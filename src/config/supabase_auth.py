@@ -5,6 +5,7 @@ from django.conf import settings
 from rest_framework.authentication import BaseAuthentication
 from rest_framework import exceptions
 import os
+from authentication.models import User
 
 SUPABASE_JWT_SECRET = os.environ.get('SUPABASE_JWT_SECRET')
 
@@ -32,12 +33,27 @@ class SupabaseJWTAuthentication(BaseAuthentication):
             payload = jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"], options={"verify_aud": False})
         except InvalidTokenError:
             raise exceptions.AuthenticationFailed("Invalid Supabase JWT")
-
-        user = SupabaseUser(
+        
+        user, created = User.objects.get_or_create(
             supabase_uid=payload.get("sub"),
-            supabase_email=payload.get("email"),
-            supabase_role=payload.get("role"),
-            supabase_tenant_id=payload.get("tenant_id")
+            defaults={
+                'email': payload.get("email"),
+                'role': payload.get("role"),
+                'tenant_id': payload.get("tenant_id"),
+                # Add more fields if needed
+            }
         )
+        # supabase sync with local user
+        update_fields = {}
+        if user.email != payload.get("email"):
+            update_fields['email'] = payload.get("email")
+        if user.role != payload.get("role"):
+            update_fields['role'] = payload.get("role")
+        if user.tenant_id != payload.get("tenant_id"):
+            update_fields['tenant_id'] = payload.get("tenant_id")
+        if update_fields:
+            for key, value in update_fields.items():
+                setattr(user, key, value)
+            user.save(update_fields=list(update_fields.keys()))
         return (user, None)
 
