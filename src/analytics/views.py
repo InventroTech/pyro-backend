@@ -10,6 +10,7 @@ import logging
 import os
 import requests
 from .models import SupportTicket
+import numpy as np
 
 logger = logging.getLogger(__name__) 
 SUPABASE_PROJECT_URL = os.environ.get('SUPABASE_PROJECT_URL')
@@ -19,17 +20,125 @@ SUPABASE_ANON_KEY = os.environ.get('SUPABASE_ANON_KEY')
 # logger.warning("This is a warning!")
 # logger.error("This is an error!")
 
-class DailyResolvedTicketsView(APIView):
-    permission_classes = []  # Will add it in future with tenant id support
+
+class StackedBarResolvedUnresolvedView(APIView):
+    permission_classes = []  # Use [IsAuthenticated] in production
 
     def get(self, request):
-        # Only show tickets for this tenant if required
-        tenant_id = getattr(request.user, 'supabase_tenant_id', None)
+        start = request.query_params.get('start')
+        end = request.query_params.get('end')
+        tenant_id = request.query_params.get('tenant_id')
+
         qs = SupportTicket.objects.all()
+        qs = qs.filter(created_at__isnull=False)
+
+        # Optional: filter by tenant_id
         if tenant_id:
             qs = qs.filter(tenant_id=tenant_id)
 
+        # Date filtering
+        if start:
+            qs = qs.filter(created_at__date__gte=start)
+        if end:
+            qs = qs.filter(created_at__date__lte=end)
+
+        # Find all unique days with tickets
+        dates = (
+            qs.annotate(day=TruncDate('created_at'))
+              .values_list('day', flat=True)
+              .distinct()
+        )
+
+        results = []
+        for date in sorted(dates):
+            day_qs = qs.filter(created_at__date=date)
+            resolved = day_qs.filter(
+                completed_at__isnull=False,
+                resolution_status__iexact='resolved'  # case-insensitive match
+            ).count()
+            unresolved = day_qs.exclude(
+                Q(completed_at__isnull=False) & Q(resolution_status__iexact='resolved')
+            ).count()
+            results.append({
+                'date': date.strftime("%Y-%m-%d"),
+                'resolved': resolved,
+                'unresolved': unresolved
+            })
+        return Response(results)
+
+
+class DailyPercentileResolutionTimeView(APIView):
+    permission_classes = []  # Use IsAuthenticated for production
+
+    def get(self, request):
+        percentile = float(request.query_params.get('percentile', 90))
+        unit = request.query_params.get('unit', 'hours').lower()
+        start_date = request.query_params.get('start')
+        end_date = request.query_params.get('end')
+
+        qs = SupportTicket.objects.filter(
+            completed_at__isnull=False,
+            created_at__isnull=False
+        )
+
+        # Optional date filtering
+        if start_date:
+            qs = qs.filter(completed_at__date__gte=start_date)
+        if end_date:
+            qs = qs.filter(completed_at__date__lte=end_date)
+
+        # Annotate each ticket with its resolution day
+        qs = qs.annotate(resolved_date=TruncDate('completed_at'))
+
+        # Helper: convert seconds to desired unit
+        def convert(seconds, unit):
+            if unit == 'seconds':
+                return round(seconds, 2)
+            elif unit == 'minutes':
+                return round(seconds / 60, 2)
+            elif unit == 'hours':
+                return round(seconds / 3600, 2)
+            elif unit == 'days':
+                return round(seconds / 86400, 2)
+            return round(seconds / 3600, 2)  # default: hours
+
+        # Build dict of day -> list of resolution times
+        data_by_day = {}
+        for ticket in qs:
+            day = ticket.resolved_date
+            res_time = (ticket.completed_at - ticket.created_at).total_seconds()
+            if day not in data_by_day:
+                data_by_day[day] = []
+            data_by_day[day].append(res_time)
+
+        # Calculate desired percentile for each day
+        result = []
+        for day, times in sorted(data_by_day.items()):
+            if times:
+                pct_val = float(np.percentile(times, percentile))
+                result.append({
+                    "date": day.strftime("%Y-%m-%d"),
+                    f"percentile_{int(percentile)}_{unit}": convert(pct_val, unit)
+                })
+
+        return Response(result)
+
+
+
+class DailyResolvedTicketsView(APIView):
+    permission_classes = [IsAuthenticated]  # Will add it in future with tenant id support
+
+    def get(self, request):
+        # Only show tickets for this tenant if required
+        start_date = request.query_params.get('start')
+        end_date = request.query_params.get('end')
+        print()
+        qs = SupportTicket.objects.all()
         # Consider ticket resolved if 'completed_at' is not null
+        if start_date:
+            qs = qs.filter(completed_at__date__gte=start_date)
+        if end_date:
+            qs = qs.filter(completed_at__date__lte=end_date)
         qs = qs.filter(completed_at__isnull=False)
         data = (
             qs
@@ -40,24 +149,21 @@ class DailyResolvedTicketsView(APIView):
         )
         return Response(list(data))
 
+
 class TicketClosureTimeAnalytics(APIView):
-    permission_classes = [IsAuthenticated]  # Add IsAuthenticated 
+    permission_classes = [IsAuthenticated]
+
     def get(self, request):
-        # print(request.user.supabase_tenant_id)
-        # print(request.user.supabase_email)
-        # print(request.user.supabase_role) (adding access to supabase user's role etc in the request itself by auth)
         start_date = request.query_params.get('start')
         end_date = request.query_params.get('end')
-        # tenant_id=tenant_id 
-        qs = SupportTicket.objects.filter(
-            completed_at__isnull=False,
-        )
+        unit = request.query_params.get('unit', 'hours').lower()
+
+        qs = SupportTicket.objects.filter(completed_at__isnull=False)
         if start_date:
             qs = qs.filter(completed_at__date__gte=start_date)
         if end_date:
             qs = qs.filter(completed_at__date__lte=end_date)
 
-        # Duration in hours
         qs = qs.annotate(
             closure_time=ExpressionWrapper(
                 F('completed_at') - F('created_at'),
@@ -68,22 +174,31 @@ class TicketClosureTimeAnalytics(APIView):
 
         results = (
             qs.values('day')
-              .annotate(avg_closure_hours=Avg(ExpressionWrapper(
-                  F('closure_time'),
-                  output_field=DurationField()
-              )))
+              .annotate(avg_closure=Avg('closure_time'))
               .order_by('day')
         )
-        # Convert duration to float hours
+
+        # Conversion factor
+        def convert_timedelta(td, unit):
+            if unit == 'seconds':
+                return round(td.total_seconds(), 2)
+            elif unit == 'minutes':
+                return round(td.total_seconds() / 60, 2)
+            elif unit == 'hours':
+                return round(td.total_seconds() / 3600, 2)
+            elif unit == 'days':
+                return round(td.total_seconds() / 86400, 2)
+            else:
+                return round(td.total_seconds() / 3600, 2)  # default to hours
+
         data = [
             {
                 "date": r["day"],
-                "avg_closure_hours": round(r["avg_closure_hours"].total_seconds() / 3600, 2)
+                f"avg_closure_time": convert_timedelta(r["avg_closure"], unit)
             }
-            for r in results if r["avg_closure_hours"] is not None
+            for r in results if r["avg_closure"] is not None
         ]
         return Response(data)
-
 
 class SupabaseAuthCheckView(APIView):
     authentication_classes = []  # Allow unauthenticated for this test

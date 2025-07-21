@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'authentication',
     'corsheaders',
     'analytics',
 ]
@@ -182,6 +183,7 @@ CORS_ALLOW_ALL_ORIGINS = True # for dev only not to be added in prod
 #     "http://localhost:3000",         # Local development (React)
 # ]
 
+AUTH_USER_MODEL = 'authentication.User'
 
 REST_FRAMEWORK = {
     # Enable API-wide permissions
