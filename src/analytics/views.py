@@ -235,3 +235,42 @@ class SupabaseAuthCheckView(APIView):
                 "error": r.json().get("error", "Login failed"),
                 "message": r.json().get("msg") or r.json().get("message")
             }, status=status.HTTP_401_UNAUTHORIZED)
+
+
+class GetAllSupportTicketsView(APIView):
+    permission_classes = []  # Set to [IsAuthenticated] in production
+
+    def get(self, request):
+        tickets = SupportTicket.objects.all()
+        data = []
+        for ticket in tickets:
+            data.append({
+                'id': ticket.id,
+                'created_at': ticket.created_at,
+                'ticket_date': ticket.ticket_date,
+                'user_id': ticket.user_id,
+                'name': ticket.name,
+                'phone': ticket.phone,
+                'source': ticket.source,
+                'subscription_status': ticket.subscription_status,
+                'atleast_paid_once': ticket.atleast_paid_once,
+                'reason': ticket.reason,
+                'other_reasons': ticket.other_reasons,
+                'badge': ticket.badge,
+                'poster': ticket.poster,
+                'tenant_id': ticket.tenant_id,
+                'assigned_to': ticket.assigned_to,
+                'layout_status': ticket.layout_status,
+                'resolution_status': ticket.resolution_status,
+                'resolution_time': ticket.resolution_time,
+                'cse_name': ticket.cse_name,
+                'cse_remarks': ticket.cse_remarks,
+                'call_status': ticket.call_status,
+                'call_attempts': ticket.call_attempts,
+                'rm_name': ticket.rm_name,
+                'completed_at': ticket.completed_at,
+                'snooze_until': ticket.snooze_until,
+                'praja_dashboard_user_link': ticket.praja_dashboard_user_link,
+                'display_pic_url': ticket.display_pic_url,
+            })
+        return Response(data)
