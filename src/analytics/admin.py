@@ -9,12 +9,12 @@ class SupportTicketAdmin(admin.ModelAdmin):
         'user_id', 
         'reason',
         'resolution_status',
-        'created_at', 
+        'dumped_at', 
         'completed_at'  
     )
     list_filter = (
         'resolution_status',
-        'created_at', 
+        'dumped_at', 
         'completed_at'
     )
     search_fields = ('reason', 'user_id', 'name', 'phone')

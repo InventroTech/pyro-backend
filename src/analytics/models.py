@@ -1,4 +1,5 @@
 from django.db import models
+from django.contrib.postgres.fields import ArrayField
 
 class SupportTicket(models.Model):
     id = models.BigAutoField(primary_key=True)
@@ -11,7 +12,7 @@ class SupportTicket(models.Model):
     subscription_status = models.TextField(null=True, blank=True)
     atleast_paid_once = models.BooleanField(null=True, blank=True)
     reason = models.TextField(null=True, blank=True)
-    other_reasons = models.JSONField(null=True, blank=True)
+    other_reasons = ArrayField(models.TextField(), null=True, blank=True)
     badge = models.CharField(max_length=255, null=True, blank=True)
     poster = models.CharField(max_length=255, null=True, blank=True)
     tenant_id = models.UUIDField(null=True, blank=True)
@@ -28,6 +29,7 @@ class SupportTicket(models.Model):
     snooze_until = models.DateTimeField(null=True, blank=True)
     praja_dashboard_user_link = models.TextField(null=True, blank=True)
     display_pic_url = models.TextField(null=True, blank=True)
+    dumped_at = models.DateTimeField(null=True, blank=True) 
 
     class Meta:
         db_table = 'support_ticket'
