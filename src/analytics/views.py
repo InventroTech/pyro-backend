@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from .models import SupportTicket
 from rest_framework.permissions import IsAuthenticated
+from datetime import datetime
 from .utils import (
     extract_date_range_from_request,
     filter_by_tenant,
@@ -27,7 +28,11 @@ class StackedBarResolvedUnresolvedView(APIView):
         qs = filter_by_tenant(qs, request)
         start_date, end_date = extract_date_range_from_request(qs, request, created_field='dumped_at')
         results = []
-        for date in get_date_range(start_date, end_date):
+        date_range = list(get_date_range(start_date, end_date))
+        if not date_range:
+            today = datetime.today().date()
+            return Response([{'x': today.strftime("%Y-%m-%d"), 'y1': 0, 'y2': 0}])
+        for date in date_range:
             day_qs = qs.filter(dumped_at__date=date)
             resolved = day_qs.filter(
                 completed_at__isnull=False,
@@ -65,8 +70,9 @@ class DailyPercentileResolutionTimeView(APIView):
         qs = SupportTicket.objects.filter(completed_at__isnull=False, dumped_at__isnull=False)
         qs = filter_by_tenant(qs, request)
         if not qs.exists():
-            logger.warning("No support tickets found for given filters. Returning empty result.")
-            return Response([])
+            today = datetime.today().date()
+            logger.warning("No support tickets found for given filters. Returning today's date with y=0.")
+            return Response([{"x": today.strftime("%Y-%m-%d"), "y": 0}])
 
         start_date, end_date = extract_date_range_from_request(qs, request, created_field='completed_at')
         qs = qs.filter(completed_at__date__gte=start_date, completed_at__date__lte=end_date)
@@ -103,7 +109,8 @@ class DailyResolvedTicketsView(APIView):
         qs = filter_by_tenant(qs, request)
         start_date, end_date = extract_date_range_from_request(qs, request, created_field='completed_at')
         if not start_date or not end_date:
-            return Response([])
+            today = datetime.today().date()
+            return Response([{"x": today.strftime("%Y-%m-%d"), "y": 0}])
 
         qs = qs.filter(completed_at__date__gte=start_date, completed_at__date__lte=end_date)
         resolved_data = (
@@ -131,7 +138,8 @@ class TicketClosureTimeAnalytics(APIView):
         qs = filter_by_tenant(qs, request)
         start_date, end_date = extract_date_range_from_request(qs, request, created_field='completed_at')
         if not start_date or not end_date:
-            return Response([])
+            today = datetime.today().date()
+            return Response([{"x": today.strftime("%Y-%m-%d"), "y": 0}])
 
         qs = qs.filter(completed_at__date__gte=start_date, completed_at__date__lte=end_date)
         qs = qs.annotate(

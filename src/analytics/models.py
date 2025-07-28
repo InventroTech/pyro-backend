@@ -33,4 +33,4 @@ class SupportTicket(models.Model):
 
     class Meta:
         db_table = 'support_ticket'
-        managed = False  # IMPORTANT: Don't let Django try to create or alter this table!
+        managed = True
