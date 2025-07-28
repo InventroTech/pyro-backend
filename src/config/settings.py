@@ -118,18 +118,32 @@ LOGGING = {
     },
 }
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': env("DB_NAME"),
-        'USER': env("DB_USER"),
-        'PASSWORD': env("DB_PASSWORD"),
-        'HOST': env("DB_HOST"),
-        'PORT': env("DB_PORT"),
-        'OPTIONS': {
-            'sslmode': 'require',
+if env.bool("LOCAL_TEST_MODE", default=False):
+    # print("Using local db")
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': env("LOCAL_DB_NAME"),
+            'USER': env("LOCAL_DB_USER"),
+            'PASSWORD': env("LOCAL_DB_PASSWORD"),
+            'HOST': env("LOCAL_DB_HOST"),
+            'PORT': env("LOCAL_DB_PORT"),
         }
     }
+else:
+    # print("Using supabase db")
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': env("DB_NAME"),
+            'USER': env("DB_USER"),
+            'PASSWORD': env("DB_PASSWORD"),
+            'HOST': env("DB_HOST"),
+            'PORT': env("DB_PORT"),
+            'OPTIONS': {
+                'sslmode': 'require',
+            }
+        }
 }
 
 
@@ -161,7 +175,7 @@ TIME_ZONE = 'UTC'
 
 USE_I18N = True
 
-USE_TZ = True
+USE_TZ = False
 
 
 # Static files (CSS, JavaScript, Images)
@@ -184,6 +198,7 @@ CORS_ALLOW_ALL_ORIGINS = True # for dev only not to be added in prod
 # ]
 
 AUTH_USER_MODEL = 'authentication.User'
+SUPABASE_JWT_SECRET = env("SUPABASE_JWT_SECRET")
 
 REST_FRAMEWORK = {
     # Enable API-wide permissions
