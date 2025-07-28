@@ -4,7 +4,9 @@ from django.db.models import F, ExpressionWrapper, DurationField, Avg, Count, Q
 from django.db.models.functions import TruncDate
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework import status
 from .models import SupportTicket
+from rest_framework.permissions import IsAuthenticated
 from .utils import (
     extract_date_range_from_request,
     filter_by_tenant,
@@ -18,15 +20,15 @@ logger = logging.getLogger(__name__)
 
 class StackedBarResolvedUnresolvedView(APIView):
     """Stacked bar data for resolved/unresolved support tickets per day."""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = SupportTicket.objects.filter(created_at__isnull=False)
+        qs = SupportTicket.objects.filter(dumped_at__isnull=False)
         qs = filter_by_tenant(qs, request)
-        start_date, end_date = extract_date_range_from_request(qs, request, created_field='created_at')
+        start_date, end_date = extract_date_range_from_request(qs, request, created_field='dumped_at')
         results = []
         for date in get_date_range(start_date, end_date):
-            day_qs = qs.filter(created_at__date=date)
+            day_qs = qs.filter(dumped_at__date=date)
             resolved = day_qs.filter(
                 completed_at__isnull=False,
                 resolution_status__iexact='resolved'
@@ -50,10 +52,17 @@ class DailyPercentileResolutionTimeView(APIView):
 
     def get(self, request):
         logger.info("DailyPercentileResolutionTimeView called with query_params: %s", request.query_params)
-        percentile = float(request.query_params.get('percentile', 90))
+        
+        try:
+            percentile = float(request.query_params.get('percentile', 90))
+        except ValueError:
+            return Response(
+                {"detail": "Percentile must be a number."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         unit = request.query_params.get('unit', 'hours').lower()
 
-        qs = SupportTicket.objects.filter(completed_at__isnull=False, created_at__isnull=False)
+        qs = SupportTicket.objects.filter(completed_at__isnull=False, dumped_at__isnull=False)
         qs = filter_by_tenant(qs, request)
         if not qs.exists():
             logger.warning("No support tickets found for given filters. Returning empty result.")
@@ -67,7 +76,7 @@ class DailyPercentileResolutionTimeView(APIView):
         for ticket in qs:
             try:
                 day = ticket.resolved_date
-                res_time = (ticket.completed_at - ticket.created_at).total_seconds()
+                res_time = (ticket.completed_at - ticket.dumped_at).total_seconds()
                 data_by_day.setdefault(day, []).append(res_time)
             except Exception as e:
                 logger.warning("Failed to calculate resolution time for ticket %s: %s", getattr(ticket, 'id', None), e)
@@ -118,7 +127,7 @@ class TicketClosureTimeAnalytics(APIView):
     permission_classes = []
 
     def get(self, request):
-        qs = SupportTicket.objects.filter(completed_at__isnull=False, created_at__isnull=False)
+        qs = SupportTicket.objects.filter(completed_at__isnull=False, dumped_at__isnull=False)
         qs = filter_by_tenant(qs, request)
         start_date, end_date = extract_date_range_from_request(qs, request, created_field='completed_at')
         if not start_date or not end_date:
@@ -127,7 +136,7 @@ class TicketClosureTimeAnalytics(APIView):
         qs = qs.filter(completed_at__date__gte=start_date, completed_at__date__lte=end_date)
         qs = qs.annotate(
             closure_time=ExpressionWrapper(
-                F('completed_at') - F('created_at'),
+                F('completed_at') - F('dumped_at'),
                 output_field=DurationField()
             ),
             day=TruncDate('completed_at')
