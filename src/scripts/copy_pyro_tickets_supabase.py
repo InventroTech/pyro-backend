@@ -297,10 +297,6 @@ class SupabaseTicketCopier:
                         transformed_ticket['other_reasons'] = [ticket['other_reasons']]
             # Don't set other_reasons if not present (let it be null)
             
-            # Handle call_attempts specifically
-            if 'call_attempts' in ticket and ticket['call_attempts'] is not None:
-                transformed_ticket['call_attempts'] = ticket['call_attempts']
-            
             # Handle call_status specifically - set default only if not present in source
             if 'call_status' not in transformed_ticket or transformed_ticket['call_status'] is None:
                 transformed_ticket['call_status'] = 'Call Waiting'
