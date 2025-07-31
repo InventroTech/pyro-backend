@@ -240,8 +240,7 @@ class SupabaseTicketCopier:
                 'id': ticket.get('id'),  # Use original ID from source
                 'name': ticket.get('name', 'Unknown'),
                 'reason': ticket.get('reason', 'No reason provided'),
-                'atleast_paid_once': False,
-                'call_attempts': 0
+                'atleast_paid_once': False
             }
             
             # Set tenant_id separately to ensure proper UUID format
@@ -263,6 +262,7 @@ class SupabaseTicketCopier:
                 'cse_name': 'cse_name',
                 'cse_remarks': 'cse_remarks',
                 'call_status': 'call_status',
+                'call_attempts': 'call_attempts',
                 'assigned_to': 'assigned_to',
                 'rm_name': 'rm_name',
                 'completed_at': 'completed_at',
