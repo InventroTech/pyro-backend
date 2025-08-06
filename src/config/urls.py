@@ -21,4 +21,5 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('analytics/', include('analytics.urls')),
     path('auth/', include('authentication.urls')),
+    path('cron-jobs/',include('cron_jobs.urls')),
 ]
