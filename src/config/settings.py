@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'analytics',
     'cron_jobs',
+    'ticket_operation',
 ]
 
 MIDDLEWARE = [
@@ -200,6 +201,9 @@ CORS_ALLOW_ALL_ORIGINS = True # for dev only not to be added in prod
 
 AUTH_USER_MODEL = 'authentication.User'
 SUPABASE_JWT_SECRET = env("SUPABASE_JWT_SECRET")
+
+# Webhook secret for ticket dump endpoint
+WEBHOOK_SECRET = env("WEBHOOK_SECRET")
 
 REST_FRAMEWORK = {
     # Enable API-wide permissions
