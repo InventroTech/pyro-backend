@@ -11,6 +11,14 @@ import requests
 import argparse
 from supabase import create_client, Client
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    # Try to load from parent directory (where Django expects it)
+    load_dotenv(os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
+except ImportError:
+    pass  # dotenv not available, continue without it
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -41,7 +49,12 @@ class SupabaseTicketCopier:
         # Default staging tenant ID
         self.staging_tenant_id = os.getenv('STAGING_TENANT_ID', 'e35e7279-d92d-4cdf-8014-98deaab639c0')
         
-
+        # Get staging URL from environment variable if not provided
+        if not self.staging_url:
+            self.staging_url = os.getenv('STAGING_SUPABASE_URL')
+            if not self.staging_url:
+                raise ValueError("STAGING_SUPABASE_URL environment variable is required")
+            self.staging_url = self.staging_url.rstrip('/')
         
         # Configuration
         self.batch_size = int(os.getenv('BATCH_SIZE', '1'))  # Use batch size of 1 for reliability
@@ -74,7 +87,9 @@ class SupabaseTicketCopier:
         }
         
         # Use service role key for staging operations to bypass RLS
-        if 'ymqptqorkuwnmvyszxls.supabase.co' in url:
+        # Get staging URL from environment variable instead of hardcoded value
+        staging_env_url = os.getenv('STAGING_SUPABASE_URL', '')
+        if staging_env_url and staging_env_url.rstrip('/') in url:
             # For staging, we need to use service role to bypass RLS
             service_role_key = os.getenv('STAGING_SERVICE_ROLE_KEY')
             if service_role_key:
@@ -91,6 +106,8 @@ class SupabaseTicketCopier:
                     response = requests.post(url, headers=headers, json=data, timeout=30)
                 elif method.upper() == 'PUT':
                     response = requests.put(url, headers=headers, json=data, timeout=30)
+                elif method.upper() == 'PATCH':
+                    response = requests.patch(url, headers=headers, json=data, timeout=30)
                 else:
                     raise ValueError(f"Unsupported HTTP method: {method}")
                 
@@ -222,6 +239,93 @@ class SupabaseTicketCopier:
         
         return missing_tickets
 
+    def find_changed_tickets(self, source_tickets: List[Dict[str, Any]], staging_tickets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Find tickets that exist in both source and staging but have different data.
+        
+        Args:
+            source_tickets: List of tickets from source
+            staging_tickets: List of tickets from staging
+            
+        Returns:
+            List of tickets that have changed and need updating
+        """
+        # Create a mapping of staging tickets by ID for quick lookup
+        staging_by_id = {ticket.get('id'): ticket for ticket in staging_tickets if ticket.get('id')}
+        
+        changed_tickets = []
+        changed_fields_summary = {}
+        
+        for source_ticket in source_tickets:
+            ticket_id = source_ticket.get('id')
+            if not ticket_id:
+                continue
+                
+            staging_ticket = staging_by_id.get(ticket_id)
+            if not staging_ticket:
+                continue
+            
+            # Compare relevant fields (exclude system fields like created_at, updated_at, and fixed staging fields)
+            fields_to_compare = [
+                'name', 'reason', 'ticket_date', 'user_id', 'phone', 'source', 
+                'subscription_status', 'badge', 'poster', 'layout_status', 
+                'resolution_status', 'resolution_time', 'cse_name', 'cse_remarks', 
+                'call_status', 'call_attempts', 'rm_name', 
+                'completed_at', 'snooze_until', 'praja_dashboard_user_link', 
+                'display_pic_url', 'dumped_at', 'atleast_paid_once', 'other_reasons'
+                # Excluded: 'assigned_to' (fixed for staging), 'tenant_id' (fixed for staging)
+            ]
+            
+            changed_fields = []
+            for field in fields_to_compare:
+                source_value = source_ticket.get(field)
+                staging_value = staging_ticket.get(field)
+                
+                # Handle different data types and null values
+                if source_value != staging_value:
+                    # Special handling for snooze_until to debug the issue
+                    if field == 'snooze_until':
+                        logger.info(f"DEBUG - Ticket {ticket_id} snooze_until comparison:")
+                        logger.info(f"  Source value: {source_value} (type: {type(source_value)})")
+                        logger.info(f"  Staging value: {staging_value} (type: {type(staging_value)})")
+                        logger.info(f"  Direct comparison (source_value != staging_value): {source_value != staging_value}")
+                        logger.info(f"  Source is None: {source_value is None}")
+                        logger.info(f"  Staging is None: {staging_value is None}")
+                        logger.info(f"  Source is empty string: {source_value == ''}")
+                        logger.info(f"  Staging is empty string: {staging_value == ''}")
+                    
+                    # Convert to string for comparison to handle different data types
+                    source_str = str(source_value) if source_value is not None else ''
+                    staging_str = str(staging_value) if staging_value is not None else ''
+                    
+                    if source_str != staging_str:
+                        changed_fields.append(field)
+                        # Track field changes for summary
+                        if field not in changed_fields_summary:
+                            changed_fields_summary[field] = 0
+                        changed_fields_summary[field] += 1
+            
+            if changed_fields:
+                # Create a ticket with only the changed fields
+                changed_ticket = {'id': ticket_id}
+                for field in changed_fields:
+                    changed_ticket[field] = source_ticket.get(field)
+                
+                changed_tickets.append(changed_ticket)
+                # Only log the first few tickets for debugging, not all
+                if len(changed_tickets) <= 5:
+                    logger.info(f"Ticket {ticket_id} changed fields: {', '.join(changed_fields)}")
+        
+        # Log summary of most commonly changed fields
+        if changed_fields_summary:
+            sorted_fields = sorted(changed_fields_summary.items(), key=lambda x: x[1], reverse=True)
+            logger.info("Most commonly changed fields:")
+            for field, count in sorted_fields[:10]:  # Show top 10
+                logger.info(f"  {field}: {count} tickets")
+        
+        logger.info(f"Total tickets with changes: {len(changed_tickets)}")
+        return changed_tickets
+
     def transform_ticket_data(self, tickets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Transform ticket data for staging environment.
@@ -297,9 +401,8 @@ class SupabaseTicketCopier:
                         transformed_ticket['other_reasons'] = [ticket['other_reasons']]
             # Don't set other_reasons if not present (let it be null)
             
-            # Handle call_status specifically - set default only if not present in source
-            if 'call_status' not in transformed_ticket or transformed_ticket['call_status'] is None:
-                transformed_ticket['call_status'] = 'Call Waiting'
+            # Handle call_status specifically - only copy if present in source, don't set defaults
+            # This prevents unnecessary updates when call_status is null in source
             
             # Set assigned_to to the specified UUID only for tickets that already have an assigned_to value
             if 'assigned_to' in transformed_ticket and transformed_ticket['assigned_to'] is not None:
@@ -391,6 +494,138 @@ class SupabaseTicketCopier:
         logger.info(f"Total inserted: {total_inserted}/{len(tickets)} tickets")
         return total_inserted
 
+    def update_tickets_in_staging(self, tickets: List[Dict[str, Any]]) -> int:
+        """
+        Update existing tickets in staging support_ticket table.
+        
+        Args:
+            tickets: List of transformed tickets to update
+            
+        Returns:
+            Number of successfully updated tickets
+        """
+        total_updated = 0
+        total_batches = (len(tickets) + self.batch_size - 1) // self.batch_size
+        
+        for i in range(0, len(tickets), self.batch_size):
+            batch = tickets[i:i + self.batch_size]
+            batch_num = (i // self.batch_size) + 1
+            
+            logger.info(f"Processing update batch {batch_num}/{total_batches} ({len(batch)} tickets)")
+            
+            for ticket in batch:
+                try:
+                    ticket_id = ticket.get('id')
+                    if not ticket_id:
+                        logger.warning(f"Skipping ticket without ID: {ticket}")
+                        continue
+                    
+                    # Remove ID and fixed staging fields from update data to avoid conflicts
+                    fixed_staging_fields = ['id', 'assigned_to', 'tenant_id']
+                    update_data = {k: v for k, v in ticket.items() if k not in fixed_staging_fields}
+                    
+                    url = f"{self.staging_url}/rest/v1/support_ticket?id=eq.{ticket_id}"
+                    
+                    # Log the first few tickets with their update data for debugging
+                    if batch_num == 1 and batch.index(ticket) == 0:
+                        logger.info(f"Sample ticket data being updated: {json.dumps(update_data, indent=2, default=str)}")
+                    elif batch_num <= 3 and batch.index(ticket) < 3:  # Log first 3 batches, first 3 tickets each
+                        logger.info(f"Updated ticket {ticket_id} with fields: {list(update_data.keys())}")
+                    
+                    data = self._make_request(url, self.staging_key, 'PATCH', update_data)
+                    total_updated += 1
+                    
+                    # Only log every 100th ticket to avoid spam
+                    if total_updated % 100 == 0:
+                        logger.info(f"Updated ticket {ticket_id} (total: {total_updated})")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to update ticket {ticket.get('id', 'unknown')}: {e}")
+                    continue
+        
+        logger.info(f"Total updated: {total_updated}/{len(tickets)} tickets")
+        return total_updated
+
+    def sync_tickets_with_staging(self, limit: int = 1000, check_missing: bool = False, update_existing: bool = False) -> Dict[str, Any]:
+        """
+        Main method to sync support tickets from source to staging.
+        This function can both insert new tickets and update existing ones.
+        
+        Args:
+            limit: Maximum number of tickets to sync
+            check_missing: If True, only sync tickets that don't exist in staging
+            update_existing: If True, also update existing tickets in staging
+            
+        Returns:
+            Summary of the sync operation
+        """
+        logger.info("Starting support ticket sync process...")
+        
+        # Step 1: Fetch tickets from source
+        source_tickets = self.fetch_tickets_from_source(limit)
+        if not source_tickets:
+            logger.warning("No tickets found in source")
+            return {"success": False, "message": "No tickets found in source"}
+        
+        # Step 2: If checking for missing tickets or updating existing, fetch staging tickets and compare
+        tickets_to_insert = []
+        tickets_to_update = []
+        
+        if check_missing or update_existing:
+            staging_tickets = self.fetch_tickets_from_staging(None)
+            
+            if check_missing:
+                tickets_to_insert = self.find_missing_tickets(source_tickets, staging_tickets)
+            
+            if update_existing:
+                # Find tickets that exist in both source and staging AND have changed
+                tickets_to_update = self.find_changed_tickets(source_tickets, staging_tickets)
+            
+            if not tickets_to_insert and not tickets_to_update:
+                logger.info("No tickets to sync")
+                return {
+                    "success": True,
+                    "message": "No tickets to sync",
+                    "source_count": len(source_tickets),
+                    "inserted_count": 0,
+                    "updated_count": 0
+                }
+        else:
+            # If neither check_missing nor update_existing is specified, insert all tickets
+            tickets_to_insert = source_tickets
+        
+        # Step 3: Transform tickets
+        transformed_insert_tickets = self.transform_ticket_data(tickets_to_insert) if tickets_to_insert else []
+        # Don't transform update tickets - they already contain only the changed fields
+        transformed_update_tickets = tickets_to_update if tickets_to_update else []
+        
+        # Step 4: Insert new tickets to staging
+        inserted_count = 0
+        if transformed_insert_tickets:
+            inserted_count = self.insert_tickets_to_staging(transformed_insert_tickets)
+        
+        # Step 5: Update existing tickets in staging
+        updated_count = 0
+        if transformed_update_tickets:
+            updated_count = self.update_tickets_in_staging(transformed_update_tickets)
+        
+        # Step 6: Return summary
+        total_processed = len(tickets_to_insert) + len(tickets_to_update)
+        total_synced = inserted_count + updated_count
+        success = total_synced > 0 or total_processed == 0
+        
+        message = f"Synced {total_synced}/{total_processed} tickets (inserted: {inserted_count}, updated: {updated_count})"
+        
+        logger.info(f"Sync process completed: {message}")
+        
+        return {
+            "success": success,
+            "message": message,
+            "source_count": len(source_tickets),
+            "inserted_count": inserted_count,
+            "updated_count": updated_count
+        }
+
     def copy_tickets(self, limit: int = 1000, check_missing: bool = False) -> Dict[str, Any]:
         """
         Main method to copy support tickets from source to staging.
@@ -444,71 +679,48 @@ class SupabaseTicketCopier:
             "inserted_count": inserted_count
         }
 
-def load_config_from_file():
-    """Load configuration from supabase-config.json file"""
-    config_path = Path(__file__).parent.parent / "supabase-config.json"
-    
-    if not config_path.exists():
-        return None
-    
-    try:
-        with open(config_path, 'r') as f:
-            return json.load(f)
-    except json.JSONDecodeError:
-        return None
-
 def main():
     """Main entry point for the script."""
-    parser = argparse.ArgumentParser(description='Copy support tickets from Pyro to staging Supabase')
+    parser = argparse.ArgumentParser(description='Sync support tickets from Pyro to staging Supabase')
     parser.add_argument('--source-url', help='Source Supabase project URL')
     parser.add_argument('--source-key', help='Source Supabase anon key')
     parser.add_argument('--staging-url', help='Staging Supabase project URL')
     parser.add_argument('--staging-key', help='Staging Supabase anon key')
     parser.add_argument('--staging-service-key', help='Staging Supabase service role key (required for bypassing RLS)')
-    parser.add_argument('--limit', type=int, default=1000, help='Maximum tickets to copy')
-    parser.add_argument('--config-file', action='store_true', help='Use configuration from supabase-config.json file')
-    parser.add_argument('--check-missing', action='store_true', help='Only copy tickets that don\'t exist in staging')
+    parser.add_argument('--limit', type=int, default=1000, help='Maximum tickets to sync')
+    parser.add_argument('--check-missing', action='store_true', help='Only sync tickets that don\'t exist in staging')
+    parser.add_argument('--update-existing', action='store_true', help='Also update existing tickets in staging')
     
     args = parser.parse_args()
     
-    # Load configuration from file if requested or if no command line args provided
-    config = None
-    if args.config_file or (not args.source_url and not args.source_key and not args.staging_url and not args.staging_key):
-        config = load_config_from_file()
-        if not config:
-            print("❌ Configuration file 'supabase-config.json' not found or invalid")
-            print("Please create the file or provide command line arguments")
-            sys.exit(1)
-        
-        # Use config file values
-        source_url = config['source_url']
-        source_key = config['source_key']
-        staging_url = config['staging_url']
-        staging_key = config['staging_key']
-        staging_service_key = config.get('staging_service_key')
-        
-        # Override with command line args if provided
-        if args.source_url:
-            source_url = args.source_url
-        if args.source_key:
-            source_key = args.source_key
-        if args.staging_url:
-            staging_url = args.staging_url
-        if args.staging_key:
-            staging_key = args.staging_key
-        if args.staging_service_key:
-            staging_service_key = args.staging_service_key
-    else:
-        # Use command line arguments
-        if not args.source_url or not args.source_key or not args.staging_url or not args.staging_key:
-            print("❌ All Supabase credentials are required when not using config file")
-            parser.print_help()
-            sys.exit(1)
-        
-        source_url = args.source_url
-        source_key = args.source_key
-        staging_url = args.staging_url
-        staging_key = args.staging_key
+    # Load configuration from environment variables
+    source_url = args.source_url or os.getenv('SOURCE_SUPABASE_URL')
+    source_key = args.source_key or os.getenv('SOURCE_SUPABASE_KEY')
+    staging_url = args.staging_url or os.getenv('STAGING_SUPABASE_URL')
+    staging_key = args.staging_key or os.getenv('STAGING_SUPABASE_KEY')
+    staging_service_key = args.staging_service_key or os.getenv('STAGING_SERVICE_ROLE_KEY')
+    
+    # Validate required environment variables
+    missing_vars = []
+    if not source_url:
+        missing_vars.append('SOURCE_SUPABASE_URL')
+    if not source_key:
+        missing_vars.append('SOURCE_SUPABASE_KEY')
+    if not staging_url:
+        missing_vars.append('STAGING_SUPABASE_URL')
+    if not staging_key:
+        missing_vars.append('STAGING_SUPABASE_KEY')
+    
+    if missing_vars:
+        print(f"❌ Missing required environment variables: {', '.join(missing_vars)}")
+        print("Please set the following environment variables:")
+        print("  SOURCE_SUPABASE_URL - Source Supabase project URL")
+        print("  SOURCE_SUPABASE_KEY - Source Supabase anon key")
+        print("  STAGING_SUPABASE_URL - Staging Supabase project URL")
+        print("  STAGING_SUPABASE_KEY - Staging Supabase anon key")
+        print("  STAGING_SERVICE_ROLE_KEY - Staging service role key (optional but recommended)")
+        print("  STAGING_TENANT_ID - Staging tenant ID (optional, has default)")
+        sys.exit(1)
     
     # Create copier instance
     copier = SupabaseTicketCopier(
@@ -518,16 +730,12 @@ def main():
         staging_key=staging_key
     )
     
-    # If using config file, set the additional configuration
-    if config:
-        copier.staging_tenant_id = config.get('staging_tenant_id', copier.staging_tenant_id)
-    
     # Set service role key if provided
     if staging_service_key:
         os.environ['STAGING_SERVICE_ROLE_KEY'] = staging_service_key
     
-    # Execute copy operation
-    result = copier.copy_tickets(args.limit, args.check_missing)
+    # Execute sync operation
+    result = copier.sync_tickets_with_staging(args.limit, args.check_missing, args.update_existing)
     
     # Print result
     if result["success"]:

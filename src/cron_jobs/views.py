@@ -9,12 +9,12 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 logger = logging.getLogger(__name__)
 
 
-class RunPythonScriptView(APIView):
+class CopyScriptView(APIView):
     """
     Class-based view to run Python scripts via API call.
     Similar structure to analytics views.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         """
