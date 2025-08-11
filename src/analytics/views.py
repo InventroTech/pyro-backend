@@ -15,6 +15,13 @@ from .utils import (
     convert_seconds,
     convert_timedelta,
 )
+from analytics_ai.executor import execute_safe_sql
+from analytics_ai.formatter import format_results_for_table
+from analytics_ai.llm_query import get_sql_from_llm, clean_llm_sql_output
+from analytics_ai.logging_utils import log_analytics_event
+from analytics_ai.prompt_builder import build_llm_prompt
+from analytics_ai.sql_validator import is_safe_sql
+from analytics_ai.schema_loader import generate_schema_summary
 
 # --- Config & Logging ---
 logger = logging.getLogger(__name__)
@@ -164,3 +171,137 @@ class TicketClosureTimeAnalytics(APIView):
         ]
         return Response(result)
 
+
+class AnalyticsQueryView(APIView):
+    """
+    API endpoint to receive analytics questions in natural language.
+    """
+    permission_classes = [IsAuthenticated]
+    def post(self, request):
+        question = request.data.get('question', '').strip()
+        print("question = ", question)
+        user_id = 'ff1e3660-2c8d-45a1-bda8-09c76b857a89'
+        schema_str = None
+        prompt = None
+        sql_query = None
+        results = None
+        exec_error = None
+
+        # 1. Input validation
+        if not question:
+            log_analytics_event(
+                "input_error", user_id, question, error="Question is required"
+            )
+            return Response({"error": "Question is required."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # 2. Schema Generation
+        try:
+            schema_str = generate_schema_summary(app_labels=['analytics'])
+            log_analytics_event(
+                "schema_generated", user_id, question, llm_prompt=None, sql_query=None, result=schema_str
+            )
+        except Exception as e:
+            log_analytics_event(
+                "schema_error", user_id, question, error=str(e)
+            )
+            return Response({"error": "Failed to generate schema."}, status=500)
+
+        # 3. Prompt Build
+        try:
+            examples = (
+    "Example:\n"
+    "Q: Which agent resolved the most support tickets last month?\n"
+    "A: SELECT cse_name, COUNT(*) AS tickets_resolved "
+    "FROM support_ticket WHERE resolution_status = 'Resolved' AND completed_at BETWEEN [start] AND [end] "
+    "GROUP BY cse_name ORDER BY tickets_resolved DESC LIMIT 5;\n"
+    "\n"
+    "Example:\n"
+    "Q: How many tickets remain unresolved as of today?\n"
+    "A: SELECT COUNT(*) AS unresolved_tickets FROM support_ticket WHERE resolution_status != 'Resolved' AND dumped_at <= [today];\n"
+    "\n"
+    "\n"
+    
+)
+
+            prompt = build_llm_prompt(user_question=question, schema_str=schema_str, examples=examples)
+            log_analytics_event(
+                "prompt_built", user_id, question, llm_prompt=prompt
+            )
+        except Exception as e:
+            log_analytics_event(
+                "prompt_build_error", user_id, question, error=str(e)
+            )
+            return Response({"error": "Failed to build LLM prompt."}, status=500)
+
+        # 4. LLM SQL Generation
+        try:
+            raw_sql_query, llm_raw_response = get_sql_from_llm(prompt)
+            if not raw_sql_query:
+                log_analytics_event(
+                    "llm_generation_error", user_id, question, llm_prompt=prompt, error="No SQL generated"
+                )
+                return Response({"error": "LLM could not generate a SQL query. Try rephrasing your question."}, status=400)
+            log_analytics_event(
+                "llm_sql_generated", user_id, question, llm_prompt=prompt, sql_query=raw_sql_query, result=llm_raw_response
+            )
+
+            # Clean the SQL output
+            sql_query = clean_llm_sql_output(raw_sql_query)
+            log_analytics_event(
+                "llm_sql_cleaned", user_id, question, llm_prompt=prompt, sql_query=sql_query
+            )
+        except Exception as e:
+            log_analytics_event(
+                "llm_call_error", user_id, question, llm_prompt=prompt, error=str(e)
+            )
+            return Response({"error": "LLM service error. Please try again later."}, status=500)
+
+        # 5. SQL Validation
+        allowed_tables = {"support_ticket"} 
+        try:
+            is_safe, reason = is_safe_sql(sql_query, allowed_tables)
+            if not is_safe:
+                log_analytics_event(
+                    "sql_validation_failed", user_id, question, llm_prompt=prompt, sql_query=sql_query, error=reason
+                )
+                return Response({"error": reason}, status=400)
+            log_analytics_event(
+                "sql_validated", user_id, question, llm_prompt=prompt, sql_query=sql_query
+            )
+        except Exception as e:
+            log_analytics_event(
+                "sql_validation_error", user_id, question, llm_prompt=prompt, sql_query=sql_query, error=str(e)
+            )
+            return Response({"error": "Internal SQL validation error."}, status=500)
+
+        # 6. Execute SQL
+        try:
+            results, exec_error = execute_safe_sql(sql_query)
+            if exec_error:
+                log_analytics_event(
+                    "sql_execution_failed", user_id, question, llm_prompt=prompt, sql_query=sql_query, error=exec_error
+                )
+                return Response({"error": "There was an error executing your query: " + exec_error}, status=400)
+            log_analytics_event(
+                "sql_executed", user_id, question, llm_prompt=prompt, sql_query=sql_query, result=results
+            )
+        except Exception as e:
+            log_analytics_event(
+                "sql_execution_error", user_id, question, llm_prompt=prompt, sql_query=sql_query, error=str(e)
+            )
+            return Response({"error": "Error executing SQL query."}, status=500)
+
+        # 7. Format Result
+        try:
+            formatted = format_results_for_table(results)
+            log_analytics_event(
+                "result_formatted", user_id, question, llm_prompt=prompt, sql_query=sql_query, result=formatted
+            )
+        except Exception as e:
+            log_analytics_event(
+                "result_formatting_error", user_id, question, llm_prompt=prompt, sql_query=sql_query, error=str(e)
+            )
+            return Response({"error": "Failed to format analytics result."}, status=500)
+
+        # 8. Return final result
+        return Response(formatted)
