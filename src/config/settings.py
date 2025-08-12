@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'analytics',
     'cron_jobs',
+    'crm',
 ]
 
 MIDDLEWARE = [
