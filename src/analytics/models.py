@@ -1,5 +1,6 @@
 from django.db import models
 from django.contrib.postgres.fields import ArrayField
+import uuid
 
 class SupportTicket(models.Model):
     id = models.BigAutoField(primary_key=True)
@@ -34,3 +35,29 @@ class SupportTicket(models.Model):
     class Meta:
         db_table = 'support_ticket'
         managed = True
+
+
+class AnalyticsRunCore(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    user_id = models.CharField(max_length=128, db_index=True)
+
+    question = models.TextField()  
+    sql_query = models.TextField(null=True, blank=True)
+    validation_ok = models.BooleanField(default=False)
+    validation_reason = models.TextField(null=True, blank=True)
+    execution_ok = models.BooleanField(default=False)
+    final_result = models.JSONField(null=True, blank=True)  # storing a small preview to avoid bloat
+    status = models.CharField(max_length=32, default="started", db_index=True)
+
+    # OPTIONAL (recommended, tiny footprint)
+    error_summary = models.TextField(null=True, blank=True)  # short error msg if any
+    rows_returned = models.IntegerField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["created_at"]),
+            models.Index(fields=["user_id", "created_at"]),
+            models.Index(fields=["status"]),
+        ]
