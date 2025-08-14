@@ -1,10 +1,11 @@
 from django.urls import path
-from . import views
+from .views import WIPLeadsView, AllMyLeadsView, LeadStatsView, GetNextLead
 
 app_name = 'crm'
 
 urlpatterns = [
-    path('leads/', views.get_all_leads, name='get_all_leads'),
-    path('leads/create/', views.create_lead, name='create_lead'),
-    path('leads/<int:lead_id>/', views.get_lead_by_id, name='get_lead_by_id'),
+    path('leads/wip/', WIPLeadsView.as_view(), name='wip-leads'),
+    path('leads/', AllMyLeadsView.as_view(), name='all-my-leads'),
+    path('leads/stats/', LeadStatsView.as_view(), name='stats-leads'),
+    path("leads/get-next-lead/", GetNextLead.as_view(), name="get-next-lead"),
 ]
