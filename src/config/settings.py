@@ -42,6 +42,9 @@ INSTALLED_APPS = [
     'authentication',
     'corsheaders',
     'analytics',
+    'cron_jobs',
+    'crm',
+    'core'
 ]
 
 MIDDLEWARE = [
