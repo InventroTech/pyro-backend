@@ -5,6 +5,7 @@ from .views import (
     DailyResolvedTicketsView,
     DailyPercentileResolutionTimeView,
     StackedBarResolvedUnresolvedView,
+    AnalyticsQueryView
 )
 app_name = "analytics"
 
@@ -28,5 +29,10 @@ urlpatterns = [
         'tickets/stacked-bar-daily/',
         StackedBarResolvedUnresolvedView.as_view(),
         name='stacked-bar'
+    ),
+    path(
+        'query/',
+        AnalyticsQueryView.as_view(),
+        name='analytics-query'
     ),
 ]

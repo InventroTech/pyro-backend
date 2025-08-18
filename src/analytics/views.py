@@ -6,7 +6,9 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from .models import SupportTicket
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from datetime import datetime
+from django.utils import timezone
 from .utils import (
     extract_date_range_from_request,
     filter_by_tenant,
@@ -14,6 +16,29 @@ from .utils import (
     convert_seconds,
     convert_timedelta,
 )
+from analytics_ai.executor import execute_safe_sql
+from analytics_ai.formatter import format_results_for_table
+from analytics_ai.llm_query import get_sql_from_llm, clean_llm_sql_output
+from analytics_ai.logging_utils import log_analytics_event
+from analytics_ai.prompt_builder import build_llm_prompt
+from analytics_ai.sql_validator import is_safe_sql
+from analytics_ai.schema_loader import generate_schema_summary
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import AllowAny
+from analytics.models import AnalyticsRunCore
+from analytics.utils import preview_result
+
+
+
+
+# "How many support tickets did each executive resolve last week?"
+# "Which executive had the fastest average resolution time last month?"
+# "Show me the number of open vs closed tickets handled by each support executive."
+# "List the top 3 executives by the number of tickets resolved in the past month."
+# "Which executive has the highest unresolved ticket count right now?"
 
 # --- Config & Logging ---
 logger = logging.getLogger(__name__)
@@ -27,7 +52,11 @@ class StackedBarResolvedUnresolvedView(APIView):
         qs = filter_by_tenant(qs, request)
         start_date, end_date = extract_date_range_from_request(qs, request, created_field='dumped_at')
         results = []
-        for date in get_date_range(start_date, end_date):
+        date_range = list(get_date_range(start_date, end_date))
+        if not date_range:
+            today = datetime.today().date()
+            return Response([{'x': today.strftime("%Y-%m-%d"), 'y1': 0, 'y2': 0}])
+        for date in date_range:
             day_qs = qs.filter(dumped_at__date=date)
             resolved = day_qs.filter(
                 completed_at__isnull=False,
@@ -65,8 +94,9 @@ class DailyPercentileResolutionTimeView(APIView):
         qs = SupportTicket.objects.filter(completed_at__isnull=False, dumped_at__isnull=False)
         qs = filter_by_tenant(qs, request)
         if not qs.exists():
-            logger.warning("No support tickets found for given filters. Returning empty result.")
-            return Response([])
+            today = datetime.today().date()
+            logger.warning("No support tickets found for given filters. Returning today's date with y=0.")
+            return Response([{"x": today.strftime("%Y-%m-%d"), "y": 0}])
 
         start_date, end_date = extract_date_range_from_request(qs, request, created_field='completed_at')
         qs = qs.filter(completed_at__date__gte=start_date, completed_at__date__lte=end_date)
@@ -103,7 +133,8 @@ class DailyResolvedTicketsView(APIView):
         qs = filter_by_tenant(qs, request)
         start_date, end_date = extract_date_range_from_request(qs, request, created_field='completed_at')
         if not start_date or not end_date:
-            return Response([])
+            today = datetime.today().date()
+            return Response([{"x": today.strftime("%Y-%m-%d"), "y": 0}])
 
         qs = qs.filter(completed_at__date__gte=start_date, completed_at__date__lte=end_date)
         resolved_data = (
@@ -131,7 +162,8 @@ class TicketClosureTimeAnalytics(APIView):
         qs = filter_by_tenant(qs, request)
         start_date, end_date = extract_date_range_from_request(qs, request, created_field='completed_at')
         if not start_date or not end_date:
-            return Response([])
+            today = datetime.today().date()
+            return Response([{"x": today.strftime("%Y-%m-%d"), "y": 0}])
 
         qs = qs.filter(completed_at__date__gte=start_date, completed_at__date__lte=end_date)
         qs = qs.annotate(
@@ -156,3 +188,181 @@ class TicketClosureTimeAnalytics(APIView):
         ]
         return Response(result)
 
+
+class AnalyticsQueryView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        question = request.data.get('question', '').strip()
+        print("question = ", question)
+        user_id = 'ff1e3660-2c8d-45a1-bda8-09c76b857a89'
+
+        if not question:
+            log_analytics_event("input_error", user_id, question, error="Question is required")
+            return Response({"error": "Question is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Create run row (only the fields we keep)
+        run = AnalyticsRunCore.objects.create(
+            user_id=user_id,
+            question=question,
+            status="started",
+        )
+
+        # 2. Schema Generation (no DB save of schema_str)
+        try:
+            schema_str = generate_schema_summary(app_labels=['analytics'])
+            log_analytics_event("schema_generated", user_id, question, llm_prompt=None, sql_query=None, result=schema_str)
+        except Exception as e:
+            log_analytics_event("schema_error", user_id, question, error=str(e))
+            run.status = "schema_error"
+            run.completed_at = timezone.now()
+            run.save(update_fields=["status", "completed_at"])
+            return Response({"error": "Failed to generate schema."}, status=500)
+
+        # 3. Prompt Build (no DB save of prompt/examples)
+        try:
+            extra_instruction = ""
+            if "resolution_time" in schema_str:
+                extra_instruction = (
+                    "IMPORTANT: The field 'resolution_time' in the support_ticket table is stored as a string in 'MM:SS' format. "
+                    "To calculate averages or aggregates, convert it to seconds in SQL using: "
+                    "(SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int). "
+                    "Use this conversion in your SQL. Do NOT use CAST(resolution_time AS INTEGER) or CAST(resolution_time AS DOUBLE PRECISION)."
+                )
+            extra_instruction += (
+                "\n\nWhen a time range or date is needed, use parameterized placeholders "
+                "compatible with psycopg2: %(start)s, %(end)s, %(today)s. "
+                "NEVER use square-bracket tokens like [start], [end], [today]. "
+                "Prefer half-open ranges: completed_at >= %(start)s AND completed_at < %(end)s."
+            )
+
+            
+            examples = (
+    "Example:\n"
+    "Q: Which agent resolved the most support tickets last month?\n"
+    "A: SELECT cse_name, COUNT(*) AS tickets_resolved "
+    "FROM support_ticket "
+    "WHERE resolution_status = 'Resolved' "
+    "  AND completed_at >= %(start)s "
+    "  AND completed_at < %(end)s "
+    "GROUP BY cse_name "
+    "ORDER BY tickets_resolved DESC "
+    "LIMIT 5;\n"
+    "\n"
+    "Example:\n"
+    "Q: How many tickets remain unresolved as of today?\n"
+    "A: SELECT COUNT(*) AS unresolved_tickets "
+    "FROM support_ticket "
+    "WHERE resolution_status != 'Resolved' "
+    "  AND dumped_at <= %(today)s;\n"
+    "\n"
+    "Example:\n"
+    "Q: What is the average resolution time (in seconds) for resolved tickets for each agent?\n"
+    "A: SELECT cse_name, "
+    "AVG(CASE WHEN resolution_status = 'Resolved' THEN "
+    "(SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int) END) "
+    "AS avg_resolution_time_seconds "
+    "FROM support_ticket "
+    "GROUP BY cse_name;\n"
+)
+
+
+
+
+            prompt = build_llm_prompt(
+                user_question=question,
+                schema_str=schema_str,
+                instructions=extra_instruction,
+                examples=examples
+            )
+            log_analytics_event("prompt_built", user_id, question, llm_prompt=prompt)
+        except Exception as e:
+            log_analytics_event("prompt_build_error", user_id, question, error=str(e))
+            run.status = "prompt_error"
+            run.completed_at = timezone.now()
+            run.save(update_fields=["status", "completed_at"])
+            return Response({"error": "Failed to build LLM prompt."}, status=500)
+
+        # 4. LLM SQL Generation (save final SQL only)
+        try:
+            raw_sql_query, llm_raw_response = get_sql_from_llm(prompt)
+            if not raw_sql_query:
+                log_analytics_event("llm_generation_error", user_id, question, llm_prompt=prompt, error="No SQL generated")
+                run.status = "llm_generation_error"
+                run.completed_at = timezone.now()
+                run.save(update_fields=["status", "completed_at"])
+                return Response({"error": "LLM could not generate a SQL query. Try rephrasing your question."}, status=400)
+
+            sql_query = clean_llm_sql_output(raw_sql_query)
+            log_analytics_event("llm_sql_generated", user_id, question, llm_prompt=prompt, sql_query=raw_sql_query, result=llm_raw_response)
+            log_analytics_event("llm_sql_cleaned", user_id, question, llm_prompt=prompt, sql_query=sql_query)
+
+            run.sql_query = sql_query
+            run.save(update_fields=["sql_query"])
+        except Exception as e:
+            log_analytics_event("llm_call_error", user_id, question, llm_prompt=prompt, error=str(e))
+            run.status = "llm_call_error"
+            run.completed_at = timezone.now()
+            run.save(update_fields=["status", "completed_at"])
+            return Response({"error": "LLM service error. Please try again later."}, status=500)
+
+        # 5. SQL Validation (save validation fields)
+        allowed_tables = {"support_ticket"}
+        try:
+            is_safe, reason = is_safe_sql(sql_query, allowed_tables)
+            run.validation_ok = bool(is_safe)
+            run.validation_reason = reason or ""
+            if not is_safe:
+                log_analytics_event("sql_validation_failed", user_id, question, llm_prompt=prompt, sql_query=sql_query, error=reason)
+                run.status = "validation_failed"
+                run.completed_at = timezone.now()
+                run.save(update_fields=["validation_ok", "validation_reason", "status", "completed_at"])
+                return Response({"error": reason}, status=400)
+
+            log_analytics_event("sql_validated", user_id, question, llm_prompt=prompt, sql_query=sql_query)
+            run.save(update_fields=["validation_ok", "validation_reason"])
+        except Exception as e:
+            log_analytics_event("sql_validation_error", user_id, question, llm_prompt=prompt, sql_query=sql_query, error=str(e))
+            run.status = "sql_validation_error"
+            run.completed_at = timezone.now()
+            run.save(update_fields=["status", "completed_at"])
+            return Response({"error": "Internal SQL validation error."}, status=500)
+
+        # 6. Execute SQL (save execution_ok and final_result preview)
+        try:
+            results, exec_error = execute_safe_sql(sql_query)
+            if exec_error:
+                log_analytics_event("sql_execution_failed", user_id, question, llm_prompt=prompt, sql_query=sql_query, error=exec_error)
+                run.execution_ok = False
+                run.status = "exec_error"
+                run.completed_at = timezone.now()
+                run.save(update_fields=["execution_ok", "status", "completed_at"])
+                return Response({"error": "There was an error executing your query: " + exec_error}, status=400)
+
+            log_analytics_event("sql_executed", user_id, question, llm_prompt=prompt, sql_query=sql_query, result=results)
+            run.execution_ok = True
+            run.final_result = preview_result(results)  # keep it light
+            run.save(update_fields=["execution_ok", "final_result"])
+        except Exception as e:
+            log_analytics_event("sql_execution_error", user_id, question, llm_prompt=prompt, sql_query=sql_query, error=str(e))
+            run.status = "sql_execution_error"
+            run.completed_at = timezone.now()
+            run.save(update_fields=["status", "completed_at"])
+            return Response({"error": "Error executing SQL query."}, status=500)
+
+        # 7. Format Result (no extra fields to save)
+        try:
+            formatted = format_results_for_table(results)
+            log_analytics_event("result_formatted", user_id, question, llm_prompt=prompt, sql_query=sql_query, result=formatted)
+        except Exception as e:
+            log_analytics_event("result_formatting_error", user_id, question, llm_prompt=prompt, sql_query=sql_query, error=str(e))
+            run.status = "result_formatting_error"
+            run.completed_at = timezone.now()
+            run.save(update_fields=["status", "completed_at"])
+            return Response({"error": "Failed to format analytics result."}, status=500)
+
+        # 8. Done
+        run.status = "success"
+        run.completed_at = timezone.now()
+        run.save(update_fields=["status", "completed_at"])
+        return Response(formatted)
