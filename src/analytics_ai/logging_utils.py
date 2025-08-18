@@ -73,7 +73,7 @@ def log_analytics_event(event_type, user_id, question, llm_prompt=None, sql_quer
         # If it's a structure, stringify safely first, then truncate
         red_result = truncate(safe_json(result), 2000)
 
-    red_error = truncate(redact_pii(str(error))) if error else None
+    red_error = truncate(redact_pii(str(error)), 500) if error else None
 
     # Hashes for correlation without leaking contents
     prompt_hash = sha12(llm_prompt or "") if llm_prompt else None

@@ -229,23 +229,45 @@ class AnalyticsQueryView(APIView):
                     "(SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int). "
                     "Use this conversion in your SQL. Do NOT use CAST(resolution_time AS INTEGER) or CAST(resolution_time AS DOUBLE PRECISION)."
                 )
-
-            examples = (
-                "Example:\n"
-                "Q: Which agent resolved the most support tickets last month?\n"
-                "A: SELECT cse_name, COUNT(*) AS tickets_resolved "
-                "FROM support_ticket WHERE resolution_status = 'Resolved' AND completed_at BETWEEN [start] AND [end] "
-                "GROUP BY cse_name ORDER BY tickets_resolved DESC LIMIT 5;\n"
-                "\n"
-                "Example:\n"
-                "Q: How many tickets remain unresolved as of today?\n"
-                "A: SELECT COUNT(*) AS unresolved_tickets FROM support_ticket WHERE resolution_status != 'Resolved' AND dumped_at <= [today];\n"
-                "\n"
-                "Example:\n"
-                "Q: What is the average resolution time (in seconds) for resolved tickets for each agent?\n"
-                "A: SELECT cse_name, AVG(CASE WHEN resolution_status = 'Resolved' THEN (SPLIT_PART(resolution_time, ':', 1)::int * 60 + "
-                "SPLIT_PART(resolution_time, ':', 2)::int) END) AS avg_resolution_time_seconds FROM support_ticket GROUP BY cse_name;\n"
+            extra_instruction += (
+                "\n\nWhen a time range or date is needed, use parameterized placeholders "
+                "compatible with psycopg2: %(start)s, %(end)s, %(today)s. "
+                "NEVER use square-bracket tokens like [start], [end], [today]. "
+                "Prefer half-open ranges: completed_at >= %(start)s AND completed_at < %(end)s."
             )
+
+            
+            examples = (
+    "Example:\n"
+    "Q: Which agent resolved the most support tickets last month?\n"
+    "A: SELECT cse_name, COUNT(*) AS tickets_resolved "
+    "FROM support_ticket "
+    "WHERE resolution_status = 'Resolved' "
+    "  AND completed_at >= %(start)s "
+    "  AND completed_at < %(end)s "
+    "GROUP BY cse_name "
+    "ORDER BY tickets_resolved DESC "
+    "LIMIT 5;\n"
+    "\n"
+    "Example:\n"
+    "Q: How many tickets remain unresolved as of today?\n"
+    "A: SELECT COUNT(*) AS unresolved_tickets "
+    "FROM support_ticket "
+    "WHERE resolution_status != 'Resolved' "
+    "  AND dumped_at <= %(today)s;\n"
+    "\n"
+    "Example:\n"
+    "Q: What is the average resolution time (in seconds) for resolved tickets for each agent?\n"
+    "A: SELECT cse_name, "
+    "AVG(CASE WHEN resolution_status = 'Resolved' THEN "
+    "(SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int) END) "
+    "AS avg_resolution_time_seconds "
+    "FROM support_ticket "
+    "GROUP BY cse_name;\n"
+)
+
+
+
 
             prompt = build_llm_prompt(
                 user_question=question,
