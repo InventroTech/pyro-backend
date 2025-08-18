@@ -5,7 +5,6 @@ from typing import List, Optional
 
 from .utils import log as log
 
-# Tunables (env-overridable upstream if you like)
 PROMPT_VERSION = "v2"
 MAX_SCHEMA_CHARS = 8000           # soft cap to reduce LLM tokens
 DEFAULT_LIMIT_HINT = 1000         # only a hint; validator/enforcer lives elsewhere

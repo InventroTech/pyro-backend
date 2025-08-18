@@ -17,7 +17,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # ---- Tunables ----
 PRIMARY_MODEL = os.getenv("LLM_PRIMARY_MODEL", "gpt-4.1")
 FALLBACK_MODELS = [m.strip() for m in os.getenv("LLM_FALLBACK_MODELS", "gpt-4o-mini").split(",") if m.strip()]  # tried in order if primary fails
-DEFAULT_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.0"))
+DEFAULT_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.1"))
 MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "512"))
 MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
 BASE_BACKOFF = float(os.getenv("LLM_BASE_BACKOFF", "0.8"))  # seconds

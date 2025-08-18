@@ -4,7 +4,6 @@ from typing import List, Set, Tuple
 from sqlparse.sql import IdentifierList, Identifier, Function
 from sqlparse.tokens import DML, Keyword, Name, Wildcard, Punctuation
 
-# --- Tunables / defaults (kept unchanged) ---
 ENFORCE_LIMIT = True
 DEFAULT_LIMIT = 1000
 

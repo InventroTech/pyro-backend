@@ -51,7 +51,6 @@ class AnalyticsRunCore(models.Model):
     final_result = models.JSONField(null=True, blank=True)  # storing a small preview to avoid bloat
     status = models.CharField(max_length=32, default="started", db_index=True)
 
-    # OPTIONAL (recommended, tiny footprint)
     error_summary = models.TextField(null=True, blank=True)  # short error msg if any
     rows_returned = models.IntegerField(null=True, blank=True)
 

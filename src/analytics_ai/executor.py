@@ -7,7 +7,6 @@ from .utils.redaction import redact_pii
 from .utils.table import rows_to_dicts
 from .utils import log as log
 
-# Tunables (safe defaults) – can be moved to Django settings if desired
 DB_STATEMENT_TIMEOUT_MS = 15000   # 15s guardrail for runaway queries
 FETCHMANY_SIZE = 1000             # stream in chunks to avoid RAM spikes
 ENABLE_READ_ONLY_TXN = True       # keep prod DB safe from accidental writes
@@ -92,7 +91,6 @@ def execute_safe_sql(sql_query: str, params: Optional[Sequence[Any]] = None) -> 
             return dict_rows, None
 
         except (OperationalError, DatabaseError) as e:
-            # Add DB-specific diagnostics if available
             detail = ""
             diag = getattr(e, "diag", None)
             if diag is not None and hasattr(diag, "message_primary"):
