@@ -1,0 +1,13 @@
+[
+  {
+    "model": "scheduler.taskpolicy",
+    "pk": 1,
+    "fields": {
+      "key": "lead.call.v1",
+      "intervals": ["30m", "3h", "10h", "24h", "72h"],
+      "max_attempts": 5,
+      "business_hours_only": false,
+      "timezone": "Asia/Kolkata"
+    }
+  }
+]
