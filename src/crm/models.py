@@ -18,6 +18,10 @@ class Lead(BaseModel):
     display_pic_url = models.TextField(null=True, blank=True)
     assigned_to = models.UUIDField(null=True, blank=True)
     lead_status = models.CharField(max_length=50, null=True, blank=True)  
+    attempt_count = models.PositiveSmallIntegerField(default=0)
+    last_call_outcome = models.CharField(max_length=50, null=True, blank=True)
+    next_call_at = models.DateTimeField(null=True, blank=True, db_index=True) 
+    do_not_call = models.BooleanField(default=False, db_index=True)
 
 
 
@@ -26,6 +30,7 @@ class Lead(BaseModel):
         managed = True
         indexes = BaseModel.Meta.indexes + [
             models.Index(fields=['assigned_to', 'lead_status', '-created_at']),
+            models.Index(fields=['lead_status', 'next_call_at'])
         ]
 
     def __str__(self):

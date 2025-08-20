@@ -44,7 +44,8 @@ INSTALLED_APPS = [
     'analytics',
     'cron_jobs',
     'crm',
-    'core'
+    'core',
+    'scheduler'
 ]
 
 MIDDLEWARE = [
