@@ -322,7 +322,6 @@ class SaveAndContinueLeadView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-
 class TakeBreakLeadView(APIView):
     """
     - If target lead is WIP (either provided or current), DO NOT unassign.
@@ -333,30 +332,23 @@ class TakeBreakLeadView(APIView):
 
     def post(self, request):
         data = request.data or {}
-        lead_id = data.get("leadId") or data.get("lead_id")
-        requested_status = data.get("lead_status") or data.get("resolution_status")
+        lead_id = data.get("leadId")
 
-        try:
-            assignee_uuid = str(UUID(str(request.user.supabase_uid)))
-        except Exception:
-            return Response(
-                {"error": "Authenticated user does not have a valid supabase_uid UUID."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
+        # Optional tenant scope
         tenant_uuid = None
         if getattr(request.user, "tenant_id", None):
             try:
                 tenant_uuid = UUID(str(request.user.tenant_id))
             except Exception:
-                pass
+                tenant_uuid = None 
 
         with transaction.atomic():
-            qs = Lead.objects.select_for_update().select_related("assigned_to")
+
+            qs = Lead.objects.select_for_update(of=("self",))
             if lead_id is not None:
                 qs = qs.filter(id=lead_id)
             else:
-                qs = qs.filter(assigned_to_id=assignee_uuid).order_by("-updated_at", "-created_at")
+                qs = qs.filter(assigned_to=request.user).order_by("-updated_at", "-created_at")
 
             if tenant_uuid:
                 qs = qs.filter(tenant_id=tenant_uuid)
@@ -365,41 +357,44 @@ class TakeBreakLeadView(APIView):
             if not lead:
                 return Response({"error": "Lead not found."}, status=status.HTTP_404_NOT_FOUND)
 
-            if lead.assigned_to_id != assignee_uuid:
-                return Response(
-                    {"error": "You are not the assignee of this lead."},
-                    status=status.HTTP_403_FORBIDDEN,
-                )
+            if lead.assigned_to is None or lead.assigned_to != request.user:
+                    return Response(
+                        {"error": "You are not the assignee of this lead."},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
 
-            should_unassign = True
-            message = "Lead unassigned. Taking a break."
             current_status = (lead.lead_status or "").strip()
-            requested_status = (requested_status or "").strip()
-
-            if requested_status == "WIP" or current_status == "WIP":
-                should_unassign = False
-                message = "Lead is in progress. Taking a break without unassigning."
-
-            if should_unassign:
-                Lead.objects.filter(id=lead.id).update(
-                    assigned_to_id=None,
-                    updated_at=timezone.now(),
+            if current_status == "WIP":
+                return Response(
+                    {
+                        "success": True,
+                        "message": "Lead is in progress. Taking a break without unassigning.",
+                        "leadUnassigned": False,
+                        "lead": LeadSerializer(lead).data,
+                        "userId": getattr(request.user, "pk", None),
+                        "userEmail": getattr(request.user, "email", None),
+                    },
+                    status=status.HTTP_200_OK,
                 )
-                lead.refresh_from_db()
-
+            # Unassign
+            updated = Lead.objects.filter(id=lead.id).update(
+                assigned_to=None,
+                updated_at=timezone.now(),
+            )
+            
+            lead.refresh_from_db()
             return Response(
                 {
                     "success": True,
-                    "message": message,
-                    "leadUnassigned": should_unassign,
+                    "message": "Lead unassigned. Taking a break.",
+                    "leadUnassigned": True,
                     "lead": LeadSerializer(lead).data,
-                    "userId": assignee_uuid,
+                    "userId": getattr(request.user, "pk", None),
                     "userEmail": getattr(request.user, "email", None),
                 },
                 status=status.HTTP_200_OK,
             )
-
-
+        
 class LeadDetailUpdateView(RetrieveUpdateAPIView):
     """
     GET   /leads/<id>/
