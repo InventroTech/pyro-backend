@@ -1,4 +1,5 @@
 
+import os
 from rest_framework.permissions import IsAuthenticated
 from .models import Lead
 from rest_framework.generics import ListAPIView, ListCreateAPIView, RetrieveUpdateAPIView
@@ -209,8 +210,6 @@ class LeadStatsView(APIView):
             'avg_time_to_close_seconds': (avg_close.total_seconds() if avg_close else None),
             'new_leads_per_day': [{'date': r['d'], 'count': r['count']} for r in per_day],
         })
-
-
 
 
 class GetNextLead(APIView):
@@ -469,19 +468,32 @@ class LeadScoreUpdateView(APIView):
     PATCH /leads/<id>/score/  -> update lead_score only
     PUT   /leads/<id>/score/  -> same as PATCH
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
-    def patch(self, request, pk):
-        return self._update_score(request, pk)
+    def post(self, request, pk):
+        # The api will contain user_id and the corresponding lead_score field. update the lead_score field for the user_id
+        # Check the x-webhook-secret in the request headers
+        webhook_secret = request.headers.get("x-webhook-secret")
+        if webhook_secret != os.environ.get('WEBHOOK_SECRET'):
+            return Response({"error": "Invalid webhook secret"}, status=status.HTTP_401_UNAUTHORIZED)
+        user_id = request.data.get("user_id")
+        lead_score = request.data.get("lead_score")
+        lead = Lead.objects.get(user_id=user_id)
+        lead.lead_score = lead_score
+        lead.save()
+        return Response({"success": True}, status=status.HTTP_200_OK)
 
-    def put(self, request, pk):
-        return self._update_score(request, pk)
+class LeadPushWebhookView(APIView):
+    permission_classes = [AllowAny]
 
-    def _update_score(self, request, pk):
-        lead = get_object_or_404(_tenant_scoped_qs(request.user), pk=pk)
-        ser = LeadScoreUpdateSerializer(lead, data=request.data, partial=True)
-        ser.is_valid(raise_exception=True)
-
-        ser.save()
-
-        return Response(LeadSerializer(lead).data, status=status.HTTP_200_OK)
+    serializer_class = LeadCreateSerializer
+    def post(self, request):
+        webhook_secret = request.headers.get("x-webhook-secret")
+        if webhook_secret != os.environ.get('WEBHOOK_SECRET'):
+            return Response({"error": "Invalid webhook secret"}, status=status.HTTP_401_UNAUTHORIZED)
+        serializer = self.serializer_class(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"success": True}, status=status.HTTP_200_OK)
+        else:
+            return Response({"error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
