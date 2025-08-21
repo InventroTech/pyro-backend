@@ -1,5 +1,7 @@
 from uuid import UUID
-from rest_framework.permissions import IsAuthenticated
+
+import os
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.generics import ListAPIView, ListCreateAPIView, RetrieveUpdateAPIView
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -416,14 +418,32 @@ class LeadScoreUpdateView(APIView):
     """
     PATCH/PUT /leads/<id>/score/ -> update lead_score only
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
-    def patch(self, request, pk): return self._update_score(request, pk)
-    def put(self, request, pk):   return self._update_score(request, pk)
+    def post(self, request, pk):
+        # The api will contain user_id and the corresponding lead_score field. update the lead_score field for the user_id
+        # Check the x-webhook-secret in the request headers
+        webhook_secret = request.headers.get("x-webhook-secret")
+        if webhook_secret != os.environ.get('WEBHOOK_SECRET'):
+            return Response({"error": "Invalid webhook secret"}, status=status.HTTP_401_UNAUTHORIZED)
+        user_id = request.data.get("user_id")
+        lead_score = request.data.get("lead_score")
+        lead = Lead.objects.get(user_id=user_id)
+        lead.lead_score = lead_score
+        lead.save()
+        return Response({"success": True}, status=status.HTTP_200_OK)
 
-    def _update_score(self, request, pk):
-        lead = get_object_or_404(_tenant_scoped_qs(request.user), pk=pk)
-        ser = LeadScoreUpdateSerializer(lead, data=request.data, partial=True)
-        ser.is_valid(raise_exception=True)
-        ser.save()
-        return Response(LeadSerializer(lead).data, status=status.HTTP_200_OK)
+class LeadPushWebhookView(APIView):
+    permission_classes = [AllowAny]
+
+    serializer_class = LeadCreateSerializer
+    def post(self, request):
+        webhook_secret = request.headers.get("x-webhook-secret")
+        if webhook_secret != os.environ.get('WEBHOOK_SECRET'):
+            return Response({"error": "Invalid webhook secret"}, status=status.HTTP_401_UNAUTHORIZED)
+        serializer = self.serializer_class(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"success": True}, status=status.HTTP_200_OK)
+        else:
+            return Response({"error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
