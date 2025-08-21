@@ -84,42 +84,28 @@ class AllMyLeadsView(ListCreateAPIView):
         return LeadSerializer if self.request.method == "GET" else LeadCreateSerializer
 
     def get_queryset(self):
-        u = self.request.user
-        try:
-            uid = str(UUID(str(u.supabase_uid)))
-        except (ValueError, TypeError):
-            return Lead.objects.none()
-
+        user = self.request.user
+        
         qs = (
-            _tenant_scoped_qs(u)
-            .filter(assigned_to_id=uid)
+            _tenant_scoped_qs(user)
+            .filter(assigned_to=user)
             .order_by("-created_at")
         )
         return qs
 
     def perform_create(self, serializer):
         user = self.request.user
-
         tenant_uuid = None
         if user.tenant_id:
             try:
                 tenant_uuid = UUID(str(user.tenant_id))
             except (ValueError, TypeError):
                 pass
-
-        try:
-            assignee_uuid = str(UUID(str(user.supabase_uid)))
-        except (ValueError, TypeError):
-            assignee_uuid = None
-
-        # Assign only if created as WIP; else leave unassigned
-        assigned_to_id = assignee_uuid if serializer.validated_data.get("lead_status") == "WIP" else None
-
+        assigned_to = user
         serializer.save(
             tenant_id=tenant_uuid,
-            assigned_to_id=assigned_to_id,
+            assigned_to=user
         )
-
 
 class MyLeadDetailView(RetrieveUpdateAPIView):
     """
