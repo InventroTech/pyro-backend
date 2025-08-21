@@ -51,7 +51,7 @@ def _tenant_scoped_qs(user):
     return qs.select_related("assigned_to")
 
 
-class WIPLeadsView(ListAPIView):
+class CallLaterLeadsView(ListAPIView):
     serializer_class = LeadSerializer
     permission_classes = [IsAuthenticated]
 
@@ -59,10 +59,10 @@ class WIPLeadsView(ListAPIView):
         user = self.request.user
         return (
             _tenant_scoped_qs(user)
-            .filter(assigned_to_id=user.supabase_uid, lead_status__in=UPDATABLE_STATUSES)
+            .filter(assigned_to=user, 
+                    lead_status="call_later")
             .order_by('-created_at')
         )
-
 
 class AllLeadsView(ListAPIView):
     serializer_class = LeadSerializer
