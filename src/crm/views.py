@@ -20,7 +20,7 @@ from .serializers import (
 # ALL STATUSES = IN_QUEUE, ASSIGNED, WON, LOST, CALL_LATER, SCHEDULED, CLOSED
 CLOSED_STATUSES = ("won", "lost", "closed")
 UPDATABLE_STATUSES = ("call_later", "scheduled")        
-QUEUEABLE = ("in_queue") 
+QUEUEABLE = ("in_queue",) 
 ASSIGNED = "assigned"
 
 
@@ -177,62 +177,77 @@ class LeadStatsView(APIView):
             "leads_lost": agg.get("leads_lost", 0) or 0,
         })
 
+
+
 class GetNextLead(APIView):
     """
     Atomically fetch & assign the highest-scoring unassigned lead to the caller.
     """
+  
     permission_classes = [IsAuthenticated]
-
     def _order_by_score(self, qs):
-        return (
-            qs.annotate(_score=Coalesce(Cast("lead_score", FloatField()), Value(float("-inf"))))
-              .order_by(F("_score").desc(nulls_last=True), "created_at", "id")
+        qs = qs.order_by(
+            F("lead_score").desc(nulls_last=True),
+            F("lead_creation_date").asc(nulls_last=True),
+            "id",
         )
+        return qs
 
     def get(self, request):
         user = request.user
-
-        try:
-            assignee_uuid = str(UUID(str(user.supabase_uid)))
-        except Exception:
-            return Response(
-                {"error": "Authenticated user does not have a valid supabase_uid UUID."},
-                status=400,
-            )
-
         tenant_uuid = None
         if getattr(user, "tenant_id", None):
             try:
+                from uuid import UUID
                 tenant_uuid = UUID(str(user.tenant_id))
-            except Exception:
-                pass
+            except Exception as e:
+                print("[GetNextLead] invalid tenant_id:", e)
 
+        mine = Lead.objects.filter(assigned_to=user, lead_status__in=QUEUEABLE)
+        if tenant_uuid:
+            mine = mine.filter(tenant_id=tenant_uuid)
+
+        mine_candidate = self._order_by_score(mine).first()
+        
+        if mine_candidate:
+            
+            with transaction.atomic():
+                locked = (Lead.objects
+                          .select_for_update(skip_locked=True, of=("self",))
+                          .filter(pk=mine_candidate.pk, assigned_to=user))
+                if tenant_uuid:
+                    locked = locked.filter(tenant_id=tenant_uuid)
+
+                locked_obj = locked.first()
+
+                if not locked_obj:
+                    print("[GetNextLead] mine vanished/raced, falling through to unassigned fetch")
+                else:
+                    if locked_obj.lead_status != ASSIGNED:
+                        prev = locked_obj.lead_status
+                        locked_obj.lead_status = ASSIGNED
+                        locked_obj.updated_at = timezone.now()
+                        locked_obj.save(update_fields=["lead_status", "updated_at"])
+
+                    lead = Lead.objects.select_related("assigned_to").get(pk=locked_obj.pk)
+                    return Response({"lead": LeadSerializer(lead).data}, status=200)
+
+        # 2) Atomically pick & assign an unassigned queued lead
         with transaction.atomic():
-            mine = Lead.objects.select_for_update(skip_locked=True).select_related("assigned_to").filter(
-                assigned_to_id=assignee_uuid, lead_status__in=QUEUEABLE
-            )
-            if tenant_uuid:
-                mine = mine.filter(tenant_id=tenant_uuid)
-
-            mine_candidate = self._order_by_score(mine).first()
-            if mine_candidate:
-                return Response({"lead": LeadSerializer(mine_candidate).data}, status=200)
-
-            unassigned = Lead.objects.select_for_update(skip_locked=True).select_related("assigned_to").filter(
-                assigned_to__isnull=True, lead_status__in=QUEUEABLE
-            )
+            unassigned = Lead.objects.filter(assigned_to__isnull=True, lead_status__in=QUEUEABLE)
             if tenant_uuid:
                 unassigned = unassigned.filter(tenant_id=tenant_uuid)
-
+            unassigned = unassigned.select_for_update(skip_locked=True, of=("self",))
             candidate = self._order_by_score(unassigned).first()
             if not candidate:
                 return Response({}, status=200)
-
-            candidate.assigned_to_id = assignee_uuid
+            candidate.assigned_to = user
             candidate.updated_at = timezone.now()
-            candidate.save(update_fields=["assigned_to_id", "updated_at"])
+            candidate.lead_status = ASSIGNED
+            candidate.save(update_fields=["assigned_to", "updated_at", "lead_status"])
 
-            return Response({"lead": LeadSerializer(candidate).data}, status=200)
+        lead = Lead.objects.select_related("assigned_to").get(pk=candidate.pk)
+        return Response({"lead": LeadSerializer(lead).data}, status=200)
 
 
 class SaveAndContinueLeadView(APIView):
