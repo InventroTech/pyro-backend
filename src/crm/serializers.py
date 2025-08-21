@@ -1,25 +1,30 @@
 from rest_framework import serializers
 from .models import Lead
 from scheduler.models import AttemptOutcome
+from authentication.models import User
 
 # Keep your existing statuses
 ALLOWED_STATUSES = {
     "New", "Pending", "Follow-up", "WIP", "Resolved", "Won", "Lost", "Can't Resolve"
 }
 
-
 class LeadSerializer(serializers.ModelSerializer):
-    """Read serializer (returns everything)."""
+    assigned_to_email = serializers.SerializerMethodField()
+
     class Meta:
         model = Lead
-        fields = "__all__"
-        read_only_fields = (
-            "id",
-            "assigned_to",
-            "attempt_count",
-            "created_at",
-            "updated_at",
+        fields = (
+            "id", "name", "phone_no", "lead_status", "lead_score",
+            "assigned_to_email",
+            "attempt_count", "last_call_outcome", "next_call_at", "do_not_call",
+            "created_at", "updated_at",
         )
+        read_only_fields = (
+            "id", "assigned_to_email", "attempt_count", "created_at", "updated_at",
+        )
+
+    def get_assigned_to_email(self, obj):
+        return obj.assigned_to.email if obj.assigned_to else None
 
 
 class LeadCreateSerializer(serializers.ModelSerializer):

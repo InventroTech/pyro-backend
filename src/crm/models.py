@@ -16,7 +16,15 @@ class Lead(BaseModel):
     reason = models.TextField(null=True, blank=True) 
     badge = models.CharField(max_length=255, null=True, blank=True)
     display_pic_url = models.TextField(null=True, blank=True)
-    assigned_to = models.UUIDField(null=True, blank=True)
+    assigned_to = models.ForeignKey(
+        'authentication.User',
+        to_field='supabase_uid',
+        db_column='assigned_to',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='assigned_leads',
+    )
     lead_status = models.CharField(max_length=50, null=True, blank=True)  
     attempt_count = models.PositiveSmallIntegerField(default=0)
     last_call_outcome = models.CharField(max_length=50, null=True, blank=True)
