@@ -16,6 +16,12 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
+from rest_framework import permissions
+from drf_spectacular.views import (
+    SpectacularAPIView,
+    SpectacularRedocView,
+    SpectacularSwaggerView,
+)
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -23,4 +29,20 @@ urlpatterns = [
     path('auth/', include('authentication.urls')),
     path('cron-jobs/',include('cron_jobs.urls')),
     path('crm/', include('crm.urls')),
+    # OpenAPI schema
+    path("api/schema/", SpectacularAPIView.as_view(
+        permission_classes=[permissions.AllowAny]
+    ), name="schema"),
+
+    # Swagger UI
+    path("", SpectacularSwaggerView.as_view(
+        url_name="schema",
+        permission_classes=[permissions.AllowAny] 
+    ), name="swagger-ui"),
+
+    # Redoc
+    path("api/redoc/", SpectacularRedocView.as_view(
+        url_name="schema",
+        permission_classes=[permissions.AllowAny]
+    ), name="redoc"),
 ]
