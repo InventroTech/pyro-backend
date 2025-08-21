@@ -39,6 +39,8 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    "drf_spectacular",
+    "drf_spectacular_sidecar",
     'authentication',
     'corsheaders',
     'analytics',
@@ -230,4 +232,29 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'config.supabase_auth.SupabaseJWTAuthentication',
     ],
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
+
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Pyro Endpoints",
+    "DESCRIPTION": "",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": True,
+    "SERVE_PUBLIC": True,         
+    "SWAGGER_UI_SETTINGS": {"persistAuthorization": True},
+
+    "SECURITY_SCHEMES": {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+        },
+    },
+    
+    "SECURITY": [{"BearerAuth": []}],
+    "COMPONENT_SPLIT_REQUEST": True,
+}
+
+
+import config.spectacular_auth
