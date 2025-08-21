@@ -396,24 +396,24 @@ class TakeBreakLeadView(APIView):
                     )
 
             current_status = (lead.lead_status or "").strip()
-            if current_status == "WIP":
-                return Response(
-                    {
-                        "success": True,
-                        "message": "Lead is in progress. Taking a break without unassigning.",
-                        "leadUnassigned": False,
-                        "lead": LeadSerializer(lead).data,
-                        "userId": getattr(request.user, "pk", None),
-                        "userEmail": getattr(request.user, "email", None),
-                    },
-                    status=status.HTTP_200_OK,
-                )
+            # if current_status == "WIP":
+            #     return Response(
+            #         {
+            #             "success": True,
+            #             "message": "Lead is in progress. Taking a break without unassigning.",
+            #             "leadUnassigned": False,
+            #             "lead": LeadSerializer(lead).data,
+            #             "userId": getattr(request.user, "pk", None),
+            #             "userEmail": getattr(request.user, "email", None),
+            #         },
+            #         status=status.HTTP_200_OK,
+            #     )
             # Unassign
             updated = Lead.objects.filter(id=lead.id).update(
                 assigned_to=None,
-                updated_at=timezone.now(),
+                lead_status = "in_queue",
+                updated_at=timezone.now()
             )
-            
             lead.refresh_from_db()
             return Response(
                 {
