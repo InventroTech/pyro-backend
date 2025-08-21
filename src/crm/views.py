@@ -7,7 +7,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, serializers
 from django.db import transaction
-from django.db.models import Avg, Count, F, ExpressionWrapper, DurationField, FloatField, Value
+from django.db.models import Avg, Count, F, ExpressionWrapper, DurationField, FloatField, Value, Q
 from django.db.models.functions import TruncDate, Cast, Coalesce
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -17,10 +17,11 @@ from .serializers import (
     LeadSerializer, LeadCreateSerializer, LeadUpdateSerializer,
     LeadScoreUpdateSerializer, ALLOWED_STATUSES
 )
-
-CLOSED_STATUSES = ("Resolved", "Won", "Lost", "Can't Resolve")
-ACTIVE_OWNED    = ("WIP",)           
-QUEUEABLE       = ("Pending", "New")  
+# ALL STATUSES = IN_QUEUE, ASSIGNED, WON, LOST, CALL_LATER, SCHEDULED, CLOSED
+CLOSED_STATUSES = ("won", "lost", "closed")
+UPDATABLE_STATUSES = ("call_later", "scheduled")        
+QUEUEABLE = ("in_queue") 
+ASSIGNED = "assigned"
 
 
 def _tenant_scoped_qs(user):
@@ -42,7 +43,7 @@ class WIPLeadsView(ListAPIView):
         user = self.request.user
         return (
             _tenant_scoped_qs(user)
-            .filter(assigned_to_id=user.supabase_uid, lead_status__in=ACTIVE_OWNED)
+            .filter(assigned_to_id=user.supabase_uid, lead_status__in=UPDATABLE_STATUSES)
             .order_by('-created_at')
         )
 
@@ -150,43 +151,31 @@ class MyLeadDetailView(RetrieveUpdateAPIView):
 
 class LeadStatsView(APIView):
     permission_classes = [IsAuthenticated]
-
     def get(self, request):
         try:
-            days = int(request.query_params.get('days', 30))
+            days = int(request.query_params.get('days', 1))
             assert days > 0
         except Exception:
             return Response({'error': "'days' must be a positive integer."}, status=400)
-
+        DAYS_HARD_CAP = 365
+        if days > DAYS_HARD_CAP:
+            days = DAYS_HARD_CAP
         since = timezone.now() - timezone.timedelta(days=days)
+        qs = _tenant_scoped_qs(request.user).filter(lead_creation_date__gte=since)
 
-        qs = _tenant_scoped_qs(request.user).filter(created_at__gte=since)
-        total = qs.count()
-        wip = qs.filter(lead_status='WIP').count()
-        resolved = qs.filter(lead_status__in=CLOSED_STATUSES).count()
-
-        avg_close = qs.filter(
-            lead_status__in=CLOSED_STATUSES, updated_at__isnull=False
-        ).aggregate(
-            avg=Avg(ExpressionWrapper(F('updated_at') - F('created_at'), output_field=DurationField()))
-        )['avg']
-
-        per_day = list(
-            qs.annotate(d=TruncDate('created_at'))
-              .values('d')
-              .annotate(count=Count('id'))
-              .order_by('d')
+        agg = qs.aggregate(
+            fresh_leads=Count("id"),
+            leads_won=Count("id", filter=Q(lead_status="won")),
+            call_later=Count("id", filter=Q(lead_status="call_later")),
+            leads_lost=Count("id", filter=Q(lead_status="lost")),
         )
 
         return Response({
-            'period_in_days': days,
-            'total_leads': total,
-            'wip_count': wip,
-            'closed_count': resolved,
-            'avg_time_to_close_seconds': (avg_close.total_seconds() if avg_close else None),
-            'new_leads_per_day': [{'date': r['d'], 'count': r['count']} for r in per_day],
+            "fresh_leads": agg.get("fresh_leads", 0) or 0,
+            "leads_won": agg.get("leads_won", 0) or 0,
+            "call_later": agg.get("call_later", 0) or 0,
+            "leads_lost": agg.get("leads_lost", 0) or 0,
         })
-
 
 class GetNextLead(APIView):
     """
