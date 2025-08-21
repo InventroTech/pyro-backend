@@ -6,13 +6,15 @@ from django.utils import timezone
 from .models import Lead
 from .policy import MAX_ATTEMPTS
 from .policy_utils import next_due
+from django.utils.dateparse import parse_datetime
 
 class LeadCallOutcomeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, lead_id: int):
         outcome = request.data.get("outcome")
-        callback_at = request.data.get("callback_at") 
+        callback_at = request.data.get("callbackAt")
+
         if outcome not in ["Won", "Lost", "WIP"]:
             return Response({"error": "invalid outcome"}, status=400)
 
@@ -25,30 +27,24 @@ class LeadCallOutcomeView(APIView):
         lead.attempt_count = attempt_no
         lead.last_call_outcome = outcome
 
-        # terminal outcomes clear next_call_at
-        if outcome in (
-            "Won", "Lost"
-        ):
+        if outcome in ("Won", "Lost"):
             lead.next_call_at = None
             lead.lead_status = outcome
 
         elif outcome == "WIP" and callback_at:
-            # Trust the agent's requested time
-            from django.utils.dateparse import parse_datetime
             dt = parse_datetime(callback_at)
             lead.next_call_at = dt
-            
+            lead.lead_status = "WIP"
 
         elif attempt_no >= MAX_ATTEMPTS:
-            # attempts exhausted
             lead.next_call_at = None
-            lead.lead_status="Lost"
+            lead.lead_status = "Lost"
 
         else:
-            # schedule next retry using the policy
             lead.next_call_at = next_due(now, attempt_no - 1)
 
         lead.save(update_fields=["attempt_count", "last_call_outcome", "next_call_at", "lead_status"])
+        
         return Response({
             "ok": True,
             "attempt_count": lead.attempt_count,
