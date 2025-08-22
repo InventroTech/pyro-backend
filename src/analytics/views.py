@@ -366,3 +366,12 @@ class AnalyticsQueryView(APIView):
         run.completed_at = timezone.now()
         run.save(update_fields=["status", "completed_at"])
         return Response(formatted)
+
+
+
+class SupportTicketView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        count = SupportTicket.objects.filter(tenant_id=request.user.tenant_id).filter(poster__in=["paid", "in_trial"]).filter(resolution_status__not__in=["Resolved"]).count()
+        return Response({"count": count}, status=status.HTTP_200_OK)
