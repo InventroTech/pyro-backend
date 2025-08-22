@@ -1,7 +1,7 @@
 from django.urls import path
 from .views import (
     LeadPushWebhookView,
-    WIPLeadsView,
+    CallLaterLeadsView,
     AllMyLeadsView,
     LeadStatsView,
     GetNextLead,
@@ -18,7 +18,7 @@ from .views_calls import LeadCallOutcomeView
 app_name = 'crm'
 
 urlpatterns = [
-    path('leads/wip/', WIPLeadsView.as_view(), name='wip-leads'),
+    path('leads/call-later/', CallLaterLeadsView.as_view(), name='call-later-leads'),
     path('my-leads/', AllMyLeadsView.as_view(), name='all-my-leads'),
     path('leads/stats/', LeadStatsView.as_view(), name='stats-leads'),
     path("leads/get-next-lead/", GetNextLead.as_view(), name="get-next-lead"),
