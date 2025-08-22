@@ -15,7 +15,7 @@ class LeadCallOutcomeView(APIView):
         outcome = request.data.get("outcome")
         callback_at = request.data.get("callbackAt")
 
-        if outcome not in ["Won", "Lost", "WIP"]:
+        if outcome not in ["won", "lost", "call_later"]:
             return Response({"error": "invalid outcome"}, status=400)
 
         lead = Lead.objects.filter(id=lead_id).first()
@@ -27,21 +27,22 @@ class LeadCallOutcomeView(APIView):
         lead.attempt_count = attempt_no
         lead.last_call_outcome = outcome
 
-        if outcome in ("Won", "Lost"):
+        if outcome in ("won", "lost"):
             lead.next_call_at = None
             lead.lead_status = outcome
 
-        elif outcome == "WIP" and callback_at:
+        elif outcome == "call_later" and callback_at:
             dt = parse_datetime(callback_at)
             lead.next_call_at = dt
-            lead.lead_status = "WIP"
+            lead.lead_status = outcome
 
         elif attempt_no >= MAX_ATTEMPTS:
             lead.next_call_at = None
-            lead.lead_status = "Lost"
+            lead.lead_status = "closed"
 
         else:
             lead.next_call_at = next_due(now, attempt_no - 1)
+            lead.lead_status = "scheduled"
 
         lead.save(update_fields=["attempt_count", "last_call_outcome", "next_call_at", "lead_status"])
         

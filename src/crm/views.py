@@ -7,7 +7,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, serializers
 from django.db import transaction
-from django.db.models import Avg, Count, F, ExpressionWrapper, DurationField, FloatField, Value
+from django.db.models import Avg, Count, F, ExpressionWrapper, DurationField, FloatField, Value, Q
 from django.db.models.functions import TruncDate, Cast, Coalesce
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -17,10 +17,27 @@ from .serializers import (
     LeadSerializer, LeadCreateSerializer, LeadUpdateSerializer,
     LeadScoreUpdateSerializer, ALLOWED_STATUSES
 )
+# ALL STATUSES = IN_QUEUE, ASSIGNED, WON, LOST, CALL_LATER, SCHEDULED, CLOSED
+CLOSED_STATUSES = ("won", "lost", "closed")
+UPDATABLE_STATUSES = ("call_later", "scheduled")        
+QUEUEABLE = ("in_queue",) 
+ASSIGNED = "assigned"
+VALID_STATUSES = {
+    "won", "lost", "closed", "call_later",
+    "scheduled", "in_queue",
+    "assigned"
+    }
 
-CLOSED_STATUSES = ("Resolved", "Won", "Lost", "Can't Resolve")
-ACTIVE_OWNED    = ("WIP",)           
-QUEUEABLE       = ("Pending", "New")  
+WRITABLE_FIELDS = {
+    "reason",
+    "badge",
+    "lead_description",
+    "other_description",
+    "lead_score",
+    "praja_dashboard_user_link",
+}
+
+
 
 
 def _tenant_scoped_qs(user):
@@ -34,7 +51,7 @@ def _tenant_scoped_qs(user):
     return qs.select_related("assigned_to")
 
 
-class WIPLeadsView(ListAPIView):
+class CallLaterLeadsView(ListAPIView):
     serializer_class = LeadSerializer
     permission_classes = [IsAuthenticated]
 
@@ -42,10 +59,10 @@ class WIPLeadsView(ListAPIView):
         user = self.request.user
         return (
             _tenant_scoped_qs(user)
-            .filter(assigned_to_id=user.supabase_uid, lead_status__in=ACTIVE_OWNED)
+            .filter(assigned_to=user, 
+                    lead_status="call_later")
             .order_by('-created_at')
         )
-
 
 class AllLeadsView(ListAPIView):
     serializer_class = LeadSerializer
@@ -67,42 +84,28 @@ class AllMyLeadsView(ListCreateAPIView):
         return LeadSerializer if self.request.method == "GET" else LeadCreateSerializer
 
     def get_queryset(self):
-        u = self.request.user
-        try:
-            uid = str(UUID(str(u.supabase_uid)))
-        except (ValueError, TypeError):
-            return Lead.objects.none()
-
+        user = self.request.user
+        
         qs = (
-            _tenant_scoped_qs(u)
-            .filter(assigned_to_id=uid)
+            _tenant_scoped_qs(user)
+            .filter(assigned_to=user)
             .order_by("-created_at")
         )
         return qs
 
     def perform_create(self, serializer):
         user = self.request.user
-
         tenant_uuid = None
         if user.tenant_id:
             try:
                 tenant_uuid = UUID(str(user.tenant_id))
             except (ValueError, TypeError):
                 pass
-
-        try:
-            assignee_uuid = str(UUID(str(user.supabase_uid)))
-        except (ValueError, TypeError):
-            assignee_uuid = None
-
-        # Assign only if created as WIP; else leave unassigned
-        assigned_to_id = assignee_uuid if serializer.validated_data.get("lead_status") == "WIP" else None
-
+        assigned_to = user
         serializer.save(
             tenant_id=tenant_uuid,
-            assigned_to_id=assigned_to_id,
+            assigned_to=user
         )
-
 
 class MyLeadDetailView(RetrieveUpdateAPIView):
     """
@@ -150,179 +153,192 @@ class MyLeadDetailView(RetrieveUpdateAPIView):
 
 class LeadStatsView(APIView):
     permission_classes = [IsAuthenticated]
-
     def get(self, request):
         try:
-            days = int(request.query_params.get('days', 30))
+            days = int(request.query_params.get('days', 1))
             assert days > 0
         except Exception:
             return Response({'error': "'days' must be a positive integer."}, status=400)
-
+        DAYS_HARD_CAP = 365
+        if days > DAYS_HARD_CAP:
+            days = DAYS_HARD_CAP
         since = timezone.now() - timezone.timedelta(days=days)
+        qs = _tenant_scoped_qs(request.user).filter(lead_creation_date__gte=since)
 
-        qs = _tenant_scoped_qs(request.user).filter(created_at__gte=since)
-        total = qs.count()
-        wip = qs.filter(lead_status='WIP').count()
-        resolved = qs.filter(lead_status__in=CLOSED_STATUSES).count()
-
-        avg_close = qs.filter(
-            lead_status__in=CLOSED_STATUSES, updated_at__isnull=False
-        ).aggregate(
-            avg=Avg(ExpressionWrapper(F('updated_at') - F('created_at'), output_field=DurationField()))
-        )['avg']
-
-        per_day = list(
-            qs.annotate(d=TruncDate('created_at'))
-              .values('d')
-              .annotate(count=Count('id'))
-              .order_by('d')
+        agg = qs.aggregate(
+            fresh_leads=Count("id"),
+            leads_won=Count("id", filter=Q(lead_status="won")),
+            call_later=Count("id", filter=Q(lead_status="call_later")),
+            leads_lost=Count("id", filter=Q(lead_status="lost")),
         )
 
         return Response({
-            'period_in_days': days,
-            'total_leads': total,
-            'wip_count': wip,
-            'closed_count': resolved,
-            'avg_time_to_close_seconds': (avg_close.total_seconds() if avg_close else None),
-            'new_leads_per_day': [{'date': r['d'], 'count': r['count']} for r in per_day],
+            "fresh_leads": agg.get("fresh_leads", 0) or 0,
+            "leads_won": agg.get("leads_won", 0) or 0,
+            "call_later": agg.get("call_later", 0) or 0,
+            "leads_lost": agg.get("leads_lost", 0) or 0,
         })
+
 
 
 class GetNextLead(APIView):
     """
     Atomically fetch & assign the highest-scoring unassigned lead to the caller.
     """
+  
     permission_classes = [IsAuthenticated]
-
     def _order_by_score(self, qs):
-        return (
-            qs.annotate(_score=Coalesce(Cast("lead_score", FloatField()), Value(float("-inf"))))
-              .order_by(F("_score").desc(nulls_last=True), "created_at", "id")
+        qs = qs.order_by(
+            F("lead_score").desc(nulls_last=True),
+            F("lead_creation_date").asc(nulls_last=True),
+            "id",
         )
+        return qs
 
     def get(self, request):
         user = request.user
-
-        try:
-            assignee_uuid = str(UUID(str(user.supabase_uid)))
-        except Exception:
-            return Response(
-                {"error": "Authenticated user does not have a valid supabase_uid UUID."},
-                status=400,
-            )
-
         tenant_uuid = None
         if getattr(user, "tenant_id", None):
             try:
+                from uuid import UUID
                 tenant_uuid = UUID(str(user.tenant_id))
-            except Exception:
-                pass
+            except Exception as e:
+                print("[GetNextLead] invalid tenant_id:", e)
 
+        mine = Lead.objects.filter(assigned_to=user, lead_status__in=QUEUEABLE)
+        if tenant_uuid:
+            mine = mine.filter(tenant_id=tenant_uuid)
+
+        mine_candidate = self._order_by_score(mine).first()
+        
+        if mine_candidate:
+            
+            with transaction.atomic():
+                locked = (Lead.objects
+                          .select_for_update(skip_locked=True, of=("self",))
+                          .filter(pk=mine_candidate.pk, assigned_to=user))
+                if tenant_uuid:
+                    locked = locked.filter(tenant_id=tenant_uuid)
+
+                locked_obj = locked.first()
+
+                if not locked_obj:
+                    print("[GetNextLead] mine vanished/raced, falling through to unassigned fetch")
+                else:
+                    if locked_obj.lead_status != ASSIGNED:
+                        prev = locked_obj.lead_status
+                        locked_obj.lead_status = ASSIGNED
+                        locked_obj.updated_at = timezone.now()
+                        locked_obj.save(update_fields=["lead_status", "updated_at"])
+
+                    lead = Lead.objects.select_related("assigned_to").get(pk=locked_obj.pk)
+                    return Response({"lead": LeadSerializer(lead).data}, status=200)
+
+        # 2) Atomically pick & assign an unassigned queued lead
         with transaction.atomic():
-            mine = Lead.objects.select_for_update(skip_locked=True).select_related("assigned_to").filter(
-                assigned_to_id=assignee_uuid, lead_status__in=QUEUEABLE
-            )
-            if tenant_uuid:
-                mine = mine.filter(tenant_id=tenant_uuid)
-
-            mine_candidate = self._order_by_score(mine).first()
-            if mine_candidate:
-                return Response({"lead": LeadSerializer(mine_candidate).data}, status=200)
-
-            unassigned = Lead.objects.select_for_update(skip_locked=True).select_related("assigned_to").filter(
-                assigned_to__isnull=True, lead_status__in=QUEUEABLE
-            )
+            unassigned = Lead.objects.filter(assigned_to__isnull=True, lead_status__in=QUEUEABLE)
             if tenant_uuid:
                 unassigned = unassigned.filter(tenant_id=tenant_uuid)
-
+            unassigned = unassigned.select_for_update(skip_locked=True, of=("self",))
             candidate = self._order_by_score(unassigned).first()
             if not candidate:
                 return Response({}, status=200)
-
-            candidate.assigned_to_id = assignee_uuid
+            candidate.assigned_to = user
             candidate.updated_at = timezone.now()
-            candidate.save(update_fields=["assigned_to_id", "updated_at"])
+            candidate.lead_status = ASSIGNED
+            candidate.save(update_fields=["assigned_to", "updated_at", "lead_status"])
 
-            return Response({"lead": LeadSerializer(candidate).data}, status=200)
+        lead = Lead.objects.select_related("assigned_to").get(pk=candidate.pk)
+        return Response({"lead": LeadSerializer(lead).data}, status=200)
+
 
 
 class SaveAndContinueLeadView(APIView):
     """
     Update a lead (status, fields)
-    - If lead_status == 'WIP' => assign to current user.
+    - If lead_status == 'assigned' => assign to current user.
     - Else => unassign.
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        user = request.user
         data = request.data or {}
-        lead_id = data.get("leadId") or data.get("lead_id")
-        lead_status = data.get("lead_status")
-        is_read_only = bool(data.get("isReadOnly", False))
+        lead_id = data.get("leadId")
+        lead_status = data.get("leadStatus")
+        
 
         if not lead_id:
             return Response({"error": "leadId is required."}, status=status.HTTP_400_BAD_REQUEST)
-        if is_read_only:
-            return Response({"error": "This lead is read-only."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        normalized_status = None
+        if lead_status is not None:
+            normalized_status = str(lead_status).strip().lower()
+            if normalized_status not in VALID_STATUSES:
+                return Response(
+                    {
+                        "error":"Invalid leadStatus",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-        try:
-            assignee_uuid = str(UUID(str(request.user.supabase_uid)))
-        except Exception:
-            return Response(
-                {"error": "Authenticated user does not have a valid supabase_uid UUID."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
         tenant_uuid = None
         if getattr(request.user, "tenant_id", None):
             try:
                 tenant_uuid = UUID(str(request.user.tenant_id))
             except Exception:
-                pass
+                tenant_uuid = None 
 
         with transaction.atomic():
-            qs = Lead.objects.select_for_update().filter(id=lead_id)
+            qs = Lead.objects.select_for_update(skip_locked=True, of=("self",)).filter(id=lead_id)
             if tenant_uuid:
                 qs = qs.filter(tenant_id=tenant_uuid)
 
-            lead = qs.select_related("assigned_to").first()
+            lead = qs.first()
             if not lead:
                 return Response({"error": "Lead not found."}, status=status.HTTP_404_NOT_FOUND)
+            
+            fields_to_update = []
 
-            updates = {}
+            if normalized_status is not None:
+                lead.lead_status = normalized_status
+                fields_to_update.append("lead_status")
 
-            if lead_status is not None:
-                updates["lead_status"] = lead_status
-                updates["assigned_to_id"] = assignee_uuid if lead_status == "WIP" else None
+                # assignment rule
+                if normalized_status=="assigned":
+                    if lead.assigned_to != user:
+                        lead.assigned_to = user
+                        fields_to_update.append("assigned_to")
+                else:
+                    if lead.assigned_to is not None:
+                        lead.assigned_to = None
+                        fields_to_update.append("assigned_to")
 
-            for field in (
-                "reason",
-                "badge",
-                "lead_description",
-                "other_description",
-                "lead_score",
-                "praja_dashboard_user_link",
-                "display_pic_url",
-                "lead_creation_date",
-            ):
+
+            for field in WRITABLE_FIELDS:
                 if field in data:
-                    updates[field] = data[field]
+                    setattr(lead, field, data[field])
+                    fields_to_update.append(field)
 
-            updates["updated_at"] = timezone.now()
+            lead.updated_at = timezone.now()
+            fields_to_update.append("updated_at")
+            fields_to_update = list(dict.fromkeys(fields_to_update))
 
-            Lead.objects.filter(id=lead.id).update(**updates)
-            lead.refresh_from_db()  # picks up FK
+            if fields_to_update:
+                lead.save(update_fields=fields_to_update)
 
-            return Response(
-                {
-                    "success": True,
-                    "message": "Lead updated successfully",
-                    "lead": LeadSerializer(lead).data,
-                    "userId": assignee_uuid,
-                    "userEmail": getattr(request.user, "email", None),
-                },
-                status=status.HTTP_200_OK,
-            )
+        lead = Lead.objects.select_related("assigned_to").get(pk=lead.pk)
+        return Response(
+            {
+                "success": True,
+                "message": "Lead updated successfully",
+                "lead": LeadSerializer(lead).data,
+                "user": getattr(user, "email", None)
+            },
+            status=status.HTTP_200_OK,
+        )
+
 
 class TakeBreakLeadView(APIView):
     """
@@ -366,24 +382,24 @@ class TakeBreakLeadView(APIView):
                     )
 
             current_status = (lead.lead_status or "").strip()
-            if current_status == "WIP":
-                return Response(
-                    {
-                        "success": True,
-                        "message": "Lead is in progress. Taking a break without unassigning.",
-                        "leadUnassigned": False,
-                        "lead": LeadSerializer(lead).data,
-                        "userId": getattr(request.user, "pk", None),
-                        "userEmail": getattr(request.user, "email", None),
-                    },
-                    status=status.HTTP_200_OK,
-                )
+            # if current_status == "WIP":
+            #     return Response(
+            #         {
+            #             "success": True,
+            #             "message": "Lead is in progress. Taking a break without unassigning.",
+            #             "leadUnassigned": False,
+            #             "lead": LeadSerializer(lead).data,
+            #             "userId": getattr(request.user, "pk", None),
+            #             "userEmail": getattr(request.user, "email", None),
+            #         },
+            #         status=status.HTTP_200_OK,
+            #     )
             # Unassign
             updated = Lead.objects.filter(id=lead.id).update(
                 assigned_to=None,
-                updated_at=timezone.now(),
+                lead_status = "in_queue",
+                updated_at=timezone.now()
             )
-            
             lead.refresh_from_db()
             return Response(
                 {

@@ -31,9 +31,9 @@ class CronFixLeadsView(APIView):
         try:
             now = timezone.now()
             batch = int(request.query_params.get("batch", 2000))
-            from_status = request.query_params.get("from", "WIP")
-            to_pending = request.query_params.get("to_pending", "Pending")
-            to_lost = request.query_params.get("to_lost", "Lost")
+            from_status = request.query_params.get("from", "scheduled")
+            to_queue = request.query_params.get("to_pending", "in_queue")
+            to_lost = request.query_params.get("to_lost", "lost")
 
             # 1) do_not_call -> Lost (idempotent; skip rows already Lost)
             dnc_total = 0
@@ -80,7 +80,7 @@ class CronFixLeadsView(APIView):
                         next_call_at__lte=now,
                         attempt_count__lt=MAX_ATTEMPTS,  # still under max attempts
                     )
-                    .exclude(lead_status=to_pending)
+                    .exclude(lead_status=to_queue)
                     .values_list("id", flat=True)
                     .order_by("next_call_at")[:batch]
                 )
@@ -88,7 +88,7 @@ class CronFixLeadsView(APIView):
                     break
                 # assigned_to is preserved automatically since we don't touch it
                 pend_total += Lead.objects.filter(id__in=ids).update(
-                    lead_status=to_pending,
+                    lead_status=to_queue,
                     updated_at=now
                 )
 
@@ -97,7 +97,7 @@ class CronFixLeadsView(APIView):
                 "at": now,
                 "dnc_to_lost": dnc_total,
                 "max_attempts_to_lost": maxed_total,
-                "wip_due_to_pending": pend_total,
+                "requeued": pend_total,
             }, status=200)
 
         finally:
