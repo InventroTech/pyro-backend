@@ -23,6 +23,10 @@ from drf_spectacular.views import (
     SpectacularSwaggerView,
 )
 
+def trigger_error(request):
+    division_by_zero = 1 / 0
+
+
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('analytics/', include('analytics.urls')),
@@ -45,4 +49,5 @@ urlpatterns = [
         url_name="schema",
         permission_classes=[permissions.AllowAny]
     ), name="redoc"),
+    path('sentry-debug/', trigger_error),
 ]
