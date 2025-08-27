@@ -1,6 +1,7 @@
 # urls.py
 from django.urls import path
 from .views import (
+    SupportTicketView,
     TicketClosureTimeAnalytics,
     DailyResolvedTicketsView,
     DailyPercentileResolutionTimeView,
@@ -35,4 +36,5 @@ urlpatterns = [
         AnalyticsQueryView.as_view(),
         name='analytics-query'
     ),
+    path('support-ticket-count/', SupportTicketView.as_view(), name='support-ticket-count'),
 ]

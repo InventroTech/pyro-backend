@@ -1,12 +1,14 @@
 from rest_framework import serializers
 from .models import Lead
 from scheduler.models import AttemptOutcome
-from authentication.models import User
+
 
 # Keep your existing statuses
 ALLOWED_STATUSES = {
-    "New", "Pending", "Follow-up", "WIP", "Resolved", "Won", "Lost", "Can't Resolve"
-}
+    "won", "lost", "closed", "call_later",
+    "scheduled", "in_queue",
+    "assigned"
+    }
 
 class LeadSerializer(serializers.ModelSerializer):
     assigned_to_email = serializers.SerializerMethodField()
@@ -114,3 +116,27 @@ class LeadScoreUpdateSerializer(serializers.ModelSerializer):
 class LeadCallOutcomeRequest(serializers.Serializer): 
     outcome = serializers.ChoiceField(choices=AttemptOutcome.choices) 
     callback_at = serializers.DateTimeField(required=False)
+
+
+
+
+
+OUTCOME_CHOICES = ("won", "lost", "call_later")
+
+class LeadOutcomeRequestSerializer(serializers.Serializer):
+    outcome = serializers.ChoiceField(choices=OUTCOME_CHOICES)
+    # Keep the client-facing key as `callbackAt` if FE already uses it
+    callbackAt = serializers.DateTimeField(required=False, allow_null=True)
+
+    def validate(self, attrs):
+        outcome = attrs.get("outcome")
+        callback_at = attrs.get("callbackAt")
+        return attrs
+
+class LeadOutcomeResponseSerializer(serializers.Serializer):
+    ok = serializers.BooleanField()
+    attempt_count = serializers.IntegerField()
+    next_call_at = serializers.DateTimeField(allow_null=True)
+
+class ErrorSerializer(serializers.Serializer):
+    error = serializers.CharField()

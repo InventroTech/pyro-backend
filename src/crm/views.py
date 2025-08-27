@@ -11,12 +11,29 @@ from django.db.models import Avg, Count, F, ExpressionWrapper, DurationField, Fl
 from django.db.models.functions import TruncDate, Cast, Coalesce
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from datetime import datetime, time, timedelta
+from django.conf import settings
 
 from .models import Lead
 from .serializers import (
     LeadSerializer, LeadCreateSerializer, LeadUpdateSerializer,
-    LeadScoreUpdateSerializer, ALLOWED_STATUSES
+     ALLOWED_STATUSES
 )
+from drf_spectacular.utils import (
+    extend_schema,
+    OpenApiParameter,
+    OpenApiExample,
+    OpenApiResponse,
+    OpenApiTypes,
+    extend_schema_view
+)
+from drf_spectacular.types import OpenApiTypes
+
+
+
+
+
+
 # ALL STATUSES = IN_QUEUE, ASSIGNED, WON, LOST, CALL_LATER, SCHEDULED, CLOSED
 CLOSED_STATUSES = ("won", "lost", "closed")
 UPDATABLE_STATUSES = ("call_later", "scheduled")        
@@ -38,6 +55,25 @@ WRITABLE_FIELDS = {
 }
 
 
+
+# @extend_schema_view(
+#         get=extend_schema(
+#             summary="List all leads",
+#             description="Returns a paginated list of leads for the current tenant.",
+#             tags=["Leads"],
+#             parameters=[
+#                 OpenApiParameter(name="search", description="Search by name/phone/email", required=False, type=OpenApiTypes.STR),
+#                 OpenApiParameter(name="lead_status", description="Filter by status", required=False, type=OpenApiTypes.STR),
+#                 OpenApiParameter(name="ordering", description="Order by field (e.g. -created_at, lead_score)", required=False, type=OpenApiTypes.STR),
+#             ],
+#             responses={
+#                 200: LeadSerializer(many=True),   # drf-spectacular will wrap in your pagination schema automatically
+#                 401: OpenApiResponse(description="Unauthorized"),
+#                 403: OpenApiResponse(description="Forbidden"),
+#             },
+#             operation_id="leads_list",  # stable, nice for clients
+#         )
+#         )
 
 
 def _tenant_scoped_qs(user):
@@ -151,35 +187,65 @@ class MyLeadDetailView(RetrieveUpdateAPIView):
             serializer.save(tenant_id=tenant_uuid, assigned_to_id=None)
 
 
+
 class LeadStatsView(APIView):
     permission_classes = [IsAuthenticated]
+
     def get(self, request):
+        # 1) Parse days
         try:
             days = int(request.query_params.get('days', 1))
             assert days > 0
         except Exception:
             return Response({'error': "'days' must be a positive integer."}, status=400)
-        DAYS_HARD_CAP = 365
-        if days > DAYS_HARD_CAP:
-            days = DAYS_HARD_CAP
-        since = timezone.now() - timezone.timedelta(days=days)
-        qs = _tenant_scoped_qs(request.user).filter(lead_creation_date__gte=since)
 
-        agg = qs.aggregate(
+        DAYS_HARD_CAP = 365
+        days = min(days, DAYS_HARD_CAP)
+
+        now = timezone.now()
+        created_since = now - timedelta(days=days)
+        print(created_since)
+
+        # 2) Tenant-scoped QSes
+        base_qs = _tenant_scoped_qs(request.user)
+        created_qs = base_qs.filter(created_at__gte=created_since)
+
+        # 3) Build start/end of today safely
+        if settings.USE_TZ:
+            tz = timezone.get_current_timezone()
+            today = timezone.localdate()
+            start_of_today = timezone.make_aware(datetime.combine(today, time.min), tz)
+            start_of_tomorrow = start_of_today + timedelta(days=1)
+        else:
+            today = datetime.today().date()
+            start_of_today = datetime.combine(today, time.min)
+            start_of_tomorrow = start_of_today + timedelta(days=1)
+            
+        agg_created = created_qs.aggregate(
             fresh_leads=Count("id"),
-            leads_won=Count("id", filter=Q(lead_status="won")),
-            call_later=Count("id", filter=Q(lead_status="call_later")),
-            leads_lost=Count("id", filter=Q(lead_status="lost")),
+            call_later=Count("id", filter=Q(lead_status__iexact="call_later"))
+        )
+
+        agg_resolved = base_qs.aggregate(
+            won_today=Count("id", filter=Q(
+                lead_status__iexact="won",
+                resolved_at__gte=start_of_today,
+                resolved_at__lt=start_of_tomorrow,
+            )),
+            lost_today=Count("id", filter=Q(
+                lead_status__iexact="lost",
+                resolved_at__gte=start_of_today,
+                resolved_at__lt=start_of_tomorrow,
+            ))
         )
 
         return Response({
-            "fresh_leads": agg.get("fresh_leads", 0) or 0,
-            "leads_won": agg.get("leads_won", 0) or 0,
-            "call_later": agg.get("call_later", 0) or 0,
-            "leads_lost": agg.get("leads_lost", 0) or 0,
+            "fresh_leads": agg_created.get("fresh_leads") or 0,
+            "leads_won":  agg_resolved.get("won_today") or 0,
+            "call_later": agg_created.get("call_later") or 0,
+            "leads_lost": agg_resolved.get("lost_today") or 0,
         })
-
-
+    
 
 class GetNextLead(APIView):
     """

@@ -1,5 +1,8 @@
 from django.db import models
 from core.models import BaseModel 
+from django.utils import timezone
+
+TERMINAL_STATUSES = ("won", "lost", "closed")
 
 class Lead(BaseModel):
     id = models.BigAutoField(primary_key=True)
@@ -30,6 +33,36 @@ class Lead(BaseModel):
     last_call_outcome = models.CharField(max_length=50, null=True, blank=True)
     next_call_at = models.DateTimeField(null=True, blank=True, db_index=True) 
     do_not_call = models.BooleanField(default=False, db_index=True)
+    resolved_at = models.DateTimeField(null=True, blank=True, db_index=True) 
+
+    def is_terminal(self, status=None):
+        s = status if status is not None else self.lead_status
+        return s in TERMINAL_STATUSES
+
+    def set_status(self, new_status: str, *, when=None, set_reason=None, set_by=None):
+        """
+        Central method to update status & resolved_at consistently.
+        - Sets resolved_at when entering a terminal state and it's not already set.
+        - (Optional) Unsets resolved_at if leaving terminal (choose policy below).
+        """
+        now = when or timezone.now()
+        old_terminal = self.is_terminal()
+        new_terminal = new_status in TERMINAL_STATUSES
+
+        self.lead_status = new_status
+
+        # resolution time
+        if new_terminal and not self.resolved_at:
+            self.resolved_at = now
+
+        # If we want to clear it when leaving a terminal state:
+        if old_terminal and not new_terminal:
+            self.resolved_at = None
+
+        if set_reason is not None:
+            self.reason = set_reason
+        if set_by is not None:
+            self.assigned_to = set_by
 
 
 
