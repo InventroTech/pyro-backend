@@ -15,8 +15,23 @@ from django.utils import timezone
 from .models import Lead
 from .serializers import (
     LeadSerializer, LeadCreateSerializer, LeadUpdateSerializer,
-    LeadScoreUpdateSerializer, ALLOWED_STATUSES
+     ALLOWED_STATUSES
 )
+from drf_spectacular.utils import (
+    extend_schema,
+    OpenApiParameter,
+    OpenApiExample,
+    OpenApiResponse,
+    OpenApiTypes,
+    extend_schema_view
+)
+from drf_spectacular.types import OpenApiTypes
+
+
+
+
+
+
 # ALL STATUSES = IN_QUEUE, ASSIGNED, WON, LOST, CALL_LATER, SCHEDULED, CLOSED
 CLOSED_STATUSES = ("won", "lost", "closed")
 UPDATABLE_STATUSES = ("call_later", "scheduled")        
@@ -38,6 +53,25 @@ WRITABLE_FIELDS = {
 }
 
 
+
+# @extend_schema_view(
+#         get=extend_schema(
+#             summary="List all leads",
+#             description="Returns a paginated list of leads for the current tenant.",
+#             tags=["Leads"],
+#             parameters=[
+#                 OpenApiParameter(name="search", description="Search by name/phone/email", required=False, type=OpenApiTypes.STR),
+#                 OpenApiParameter(name="lead_status", description="Filter by status", required=False, type=OpenApiTypes.STR),
+#                 OpenApiParameter(name="ordering", description="Order by field (e.g. -created_at, lead_score)", required=False, type=OpenApiTypes.STR),
+#             ],
+#             responses={
+#                 200: LeadSerializer(many=True),   # drf-spectacular will wrap in your pagination schema automatically
+#                 401: OpenApiResponse(description="Unauthorized"),
+#                 403: OpenApiResponse(description="Forbidden"),
+#             },
+#             operation_id="leads_list",  # stable, nice for clients
+#         )
+#         )
 
 
 def _tenant_scoped_qs(user):
