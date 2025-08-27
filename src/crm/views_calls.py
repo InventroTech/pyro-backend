@@ -126,6 +126,7 @@ class LeadCallOutcomeView(APIView):
         if outcome in ("won", "lost"):
             lead.next_call_at = None
             lead.lead_status = outcome
+            lead.resolved_at = now
 
         elif outcome == "call_later" and raw_callback_at:
             lead.next_call_at = dt
@@ -134,6 +135,7 @@ class LeadCallOutcomeView(APIView):
         elif attempt_no >= MAX_ATTEMPTS:
             lead.next_call_at = None
             lead.lead_status = "closed"
+            lead.resolved_at = now
 
         else:
             lead.next_call_at = next_due(now, attempt_no - 1)
