@@ -141,7 +141,7 @@ class LeadCallOutcomeView(APIView):
             lead.next_call_at = next_due(now, attempt_no - 1)
             lead.lead_status = outcome
 
-        lead.save(update_fields=["attempt_count", "last_call_outcome", "next_call_at", "lead_status"])
+        lead.save(update_fields=["attempt_count", "last_call_outcome", "next_call_at", "lead_status", "resolved_at"])
         
         return Response({
             "ok": True,
