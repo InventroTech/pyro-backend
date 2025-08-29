@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 import os
 from pathlib import Path
 import environ
+import sentry_sdk
 
 env = environ.Env()
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -39,9 +40,15 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    "drf_spectacular",
+    "drf_spectacular_sidecar",
     'authentication',
     'corsheaders',
     'analytics',
+    'cron_jobs',
+    'crm',
+    'core',
+    'scheduler'
 ]
 
 MIDDLEWARE = [
@@ -118,18 +125,32 @@ LOGGING = {
     },
 }
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': env("DB_NAME"),
-        'USER': env("DB_USER"),
-        'PASSWORD': env("DB_PASSWORD"),
-        'HOST': env("DB_HOST"),
-        'PORT': env("DB_PORT"),
-        'OPTIONS': {
-            'sslmode': 'require',
+if env.bool("LOCAL_TEST_MODE", default=False):
+    # print("Using local db")
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': env("LOCAL_DB_NAME"),
+            'USER': env("LOCAL_DB_USER"),
+            'PASSWORD': env("LOCAL_DB_PASSWORD"),
+            'HOST': env("LOCAL_DB_HOST"),
+            'PORT': env("LOCAL_DB_PORT"),
         }
     }
+else:
+    # print("Using supabase db")
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': env("DB_NAME"),
+            'USER': env("DB_USER"),
+            'PASSWORD': env("DB_PASSWORD"),
+            'HOST': env("DB_HOST"),
+            'PORT': env("DB_PORT"),
+            'OPTIONS': {
+                'sslmode': 'require',
+            }
+        }
 }
 
 
@@ -161,7 +182,7 @@ TIME_ZONE = 'UTC'
 
 USE_I18N = True
 
-USE_TZ = True
+USE_TZ = False
 
 
 # Static files (CSS, JavaScript, Images)
@@ -184,6 +205,7 @@ CORS_ALLOW_ALL_ORIGINS = True # for dev only not to be added in prod
 # ]
 
 AUTH_USER_MODEL = 'authentication.User'
+SUPABASE_JWT_SECRET = env("SUPABASE_JWT_SECRET")
 
 REST_FRAMEWORK = {
     # Enable API-wide permissions
@@ -211,4 +233,36 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'config.supabase_auth.SupabaseJWTAuthentication',
     ],
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
+
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Pyro Endpoints",
+    "DESCRIPTION": "",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": True,
+    "SERVE_PUBLIC": True,         
+    "SWAGGER_UI_SETTINGS": {"persistAuthorization": True},
+
+    "SECURITY_SCHEMES": {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+        },
+    },
+    
+    "SECURITY": [{"BearerAuth": []}],
+    "COMPONENT_SPLIT_REQUEST": True,
+}
+
+
+sentry_sdk.init(
+    dsn="https://734a1b7ca3e38c631d60ec2e5c25967c@o4509914954006528.ingest.de.sentry.io/4509914955513936",
+    # Add data like request headers and IP for users,
+    # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+    send_default_pii=True,
+)
+
+import config.spectacular_auth

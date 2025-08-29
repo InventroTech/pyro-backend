@@ -1,10 +1,12 @@
 # urls.py
 from django.urls import path
 from .views import (
+    SupportTicketView,
     TicketClosureTimeAnalytics,
     DailyResolvedTicketsView,
     DailyPercentileResolutionTimeView,
     StackedBarResolvedUnresolvedView,
+    AnalyticsQueryView
 )
 app_name = "analytics"
 
@@ -29,4 +31,10 @@ urlpatterns = [
         StackedBarResolvedUnresolvedView.as_view(),
         name='stacked-bar'
     ),
+    path(
+        'query/',
+        AnalyticsQueryView.as_view(),
+        name='analytics-query'
+    ),
+    path('support-ticket-count/', SupportTicketView.as_view(), name='support-ticket-count'),
 ]

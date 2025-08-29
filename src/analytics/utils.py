@@ -44,3 +44,10 @@ def filter_by_tenant(qs, request):
     tenant_id = request.query_params.get('tenant_id')
     return qs.filter(tenant_id=tenant_id) if tenant_id else qs
 
+def preview_result(results: dict, limit: int = 50):
+    if not results or not isinstance(results, dict):
+        return None
+    return {
+        "columns": results.get("columns", []),
+        "rows": (results.get("rows", []) or [])[:limit],
+    }
