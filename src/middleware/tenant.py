@@ -8,7 +8,7 @@ SKIP_PATH_PREFIXES = ("/admin", "/health", "/_health", "/metrics", "/docs", "/sc
 CACHE_TTL = 60  # seconds
 
 def _resolve_slug(request) -> str | None:
-    # 1) Header (recommended for APIs)
+    # 1) Header
     slug = request.headers.get("X-Tenant-Slug") or request.headers.get("X-Tenant")
     if slug:
         return slug.strip()
@@ -26,8 +26,8 @@ def _resolve_slug(request) -> str | None:
         if host.endswith("." + base):
             return host[:-(len(base) + 1)].split(".")[0].strip() or None
 
-    # 4) Optional default for dev/single-tenant
-    return getattr(settings, "DEFAULT_TENANT_SLUG", None)
+    
+    return getattr(settings, "DEFAULT_TENANT_SLUG", "bibhab-thepyro-ai")
 
 class TenantResolver(MiddlewareMixin):
     def process_request(self, request):

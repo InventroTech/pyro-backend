@@ -89,7 +89,7 @@ def _tenant_scoped_qs(request):
 
 class CallLaterLeadsView(ListAPIView):
     serializer_class = LeadSerializer
-    permission_classes = [IsTenantAuthenticated, HasTenantRole("GM")]
+    permission_classes = [IsTenantAuthenticated, HasTenantRole("AGENT")]
 
     def get_queryset(self):
         print(self.request)
