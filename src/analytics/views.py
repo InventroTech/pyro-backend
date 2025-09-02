@@ -1,7 +1,8 @@
 import logging
 import numpy as np
-from django.db.models import F, ExpressionWrapper, DurationField, Avg, Count, Q
+from django.db.models import F, ExpressionWrapper, DurationField, Avg, Count, Q, Func, IntegerField
 from django.db.models.functions import TruncDate
+from django.db import connection
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -390,7 +391,6 @@ class CSEAverageResolutionTimeView(APIView):
         end_param = request.query_params.get('end', '').strip()
         
         # Parse dates
-        from datetime import datetime
         start_date = None
         end_date = None
         
@@ -411,95 +411,57 @@ class CSEAverageResolutionTimeView(APIView):
         # Debug: Print the date range
         print(f"Date range: {start_date} to {end_date}")
         
-        # Use raw SQL to convert resolution_time from 'MM:SS' format to seconds
-        from django.db import connection
+        # Use Django ORM instead of raw SQL
+        qs = SupportTicket.objects.filter(
+            completed_at__isnull=False,
+            resolution_time__isnull=False
+        ).exclude(
+            resolution_time=''
+        ).exclude(
+            cse_name__isnull=True
+        ).exclude(
+            cse_name=''
+        )
         
+        # Apply date filters if provided
+        if start_date:
+            qs = qs.filter(completed_at__date__gte=start_date)
+        if end_date:
+            qs = qs.filter(completed_at__date__lte=end_date)
+        
+        # Apply tenant filter if provided
         tenant_id = request.query_params.get('tenant_id')
+        if tenant_id:
+            qs = qs.filter(tenant_id=tenant_id)
         
-        with connection.cursor() as cursor:
-            if tenant_id and start_date and end_date:
-                cursor.execute("""
-                    SELECT 
-                        cse_name,
-                        AVG(SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int) as avg_resolution_seconds,
-                        COUNT(*) as ticket_count
-                    FROM support_ticket 
-                    WHERE completed_at IS NOT NULL 
-                        AND resolution_time IS NOT NULL 
-                        AND resolution_time != ''
-                        AND cse_name IS NOT NULL 
-                        AND cse_name != ''
-                        AND DATE(completed_at) >= %s 
-                        AND DATE(completed_at) <= %s
-                        AND tenant_id = %s
-                    GROUP BY cse_name
-                    ORDER BY cse_name
-                """, [start_date, end_date, tenant_id])
-            elif start_date and end_date:
-                cursor.execute("""
-                    SELECT 
-                        cse_name,
-                        AVG(SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int) as avg_resolution_seconds,
-                        COUNT(*) as ticket_count
-                    FROM support_ticket 
-                    WHERE completed_at IS NOT NULL 
-                        AND resolution_time IS NOT NULL 
-                        AND resolution_time != ''
-                        AND cse_name IS NOT NULL 
-                        AND cse_name != ''
-                        AND DATE(completed_at) >= %s 
-                        AND DATE(completed_at) <= %s
-                    GROUP BY cse_name
-                    ORDER BY cse_name
-                """, [start_date, end_date])
-            elif tenant_id:
-                cursor.execute("""
-                    SELECT 
-                        cse_name,
-                        AVG(SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int) as avg_resolution_seconds,
-                        COUNT(*) as ticket_count
-                    FROM support_ticket 
-                    WHERE completed_at IS NOT NULL 
-                        AND resolution_time IS NOT NULL 
-                        AND resolution_time != ''
-                        AND cse_name IS NOT NULL 
-                        AND cse_name != ''
-                        AND tenant_id = %s
-                    GROUP BY cse_name
-                    ORDER BY cse_name
-                """, [tenant_id])
-            else:
-                cursor.execute("""
-                    SELECT 
-                        cse_name,
-                        AVG(SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int) as avg_resolution_seconds,
-                        COUNT(*) as ticket_count
-                    FROM support_ticket 
-                    WHERE completed_at IS NOT NULL 
-                        AND resolution_time IS NOT NULL 
-                        AND resolution_time != ''
-                        AND cse_name IS NOT NULL 
-                        AND cse_name != ''
-                    GROUP BY cse_name
-                    ORDER BY cse_name
-                """)
-            
-            results = cursor.fetchall()
-            
-            # Debug: Print the number of results
-            print(f"Found {len(results)} CSEs with data")
+        # Create a custom function to convert MM:SS to seconds
+        class TimeToSeconds(Func):
+            function = 'CAST'
+            template = "CAST(SPLIT_PART(%(expressions)s, ':', 1) AS INTEGER) * 60 + CAST(SPLIT_PART(%(expressions)s, ':', 2) AS INTEGER)"
+            output_field = IntegerField()
+        
+        # Annotate with resolution time in seconds using Django ORM
+        qs = qs.annotate(
+            resolution_seconds=TimeToSeconds('resolution_time')
+        ).values('cse_name').annotate(
+            avg_resolution_seconds=Avg('resolution_seconds'),
+            ticket_count=Count('id')
+        ).order_by('cse_name')
+        
+        # Debug: Print the number of results
+        print(f"Found {qs.count()} CSEs with data")
         
         unit = request.query_params.get('unit', 'minutes').lower()
         
         result = []
-        for cse_name, avg_resolution_seconds, ticket_count in results:
-            if avg_resolution_seconds is not None:
-                avg_time = convert_seconds(avg_resolution_seconds, unit)
+        for item in qs:
+            if item['avg_resolution_seconds'] is not None:
+                avg_time = convert_seconds(item['avg_resolution_seconds'], unit)
                 result.append({
-                    'cse_name': cse_name,
+                    'cse_name': item['cse_name'],
                     'average_resolution_time': round(avg_time, 2),
-                    'ticket_count': ticket_count,
+                    'ticket_count': item['ticket_count'],
                     'unit': unit
                 })
         
-        return Response(result)
+        return Response({"data": result}, status=status.HTTP_200_OK)
