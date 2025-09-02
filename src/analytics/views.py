@@ -1,7 +1,8 @@
 import logging
 import numpy as np
-from django.db.models import F, ExpressionWrapper, DurationField, Avg, Count, Q
+from django.db.models import F, ExpressionWrapper, DurationField, Avg, Count, Q, Func, IntegerField
 from django.db.models.functions import TruncDate
+from django.db import connection
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -30,6 +31,17 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from analytics.models import AnalyticsRunCore
 from analytics.utils import preview_result
+from rest_framework.generics import ListAPIView
+from rest_framework.exceptions import ValidationError
+from .serializers import SupportTicketSerializer
+from core.pagination import MetaPageNumberPagination
+from .filters import (
+    get_multi_values, build_nullable_in_q,
+    POSTER_CHOICES, RESOLUTION_CHOICES,
+    SafeSearchFilter, SafeOrderingFilter
+)
+from .utils import tenant_scoped_qs
+
 
 
 
@@ -366,3 +378,163 @@ class AnalyticsQueryView(APIView):
         run.completed_at = timezone.now()
         run.save(update_fields=["status", "completed_at"])
         return Response(formatted)
+
+
+
+class SupportTicketView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        count = SupportTicket.objects.filter(tenant_id=request.user.tenant_id).filter(poster__in=["paid", "in_trial"]).filter(resolution_status__not__in=["Resolved"]).count()
+        return Response({"count": count}, status=status.HTTP_200_OK)
+
+class CSEAverageResolutionTimeView(APIView):
+    """
+    Returns average resolution time for each CSE (Customer Support Executive) for a given date range.
+    Query params: start, end, unit, tenant_id
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # Get date parameters directly and clean them
+        start_param = request.query_params.get('start', '').strip()
+        end_param = request.query_params.get('end', '').strip()
+        
+        # Parse dates
+        start_date = None
+        end_date = None
+        
+        if start_param:
+            try:
+                start_date = datetime.strptime(start_param, "%Y-%m-%d").date()
+            except ValueError:
+                print(f"Invalid start date format: {start_param}")
+                start_date = None
+                
+        if end_param:
+            try:
+                end_date = datetime.strptime(end_param, "%Y-%m-%d").date()
+            except ValueError:
+                print(f"Invalid end date format: {end_param}")
+                end_date = None
+        
+        # Debug: Print the date range
+        print(f"Date range: {start_date} to {end_date}")
+        
+        # Use Django ORM instead of raw SQL
+        qs = SupportTicket.objects.filter(
+            completed_at__isnull=False,
+            resolution_time__isnull=False
+        ).exclude(
+            resolution_time=''
+        ).exclude(
+            cse_name__isnull=True
+        ).exclude(
+            cse_name=''
+        )
+        
+        # Apply date filters if provided
+        if start_date:
+            qs = qs.filter(completed_at__date__gte=start_date)
+        if end_date:
+            qs = qs.filter(completed_at__date__lte=end_date)
+        
+        # Apply tenant filter if provided
+        tenant_id = request.query_params.get('tenant_id')
+        if tenant_id:
+            qs = qs.filter(tenant_id=tenant_id)
+        
+        # Create a custom function to convert MM:SS to seconds
+        class TimeToSeconds(Func):
+            function = 'CAST'
+            template = "CAST(SPLIT_PART(%(expressions)s, ':', 1) AS INTEGER) * 60 + CAST(SPLIT_PART(%(expressions)s, ':', 2) AS INTEGER)"
+            output_field = IntegerField()
+        
+        # Annotate with resolution time in seconds using Django ORM
+        qs = qs.annotate(
+            resolution_seconds=TimeToSeconds('resolution_time')
+        ).values('cse_name').annotate(
+            avg_resolution_seconds=Avg('resolution_seconds'),
+            ticket_count=Count('id')
+        ).order_by('cse_name')
+        
+        # Debug: Print the number of results
+        print(f"Found {qs.count()} CSEs with data")
+        
+        unit = request.query_params.get('unit', 'minutes').lower()
+        
+        result = []
+        for item in qs:
+            if item['avg_resolution_seconds'] is not None:
+                avg_time = convert_seconds(item['avg_resolution_seconds'], unit)
+                result.append({
+                    'cse_name': item['cse_name'],
+                    'average_resolution_time': round(avg_time, 2),
+                    'ticket_count': item['ticket_count'],
+                    'unit': unit
+                })
+        
+        return Response({"data": result}, status=status.HTTP_200_OK)
+    
+class SupportTicketListView(ListAPIView):
+    serializer_class = SupportTicketSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = MetaPageNumberPagination
+    filter_backends = [SafeSearchFilter, SafeOrderingFilter]
+    search_fields = ["name", "phone", "user_id"] 
+    ordering = "-created_at"
+
+    def get_queryset(self):
+        qs = tenant_scoped_qs(self.request.user)
+        qp = self.request.query_params
+
+        # resolution_status (multi + null)
+        res_vals = get_multi_values(qp, "resolution_status", "resolution_status__in")
+        if res_vals:
+            qs = qs.filter(build_nullable_in_q("resolution_status", res_vals, allowed=RESOLUTION_CHOICES))
+
+        # poster (multi)
+        poster_vals = get_multi_values(qp, "poster", "poster__in")
+        if poster_vals:
+            # poster != null selection behaves the same as resolution
+            include_null = any(v.lower() == "null" for v in poster_vals)
+            vals = [v for v in poster_vals if v.lower() != "null"]
+            bad = [v for v in vals if v not in POSTER_CHOICES]
+            if bad:
+                raise ValidationError({"poster": f"Invalid values: {bad}"})
+            q = Q()
+            if vals:
+                q |= Q(poster__in=vals)
+            if include_null:
+                q |= Q(poster__isnull=True)
+            qs = qs.filter(q)
+
+        # assigned_to (multi + null) — accepts UUID strings or "null"
+        assigned_vals = get_multi_values(qp, "assigned_to", "assigned_to__in")
+        if assigned_vals:
+            include_null = any(v.lower() == "null" for v in assigned_vals)
+            uuids = [v for v in assigned_vals if v.lower() != "null"]
+            q = Q()
+            if uuids:
+                q |= Q(assigned_to__in=uuids)
+            if include_null:
+                q |= Q(assigned_to__isnull=True)
+            qs = qs.filter(q)
+
+        # date range
+        gte = qp.get("created_at__gte")
+        lte = qp.get("created_at__lte")
+        if gte:
+            qs = qs.filter(created_at__gte=gte)
+        if lte:
+            qs = qs.filter(created_at__lte=lte)
+
+
+        return qs.select_related(None).only(
+            "id","created_at","ticket_date","user_id","name","phone","source",
+            "subscription_status","atleast_paid_once","reason","other_reasons",
+            "badge","poster","tenant_id","assigned_to","layout_status",
+            "resolution_status","resolution_time","cse_name","cse_remarks",
+            "call_status","call_attempts","rm_name","completed_at","snooze_until",
+            "praja_dashboard_user_link","display_pic_url","dumped_at"
+        )

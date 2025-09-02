@@ -1,4 +1,6 @@
 from datetime import timedelta, datetime
+from .models import SupportTicket
+from uuid import UUID
 
 # --- Utility Functions ---
 def convert_seconds(value, unit):
@@ -51,3 +53,13 @@ def preview_result(results: dict, limit: int = 50):
         "columns": results.get("columns", []),
         "rows": (results.get("rows", []) or [])[:limit],
     }
+
+def tenant_scoped_qs(user):
+    qs = SupportTicket.objects.all()
+    tenant_id = getattr(user, "tenant_id", None)
+    if tenant_id:
+        try:
+            qs = qs.filter(tenant_id=UUID(str(tenant_id)))
+        except Exception:
+            return SupportTicket.objects.none()
+    return qs

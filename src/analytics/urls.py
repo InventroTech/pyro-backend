@@ -1,11 +1,15 @@
 # urls.py
 from django.urls import path
 from .views import (
+    SupportTicketView,
     TicketClosureTimeAnalytics,
     DailyResolvedTicketsView,
     DailyPercentileResolutionTimeView,
     StackedBarResolvedUnresolvedView,
-    AnalyticsQueryView
+    AnalyticsQueryView,
+    CSEAverageResolutionTimeView,
+    SupportTicketListView
+
 )
 app_name = "analytics"
 
@@ -35,4 +39,12 @@ urlpatterns = [
         AnalyticsQueryView.as_view(),
         name='analytics-query'
     ),
+    path('support-ticket-count/', SupportTicketView.as_view(), name='support-ticket-count'),
+    path(
+        'cse-average-resolution-time/',
+        CSEAverageResolutionTimeView.as_view(),
+        name='cse-average-resolution-time'
+    ),
+
+    path("support-ticket/", SupportTicketListView.as_view(), name="support-ticket-list"),
 ]
