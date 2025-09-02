@@ -6,7 +6,8 @@ from .views import (
     DailyResolvedTicketsView,
     DailyPercentileResolutionTimeView,
     StackedBarResolvedUnresolvedView,
-    AnalyticsQueryView
+    AnalyticsQueryView,
+    SupportTicketListView
 )
 app_name = "analytics"
 
@@ -37,4 +38,5 @@ urlpatterns = [
         name='analytics-query'
     ),
     path('support-ticket-count/', SupportTicketView.as_view(), name='support-ticket-count'),
+    path("support-ticket/", SupportTicketListView.as_view(), name="support-ticket-list"),
 ]
