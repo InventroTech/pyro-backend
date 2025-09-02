@@ -393,7 +393,7 @@ class CSEAverageResolutionTimeView(APIView):
     Returns average resolution time for each CSE (Customer Support Executive) for a given date range.
     Query params: start, end, unit, tenant_id
     """
-    permission_classes = []
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         # Get date parameters directly and clean them
