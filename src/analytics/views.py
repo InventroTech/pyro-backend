@@ -375,3 +375,131 @@ class SupportTicketView(APIView):
     def get(self, request):
         count = SupportTicket.objects.filter(tenant_id=request.user.tenant_id).filter(poster__in=["paid", "in_trial"]).filter(resolution_status__not__in=["Resolved"]).count()
         return Response({"count": count}, status=status.HTTP_200_OK)
+
+
+class CSEAverageResolutionTimeView(APIView):
+    """
+    Returns average resolution time for each CSE (Customer Support Executive) for a given date range.
+    Query params: start, end, unit, tenant_id
+    """
+    permission_classes = []
+
+    def get(self, request):
+        # Get date parameters directly and clean them
+        start_param = request.query_params.get('start', '').strip()
+        end_param = request.query_params.get('end', '').strip()
+        
+        # Parse dates
+        from datetime import datetime
+        start_date = None
+        end_date = None
+        
+        if start_param:
+            try:
+                start_date = datetime.strptime(start_param, "%Y-%m-%d").date()
+            except ValueError:
+                print(f"Invalid start date format: {start_param}")
+                start_date = None
+                
+        if end_param:
+            try:
+                end_date = datetime.strptime(end_param, "%Y-%m-%d").date()
+            except ValueError:
+                print(f"Invalid end date format: {end_param}")
+                end_date = None
+        
+        # Debug: Print the date range
+        print(f"Date range: {start_date} to {end_date}")
+        
+        # Use raw SQL to convert resolution_time from 'MM:SS' format to seconds
+        from django.db import connection
+        
+        tenant_id = request.query_params.get('tenant_id')
+        
+        with connection.cursor() as cursor:
+            if tenant_id and start_date and end_date:
+                cursor.execute("""
+                    SELECT 
+                        cse_name,
+                        AVG(SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int) as avg_resolution_seconds,
+                        COUNT(*) as ticket_count
+                    FROM support_ticket 
+                    WHERE completed_at IS NOT NULL 
+                        AND resolution_time IS NOT NULL 
+                        AND resolution_time != ''
+                        AND cse_name IS NOT NULL 
+                        AND cse_name != ''
+                        AND DATE(completed_at) >= %s 
+                        AND DATE(completed_at) <= %s
+                        AND tenant_id = %s
+                    GROUP BY cse_name
+                    ORDER BY cse_name
+                """, [start_date, end_date, tenant_id])
+            elif start_date and end_date:
+                cursor.execute("""
+                    SELECT 
+                        cse_name,
+                        AVG(SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int) as avg_resolution_seconds,
+                        COUNT(*) as ticket_count
+                    FROM support_ticket 
+                    WHERE completed_at IS NOT NULL 
+                        AND resolution_time IS NOT NULL 
+                        AND resolution_time != ''
+                        AND cse_name IS NOT NULL 
+                        AND cse_name != ''
+                        AND DATE(completed_at) >= %s 
+                        AND DATE(completed_at) <= %s
+                    GROUP BY cse_name
+                    ORDER BY cse_name
+                """, [start_date, end_date])
+            elif tenant_id:
+                cursor.execute("""
+                    SELECT 
+                        cse_name,
+                        AVG(SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int) as avg_resolution_seconds,
+                        COUNT(*) as ticket_count
+                    FROM support_ticket 
+                    WHERE completed_at IS NOT NULL 
+                        AND resolution_time IS NOT NULL 
+                        AND resolution_time != ''
+                        AND cse_name IS NOT NULL 
+                        AND cse_name != ''
+                        AND tenant_id = %s
+                    GROUP BY cse_name
+                    ORDER BY cse_name
+                """, [tenant_id])
+            else:
+                cursor.execute("""
+                    SELECT 
+                        cse_name,
+                        AVG(SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int) as avg_resolution_seconds,
+                        COUNT(*) as ticket_count
+                    FROM support_ticket 
+                    WHERE completed_at IS NOT NULL 
+                        AND resolution_time IS NOT NULL 
+                        AND resolution_time != ''
+                        AND cse_name IS NOT NULL 
+                        AND cse_name != ''
+                    GROUP BY cse_name
+                    ORDER BY cse_name
+                """)
+            
+            results = cursor.fetchall()
+            
+            # Debug: Print the number of results
+            print(f"Found {len(results)} CSEs with data")
+        
+        unit = request.query_params.get('unit', 'minutes').lower()
+        
+        result = []
+        for cse_name, avg_resolution_seconds, ticket_count in results:
+            if avg_resolution_seconds is not None:
+                avg_time = convert_seconds(avg_resolution_seconds, unit)
+                result.append({
+                    'cse_name': cse_name,
+                    'average_resolution_time': round(avg_time, 2),
+                    'ticket_count': ticket_count,
+                    'unit': unit
+                })
+        
+        return Response(result)

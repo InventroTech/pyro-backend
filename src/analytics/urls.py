@@ -6,7 +6,8 @@ from .views import (
     DailyResolvedTicketsView,
     DailyPercentileResolutionTimeView,
     StackedBarResolvedUnresolvedView,
-    AnalyticsQueryView
+    AnalyticsQueryView,
+    CSEAverageResolutionTimeView
 )
 app_name = "analytics"
 
@@ -37,4 +38,9 @@ urlpatterns = [
         name='analytics-query'
     ),
     path('support-ticket-count/', SupportTicketView.as_view(), name='support-ticket-count'),
+    path(
+        'cse-average-resolution-time/',
+        CSEAverageResolutionTimeView.as_view(),
+        name='cse-average-resolution-time'
+    ),
 ]
