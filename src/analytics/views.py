@@ -30,6 +30,17 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from analytics.models import AnalyticsRunCore
 from analytics.utils import preview_result
+from rest_framework.generics import ListAPIView
+from rest_framework.exceptions import ValidationError
+from .serializers import SupportTicketSerializer
+from core.pagination import MetaPageNumberPagination
+from .filters import (
+    get_multi_values, build_nullable_in_q,
+    POSTER_CHOICES, RESOLUTION_CHOICES,
+    SafeSearchFilter, SafeOrderingFilter
+)
+from .utils import tenant_scoped_qs
+
 
 
 
@@ -375,3 +386,66 @@ class SupportTicketView(APIView):
     def get(self, request):
         count = SupportTicket.objects.filter(tenant_id=request.user.tenant_id).filter(poster__in=["paid", "in_trial"]).filter(resolution_status__not__in=["Resolved"]).count()
         return Response({"count": count}, status=status.HTTP_200_OK)
+    
+class SupportTicketListView(ListAPIView):
+    serializer_class = SupportTicketSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = MetaPageNumberPagination
+    filter_backends = [SafeSearchFilter, SafeOrderingFilter]
+    search_fields = ["name", "phone", "user_id"] 
+    ordering = "-created_at"
+
+    def get_queryset(self):
+        qs = tenant_scoped_qs(self.request.user)
+        qp = self.request.query_params
+
+        # resolution_status (multi + null)
+        res_vals = get_multi_values(qp, "resolution_status", "resolution_status__in")
+        if res_vals:
+            qs = qs.filter(build_nullable_in_q("resolution_status", res_vals, allowed=RESOLUTION_CHOICES))
+
+        # poster (multi)
+        poster_vals = get_multi_values(qp, "poster", "poster__in")
+        if poster_vals:
+            # poster != null selection behaves the same as resolution
+            include_null = any(v.lower() == "null" for v in poster_vals)
+            vals = [v for v in poster_vals if v.lower() != "null"]
+            bad = [v for v in vals if v not in POSTER_CHOICES]
+            if bad:
+                raise ValidationError({"poster": f"Invalid values: {bad}"})
+            q = Q()
+            if vals:
+                q |= Q(poster__in=vals)
+            if include_null:
+                q |= Q(poster__isnull=True)
+            qs = qs.filter(q)
+
+        # assigned_to (multi + null) — accepts UUID strings or "null"
+        assigned_vals = get_multi_values(qp, "assigned_to", "assigned_to__in")
+        if assigned_vals:
+            include_null = any(v.lower() == "null" for v in assigned_vals)
+            uuids = [v for v in assigned_vals if v.lower() != "null"]
+            q = Q()
+            if uuids:
+                q |= Q(assigned_to__in=uuids)
+            if include_null:
+                q |= Q(assigned_to__isnull=True)
+            qs = qs.filter(q)
+
+        # date range
+        gte = qp.get("created_at__gte")
+        lte = qp.get("created_at__lte")
+        if gte:
+            qs = qs.filter(created_at__gte=gte)
+        if lte:
+            qs = qs.filter(created_at__lte=lte)
+
+
+        return qs.select_related(None).only(
+            "id","created_at","ticket_date","user_id","name","phone","source",
+            "subscription_status","atleast_paid_once","reason","other_reasons",
+            "badge","poster","tenant_id","assigned_to","layout_status",
+            "resolution_status","resolution_time","cse_name","cse_remarks",
+            "call_status","call_attempts","rm_name","completed_at","snooze_until",
+            "praja_dashboard_user_link","display_pic_url","dumped_at"
+        )
