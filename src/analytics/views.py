@@ -1,7 +1,8 @@
 import logging
 import numpy as np
-from django.db.models import F, ExpressionWrapper, DurationField, Avg, Count, Q
+from django.db.models import F, ExpressionWrapper, DurationField, Avg, Count, Q, Func, IntegerField
 from django.db.models.functions import TruncDate
+from django.db import connection
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -386,6 +387,94 @@ class SupportTicketView(APIView):
     def get(self, request):
         count = SupportTicket.objects.filter(tenant_id=request.user.tenant_id).filter(poster__in=["paid", "in_trial"]).filter(resolution_status__not__in=["Resolved"]).count()
         return Response({"count": count}, status=status.HTTP_200_OK)
+
+class CSEAverageResolutionTimeView(APIView):
+    """
+    Returns average resolution time for each CSE (Customer Support Executive) for a given date range.
+    Query params: start, end, unit, tenant_id
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # Get date parameters directly and clean them
+        start_param = request.query_params.get('start', '').strip()
+        end_param = request.query_params.get('end', '').strip()
+        
+        # Parse dates
+        start_date = None
+        end_date = None
+        
+        if start_param:
+            try:
+                start_date = datetime.strptime(start_param, "%Y-%m-%d").date()
+            except ValueError:
+                print(f"Invalid start date format: {start_param}")
+                start_date = None
+                
+        if end_param:
+            try:
+                end_date = datetime.strptime(end_param, "%Y-%m-%d").date()
+            except ValueError:
+                print(f"Invalid end date format: {end_param}")
+                end_date = None
+        
+        # Debug: Print the date range
+        print(f"Date range: {start_date} to {end_date}")
+        
+        # Use Django ORM instead of raw SQL
+        qs = SupportTicket.objects.filter(
+            completed_at__isnull=False,
+            resolution_time__isnull=False
+        ).exclude(
+            resolution_time=''
+        ).exclude(
+            cse_name__isnull=True
+        ).exclude(
+            cse_name=''
+        )
+        
+        # Apply date filters if provided
+        if start_date:
+            qs = qs.filter(completed_at__date__gte=start_date)
+        if end_date:
+            qs = qs.filter(completed_at__date__lte=end_date)
+        
+        # Apply tenant filter if provided
+        tenant_id = request.query_params.get('tenant_id')
+        if tenant_id:
+            qs = qs.filter(tenant_id=tenant_id)
+        
+        # Create a custom function to convert MM:SS to seconds
+        class TimeToSeconds(Func):
+            function = 'CAST'
+            template = "CAST(SPLIT_PART(%(expressions)s, ':', 1) AS INTEGER) * 60 + CAST(SPLIT_PART(%(expressions)s, ':', 2) AS INTEGER)"
+            output_field = IntegerField()
+        
+        # Annotate with resolution time in seconds using Django ORM
+        qs = qs.annotate(
+            resolution_seconds=TimeToSeconds('resolution_time')
+        ).values('cse_name').annotate(
+            avg_resolution_seconds=Avg('resolution_seconds'),
+            ticket_count=Count('id')
+        ).order_by('cse_name')
+        
+        # Debug: Print the number of results
+        print(f"Found {qs.count()} CSEs with data")
+        
+        unit = request.query_params.get('unit', 'minutes').lower()
+        
+        result = []
+        for item in qs:
+            if item['avg_resolution_seconds'] is not None:
+                avg_time = convert_seconds(item['avg_resolution_seconds'], unit)
+                result.append({
+                    'cse_name': item['cse_name'],
+                    'average_resolution_time': round(avg_time, 2),
+                    'ticket_count': item['ticket_count'],
+                    'unit': unit
+                })
+        
+        return Response({"data": result}, status=status.HTTP_200_OK)
     
 class SupportTicketListView(ListAPIView):
     serializer_class = SupportTicketSerializer
