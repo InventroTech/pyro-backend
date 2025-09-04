@@ -32,9 +32,9 @@ def _get_or_create_profile(claims):
     email = (claims.get("email") or "").lower() or None
 
     # Mirror user locally (no password; identity of record is Supabase)
-    user, _ = User.objects.get_or_create(
+    user, created = User.objects.get_or_create(
         supabase_uid=sub,
-        defaults={"email": email or f"{sub}@unknown.local", "is_active": True},
+        defaults={"email": email, "is_active": True},
     )
     if email and user.email != email:
         user.email = email
