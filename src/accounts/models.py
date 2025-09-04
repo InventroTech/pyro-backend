@@ -26,3 +26,24 @@ class LegacyUser(models.Model):
     
     def __str__(self):
         return f"{self.email or self.name} ({self.tenant_id})"
+
+
+
+class LegacyRole(models.Model):
+    id = models.UUIDField(primary_key=True)
+    name = models.TextField()
+    description = models.TextField(null=True, blank=True)
+    tenant = models.ForeignKey(
+        'core.Tenant',
+        db_column='tenant_id',
+        to_field='id',
+        on_delete=models.DO_NOTHING,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'roles'
+        managed = False
+        indexes = [
+            models.Index(fields=['tenant', 'name']),
+        ]

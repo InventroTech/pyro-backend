@@ -20,3 +20,9 @@ class LegacyUserCreateSerializer(serializers.Serializer):
         if LegacyUser.objects.filter(tenant=tenant, email__iexact=email).exists():
             raise serializers.ValidationError({'email': 'User with this email already exists in this tenant.'})
         return attrs
+
+
+class LegacyUserLiteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LegacyUser
+        fields = ['id', 'name', 'email', 'company_name', 'uid']
