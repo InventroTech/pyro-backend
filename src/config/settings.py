@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import environ
 import sentry_sdk
+from corsheaders.defaults import default_headers
 
 env = environ.Env()
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -271,5 +272,18 @@ sentry_sdk.init(
 
 TENANCY_BASE_DOMAIN = os.environ.get("TENANCY_BASE_DOMAIN")      # e.g. "api.example.com"
 DEFAULT_TENANT_SLUG = os.environ.get("DEFAULT_TENANT_SLUG")      # e.g. "dev" (dev-only)
+
+
+if DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True
+else:
+    CORS_ALLOW_ALL_ORIGINS = False
+    CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[
+        "https://app.yourdomain.com",
+    ])
+
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "X-Tenant-Slug",
+]
 
 import config.spectacular_auth
