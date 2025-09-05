@@ -11,7 +11,7 @@ User = get_user_model()
 def _get_bearer(request):
     auth = request.META.get("HTTP_AUTHORIZATION") or request.headers.get("Authorization", "")
     if not auth or not auth.lower().startswith("bearer "):
-        raise exceptions.AuthenticationFailed("Missing bearer token")
+        return None
     return auth.split(" ", 1)[1].strip()
 
 def _verify_jwt(token: str) -> dict:
@@ -44,6 +44,8 @@ def _get_or_create_profile(claims):
 class SupabaseJWTAuthentication(BaseAuthentication):
     def authenticate(self, request):
         token = _get_bearer(request)
+        if not token:
+            return None
         claims = _verify_jwt(token)
         user = _get_or_create_profile(claims)
 
