@@ -43,12 +43,14 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "drf_spectacular_sidecar",
     'authentication',
+    'authz',
     'corsheaders',
     'analytics',
     'cron_jobs',
     'crm',
     'core',
-    'scheduler'
+    'scheduler',
+    'accounts'
 ]
 
 MIDDLEWARE = [
@@ -56,6 +58,7 @@ MIDDLEWARE = [
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'middleware.tenant.TenantResolver', 
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -264,5 +267,9 @@ sentry_sdk.init(
     # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
     send_default_pii=True,
 )
+
+
+TENANCY_BASE_DOMAIN = os.environ.get("TENANCY_BASE_DOMAIN")      # e.g. "api.example.com"
+DEFAULT_TENANT_SLUG = os.environ.get("DEFAULT_TENANT_SLUG")      # e.g. "dev" (dev-only)
 
 import config.spectacular_auth

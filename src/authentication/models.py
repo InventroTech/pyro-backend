@@ -17,7 +17,7 @@ class UserManager(BaseUserManager):
     
 class User(AbstractBaseUser, PermissionsMixin):
     supabase_uid = models.CharField(max_length=255, unique=True)
-    email = models.EmailField(unique=True)
+    email = models.EmailField(null=True, blank=True)
     role = models.CharField(max_length=50, blank=True, null=True)
     tenant_id = models.CharField(max_length=255, blank=True, null=True)
     is_active = models.BooleanField(default=True)
