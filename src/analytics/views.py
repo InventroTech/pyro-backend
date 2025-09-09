@@ -41,6 +41,10 @@ from .filters import (
     SafeSearchFilter, SafeOrderingFilter
 )
 from .utils import tenant_scoped_qs
+from django.db import models
+from django.contrib.auth import get_user_model
+from authz.permissions import IsTenantAuthenticated
+from .utils import _distinct_list
 
 
 
@@ -538,3 +542,16 @@ class SupportTicketListView(ListAPIView):
             "call_status","call_attempts","rm_name","completed_at","snooze_until",
             "praja_dashboard_user_link","display_pic_url","dumped_at"
         )
+
+
+class SupportTicketFilterOptionsView(APIView):
+    permission_classes = [IsTenantAuthenticated]
+    def get(self, request):
+        tenant = request.tenant
+        qs = SupportTicket.objects.filter(tenant_id=tenant.id)
+        resolution_statuses = _distinct_list(qs, "resolution_status")
+        poster_statuses = _distinct_list(qs, "poster")
+        return Response({
+            "resolution_statuses": resolution_statuses,
+            "poster_statuses": poster_statuses,
+        }, status=status.HTTP_200_OK)

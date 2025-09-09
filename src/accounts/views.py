@@ -49,27 +49,24 @@ class LegacyUserCreateView(APIView):
     
 
 
-def _tenant_id_from_user(user):
-    return getattr(getattr(user, 'tenant', None), 'id', None) or \
-           getattr(user, 'tenant_id', None) 
 
 class AssigneesByRoleView(APIView):
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
-        print(request.user)
         role_name = (request.query_params.get('role') or '').strip()
-        if not role_name:
-            return Response({'error': "Missing required query param 'role'."}, status=400)
-
-        tenant_id = _tenant_id_from_user(request)
+        tenant_id = request.tenant.id
         if not tenant_id:
             return Response({'error': "Unable to determine tenant for current user."}, status=403)
-
-        role_ids = LegacyRole.objects.filter(
-            tenant_id=tenant_id,
-            name__iexact=role_name
-        ).values('id')  # could be multiple if not unique per tenant
+        if role_name:
+            role_ids = LegacyRole.objects.filter(
+                tenant_id=tenant_id,
+                name__iexact=role_name
+            ).values('id') 
+        else:
+            role_ids = LegacyRole.objects.filter(
+                tenant_id=tenant_id
+            ).values('id') 
 
         qs = (
             LegacyUser.objects

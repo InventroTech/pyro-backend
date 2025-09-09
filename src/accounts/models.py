@@ -1,7 +1,25 @@
 from django.db import models
-import uuid
 
-# Create your models here.
+class SupabaseAuthUser(models.Model):
+    """
+    Read-only mirror of Supabase's auth.users table.
+    """
+    id = models.UUIDField(primary_key=True)
+    email = models.EmailField(null=True, blank=True)
+    phone = models.TextField(null=True, blank=True)
+    raw_app_meta_data = models.JSONField(null=True, blank=True)
+    raw_user_meta_data = models.JSONField(null=True, blank=True)
+    created_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True)
+    last_sign_in_at = models.DateTimeField(null=True, blank=True)
+    is_super_admin = models.BooleanField(null=True, blank=True)
+    is_sso_user = models.BooleanField(null=True, blank=True)
+    is_anonymous = models.BooleanField(null=True, blank=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        managed = False
+        db_table = 'auth"."users' 
 
 class LegacyUser(models.Model):
     id=models.BigAutoField(primary_key=True)
