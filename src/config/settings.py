@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'rest_framework',
     "drf_spectacular",
     "drf_spectacular_sidecar",
+    "django_filters",
     'authentication',
     'authz',
     'corsheaders',
@@ -262,12 +263,12 @@ SPECTACULAR_SETTINGS = {
 }
 
 
-sentry_sdk.init(
-    dsn="https://734a1b7ca3e38c631d60ec2e5c25967c@o4509914954006528.ingest.de.sentry.io/4509914955513936",
-    # Add data like request headers and IP for users,
-    # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
-    send_default_pii=True,
-)
+# sentry_sdk.init(
+#     dsn="https://734a1b7ca3e38c631d60ec2e5c25967c@o4509914954006528.ingest.de.sentry.io/4509914955513936",
+#     # Add data like request headers and IP for users,
+#     # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+#     send_default_pii=True,
+# )
 
 
 TENANCY_BASE_DOMAIN = os.environ.get("TENANCY_BASE_DOMAIN")      # e.g. "api.example.com"

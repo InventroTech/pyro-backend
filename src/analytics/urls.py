@@ -8,7 +8,8 @@ from .views import (
     StackedBarResolvedUnresolvedView,
     AnalyticsQueryView,
     CSEAverageResolutionTimeView,
-    SupportTicketListView
+    SupportTicketListView,
+    SupportTicketFilterOptionsView
 
 )
 app_name = "analytics"
@@ -47,4 +48,6 @@ urlpatterns = [
     ),
 
     path("support-ticket/", SupportTicketListView.as_view(), name="support-ticket-list"),
+    path("support-tickets/filter-options/", SupportTicketFilterOptionsView.as_view(),
+         name="support-ticket-filter-options"),
 ]
