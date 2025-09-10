@@ -10,8 +10,8 @@ from .models import SupportTicket
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from datetime import datetime, time
 from django.utils import timezone
-from django.db.models import Count, Q
-from collections import defaultdict
+from django.db.models import Count
+import uuid
 from .utils import (
     extract_date_range_from_request,
     filter_by_tenant,
@@ -571,7 +571,14 @@ class GetTicketStatusView(APIView):
             # Get current user info
             user = request.user
             user_email = getattr(user, 'email', '')
-            user_id = str(user.id) if hasattr(user, 'id') else ''
+            user_supabase_uid = getattr(user, 'supabase_uid', None)
+            
+            logger.info(f"User supabase_uid: {user_supabase_uid}")
+            
+            if not user_supabase_uid:
+                return Response({
+                    "error": "User supabase_uid not found"
+                }, status=status.HTTP_400_BAD_REQUEST)
             
             # Get today's date range (start and end of day)
             today = timezone.now().date()
@@ -579,9 +586,9 @@ class GetTicketStatusView(APIView):
             end_of_day = timezone.make_aware(datetime.combine(today, time.max))
             
             # 1. Resolved By You Today - For the current CSE
-            # Check cse_name field which can contain either name or email or userId
+            # Use assigned_to field with supabase_uid
             resolved_today_count = SupportTicket.objects.filter(
-                Q(cse_name=user_email) | Q(cse_name=user_id),
+                assigned_to=user_supabase_uid,
                 resolution_status='Resolved',
                 completed_at__gte=start_of_day,
                 completed_at__lte=end_of_day
@@ -594,34 +601,36 @@ class GetTicketStatusView(APIView):
             ).count()
             
             # 2.5. Pending Tickets Breakdown by Poster
-            all_pending_tickets = SupportTicket.objects.filter(
+            # First get distinct poster values for pending tickets
+            distinct_posters = SupportTicket.objects.filter(
                 resolution_status__isnull=True,
                 poster__isnull=False
-            ).values_list('poster', flat=True)
+            ).values_list('poster', flat=True).distinct()
             
-            # Group pending tickets by poster
-            pending_by_poster = defaultdict(int)
-            for poster in all_pending_tickets:
-                pending_by_poster[poster] += 1
+            # Then count for each poster
+            pending_by_poster_array = []
+            for poster in distinct_posters:
+                count = SupportTicket.objects.filter(
+                    resolution_status__isnull=True,
+                    poster=poster
+                ).count()
+                pending_by_poster_array.append({"poster": poster, "count": count})
             
-            # Convert to array format and sort by count
-            pending_by_poster_array = [
-                {"poster": poster, "count": count}
-                for poster, count in sorted(pending_by_poster.items(), key=lambda x: x[1], reverse=True)
-            ]
+            # Sort by count (descending)
+            pending_by_poster_array.sort(key=lambda x: x['count'], reverse=True)
             
             # 2.6. Total Tickets (All tickets in the system)
             total_tickets_count = SupportTicket.objects.count()
             
             # 3. WIP tickets (For this CSE) - Not filtered by today
             wip_tickets_count = SupportTicket.objects.filter(
-                Q(cse_name=user_email) | Q(cse_name=user_id),
+                assigned_to=user_supabase_uid,
                 resolution_status='WIP'
             ).count()
             
             # 4. Can't Resolve (Today) (For this CSE)
             cant_resolve_today_count = SupportTicket.objects.filter(
-                Q(cse_name=user_email) | Q(cse_name=user_id),
+                assigned_to=user_supabase_uid,
                 resolution_status="Can't Resolve",
                 completed_at__gte=start_of_day,
                 completed_at__lte=end_of_day
