@@ -9,7 +9,8 @@ from .views import (
     AnalyticsQueryView,
     CSEAverageResolutionTimeView,
     SupportTicketListView,
-    SupportTicketFilterOptionsView
+    SupportTicketFilterOptionsView,
+    GetTicketStatusView
 
 )
 app_name = "analytics"
@@ -50,4 +51,5 @@ urlpatterns = [
     path("support-ticket/", SupportTicketListView.as_view(), name="support-ticket-list"),
     path("support-tickets/filter-options/", SupportTicketFilterOptionsView.as_view(),
          name="support-ticket-filter-options"),
+    path("get-ticket-status/", GetTicketStatusView.as_view(), name="get-ticket-status"),
 ]
