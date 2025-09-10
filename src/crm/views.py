@@ -28,6 +28,8 @@ from drf_spectacular.utils import (
     extend_schema_view
 )
 from drf_spectacular.types import OpenApiTypes
+from authz.permissions import IsTenantAuthenticated, HasTenantRole
+
 
 
 
@@ -75,26 +77,25 @@ WRITABLE_FIELDS = {
 #         )
 #         )
 
-
-def _tenant_scoped_qs(user):
-    qs = Lead.objects.all()
-    tenant_id = getattr(user, "tenant_id", None)
-    if tenant_id:
-        try:
-            qs = qs.filter(tenant_id=UUID(str(tenant_id)))
-        except Exception:
-            return Lead.objects.none()
-    return qs.select_related("assigned_to")
+def _tenant_scoped_qs(request):
+    if not getattr(request, "tenant", None):
+        return Lead.objects.none()
+    return (
+        Lead.objects
+        .filter(tenant_id=request.tenant.id) 
+        .select_related("assigned_to")
+    )
 
 
 class CallLaterLeadsView(ListAPIView):
     serializer_class = LeadSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTenantAuthenticated, HasTenantRole("AGENT")]
 
     def get_queryset(self):
+        print(self.request)
         user = self.request.user
         return (
-            _tenant_scoped_qs(user)
+            _tenant_scoped_qs(self.request)
             .filter(assigned_to=user, 
                     lead_status="call_later")
             .order_by('-created_at')
@@ -102,11 +103,11 @@ class CallLaterLeadsView(ListAPIView):
 
 class AllLeadsView(ListAPIView):
     serializer_class = LeadSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTenantAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
-        return _tenant_scoped_qs(user).order_by('-created_at')
+        return _tenant_scoped_qs(self.request).order_by('-created_at')
 
 
 class AllMyLeadsView(ListCreateAPIView):
@@ -114,7 +115,7 @@ class AllMyLeadsView(ListCreateAPIView):
     GET  -> list my leads (assigned_to = me), newest first
     POST -> create a new lead (server controls tenant/assignee)
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTenantAuthenticated]
 
     def get_serializer_class(self):
         return LeadSerializer if self.request.method == "GET" else LeadCreateSerializer
@@ -123,7 +124,7 @@ class AllMyLeadsView(ListCreateAPIView):
         user = self.request.user
         
         qs = (
-            _tenant_scoped_qs(user)
+            _tenant_scoped_qs(self.request)
             .filter(assigned_to=user)
             .order_by("-created_at")
         )
@@ -149,7 +150,7 @@ class MyLeadDetailView(RetrieveUpdateAPIView):
     PUT    /leads/mine/<id>/
     PATCH  /leads/mine/<id>/
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTenantAuthenticated]
     serializer_class = LeadUpdateSerializer
     lookup_field = "pk"
 
@@ -160,7 +161,7 @@ class MyLeadDetailView(RetrieveUpdateAPIView):
         except (ValueError, TypeError):
             return Lead.objects.none()
 
-        qs = _tenant_scoped_qs(u).filter(assigned_to_id=uid)
+        qs = _tenant_scoped_qs(self.request).filter(assigned_to_id=uid)
         return qs
 
     def perform_update(self, serializer):
@@ -189,7 +190,7 @@ class MyLeadDetailView(RetrieveUpdateAPIView):
 
 
 class LeadStatsView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
         # 1) Parse days
@@ -207,7 +208,7 @@ class LeadStatsView(APIView):
         print(created_since)
 
         # 2) Tenant-scoped QSes
-        base_qs = _tenant_scoped_qs(request.user)
+        base_qs = _tenant_scoped_qs(request)
         created_qs = base_qs.filter(created_at__gte=created_since)
 
         # 3) Build start/end of today safely
@@ -252,7 +253,7 @@ class GetNextLead(APIView):
     Atomically fetch & assign the highest-scoring unassigned lead to the caller.
     """
   
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTenantAuthenticated]
     def _order_by_score(self, qs):
         qs = qs.order_by(
             F("lead_score").desc(nulls_last=True),
@@ -325,7 +326,7 @@ class SaveAndContinueLeadView(APIView):
     - If lead_status == 'assigned' => assign to current user.
     - Else => unassign.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTenantAuthenticated]
 
     def post(self, request):
         user = request.user
@@ -412,7 +413,7 @@ class TakeBreakLeadView(APIView):
     - Otherwise, set assigned_to = NULL.
     - Only the current assignee can take a break on this lead.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTenantAuthenticated]
 
     def post(self, request):
         data = request.data or {}
@@ -485,12 +486,12 @@ class LeadDetailUpdateView(RetrieveUpdateAPIView):
     PUT   /leads/<id>/
     PATCH /leads/<id>/
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTenantAuthenticated]
     lookup_field = "pk"
 
     def get_queryset(self):
         # Tenant scope + join user
-        return _tenant_scoped_qs(self.request.user)
+        return _tenant_scoped_qs(self.request)
 
     def get_serializer_class(self):
         return LeadSerializer if self.request.method == "GET" else LeadUpdateSerializer

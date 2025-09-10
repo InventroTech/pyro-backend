@@ -30,11 +30,20 @@ class SupportTicket(models.Model):
     snooze_until = models.DateTimeField(null=True, blank=True)
     praja_dashboard_user_link = models.TextField(null=True, blank=True)
     display_pic_url = models.TextField(null=True, blank=True)
-    dumped_at = models.DateTimeField(null=True, blank=True) 
+    dumped_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        db_table = 'support_ticket'
+        db_table = "support_ticket"
         managed = True
+        indexes = [
+        
+            models.Index(fields=["assigned_to"], name="st_assigned_to_idx"),
+            models.Index(fields=["poster"], name="st_poster_idx"),
+            models.Index(fields=["resolution_status"], name="st_res_status_idx"),
+            models.Index(fields=["tenant_id", "assigned_to"], name="st_tenant_assigned_idx"),
+            models.Index(fields=["tenant_id", "poster"], name="st_tenant_poster_idx"),
+            models.Index(fields=["tenant_id", "resolution_status"], name="st_tenant_res_idx"),
+        ]
 
 
 class AnalyticsRunCore(models.Model):

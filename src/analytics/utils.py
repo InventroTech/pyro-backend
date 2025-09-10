@@ -1,4 +1,13 @@
 from datetime import timedelta, datetime
+from .models import SupportTicket
+from uuid import UUID
+
+from typing import Optional
+from django.db import models
+from django.contrib.auth import get_user_model
+from django.db.models import Q
+from django.db import connection
+
 
 # --- Utility Functions ---
 def convert_seconds(value, unit):
@@ -51,3 +60,27 @@ def preview_result(results: dict, limit: int = 50):
         "columns": results.get("columns", []),
         "rows": (results.get("rows", []) or [])[:limit],
     }
+
+def tenant_scoped_qs(user):
+    qs = SupportTicket.objects.all()
+    tenant_id = getattr(user, "tenant_id", None)
+    if tenant_id:
+        try:
+            qs = qs.filter(tenant_id=UUID(str(tenant_id)))
+        except Exception:
+            return SupportTicket.objects.none()
+    return qs
+
+
+def _distinct_list(qs, field: str):
+    fobj = qs.model._meta.get_field(field)
+    base = qs
+    if isinstance(fobj, (models.CharField, models.TextField)):
+        base = base.exclude(**{field: ""}) 
+    vals = base.values_list(field, flat=True).order_by(field).distinct()
+
+    # Convert UUIDs to strings for JSON-friendliness, keep None as-is
+    if isinstance(fobj, models.UUIDField):
+        return [str(v) if v is not None else None for v in vals]
+    return list(vals)
+

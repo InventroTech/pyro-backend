@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import environ
 import sentry_sdk
+from corsheaders.defaults import default_headers
 
 env = environ.Env()
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -42,13 +43,16 @@ INSTALLED_APPS = [
     'rest_framework',
     "drf_spectacular",
     "drf_spectacular_sidecar",
+    "django_filters",
     'authentication',
+    'authz',
     'corsheaders',
     'analytics',
     'cron_jobs',
     'crm',
     'core',
-    'scheduler'
+    'scheduler',
+    'accounts'
 ]
 
 MIDDLEWARE = [
@@ -56,6 +60,7 @@ MIDDLEWARE = [
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'middleware.tenant.TenantResolver', 
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -258,11 +263,28 @@ SPECTACULAR_SETTINGS = {
 }
 
 
-sentry_sdk.init(
-    dsn="https://734a1b7ca3e38c631d60ec2e5c25967c@o4509914954006528.ingest.de.sentry.io/4509914955513936",
-    # Add data like request headers and IP for users,
-    # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
-    send_default_pii=True,
-)
+# sentry_sdk.init(
+#     dsn="https://734a1b7ca3e38c631d60ec2e5c25967c@o4509914954006528.ingest.de.sentry.io/4509914955513936",
+#     # Add data like request headers and IP for users,
+#     # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+#     send_default_pii=True,
+# )
+
+
+TENANCY_BASE_DOMAIN = os.environ.get("TENANCY_BASE_DOMAIN")      # e.g. "api.example.com"
+DEFAULT_TENANT_SLUG = os.environ.get("DEFAULT_TENANT_SLUG")      # e.g. "dev" (dev-only)
+
+
+if DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True
+else:
+    CORS_ALLOW_ALL_ORIGINS = False
+    CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[
+        "https://app.yourdomain.com",
+    ])
+
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "X-Tenant-Slug",
+]
 
 import config.spectacular_auth
