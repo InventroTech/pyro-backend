@@ -488,7 +488,7 @@ class CSEAverageResolutionTimeView(APIView):
 
 class SupportTicketListView(ListAPIView):
     serializer_class = SupportTicketSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTenantAuthenticated]
     pagination_class = MetaPageNumberPagination
     filter_backends = [SafeOrderingFilter] 
     ordering = "-created_at"
@@ -506,6 +506,7 @@ class SupportTicketListView(ListAPIView):
                     Q(phone__icontains=digits) | 
                     Q(user_id__icontains=digits)
                 )    
+                qs = qs.filter(q)
             else:
                 qs = qs.filter(Q(name__icontains=raw_term))
 
