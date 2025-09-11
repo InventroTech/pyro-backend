@@ -8,8 +8,10 @@ from rest_framework.response import Response
 from rest_framework import status
 from .models import SupportTicket
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from datetime import datetime
+from datetime import datetime, time
 from django.utils import timezone
+from django.db.models import Count
+import uuid
 from .utils import (
     extract_date_range_from_request,
     filter_by_tenant,
@@ -45,6 +47,7 @@ from django.db import models
 from django.contrib.auth import get_user_model
 from authz.permissions import IsTenantAuthenticated
 from .utils import _distinct_list
+
 
 
 
@@ -479,60 +482,62 @@ class CSEAverageResolutionTimeView(APIView):
                 })
         
         return Response({"data": result}, status=status.HTTP_200_OK)
-    
+
+
+
+
 class SupportTicketListView(ListAPIView):
     serializer_class = SupportTicketSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = MetaPageNumberPagination
-    filter_backends = [SafeSearchFilter, SafeOrderingFilter]
-    search_fields = ["name", "phone", "user_id"] 
+    filter_backends = [SafeOrderingFilter] 
     ordering = "-created_at"
+   
+    search_fields = ["name", "phone", "user_id"]
 
     def get_queryset(self):
-        qs = tenant_scoped_qs(self.request.user)
+        qs = SupportTicket.objects.filter(tenant_id=self.request.tenant.id)
         qp = self.request.query_params
+        raw_term = (qp.get("search_fields")or "").strip()
+        if raw_term:
+            digits = "".join(ch for ch in raw_term if ch.isdigit())
+            if digits:
+                q = (
+                    Q(phone__icontains=digits) | 
+                    Q(user_id__icontains=digits)
+                )    
+            else:
+                qs = qs.filter(Q(name__icontains=raw_term))
 
-        # resolution_status (multi + null)
         res_vals = get_multi_values(qp, "resolution_status", "resolution_status__in")
         if res_vals:
             qs = qs.filter(build_nullable_in_q("resolution_status", res_vals, allowed=RESOLUTION_CHOICES))
 
-        # poster (multi)
         poster_vals = get_multi_values(qp, "poster", "poster__in")
         if poster_vals:
-            # poster != null selection behaves the same as resolution
             include_null = any(v.lower() == "null" for v in poster_vals)
             vals = [v for v in poster_vals if v.lower() != "null"]
             bad = [v for v in vals if v not in POSTER_CHOICES]
             if bad:
                 raise ValidationError({"poster": f"Invalid values: {bad}"})
             q = Q()
-            if vals:
-                q |= Q(poster__in=vals)
-            if include_null:
-                q |= Q(poster__isnull=True)
+            if vals: q |= Q(poster__in=vals)
+            if include_null: q |= Q(poster__isnull=True)
             qs = qs.filter(q)
 
-        # assigned_to (multi + null) — accepts UUID strings or "null"
         assigned_vals = get_multi_values(qp, "assigned_to", "assigned_to__in")
         if assigned_vals:
             include_null = any(v.lower() == "null" for v in assigned_vals)
-            uuids = [v for v in assigned_vals if v.lower() != "null"]
+            ids = [v for v in assigned_vals if v.lower() != "null"]
             q = Q()
-            if uuids:
-                q |= Q(assigned_to__in=uuids)
-            if include_null:
-                q |= Q(assigned_to__isnull=True)
+            if ids: q |= Q(assigned_to__in=ids)
+            if include_null: q |= Q(assigned_to__isnull=True)
             qs = qs.filter(q)
 
-        # date range
         gte = qp.get("created_at__gte")
         lte = qp.get("created_at__lte")
-        if gte:
-            qs = qs.filter(created_at__gte=gte)
-        if lte:
-            qs = qs.filter(created_at__lte=lte)
-
+        if gte: qs = qs.filter(created_at__gte=gte)
+        if lte: qs = qs.filter(created_at__lte=lte)
 
         return qs.select_related(None).only(
             "id","created_at","ticket_date","user_id","name","phone","source",
@@ -542,7 +547,6 @@ class SupportTicketListView(ListAPIView):
             "call_status","call_attempts","rm_name","completed_at","snooze_until",
             "praja_dashboard_user_link","display_pic_url","dumped_at"
         )
-
 
 class SupportTicketFilterOptionsView(APIView):
     permission_classes = [IsTenantAuthenticated]
@@ -555,3 +559,106 @@ class SupportTicketFilterOptionsView(APIView):
             "resolution_statuses": resolution_statuses,
             "poster_statuses": poster_statuses,
         }, status=status.HTTP_200_OK)
+
+
+class GetTicketStatusView(APIView):
+    """
+    API endpoint to get ticket status statistics for the current user.
+    Returns various ticket counts including resolved today, pending, WIP, etc.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            # Get current user info
+            user = request.user
+            user_email = getattr(user, 'email', '')
+            user_supabase_uid = getattr(user, 'supabase_uid', None)
+            
+            logger.info(f"User supabase_uid: {user_supabase_uid}")
+            
+            if not user_supabase_uid:
+                return Response({
+                    "error": "User supabase_uid not found"
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Get today's date range (start and end of day)
+            today = timezone.now().date()
+            start_of_day = timezone.make_aware(datetime.combine(today, time.min))
+            end_of_day = timezone.make_aware(datetime.combine(today, time.max))
+            
+            # 1. Resolved By You Today - For the current CSE
+            # Use assigned_to field with supabase_uid
+            resolved_today_count = SupportTicket.objects.filter(
+                assigned_to=user_supabase_uid,
+                resolution_status='Resolved',
+                completed_at__gte=start_of_day,
+                completed_at__lte=end_of_day
+            ).count()
+            
+            # 2. Total Pending Tickets (Overall. Not specific to this CSE)
+            # Include both 'Pending' status and null resolution_status
+            total_pending_count = SupportTicket.objects.filter(
+                resolution_status__isnull=True
+            ).count()
+            
+            # 2.5. Pending Tickets Breakdown by Poster
+            # First get distinct poster values for pending tickets
+            distinct_posters = SupportTicket.objects.filter(
+                resolution_status__isnull=True,
+                poster__isnull=False
+            ).values_list('poster', flat=True).distinct()
+            
+            # Then count for each poster
+            pending_by_poster_array = []
+            for poster in distinct_posters:
+                count = SupportTicket.objects.filter(
+                    resolution_status__isnull=True,
+                    poster=poster
+                ).count()
+                pending_by_poster_array.append({"poster": poster, "count": count})
+            
+            # Sort by count (descending)
+            pending_by_poster_array.sort(key=lambda x: x['count'], reverse=True)
+            
+            # 2.6. Total Tickets (All tickets in the system)
+            total_tickets_count = SupportTicket.objects.count()
+            
+            # 3. WIP tickets (For this CSE) - Not filtered by today
+            wip_tickets_count = SupportTicket.objects.filter(
+                assigned_to=user_supabase_uid,
+                resolution_status='WIP'
+            ).count()
+            
+            # 4. Can't Resolve (Today) (For this CSE)
+            cant_resolve_today_count = SupportTicket.objects.filter(
+                assigned_to=user_supabase_uid,
+                resolution_status="Can't Resolve",
+                completed_at__gte=start_of_day,
+                completed_at__lte=end_of_day
+            ).count()
+            
+            # Prepare response
+            ticket_stats = {
+                "resolvedByYouToday": resolved_today_count,
+                "totalPendingTickets": total_pending_count,
+                "pendingByPoster": pending_by_poster_array,
+                "totalTickets": total_tickets_count,
+                "wipTickets": wip_tickets_count,
+                "cantResolveToday": cant_resolve_today_count
+            }
+            
+            return Response({
+                "success": True,
+                "ticketStats": ticket_stats,
+                "dateRange": {
+                    "startOfDay": start_of_day.isoformat(),
+                    "endOfDay": end_of_day.isoformat()
+                }
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as error:
+            logger.error('Error in get-ticket-status function: %s', error)
+            return Response({
+                "error": "Internal server error"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
