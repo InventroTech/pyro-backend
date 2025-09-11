@@ -52,6 +52,7 @@ from .utils import _distinct_list
 
 
 
+
 # "How many support tickets did each executive resolve last week?"
 # "Which executive had the fastest average resolution time last month?"
 # "Show me the number of open vs closed tickets handled by each support executive."
@@ -481,60 +482,62 @@ class CSEAverageResolutionTimeView(APIView):
                 })
         
         return Response({"data": result}, status=status.HTTP_200_OK)
-    
+
+
+
+
 class SupportTicketListView(ListAPIView):
     serializer_class = SupportTicketSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = MetaPageNumberPagination
-    filter_backends = [SafeSearchFilter, SafeOrderingFilter]
-    search_fields = ["name", "phone", "user_id"] 
+    filter_backends = [SafeOrderingFilter] 
     ordering = "-created_at"
+   
+    search_fields = ["name", "phone", "user_id"]
 
     def get_queryset(self):
-        qs = tenant_scoped_qs(self.request.user)
+        qs = SupportTicket.objects.filter(tenant_id=self.request.tenant.id)
         qp = self.request.query_params
+        raw_term = (qp.get("search_fields")or "").strip()
+        if raw_term:
+            digits = "".join(ch for ch in raw_term if ch.isdigit())
+            if digits:
+                q = (
+                    Q(phone__icontains=digits) | 
+                    Q(user_id__icontains=digits)
+                )    
+            else:
+                qs = qs.filter(Q(name__icontains=raw_term))
 
-        # resolution_status (multi + null)
         res_vals = get_multi_values(qp, "resolution_status", "resolution_status__in")
         if res_vals:
             qs = qs.filter(build_nullable_in_q("resolution_status", res_vals, allowed=RESOLUTION_CHOICES))
 
-        # poster (multi)
         poster_vals = get_multi_values(qp, "poster", "poster__in")
         if poster_vals:
-            # poster != null selection behaves the same as resolution
             include_null = any(v.lower() == "null" for v in poster_vals)
             vals = [v for v in poster_vals if v.lower() != "null"]
             bad = [v for v in vals if v not in POSTER_CHOICES]
             if bad:
                 raise ValidationError({"poster": f"Invalid values: {bad}"})
             q = Q()
-            if vals:
-                q |= Q(poster__in=vals)
-            if include_null:
-                q |= Q(poster__isnull=True)
+            if vals: q |= Q(poster__in=vals)
+            if include_null: q |= Q(poster__isnull=True)
             qs = qs.filter(q)
 
-        # assigned_to (multi + null) — accepts UUID strings or "null"
         assigned_vals = get_multi_values(qp, "assigned_to", "assigned_to__in")
         if assigned_vals:
             include_null = any(v.lower() == "null" for v in assigned_vals)
-            uuids = [v for v in assigned_vals if v.lower() != "null"]
+            ids = [v for v in assigned_vals if v.lower() != "null"]
             q = Q()
-            if uuids:
-                q |= Q(assigned_to__in=uuids)
-            if include_null:
-                q |= Q(assigned_to__isnull=True)
+            if ids: q |= Q(assigned_to__in=ids)
+            if include_null: q |= Q(assigned_to__isnull=True)
             qs = qs.filter(q)
 
-        # date range
         gte = qp.get("created_at__gte")
         lte = qp.get("created_at__lte")
-        if gte:
-            qs = qs.filter(created_at__gte=gte)
-        if lte:
-            qs = qs.filter(created_at__lte=lte)
-
+        if gte: qs = qs.filter(created_at__gte=gte)
+        if lte: qs = qs.filter(created_at__lte=lte)
 
         return qs.select_related(None).only(
             "id","created_at","ticket_date","user_id","name","phone","source",
@@ -544,7 +547,6 @@ class SupportTicketListView(ListAPIView):
             "call_status","call_attempts","rm_name","completed_at","snooze_until",
             "praja_dashboard_user_link","display_pic_url","dumped_at"
         )
-
 
 class SupportTicketFilterOptionsView(APIView):
     permission_classes = [IsTenantAuthenticated]
