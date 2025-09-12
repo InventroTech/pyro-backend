@@ -121,8 +121,6 @@ class AssigneesByRoleView(APIView):
         return Response({'count': len(data), 'results': data})
 
 
-
-
 class LinkUserUidView(APIView):
     """
     POST: Link Supabase UID to a user and activate tenant memberships.
