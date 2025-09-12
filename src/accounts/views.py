@@ -19,11 +19,11 @@ class LegacyUserCreateView(APIView):
     Body: { name, email, [company_name], [role_id], [uid] }
     """
     # permission_classes = [IsTenantAuthenticated, HasTenantRole("GM")]
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTenantAuthenticated]
     def post(self, request):
         ser = LegacyUserCreateSerializer(data = request.data, context={'request':request})
         ser.is_valid(raise_exception=True)
-        tenant = ser.validated_data["_tenant"]
+        tenant = request.tenant
         name = ser.validated_data["name"].strip()
         email = ser.validated_data["email"]
         company_name = ser.validated_data.get("company_name")
@@ -41,6 +41,7 @@ class LegacyUserCreateView(APIView):
             )
             
             # Create TenantMembership entry if role_id is provided
+            
             if role_id:
                 try:
                     # Get the corresponding authz role
@@ -51,7 +52,7 @@ class LegacyUserCreateView(APIView):
                         tenant=tenant,
                         email=email,
                         defaults={
-                            'role': authz_role,
+                            'role_id': authz_role,
                             'user_id': uid,  # Link to UID if provided
                             'is_active': bool(uid)  # Activate if UID is provided
                         }

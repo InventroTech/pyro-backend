@@ -1,6 +1,6 @@
 from django.urls import path
-from . import views
+from .views import LinkUserUidView
 
 urlpatterns = [
-    path('link-user-uid/', views.link_user_uid, name='link_user_uid'),
+    path("link-user-uid/", LinkUserUidView.as_view(), name="link_user_uid"),
 ]

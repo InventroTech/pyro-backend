@@ -69,7 +69,7 @@ def get_effective_permissions(user_uuid: str, tenant) -> dict:
     return val
 
 
-def get_authz_role_from_legacy_role(legacy_role_id: str, tenant) -> 'Role':
+def get_authz_role_from_legacy_role(legacy_role_id: str, tenant):
     """
     Map a legacy role ID to the corresponding authz Role.
     
@@ -109,14 +109,14 @@ def get_authz_role_from_legacy_role(legacy_role_id: str, tenant) -> 'Role':
     
     if authz_role_key:
         try:
-            return Role.objects.get(tenant=tenant, key=authz_role_key)
-        except Role.DoesNotExist:
+            return LegacyRole.objects.get(tenant=tenant, key=authz_role_key)
+        except LegacyRole.DoesNotExist:
             pass
     
     # If no direct mapping, try to find by name match
     try:
-        return Role.objects.get(tenant=tenant, name__iexact=legacy_role.name)
-    except Role.DoesNotExist:
+        return LegacyRole.objects.get(tenant=tenant, name__iexact=legacy_role.name).id
+    except LegacyRole.DoesNotExist:
         raise Exception(f"No corresponding authz role found for legacy role '{legacy_role.name}'")
 
 

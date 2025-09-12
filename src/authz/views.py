@@ -1,42 +1,39 @@
-from django.shortcuts import render
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework import status, serializers
 from authz.service import link_user_uid_and_activate
 import logging
+from .serializers import LinkUserUidSerializer
+from authz.permissions import IsTenantAuthenticated
 
 logger = logging.getLogger(__name__)
 
+class LinkUserUidView(APIView):
+    """
+    POST: Link Supabase UID to a user and activate tenant memberships.
+    """
+    permission_classes = [IsTenantAuthenticated]
 
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def link_user_uid(request):
-    """
-    API endpoint to link Supabase UID to user and activate tenant memberships.
-    This replaces the functionality of the edge function.
-    """
-    try:
-        data = request.data
-        email = data.get('email')
-        uid = data.get('uid')
-        
-        if not email or not uid:
-            return Response(
-                {'error': 'Email and UID are required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        result = link_user_uid_and_activate(email, uid)
-        
-        if result['success']:
-            return Response(result, status=status.HTTP_200_OK)
-        else:
+    def post(self, request):
+        try:
+            serializer = LinkUserUidSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+
+            email = serializer.validated_data["email"]
+            uid = serializer.validated_data["uid"]
+
+            result = link_user_uid_and_activate(email, uid)
+
+            if result.get("success"):
+                return Response(result, status=status.HTTP_200_OK)
             return Response(result, status=status.HTTP_400_BAD_REQUEST)
-            
-    except Exception as e:
-        logger.error(f"Error in link_user_uid: {str(e)}")
-        return Response(
-            {'error': 'Internal server error', 'message': str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
+
+        except serializers.ValidationError as ve:
+            return Response({"error": ve.detail}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"Error in LinkUserUidView.post: {e}", exc_info=True)
+            return Response(
+                {"error": "Internal server error", "message": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
