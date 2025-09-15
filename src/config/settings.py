@@ -12,7 +12,6 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 import os
 from pathlib import Path
 import environ
-import sentry_sdk
 from corsheaders.defaults import default_headers
 
 env = environ.Env()
@@ -20,6 +19,14 @@ env = environ.Env()
 BASE_DIR = Path(__file__).resolve().parent.parent
 environ.Env.read_env(os.path.join(BASE_DIR.parent, '.env'))
 
+DJANGO_ENV = os.getenv("DJANGO_ENV", "development").lower()
+
+IS_DEV = DJANGO_ENV == "development"
+IS_STAGING = DJANGO_ENV == "staging"
+IS_PROD = DJANGO_ENV == "production"
+
+if os.environ.get("RUN_MAIN") == "true":
+    print("Server Type -", DJANGO_ENV)
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
@@ -27,10 +34,13 @@ environ.Env.read_env(os.path.join(BASE_DIR.parent, '.env'))
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = env("DJANGO_SECRET_KEY")
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = env('DJANGO_DEBUG')
+DEBUG = IS_DEV or IS_STAGING
 
-ALLOWED_HOSTS = ['*']
-
+ALLOWED_HOSTS = (
+    ["*"] if IS_DEV else  # local convenience
+    ["pyro-backend-1.onrender.com"] if IS_STAGING else
+    ["pyro-prod-backend.onrender.com"]
+)
 # Application definition
 
 INSTALLED_APPS = [
@@ -224,22 +234,27 @@ REST_FRAMEWORK = {
         'rest_framework.throttling.AnonRateThrottle',  # Throttle for anonymous users
     ],
     'DEFAULT_THROTTLE_RATES': {
-        'user': '1000/day',   # Authenticated users: 1000 requests per day
-        'anon': '100/day',    # Anonymous users: 100 requests per day
+        'anon': '60/min',    # Anonymous users: 60 per min
+        'user': '1000/hour'
     },
 
     # Exception handling (optional: improves error responses)
     'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
-
-    'DEFAULT_RENDERER_CLASSES': [
-        'rest_framework.renderers.JSONRenderer',
-        'rest_framework.renderers.BrowsableAPIRenderer',  # Remove in production for performance/security
-    ],
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'config.supabase_auth.SupabaseJWTAuthentication',
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
+
+if DEBUG:
+    REST_FRAMEWORK["DEFAULT_RENDERER_CLASSES"] = [
+        "rest_framework.renderers.JSONRenderer",
+        "rest_framework.renderers.BrowsableAPIRenderer",
+    ]
+else:
+    REST_FRAMEWORK["DEFAULT_RENDERER_CLASSES"] = [
+        "rest_framework.renderers.JSONRenderer",
+]
 
 
 SPECTACULAR_SETTINGS = {
@@ -263,28 +278,47 @@ SPECTACULAR_SETTINGS = {
 }
 
 
-# sentry_sdk.init(
-#     dsn="https://734a1b7ca3e38c631d60ec2e5c25967c@o4509914954006528.ingest.de.sentry.io/4509914955513936",
-#     # Add data like request headers and IP for users,
-#     # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
-#     send_default_pii=True,
-# )
+SENTRY_DSN = os.getenv("SENTRY_DSN", "")
+
+if not IS_DEV and SENTRY_DSN:
+    import sentry_sdk
+    from sentry_sdk.integrations.django import DjangoIntegration
+    sentry_sdk.init(
+    dsn=SENTRY_DSN,
+    environment=DJANGO_ENV,
+    integrations=[DjangoIntegration()],
+    send_default_pii=False,
+    traces_sampler=lambda _: 1.0,   # capture all requests
+    profiles_sample_rate=1.0,       # profile every request
+)
+
 
 
 TENANCY_BASE_DOMAIN = os.environ.get("TENANCY_BASE_DOMAIN")      # e.g. "api.example.com"
 DEFAULT_TENANT_SLUG = os.environ.get("DEFAULT_TENANT_SLUG")      # e.g. "dev" (dev-only)
 
 
-if DEBUG:
+if IS_DEV:
     CORS_ALLOW_ALL_ORIGINS = True
+    CORS_ALLOWED_ORIGINS = []
 else:
+    # Staging / Production: strict origins
     CORS_ALLOW_ALL_ORIGINS = False
-    CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[
-        "https://app.yourdomain.com",
-    ])
+    CORS_ALLOWED_ORIGINS = env.list(
+        "CORS_ALLOWED_ORIGINS",
+        default=[
+            # Staging frontend
+            "https://staging.thepyro.ai",
+            # Prod frontend
+            "https://app.thepyro.ai",
+        ] if IS_STAGING else [
+            # Only production frontend
+            "https://app.thepyro.ai",
+        ]
+    )
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
-    "X-Tenant-Slug",
+    "X-Tenant-Slug",  # custom tenant header
 ]
 
 import config.spectacular_auth
