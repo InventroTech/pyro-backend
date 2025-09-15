@@ -1,6 +1,9 @@
 from django.db import models
 from django.contrib.postgres.fields import ArrayField
+from django.contrib.postgres.indexes import GinIndex, BrinIndex
 import uuid
+from django.db.models import Q
+
 
 class SupportTicket(models.Model):
     id = models.BigAutoField(primary_key=True)
@@ -36,13 +39,27 @@ class SupportTicket(models.Model):
         db_table = "support_ticket"
         managed = True
         indexes = [
-        
-            models.Index(fields=["assigned_to"], name="st_assigned_to_idx"),
-            models.Index(fields=["poster"], name="st_poster_idx"),
-            models.Index(fields=["resolution_status"], name="st_res_status_idx"),
-            models.Index(fields=["tenant_id", "assigned_to"], name="st_tenant_assigned_idx"),
-            models.Index(fields=["tenant_id", "poster"], name="st_tenant_poster_idx"),
-            models.Index(fields=["tenant_id", "resolution_status"], name="st_tenant_res_idx"),
+            # base ordering
+            models.Index(fields=["tenant_id", "-created_at"], name="st_tn_cr_desc"),
+
+            # facet + ordering
+            models.Index(fields=["tenant_id", "resolution_status", "-created_at"], name="st_tn_res_cr"),
+            models.Index(fields=["tenant_id", "poster", "-created_at"],             name="st_tn_pst_cr"),
+            models.Index(fields=["tenant_id", "assigned_to", "-created_at"],        name="st_tn_asg_cr"),
+
+            # partial (NULL) variants
+            models.Index(fields=["tenant_id", "-created_at"], name="st_tn_asg_null_cr",
+                         condition=Q(assigned_to__isnull=True)),
+            models.Index(fields=["tenant_id", "-created_at"], name="st_tn_pst_null_cr",
+                         condition=Q(poster__isnull=True)),
+
+            # trigram for icontains
+            GinIndex(fields=["name"],    name="st_name_trgm",   opclasses=["gin_trgm_ops"]),
+            GinIndex(fields=["phone"],   name="st_phone_trgm",  opclasses=["gin_trgm_ops"]),
+            GinIndex(fields=["user_id"], name="st_uid_trgm",    opclasses=["gin_trgm_ops"]),
+
+            # large-table time scans
+            BrinIndex(fields=["created_at"], name="st_brin_cr"),
         ]
 
 

@@ -26,3 +26,8 @@ class LegacyUserLiteSerializer(serializers.ModelSerializer):
     class Meta:
         model = LegacyUser
         fields = ['id', 'name', 'email', 'company_name', 'uid']
+
+
+class LinkUserUidSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    uid = serializers.CharField(max_length=64)
