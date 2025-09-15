@@ -16,6 +16,7 @@ from .serializers import LegacyUserLiteSerializer
 from authz.service import link_user_uid_and_activate
 import logging
 from .serializers import LinkUserUidSerializer
+from rest_framework.permissions import AllowAny
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +126,7 @@ class LinkUserUidView(APIView):
     """
     POST: Link Supabase UID to a user and activate tenant memberships.
     """
-    permission_classes = [IsTenantAuthenticated]
+    permission_classes = [AllowAny]
 
     def post(self, request):
         try:
