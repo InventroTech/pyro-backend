@@ -235,6 +235,7 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_THROTTLE_RATES': {
         'anon': '60/min',    # Anonymous users: 60 per min
+        'user': '1000/hour'
     },
 
     # Exception handling (optional: improves error responses)
