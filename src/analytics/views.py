@@ -604,23 +604,19 @@ class GetTicketStatusView(APIView):
             ).count()
             
             # 2.5. Pending Tickets Breakdown by Poster
-            # First get distinct poster values for pending tickets
-            distinct_posters = SupportTicket.objects.filter(
+            # Use a single query with aggregation to avoid N+1 problem
+            pending_by_poster_query = SupportTicket.objects.filter(
                 resolution_status__isnull=True,
                 poster__isnull=False
-            ).values_list('poster', flat=True).distinct()
+            ).values('poster').annotate(
+                count=Count('id')
+            ).order_by('-count')
             
-            # Then count for each poster
-            pending_by_poster_array = []
-            for poster in distinct_posters:
-                count = SupportTicket.objects.filter(
-                    resolution_status__isnull=True,
-                    poster=poster
-                ).count()
-                pending_by_poster_array.append({"poster": poster, "count": count})
-            
-            # Sort by count (descending)
-            pending_by_poster_array.sort(key=lambda x: x['count'], reverse=True)
+            # Convert to the expected format
+            pending_by_poster_array = [
+                {"poster": item['poster'], "count": item['count']}
+                for item in pending_by_poster_query
+            ]
             
             # 2.6. Total Tickets (All tickets in the system)
             total_tickets_count = SupportTicket.objects.count()
