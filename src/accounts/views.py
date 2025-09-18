@@ -17,6 +17,9 @@ from authz.service import link_user_uid_and_activate
 import logging
 from .serializers import LinkUserUidSerializer
 from rest_framework.permissions import AllowAny
+from authz.permissions import IsTenantAuthenticated, HasTenantRole
+from accounts.serializers import DeleteUserEverywhereSerializer
+from accounts.services.delete_user_everywhere import delete_user_everywhere
 
 logger = logging.getLogger(__name__)
 
@@ -148,5 +151,57 @@ class LinkUserUidView(APIView):
             logger.error(f"Error in LinkUserUidView.post: {e}", exc_info=True)
             return Response(
                 {"error": "Internal server error", "message": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+
+class DeleteUserEverywhereView(APIView):
+    """
+    DELETE /api/accounts/delete-user
+    Body:
+      - Preferred: { "uid": "<uuid>" }
+      - Or:        { "email": "user@example.com", "role_id": "<uuid>" }
+
+    Behavior:
+      - Requires authenticated, tenant-scoped caller.
+      - GM/OWNER (or whichever role you prefer) can delete users in their tenant.
+      - Deletes rows in:
+          1) auth.users (by uid)  [cascades public.users via FK]
+          2) public.users (any leftovers)
+          3) public.authz_tenantmembership (scoped to tenant)
+      - Idempotent; returns counts of actually deleted rows.
+    """
+    permission_classes = [IsTenantAuthenticated, HasTenantRole("GM")]  # adjust to your policy
+
+    def delete(self, request):
+        try:
+            ser = DeleteUserEverywhereSerializer(data=request.data, context={"request": request})
+            ser.is_valid(raise_exception=True)
+
+            tenant = ser.validated_data["_tenant"]
+            uid = ser.validated_data.get("uid")
+            email = ser.validated_data.get("email")
+            role_id = ser.validated_data.get("role_id")
+
+            report = delete_user_everywhere(tenant=tenant, uid=uid, email=email, role_id=role_id)
+
+            # 204 is also OK for delete
+            return Response(
+                {
+                    "success": True,
+                    "matched_by": report.get("matched_by"),
+                    "tenant_id": report.get("tenant_id"),
+                    "resolved_uid": report.get("resolved_uid"),
+                    "deleted": report.get("deleted"),
+                    "notes": report.get("notes", []),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            logger.error("DeleteUserEverywhereView error", exc_info=True, extra={"message": str(e)})
+            return Response(
+                {"success": False, "error": "Internal server error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
