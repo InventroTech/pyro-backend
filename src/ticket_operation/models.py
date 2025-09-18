@@ -31,15 +31,10 @@ class SupportTicketDump(models.Model):
     
     # Processing status (for cron job)
     is_processed = models.BooleanField(default=False)
-    processed_at = models.DateTimeField(null=True, blank=True)
-    processing_error = models.TextField(null=True, blank=True)
 
     class Meta:
         db_table = "support_ticket_dump"
-        indexes = [
-            models.Index(fields=["tenant_id", "created_at"], name="std_tenant_created"),
-            models.Index(fields=["is_processed", "created_at"], name="std_processed_created"),
-        ]
+        managed = False  # Don't let Django manage this table since it already exists
 
     def __str__(self):
         return f"Dump {self.id} - {self.tenant_id} - {self.created_at}"
