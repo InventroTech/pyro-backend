@@ -33,6 +33,10 @@ if os.environ.get("RUN_MAIN") == "true":
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = env("DJANGO_SECRET_KEY")
+
+# Webhook secret for ticket operations
+WEBHOOK_SECRET = env("WEBHOOK_SECRET", default=None)
+
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = IS_DEV or IS_STAGING
 
@@ -62,7 +66,8 @@ INSTALLED_APPS = [
     'crm',
     'core',
     'scheduler',
-    'accounts'
+    'accounts',
+    'ticket_operation'
 ]
 
 MIDDLEWARE = [
