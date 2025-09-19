@@ -1,68 +1,68 @@
-import logging
 import os
 import requests
-from typing import Optional, Dict, Any
+import logging
+import base64
+from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
 
 class MixpanelService:
     """
-    Service for sending events to Mixpanel via the working Edge function
+    Service for sending events to Mixpanel via custom API
     """
     
     def __init__(self):
-        # Use the working Edge function instead of calling Mixpanel directly
-        self.edge_function_url = os.environ.get("SUPABASE_EDGE_FUNCTION_URL", "https://hihrftwrriygnbrsvlrr.supabase.co/functions/v1/save-and-continue")
         self.mixpanel_token = os.environ.get("MIXPANEL_TOKEN")
+        self.mixpanel_api_url = "https://api.thecircleapp.in/pyro/send_to_mixpanel"
     
     def send_to_mixpanel_sync(self, user_id: str, event_name: str, properties: Dict[str, Any]) -> bool:
         """
-        Send event to Mixpanel - EXACTLY like the working Edge function
+        Send event to Mixpanel via custom API
         """
         try:
             if not self.mixpanel_token:
                 logger.warning("MIXPANEL_TOKEN not configured, skipping Mixpanel event")
                 return False
             
-            # EXACT payload structure from working Edge function
+            # Custom API payload structure
             payload = {
-                'user_id': int(user_id),  # parseInt(userId) in Edge function
+                'user_id': int(user_id),
                 'event_name': event_name,
                 'properties': properties
             }
             
-            # EXACT headers from working Edge function
             headers = {
                 'Content-Type': 'application/json',
                 'Authorization': f'Bearer {self.mixpanel_token}'
             }
             
-            logger.info(f"🎯 Calling Mixpanel API exactly like working Edge function")
-            logger.info(f"  - URL: https://api.thecircleapp.in/pyro/send_to_mixpanel")
+            logger.info(f"🎯 Sending event to custom Mixpanel API")
+            logger.info(f"  - URL: {self.mixpanel_api_url}")
             logger.info(f"  - Event: {event_name}")
             logger.info(f"  - User ID: {user_id}")
-            logger.info(f"  - Token: {self.mixpanel_token[:10]}...{self.mixpanel_token[-5:]}")
+            logger.info(f"  - Properties: {list(properties.keys())}")
+            logger.info(f"  - Token: {self.mixpanel_token[:10] if self.mixpanel_token else 'None'}...{self.mixpanel_token[-5:] if self.mixpanel_token else ''}")
             
             response = requests.post(
-                "https://api.thecircleapp.in/pyro/send_to_mixpanel",  # Exact URL from Edge function
+                self.mixpanel_api_url,
                 json=payload,
                 headers=headers,
                 timeout=30
             )
             
-            logger.info(f"📥 Mixpanel API Response: {response.status_code}")
+            logger.info(f"📥 Custom API Response: {response.status_code}")
             logger.info(f"📥 Response body: {response.text}")
             
             if not response.ok:
-                logger.error(f"❌ Mixpanel API error: {response.status_code} {response.text}")
+                logger.error(f"❌ Custom API error: {response.status_code} {response.text}")
                 return False
             
-            logger.info(f"✅ Mixpanel event sent successfully: {event_name}")
+            logger.info(f"✅ Mixpanel event sent successfully via custom API: {event_name}")
             return True
             
         except Exception as error:
-            logger.error(f'❌ Error sending to Mixpanel: {error}')
+            logger.error(f'❌ Error sending to custom Mixpanel API: {error}')
             return False
     
 

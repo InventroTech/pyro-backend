@@ -107,7 +107,7 @@ class MixpanelServiceTest(TestCase):
         expected_payload = {
             'user_id': 123,
             'event_name': 'test_event',
-            'properties': {"key": "value"}
+            'properties': {'key': 'value'}
         }
         self.assertEqual(call_args[1]['json'], expected_payload)
         

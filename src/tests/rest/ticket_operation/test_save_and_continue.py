@@ -72,9 +72,12 @@ class MixpanelServiceTest(BaseAPITestCase):
         
         # Verify the call was made with correct parameters
         call_args = mock_post.call_args
-        self.assertEqual(call_args[1]['json']['user_id'], 123)
-        self.assertEqual(call_args[1]['json']['event_name'], 'test_event')
-        self.assertEqual(call_args[1]['json']['properties'], {"key": "value"})
+        expected_payload = {
+            'user_id': 123,
+            'event_name': 'test_event',
+            'properties': {'key': 'value'}
+        }
+        self.assertEqual(call_args[1]['json'], expected_payload)
     
     @patch('os.environ.get')
     def test_send_to_mixpanel_no_token(self, mock_env):
