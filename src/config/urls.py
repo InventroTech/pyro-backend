@@ -35,6 +35,7 @@ urlpatterns = [
     path('cron-jobs/',include('cron_jobs.urls')),
     path('crm/', include('crm.urls')),
     path('accounts/', include('accounts.urls')),
+    path('ticket-operation/', include('ticket_operation.urls')),
     # OpenAPI schema
     path("api/schema/", SpectacularAPIView.as_view(
         permission_classes=[permissions.AllowAny]

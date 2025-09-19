@@ -1,0 +1,9 @@
+from django.urls import path
+from .views import DumpTicketWebhookView, SaveAndContinueView
+
+app_name = 'ticket_operation'
+
+urlpatterns = [
+    path('dump-ticket-webhook/', DumpTicketWebhookView.as_view(), name='dump-ticket-webhook'),
+    path('save-and-continue/', SaveAndContinueView.as_view(), name='save-and-continue'),
+]
