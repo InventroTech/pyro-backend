@@ -30,6 +30,55 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Staging users from the Supabase dashboard (as seen in the image)
+STAGING_USERS = [
+    {
+        'uid': '5a960c96-e5a1-4920-b93f-491990d9cad7',
+        'email': 'itsdinesh02@gmail.com',
+        'display_name': 'DINESH SHARMA'
+    },
+    {
+        'uid': '53b053bf-3e58-4475-af8d-5bc7ac932ee2',
+        'email': 'ranji.nitt@gmail.com',
+        'display_name': 'Ranjith Somasundaram'
+    },
+    {
+        'uid': '2e947c14-e4cb-4454-bed9-5ac5482f955c',
+        'email': 'ritam@thepyro.ai',
+        'display_name': 'Ritam Majumder'
+    },
+    {
+        'uid': '295e33ec-fece-4b42-9122-ad71034a2230',
+        'email': 'harisudhan@thepyro.ai',
+        'display_name': ''
+    },
+    {
+        'uid': '25ee1feb-3be8-4cac-9e59-1994959dda58',
+        'email': 'ranjith1610@gmail.com',
+        'display_name': 'Ranjith S'
+    },
+    {
+        'uid': '2e81a97e-c091-45a8-a7f4-213d00c6db7a',
+        'email': 'bibhab@thepyro.ai',
+        'display_name': 'Bibhab Mukhopadhyay'
+    },
+    {
+        'uid': 'ff1e3660-2c8d-45a1-bda8-09c76b857a89',
+        'email': 'dinesh@thepyro.ai',
+        'display_name': 'Dinesh Sharma'
+    },
+    {
+        'uid': '80601c89-35c1-485b-95d0-a8c9493ca4a7',
+        'email': 'ranjith@thepyro.ai',
+        'display_name': ''
+    },
+    {
+        'uid': '503fc7c5-8c48-4e66-bccd-352ce5a84254',
+        'email': 'ritammajumder0@gmail.com',
+        'display_name': 'Ritam Majumder'
+    }
+]
+
 class SupabaseTicketCopier:
     def __init__(self, source_url: str, source_key: str, staging_url: str, staging_key: str):
         """
@@ -58,8 +107,248 @@ class SupabaseTicketCopier:
         
         # Configuration
         self.batch_size = int(os.getenv('BATCH_SIZE', '1'))  # Use batch size of 1 for reliability
+        
+        # User mapping for round-robin assignment
+        self.staging_users = STAGING_USERS
+        self.staging_user_count = len(self.staging_users)
+        self.user_mappings = {}  # Cache for production_user_id -> staging_user mapping
+        self.mapping_counter = 0  # Counter for round-robin
         self.max_retries = int(os.getenv('MAX_RETRIES', '3'))
         self.retry_delay = float(os.getenv('RETRY_DELAY', '1.0'))
+
+    def get_staging_user_for_production_user(self, production_user_id: str, production_user_email: str = None) -> Optional[Dict]:
+        """
+        Get the staging user mapped to a production user using round-robin logic.
+        
+        Args:
+            production_user_id: UUID of the production user
+            production_user_email: Email of the production user (optional)
+            
+        Returns:
+            Dict containing staging user info or None if not found
+        """
+        try:
+            # Always use round-robin based on the counter, not caching by production user
+            staging_user_index = self.mapping_counter % self.staging_user_count
+            staging_user = self.staging_users[staging_user_index]
+            
+            # Increment counter for next assignment
+            self.mapping_counter += 1
+            
+            logger.debug(f"Round-robin assignment #{self.mapping_counter}: {production_user_email or production_user_id} -> {staging_user['email']}")
+            
+            return staging_user
+            
+        except Exception as e:
+            logger.error(f"Error getting staging user for production user {production_user_id}: {e}")
+            return None
+
+    def get_user_mapping_statistics(self) -> Dict:
+        """
+        Get statistics about staging user assignments.
+        
+        Returns:
+            Dict with assignment counts per staging user
+        """
+        stats = {}
+        total_assignments = self.mapping_counter
+        
+        for i, user in enumerate(self.staging_users):
+            # Calculate how many assignments this user should have gotten
+            # Each user gets assignments in cycles
+            cycles = total_assignments // self.staging_user_count
+            remainder = total_assignments % self.staging_user_count
+            
+            # Base count from complete cycles
+            count = cycles
+            
+            # Add one more if this user is within the remainder
+            if i < remainder:
+                count += 1
+            
+            stats[user['email']] = {
+                'uid': user['uid'],
+                'display_name': user['display_name'],
+                'assignment_count': count
+            }
+        return stats
+
+    def update_existing_ticket_assignments(self, limit: int = 1000) -> Dict[str, Any]:
+        """
+        Update existing tickets in staging to use round-robin user mapping.
+        This is useful for tickets that were copied before the round-robin logic was implemented.
+        
+        Args:
+            limit: Maximum number of tickets to update
+            
+        Returns:
+            Dict with update results
+        """
+        logger.info(f"Starting update of existing ticket assignments (limit: {limit})")
+        
+        try:
+            # Fetch existing tickets from staging with pagination to handle large datasets
+            all_tickets = []
+            page_size = 1000  # Supabase max per request
+            offset = 0
+            
+            while len(all_tickets) < limit:
+                remaining = limit - len(all_tickets)
+                current_page_size = min(page_size, remaining)
+                
+                url = f"{self.staging_url}/rest/v1/support_ticket?select=id,assigned_to,cse_name,user_id&limit={current_page_size}&offset={offset}&or=(assigned_to.not.is.null,cse_name.not.is.null)"
+                page_tickets = self._make_request(url, self.staging_key, 'GET')
+                
+                if not page_tickets:
+                    break  # No more tickets
+                
+                all_tickets.extend(page_tickets)
+                offset += len(page_tickets)
+                
+                logger.info(f"Fetched {len(all_tickets)} tickets so far...")
+                
+                # If we got fewer tickets than requested, we've reached the end
+                if len(page_tickets) < current_page_size:
+                    break
+            
+            existing_tickets = all_tickets[:limit]  # Ensure we don't exceed the limit
+            
+            if not existing_tickets:
+                logger.info("No existing tickets with assignments found")
+                return {
+                    "success": True,
+                    "message": "No existing tickets to update",
+                    "updated_count": 0
+                }
+            
+            logger.info(f"Found {len(existing_tickets)} existing tickets with assignments")
+            
+            # Group tickets by their current assignment (either assigned_to or cse_name)
+            tickets_by_current_user = {}
+            for ticket in existing_tickets:
+                # Check both assigned_to and cse_name fields
+                current_assigned_to = ticket.get('assigned_to')
+                current_cse_name = ticket.get('cse_name')
+                
+                # Use assigned_to if available, otherwise use cse_name
+                current_assignment = current_assigned_to or current_cse_name
+                
+                if current_assignment not in tickets_by_current_user:
+                    tickets_by_current_user[current_assignment] = []
+                tickets_by_current_user[current_assignment].append(ticket)
+            
+            # Update tickets with new round-robin assignments
+            updated_count = 0
+            update_batch = []
+            
+            for ticket in existing_tickets:
+                ticket_id = ticket['id']
+                current_assigned_to = ticket.get('assigned_to')
+                current_cse_name = ticket.get('cse_name')
+                
+                # Use assigned_to if available, otherwise use cse_name as the identifier
+                current_assignment = current_assigned_to or current_cse_name
+                
+                # Get new assignment using round-robin logic
+                new_staging_user = self.get_staging_user_for_production_user(
+                    production_user_id=current_assignment,
+                    production_user_email=None  # We don't have email info for existing tickets
+                )
+                
+                if new_staging_user:
+                    # Determine what fields to update based on what exists
+                    update_data = {'id': ticket_id}
+                    needs_update = False
+                    
+                    # Update assigned_to if it exists
+                    if current_assigned_to:
+                        new_assigned_to = new_staging_user['uid']
+                        if new_assigned_to != current_assigned_to:
+                            update_data['assigned_to'] = new_assigned_to
+                            needs_update = True
+                    
+                    # Update cse_name if it exists
+                    if current_cse_name:
+                        new_cse_name = new_staging_user['display_name'] or new_staging_user['email']
+                        if new_cse_name != current_cse_name:
+                            update_data['cse_name'] = new_cse_name
+                            needs_update = True
+                    
+                    # Only update if something actually changed
+                    if needs_update:
+                        update_batch.append(update_data)
+                        
+                        if len(update_batch) >= self.batch_size:
+                            # Perform batch update
+                            batch_updated = self._update_ticket_batch(update_batch)
+                            updated_count += batch_updated
+                            update_batch = []
+                            logger.info(f"Updated batch: {batch_updated} tickets")
+            
+            # Update remaining tickets in the last batch
+            if update_batch:
+                batch_updated = self._update_ticket_batch(update_batch)
+                updated_count += batch_updated
+                logger.info(f"Updated final batch: {batch_updated} tickets")
+            
+            # Log statistics
+            mapping_stats = self.get_user_mapping_statistics()
+            logger.info("Updated ticket assignment statistics:")
+            for email, stats in mapping_stats.items():
+                logger.info(f"  {stats['display_name'] or 'No Name'} ({email}): {stats['assignment_count']} assignments")
+            
+            return {
+                "success": True,
+                "message": f"Successfully updated {updated_count} ticket assignments",
+                "updated_count": updated_count,
+                "user_mappings": mapping_stats
+            }
+            
+        except Exception as e:
+            logger.error(f"Error updating existing ticket assignments: {e}")
+            return {
+                "success": False,
+                "message": f"Failed to update ticket assignments: {e}",
+                "updated_count": 0
+            }
+
+    def _update_ticket_batch(self, update_batch: List[Dict]) -> int:
+        """
+        Update a batch of tickets in staging.
+        
+        Args:
+            update_batch: List of ticket updates
+            
+        Returns:
+            Number of successfully updated tickets
+        """
+        try:
+            url = f"{self.staging_url}/rest/v1/support_ticket"
+            
+            # Use PATCH method to update multiple tickets
+            # We'll update them one by one for reliability
+            updated_count = 0
+            
+            for ticket_update in update_batch:
+                ticket_id = ticket_update['id']
+                
+                # Prepare update data - exclude the 'id' field
+                update_data = {k: v for k, v in ticket_update.items() if k != 'id'}
+                
+                try:
+                    patch_url = f"{url}?id=eq.{ticket_id}"
+                    response = self._make_request(patch_url, self.staging_key, 'PATCH', update_data)
+                    updated_count += 1
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to update ticket {ticket_id}: {e}")
+                    continue
+            
+            return updated_count
+            
+        except Exception as e:
+            logger.error(f"Error updating ticket batch: {e}")
+            return 0
 
 
 
@@ -404,9 +693,43 @@ class SupabaseTicketCopier:
             # Handle call_status specifically - only copy if present in source, don't set defaults
             # This prevents unnecessary updates when call_status is null in source
             
-            # Set assigned_to to the specified UUID only for tickets that already have an assigned_to value
+            # Map production user to staging user using round-robin logic
+            staging_user = None
+            
+            # Handle assigned_to field
             if 'assigned_to' in transformed_ticket and transformed_ticket['assigned_to'] is not None:
-                transformed_ticket['assigned_to'] = '2e81a97e-c091-45a8-a7f4-213d00c6db7a'
+                production_user_id = transformed_ticket['assigned_to']
+                staging_user = self.get_staging_user_for_production_user(
+                    production_user_id=production_user_id,
+                    production_user_email=ticket.get('user_email')  # Assuming user_email exists in source data
+                )
+                
+                if staging_user:
+                    transformed_ticket['assigned_to'] = staging_user['uid']
+                    logger.debug(f"Mapped production user {production_user_id} to staging user {staging_user['email']}")
+                else:
+                    # Fallback to default staging user if mapping fails
+                    transformed_ticket['assigned_to'] = '2e81a97e-c091-45a8-a7f4-213d00c6db7a'
+                    logger.warning(f"Failed to map production user {production_user_id}, using fallback")
+            
+            # Handle cse_name field - also apply round-robin logic
+            if 'cse_name' in transformed_ticket and transformed_ticket['cse_name'] is not None:
+                # If we already have a staging_user from assigned_to mapping, use it
+                # Otherwise, get a new staging user using round-robin
+                if not staging_user:
+                    staging_user = self.get_staging_user_for_production_user(
+                        production_user_id=transformed_ticket.get('assigned_to', 'unknown'),
+                        production_user_email=ticket.get('user_email')
+                    )
+                
+                if staging_user:
+                    # Use display_name if available, otherwise use email
+                    transformed_ticket['cse_name'] = staging_user['display_name'] or staging_user['email']
+                    logger.debug(f"Mapped cse_name to staging user {staging_user['email']}")
+                else:
+                    # Fallback to default staging user name
+                    transformed_ticket['cse_name'] = 'Bibhab Mukhopadhyay'
+                    logger.warning(f"Failed to map cse_name, using fallback")
             
             transformed_tickets.append(transformed_ticket)
         
@@ -609,7 +932,13 @@ class SupabaseTicketCopier:
         if transformed_update_tickets:
             updated_count = self.update_tickets_in_staging(transformed_update_tickets)
         
-        # Step 6: Return summary
+        # Step 6: Log user mapping statistics
+        mapping_stats = self.get_user_mapping_statistics()
+        logger.info("User mapping statistics:")
+        for email, stats in mapping_stats.items():
+            logger.info(f"  {stats['display_name'] or 'No Name'} ({email}): {stats['assignment_count']} assignments")
+        
+        # Step 7: Return summary
         total_processed = len(tickets_to_insert) + len(tickets_to_update)
         total_synced = inserted_count + updated_count
         success = total_synced > 0 or total_processed == 0
@@ -623,7 +952,8 @@ class SupabaseTicketCopier:
             "message": message,
             "source_count": len(source_tickets),
             "inserted_count": inserted_count,
-            "updated_count": updated_count
+            "updated_count": updated_count,
+            "user_mappings": mapping_stats
         }
 
     def copy_tickets(self, limit: int = 1000, check_missing: bool = False) -> Dict[str, Any]:
@@ -690,6 +1020,7 @@ def main():
     parser.add_argument('--limit', type=int, default=1000, help='Maximum tickets to sync')
     parser.add_argument('--check-missing', action='store_true', help='Only sync tickets that don\'t exist in staging')
     parser.add_argument('--update-existing', action='store_true', help='Also update existing tickets in staging')
+    parser.add_argument('--update-assignments', action='store_true', help='Update existing ticket assignments with round-robin mapping')
     
     args = parser.parse_args()
     
@@ -734,12 +1065,26 @@ def main():
     if staging_service_key:
         os.environ['STAGING_SERVICE_ROLE_KEY'] = staging_service_key
     
-    # Execute sync operation
-    result = copier.sync_tickets_with_staging(args.limit, args.check_missing, args.update_existing)
+    # Execute operation based on arguments
+    if args.update_assignments:
+        # Update existing ticket assignments with round-robin mapping
+        result = copier.update_existing_ticket_assignments(args.limit)
+    else:
+        # Execute sync operation
+        result = copier.sync_tickets_with_staging(args.limit, args.check_missing, args.update_existing)
     
     # Print result
     if result["success"]:
         print(f"✅ {result['message']}")
+        
+        # Print user mapping statistics
+        if "user_mappings" in result:
+            print("\n📊 User Mapping Statistics:")
+            print("=" * 50)
+            for email, stats in result["user_mappings"].items():
+                display_name = stats['display_name'] or 'No Name'
+                print(f"{display_name} ({email}): {stats['assignment_count']} assignments")
+        
         sys.exit(0)
     else:
         print(f"❌ {result['message']}")
