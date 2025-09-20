@@ -302,7 +302,7 @@ class SaveAndContinueView(APIView):
 class GetNextTicketView(APIView):
     """
     Django equivalent of the Supabase get-next-ticket edge function.
-    Gets the next ticket for a CSE using LIFO logic and snoozed ticket handling.
+    Simple LIFO logic: newest unassigned ticket first, then snoozed tickets.
     """
     authentication_classes = [SupabaseJWTAuthentication]
     
@@ -364,14 +364,39 @@ class GetNextTicketView(APIView):
     
     def _get_and_assign_ticket(self, user_id, user_email):
         """
-        Main logic to get and assign a ticket to the user.
-        Follows the exact logic from the edge function but simplified (no fallback).
+        Simplified logic to get and assign a ticket to the user.
+        1. First get the newest unassigned ticket (LIFO - Last In, First Out)
+        2. Then check for snoozed tickets for this user
         """
         current_time = timezone.now()
         
-        # 1. Look for snoozed tickets for this user first
-        logger.info(f"1 - Looking for snoozed tickets for user: {user_id}")
-        logger.info(f"1 - Current time: {current_time}")
+        # 1. Get newest unassigned ticket first (LIFO - newest first)
+        logger.info("1 - Getting newest unassigned ticket (LIFO)")
+        
+        unassigned_tickets = SupportTicket.objects.filter(
+            assigned_to__isnull=True,
+            resolution_status__isnull=True
+        ).order_by('-created_at')[:1]
+        
+        logger.info(f"2 - Found {len(unassigned_tickets)} unassigned tickets")
+        
+        if unassigned_tickets:
+            ticket = unassigned_tickets[0]
+            logger.info(f"UNASSIGNED TICKET FOUND: ID {ticket.id}")
+            logger.info(f"Ticket created at: {ticket.created_at}")
+            
+            # Try to assign the ticket to the user
+            assignment_success = self._try_assign_ticket(ticket.id, user_id, user_email)
+            if assignment_success:
+                logger.info("3 - UNASSIGNED TICKET ASSIGNED")
+                updated_ticket = SupportTicket.objects.get(id=ticket.id)
+                return updated_ticket
+            else:
+                logger.info("4 - Assignment failed for unassigned ticket, trying snoozed tickets")
+        
+        # 2. Look for snoozed tickets for this user as fallback
+        logger.info(f"5 - Looking for snoozed tickets for user: {user_id}")
+        logger.info(f"5 - Current time: {current_time}")
         
         snoozed_tickets = SupportTicket.objects.filter(
             assigned_to=user_id,
@@ -380,78 +405,19 @@ class GetNextTicketView(APIView):
             snooze_until__lte=current_time
         ).order_by('-snooze_until')[:1]
         
-        logger.info(f"2 - Found {len(snoozed_tickets)} snoozed tickets")
+        logger.info(f"6 - Found {len(snoozed_tickets)} snoozed tickets")
         
         if snoozed_tickets:
             ticket = snoozed_tickets[0]
-            logger.info("3 - SNOOZED TICKET FOUND")
+            logger.info("7 - SNOOZED TICKET FOUND")
             logger.info(f"Snoozed ticket ID: {ticket.id}")
             logger.info(f"Snooze until: {ticket.snooze_until}")
             logger.info(f"Created at: {ticket.created_at}")
             return ticket
         
-        # 2. Get newest unassigned priority ticket (LIFO - newest first)
-        logger.info("4 - Getting newest unassigned priority ticket")
-        
-        # Define priority poster types (from the edge function)
-        priority_poster_types = [
-            'in_trail', 'paid', 'in_trial_extension', 'premium_extension',
-            'trial_expired', 'premium_expired', 'grace', 'auto_pay_not_set_up', 'free'
-        ]
-        
-        # Try to get and assign a priority ticket
-        priority_tickets = SupportTicket.objects.filter(
-            assigned_to__isnull=True,
-            resolution_status__isnull=True,
-            poster__in=priority_poster_types
-        ).order_by('-created_at')[:1]
-        
-        if priority_tickets:
-            ticket = priority_tickets[0]
-            logger.info(f"PRIORITY TICKET FOUND: ID {ticket.id}")
-            logger.info(f"Priority ticket created at: {ticket.created_at}")
-            logger.info(f"Priority ticket poster: {ticket.poster}")
-            
-            # Try to assign the ticket to the user
-            assignment_success = self._try_assign_ticket(ticket.id, user_id, user_email)
-            if assignment_success:
-                # Fetch the updated ticket
-                logger.info("6 - PRIORITY TICKET ASSIGNED")
-                updated_ticket = SupportTicket.objects.get(id=ticket.id)
-                return updated_ticket
-            else:
-                logger.info(f"Assignment failed for ticket {ticket.id}, trying fallback")
-        
-        # 3. Fallback to newest unassigned ticket (excluding priority poster types)
-        logger.info("5 - Fallback to newest unassigned ticket")
-        
-        fallback_tickets = SupportTicket.objects.filter(
-            assigned_to__isnull=True,
-            resolution_status__isnull=True
-        ).exclude(
-            poster__in=priority_poster_types
-        ).order_by('-created_at')[:1]
-        
-        logger.info(f"6 - Found {len(fallback_tickets)} fallback tickets")
-        
-        if not fallback_tickets:
-            logger.info("7 - No tickets available")
-            return None
-        
-        ticket = fallback_tickets[0]
-        
-        # Try to assign the ticket to the user
-        assignment_success = self._try_assign_ticket(ticket.id, user_id, user_email)
-        if assignment_success:
-            logger.info("8 - FALLBACK TICKET ASSIGNED")
-            logger.info(f"Fallback ticket ID: {ticket.id}")
-            logger.info(f"Fallback ticket created at: {ticket.created_at}")
-            updated_ticket = SupportTicket.objects.get(id=ticket.id)
-            return updated_ticket
-        else:
-            # If assignment failed, try again recursively
-            logger.info("9 - Assignment failed, trying again")
-            return self._get_and_assign_ticket(user_id, user_email)
+        # No tickets available
+        logger.info("8 - No tickets available")
+        return None
     
     def _try_assign_ticket(self, ticket_id, user_id, user_email):
         """
