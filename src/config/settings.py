@@ -62,7 +62,8 @@ INSTALLED_APPS = [
     'crm',
     'core',
     'scheduler',
-    'accounts'
+    'accounts',
+    'support_ticket'
 ]
 
 MIDDLEWARE = [
@@ -279,6 +280,9 @@ SPECTACULAR_SETTINGS = {
 
 
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
+
+# Staging environment flag - used to control certain behaviors like assigned_to field updates
+IS_STAGING_ENV = os.getenv("IS_STAGING_ENV", "false").lower() == "true"
 
 if not IS_DEV and SENTRY_DSN:
     import sentry_sdk
