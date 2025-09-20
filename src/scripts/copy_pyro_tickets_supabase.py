@@ -30,54 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Staging users from the Supabase dashboard (as seen in the image)
-STAGING_USERS = [
-    {
-        'uid': '5a960c96-e5a1-4920-b93f-491990d9cad7',
-        'email': 'itsdinesh02@gmail.com',
-        'display_name': 'DINESH SHARMA'
-    },
-    {
-        'uid': '53b053bf-3e58-4475-af8d-5bc7ac932ee2',
-        'email': 'ranji.nitt@gmail.com',
-        'display_name': 'Ranjith Somasundaram'
-    },
-    {
-        'uid': '2e947c14-e4cb-4454-bed9-5ac5482f955c',
-        'email': 'ritam@thepyro.ai',
-        'display_name': 'Ritam Majumder'
-    },
-    {
-        'uid': '295e33ec-fece-4b42-9122-ad71034a2230',
-        'email': 'harisudhan@thepyro.ai',
-        'display_name': ''
-    },
-    {
-        'uid': '25ee1feb-3be8-4cac-9e59-1994959dda58',
-        'email': 'ranjith1610@gmail.com',
-        'display_name': 'Ranjith S'
-    },
-    {
-        'uid': '2e81a97e-c091-45a8-a7f4-213d00c6db7a',
-        'email': 'bibhab@thepyro.ai',
-        'display_name': 'Bibhab Mukhopadhyay'
-    },
-    {
-        'uid': 'ff1e3660-2c8d-45a1-bda8-09c76b857a89',
-        'email': 'dinesh@thepyro.ai',
-        'display_name': 'Dinesh Sharma'
-    },
-    {
-        'uid': '80601c89-35c1-485b-95d0-a8c9493ca4a7',
-        'email': 'ranjith@thepyro.ai',
-        'display_name': ''
-    },
-    {
-        'uid': '503fc7c5-8c48-4e66-bccd-352ce5a84254',
-        'email': 'ritammajumder0@gmail.com',
-        'display_name': 'Ritam Majumder'
-    }
-]
+# Staging users will be fetched dynamically from Supabase auth.users table
 
 class SupabaseTicketCopier:
     def __init__(self, source_url: str, source_key: str, staging_url: str, staging_key: str):
@@ -108,13 +61,92 @@ class SupabaseTicketCopier:
         # Configuration
         self.batch_size = int(os.getenv('BATCH_SIZE', '1'))  # Use batch size of 1 for reliability
         
-        # User mapping for round-robin assignment
-        self.staging_users = STAGING_USERS
-        self.staging_user_count = len(self.staging_users)
+        # User mapping for round-robin assignment - will be populated dynamically
+        self.staging_users = []
+        self.staging_user_count = 0
         self.user_mappings = {}  # Cache for production_user_id -> staging_user mapping
         self.mapping_counter = 0  # Counter for round-robin
         self.max_retries = int(os.getenv('MAX_RETRIES', '3'))
         self.retry_delay = float(os.getenv('RETRY_DELAY', '1.0'))
+        
+        # Fetch staging users dynamically
+        self._fetch_staging_users()
+
+    def _fetch_staging_users(self):
+        """
+        Fetch staging users dynamically from Supabase auth.users table.
+        This replaces the hardcoded STAGING_USERS list.
+        """
+        try:
+            logger.info("Fetching staging users dynamically from Supabase...")
+            
+            # Use auth.users endpoint to get user list
+            url = f"{self.staging_url}/auth/v1/admin/users"
+            
+            # Need to use service role key for auth admin endpoints
+            service_role_key = os.getenv('STAGING_SERVICE_ROLE_KEY')
+            if not service_role_key:
+                logger.error("STAGING_SERVICE_ROLE_KEY is required to fetch users from auth.users table")
+                raise ValueError("STAGING_SERVICE_ROLE_KEY environment variable is required")
+            
+            headers = {
+                'apikey': service_role_key,
+                'Authorization': f'Bearer {service_role_key}',
+                'Content-Type': 'application/json'
+            }
+            
+            response = requests.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            
+            users_data = response.json()
+            users = users_data.get('users', []) if isinstance(users_data, dict) else users_data
+            
+            if not users:
+                logger.warning("No users found in staging environment")
+                # Fallback to a single default user if no users found
+                self.staging_users = [{
+                    'uid': '2e81a97e-c091-45a8-a7f4-213d00c6db7a',
+                    'email': 'bibhab@thepyro.ai',
+                    'display_name': 'Default User'
+                }]
+            else:
+                # Transform user data to match expected format
+                self.staging_users = []
+                for user in users:
+                    user_data = {
+                        'uid': user.get('id'),
+                        'email': user.get('email'),
+                        'display_name': user.get('user_metadata', {}).get('full_name') or 
+                                       user.get('raw_user_meta_data', {}).get('full_name') or
+                                       user.get('email', '').split('@')[0]
+                    }
+                    
+                    # Only include users with valid uid and email
+                    if user_data['uid'] and user_data['email']:
+                        self.staging_users.append(user_data)
+                
+                logger.info(f"Successfully fetched {len(self.staging_users)} staging users:")
+                for user in self.staging_users:
+                    logger.info(f"  - {user['display_name']} ({user['email']})")
+            
+            self.staging_user_count = len(self.staging_users)
+            
+            if self.staging_user_count == 0:
+                raise ValueError("No valid staging users found")
+                
+        except Exception as e:
+            logger.error(f"Failed to fetch staging users dynamically: {e}")
+            logger.warning("Falling back to default user...")
+            
+            # Fallback to a single default user
+            self.staging_users = [{
+                'uid': '2e81a97e-c091-45a8-a7f4-213d00c6db7a',
+                'email': 'bibhab@thepyro.ai',
+                'display_name': 'Default User (Fallback)'
+            }]
+            self.staging_user_count = 1
+            
+            logger.info("Using fallback user for staging assignments")
 
     def get_staging_user_for_production_user(self, production_user_id: str, production_user_email: str = None) -> Optional[Dict]:
         """
@@ -708,9 +740,15 @@ class SupabaseTicketCopier:
                     transformed_ticket['assigned_to'] = staging_user['uid']
                     logger.debug(f"Mapped production user {production_user_id} to staging user {staging_user['email']}")
                 else:
-                    # Fallback to default staging user if mapping fails
-                    transformed_ticket['assigned_to'] = '2e81a97e-c091-45a8-a7f4-213d00c6db7a'
-                    logger.warning(f"Failed to map production user {production_user_id}, using fallback")
+                    # Fallback to first staging user if mapping fails
+                    fallback_user = self.staging_users[0] if self.staging_users else None
+                    if fallback_user:
+                        transformed_ticket['assigned_to'] = fallback_user['uid']
+                        logger.warning(f"Failed to map production user {production_user_id}, using fallback: {fallback_user['email']}")
+                    else:
+                        logger.error(f"No staging users available for fallback assignment")
+                        # Remove assigned_to field if no users available
+                        transformed_ticket.pop('assigned_to', None)
             
             # Handle cse_name field - also apply round-robin logic
             if 'cse_name' in transformed_ticket and transformed_ticket['cse_name'] is not None:
@@ -727,9 +765,15 @@ class SupabaseTicketCopier:
                     transformed_ticket['cse_name'] = staging_user['display_name'] or staging_user['email']
                     logger.debug(f"Mapped cse_name to staging user {staging_user['email']}")
                 else:
-                    # Fallback to default staging user name
-                    transformed_ticket['cse_name'] = 'Bibhab Mukhopadhyay'
-                    logger.warning(f"Failed to map cse_name, using fallback")
+                    # Fallback to first staging user name
+                    fallback_user = self.staging_users[0] if self.staging_users else None
+                    if fallback_user:
+                        transformed_ticket['cse_name'] = fallback_user['display_name'] or fallback_user['email']
+                        logger.warning(f"Failed to map cse_name, using fallback: {fallback_user['email']}")
+                    else:
+                        logger.error(f"No staging users available for cse_name fallback")
+                        # Remove cse_name field if no users available
+                        transformed_ticket.pop('cse_name', None)
             
             transformed_tickets.append(transformed_ticket)
         
@@ -1021,6 +1065,7 @@ def main():
     parser.add_argument('--check-missing', action='store_true', help='Only sync tickets that don\'t exist in staging')
     parser.add_argument('--update-existing', action='store_true', help='Also update existing tickets in staging')
     parser.add_argument('--update-assignments', action='store_true', help='Update existing ticket assignments with round-robin mapping')
+    parser.add_argument('--test-users', action='store_true', help='Test fetching staging users (no ticket operations)')
     
     args = parser.parse_args()
     
@@ -1066,7 +1111,38 @@ def main():
         os.environ['STAGING_SERVICE_ROLE_KEY'] = staging_service_key
     
     # Execute operation based on arguments
-    if args.update_assignments:
+    if args.test_users:
+        # Test user fetching functionality
+        print("🔍 Testing staging user fetching...")
+        print(f"✅ Successfully fetched {copier.staging_user_count} staging users:")
+        print("=" * 60)
+        
+        for i, user in enumerate(copier.staging_users, 1):
+            print(f"{i:2d}. {user['display_name']} ({user['email']})")
+            print(f"    UID: {user['uid']}")
+            print()
+        
+        # Test round-robin assignment
+        print("🔄 Testing round-robin assignment (first 10 assignments):")
+        print("=" * 60)
+        
+        # Reset counter for clean test
+        copier.mapping_counter = 0
+        
+        for i in range(min(10, copier.staging_user_count * 2)):  # Test at least 2 full cycles
+            test_user = copier.get_staging_user_for_production_user(f"test-user-{i}", f"test{i}@example.com")
+            if test_user:
+                print(f"Assignment #{i+1}: {test_user['display_name']} ({test_user['email']})")
+            else:
+                print(f"Assignment #{i+1}: FAILED")
+        
+        print(f"\n📊 Final Statistics:")
+        stats = copier.get_user_mapping_statistics()
+        for email, stat in stats.items():
+            print(f"  {stat['display_name']} ({email}): {stat['assignment_count']} assignments")
+        
+        sys.exit(0)
+    elif args.update_assignments:
         # Update existing ticket assignments with round-robin mapping
         result = copier.update_existing_ticket_assignments(args.limit)
     else:
