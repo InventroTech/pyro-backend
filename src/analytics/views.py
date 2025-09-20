@@ -598,7 +598,6 @@ class GetTicketStatusView(APIView):
             ).count()
             
             # 2. Total Pending Tickets (Overall. Not specific to this CSE)
-            # Include both 'Pending' status and null resolution_status
             total_pending_count = SupportTicket.objects.filter(
                 resolution_status__isnull=True
             ).count()
@@ -609,7 +608,7 @@ class GetTicketStatusView(APIView):
                 resolution_status__isnull=True,
                 poster__isnull=False
             ).values_list('poster', flat=True).distinct()
-            
+
             # Then count for each poster
             pending_by_poster_array = []
             for poster in distinct_posters:
@@ -618,7 +617,7 @@ class GetTicketStatusView(APIView):
                     poster=poster
                 ).count()
                 pending_by_poster_array.append({"poster": poster, "count": count})
-            
+
             # Sort by count (descending)
             pending_by_poster_array.sort(key=lambda x: x['count'], reverse=True)
             
