@@ -1,1 +1,0 @@
-# Ticket operation tests

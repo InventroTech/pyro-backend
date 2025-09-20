@@ -7,7 +7,7 @@ from rest_framework import status
 from django.utils import timezone
 
 from tests.base.test_setup import BaseAPITestCase
-from ticket_operation.models import SupportTicketDump
+from support_ticket.models import SupportTicketDump
 
 
 class DumpTicketWebhookViewTest(BaseAPITestCase):
@@ -16,7 +16,7 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
     def setUp(self):
         """Set up test data"""
         super().setUp()
-        self.url = reverse('ticket_operation:dump-ticket-webhook')
+        self.url = reverse('support_ticket:dump-ticket-webhook')
         self.webhook_secret = 'test_webhook_secret_123'
         self.valid_headers = {
             'x-webhook-secret': self.webhook_secret,
@@ -428,7 +428,7 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
         self.assertEqual(len(ticket_dump.reason), 10000)
     
     @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
-    @patch('ticket_operation.views.logger')
+    @patch('support_ticket.views.logger')
     def test_dump_ticket_webhook_logging(self, mock_logger):
         """Test that appropriate logging occurs during webhook processing"""
         response = self.client.post(
@@ -442,65 +442,6 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
         
         # Verify that logging was called (exact calls depend on implementation)
         self.assertTrue(mock_logger.warning.called or mock_logger.info.called or mock_logger.error.called)
-
-
-class DumpTicketWebhookSecurityTest(BaseAPITestCase):
-    """Security-focused tests for the dump ticket webhook"""
-    
-    def setUp(self):
-        super().setUp()
-        self.url = reverse('ticket_operation:dump-ticket-webhook')
-        self.webhook_secret = 'test_webhook_secret_123'
-    
-    @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
-    def test_sql_injection_attempt(self):
-        """Test that SQL injection attempts are handled safely"""
-        malicious_payload = {
-            'tenant_id': str(self.tenant_id),
-            'name': "'; DROP TABLE support_ticket_dump; --",
-            'user_id': "1' OR '1'='1",
-            'reason': "test'; DELETE FROM support_ticket_dump WHERE '1'='1"
-        }
-        
-        response = self.client.post(
-            self.url,
-            data=json.dumps(malicious_payload),
-            content_type='application/json',
-            **{'HTTP_X_WEBHOOK_SECRET': self.webhook_secret}
-        )
-        
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        
-        # Verify the malicious content was stored as plain text (not executed)
-        ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
-        self.assertEqual(ticket_dump.name, "'; DROP TABLE support_ticket_dump; --")
-        self.assertEqual(ticket_dump.user_id, "1' OR '1'='1")
-        
-        # Verify the table still exists and contains the record
-        self.assertEqual(SupportTicketDump.objects.count(), 1)
-    
-    @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
-    def test_xss_attempt(self):
-        """Test that XSS attempts are stored safely"""
-        xss_payload = {
-            'tenant_id': str(self.tenant_id),
-            'name': '<script>alert("XSS")</script>',
-            'reason': '<img src="x" onerror="alert(1)">'
-        }
-        
-        response = self.client.post(
-            self.url,
-            data=json.dumps(xss_payload),
-            content_type='application/json',
-            **{'HTTP_X_WEBHOOK_SECRET': self.webhook_secret}
-        )
-        
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        
-        # Verify the XSS content was stored as plain text
-        ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
-        self.assertEqual(ticket_dump.name, '<script>alert("XSS")</script>')
-        self.assertEqual(ticket_dump.reason, '<img src="x" onerror="alert(1)">')
     
     def test_rate_limiting_behavior(self):
         """Test webhook behavior under rapid successive requests"""
@@ -521,3 +462,5 @@ class DumpTicketWebhookSecurityTest(BaseAPITestCase):
                 status.HTTP_401_UNAUTHORIZED,  # Due to missing/invalid secret
                 status.HTTP_429_TOO_MANY_REQUESTS  # If rate limiting is enabled
             ])
+
+

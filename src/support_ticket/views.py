@@ -214,18 +214,16 @@ class SaveAndContinueView(APIView):
                 'other_reasons': other_reasons
             }
             
-            # Only update assigned_to if not in staging environment (based on memory)
-            if not getattr(settings, 'IS_STAGING_ENV', False):
-                # Convert user_id string to UUID if needed
-                try:
-                    from uuid import UUID
-                    if isinstance(user_id, str):
-                        update_data['assigned_to'] = UUID(user_id)
-                    else:
-                        update_data['assigned_to'] = user_id
-                except ValueError:
-                    logger.warning(f'Invalid UUID format for user_id: {user_id}, skipping assigned_to update')
-                    # Don't update assigned_to if user_id is not a valid UUID
+            # Convert user_id string to UUID if needed and update assigned_to
+            try:
+                from uuid import UUID
+                if isinstance(user_id, str):
+                    update_data['assigned_to'] = UUID(user_id)
+                else:
+                    update_data['assigned_to'] = user_id
+            except ValueError:
+                logger.warning(f'Invalid UUID format for user_id: {user_id}, skipping assigned_to update')
+                # Don't update assigned_to if user_id is not a valid UUID
             
             for field, value in update_data.items():
                 setattr(current_ticket, field, value)

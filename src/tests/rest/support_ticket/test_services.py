@@ -1,7 +1,7 @@
 from unittest.mock import patch, MagicMock
 from django.test import TestCase
 
-from ticket_operation.services import TicketTimeService, MixpanelService
+from support_ticket.services import TicketTimeService, MixpanelService
 
 
 class TicketTimeServiceTest(TestCase):

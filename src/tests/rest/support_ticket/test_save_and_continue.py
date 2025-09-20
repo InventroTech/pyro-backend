@@ -7,7 +7,7 @@ from django.utils import timezone
 from tests.base.test_setup import BaseAPITestCase
 from tests.factories.support_ticket_factory import SupportTicketFactory
 from analytics.models import SupportTicket
-from ticket_operation.services import TicketTimeService, MixpanelService
+from support_ticket.services import TicketTimeService, MixpanelService
 
 
 class TicketTimeServiceTest(BaseAPITestCase):
@@ -134,9 +134,9 @@ class SaveAndContinueViewTest(BaseAPITestCase):
             call_attempts=0
         )
         
-        self.url = reverse('ticket_operation:save-and-continue')
+        self.url = reverse('support_ticket:save-and-continue')
     
-    @patch('ticket_operation.services.MixpanelService.send_to_mixpanel_sync')
+    @patch('support_ticket.services.MixpanelService.send_to_mixpanel_sync')
     def test_save_and_continue_success(self, mock_mixpanel):
         """Test successful save and continue operation"""
         mock_mixpanel.return_value = True
@@ -187,7 +187,7 @@ class SaveAndContinueViewTest(BaseAPITestCase):
             'isReadOnly': False
         }
         
-        with patch('ticket_operation.services.MixpanelService.send_to_mixpanel_sync'):
+        with patch('support_ticket.services.MixpanelService.send_to_mixpanel_sync'):
             response = self.client.post(self.url, data, format='json', **self.auth_headers)
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -248,7 +248,7 @@ class SaveAndContinueViewTest(BaseAPITestCase):
         
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
     
-    @patch('ticket_operation.services.MixpanelService.send_to_mixpanel_sync')
+    @patch('support_ticket.services.MixpanelService.send_to_mixpanel_sync')
     def test_mixpanel_events_for_different_statuses(self, mock_mixpanel):
         """Test that correct Mixpanel events are sent for different resolution statuses"""
         mock_mixpanel.return_value = True
@@ -281,7 +281,7 @@ class SaveAndContinueViewTest(BaseAPITestCase):
                 self.assertEqual(calls[0][0][1], 'pyro_connected')  # First call
                 self.assertEqual(calls[1][0][1], expected_event)    # Second call
     
-    @patch('ticket_operation.services.MixpanelService.send_to_mixpanel_sync')
+    @patch('support_ticket.services.MixpanelService.send_to_mixpanel_sync')
     def test_no_mixpanel_event_without_user_id(self, mock_mixpanel):
         """Test that no Mixpanel events are sent when ticket has no user_id"""
         mock_mixpanel.return_value = True

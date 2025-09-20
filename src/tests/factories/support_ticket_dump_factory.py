@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timedelta
 from django.utils import timezone
 
-from ticket_operation.models import SupportTicketDump
+from support_ticket.models import SupportTicketDump
 
 
 class SupportTicketDumpFactory(factory.django.DjangoModelFactory):
