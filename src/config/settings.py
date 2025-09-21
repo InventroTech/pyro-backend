@@ -166,9 +166,8 @@ else:
             'OPTIONS': {
                 'sslmode': 'require',
                 'MAX_CONNS': 50,  # Maximum connections in pool
-                'MIN_CONNS': 10,  # Minimum connections in pool
+                'MIN_CONNS': 25,  # Minimum connections in pool
             },
-            # Note: CONN_MAX_AGE not compatible with connection pooling
         }
     }
 
