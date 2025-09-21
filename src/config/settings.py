@@ -165,8 +165,11 @@ else:
             'PORT': env("DB_PORT"),
             'OPTIONS': {
                 'sslmode': 'require',
-                'MAX_CONNS': 20,  # Connection pool size
-                'MIN_CONNS': 5,   # Minimum connections
+                "pool": {
+                    "min_size": 20,  # Minimum number of connections in the pool
+                    "max_size": 50,  # Maximum number of connections in the pool
+                    "timeout": 10,  # Timeout in seconds for acquiring a connection
+                }
             },
             'CONN_MAX_AGE': 60,  # Keep connections alive for 60 seconds
         }
