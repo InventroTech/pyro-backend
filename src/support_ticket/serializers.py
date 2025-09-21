@@ -133,6 +133,19 @@ class SupportTicketResponseSerializer(serializers.ModelSerializer):
             'source', 'subscription_status', 'atleast_paid_once', 'reason',
             'other_reasons', 'badge', 'poster', 'tenant_id', 'assigned_to', 'layout_status',
             'resolution_status', 'resolution_time', 'cse_name', 'cse_remarks',
-            'call_status', 'call_attempts', 'completed_at', 'dumped_at'
+            'call_status', 'call_attempts', 'completed_at', 'dumped_at', 'snooze_until'
         ]
         read_only_fields = ['id', 'created_at', 'dumped_at']
+
+
+class GetNextTicketResponseSerializer(serializers.Serializer):
+    """
+    Serializer for get-next-ticket API response
+    """
+    ticket = SupportTicketResponseSerializer(required=False, allow_null=True)
+    
+    def to_representation(self, instance):
+        """Custom representation to handle empty response case"""
+        if not instance.get('ticket'):
+            return {}
+        return super().to_representation(instance)
