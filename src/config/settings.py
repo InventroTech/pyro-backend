@@ -171,7 +171,7 @@ else:
                     "timeout": 10,  # Timeout in seconds for acquiring a connection
                 }
             },
-            'CONN_MAX_AGE': 60,  # Keep connections alive for 60 seconds
+            # Note: CONN_MAX_AGE is not compatible with connection pooling
         }
     }
 
