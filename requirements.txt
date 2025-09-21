@@ -58,3 +58,4 @@ tzdata==2025.2
 uritemplate==4.2.0
 urllib3==2.5.0
 whitenoise==6.9.0
+django-db-pool==1.0.0
