@@ -163,6 +163,7 @@ else:
             'PASSWORD': env("DB_PASSWORD"),
             'HOST': env("DB_HOST"),
             'PORT': env("DB_PORT"),
+            'CONN_MAX_AGE': 60,  # Keep connections alive for 60 seconds
             'OPTIONS': {
                 'sslmode': 'require',
                 'MAX_CONNS': 50,  # Maximum connections in pool
