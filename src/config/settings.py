@@ -165,9 +165,12 @@ else:
             'PORT': env("DB_PORT"),
             'OPTIONS': {
                 'sslmode': 'require',
-            }
+                'MAX_CONNS': 20,  # Connection pool size
+                'MIN_CONNS': 5,   # Minimum connections
+            },
+            'CONN_MAX_AGE': 60,  # Keep connections alive for 60 seconds
         }
-}
+    }
 
 
 # Password validation
