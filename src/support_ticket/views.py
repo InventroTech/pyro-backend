@@ -10,6 +10,7 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
 from django.conf import settings
+from django.db import transaction
 from config.supabase_auth import SupabaseJWTAuthentication
 import os
 
@@ -332,13 +333,17 @@ class GetNextTicketView(APIView):
                     'error': 'No user id in JWT'
                 }, status=status.HTTP_400_BAD_REQUEST)
             
+            # Combine all the logs into one log line
+
             logger.info(f"=== TICKET ORDERING VALIDATION ===")
             logger.info(f"Current time: {timezone.now()}")
             logger.info(f"User ID: {user_id}")
             logger.info(f"User Email: {user_email}")
             
             # Get the next ticket
-            next_ticket = self._get_and_assign_ticket(user_id, user_email)
+            with transaction.atomic():
+                next_ticket = self._get_and_assign_ticket(user_id, user_email)
+                
             
             # If no tickets available, return empty object
             if not next_ticket:
@@ -370,29 +375,24 @@ class GetNextTicketView(APIView):
         """
         current_time = timezone.now()
         
-        # 1. Get newest unassigned ticket first (LIFO - newest first)
-        logger.info("1 - Getting newest unassigned ticket (LIFO)")
         
-        unassigned_tickets = SupportTicket.objects.filter(
+        unassigned_ticket = SupportTicket.objects.select_for_update(
+            skip_locked=True,
+            of=("self",)
+        ).filter(
             assigned_to__isnull=True,
             resolution_status__isnull=True
-        ).order_by('-created_at')[:1]
+        ).order_by('-created_at')[:1].first()
         
-        logger.info(f"2 - Found {len(unassigned_tickets)} unassigned tickets")
-        
-        if unassigned_tickets:
-            ticket = unassigned_tickets[0]
-            logger.info(f"UNASSIGNED TICKET FOUND: ID {ticket.id}")
-            logger.info(f"Ticket created at: {ticket.created_at}")
+        if unassigned_ticket:
+            logger.info(f"UNASSIGNED TICKET FOUND: ID {unassigned_ticket.id}")
+            logger.info(f"Ticket created at: {unassigned_ticket.created_at}")
             
             # Try to assign the ticket to the user
-            assignment_success = self._try_assign_ticket(ticket.id, user_id, user_email)
-            if assignment_success:
-                logger.info("3 - UNASSIGNED TICKET ASSIGNED")
-                updated_ticket = SupportTicket.objects.get(id=ticket.id)
-                return updated_ticket
-            else:
-                logger.info("4 - Assignment failed for unassigned ticket, trying snoozed tickets")
+            unassigned_ticket.assigned_to = user_id
+            unassigned_ticket.cse_name = user_email
+            unassigned_ticket.save()
+            return unassigned_ticket
         
         # 2. Look for snoozed tickets for this user as fallback
         logger.info(f"5 - Looking for snoozed tickets for user: {user_id}")
@@ -419,34 +419,3 @@ class GetNextTicketView(APIView):
         logger.info("8 - No tickets available")
         return None
     
-    def _try_assign_ticket(self, ticket_id, user_id, user_email):
-        """
-        Try to assign a ticket to the user.
-        Returns True if successful, False otherwise.
-        """
-        try:
-            from uuid import UUID
-            
-            # Convert user_id to UUID if it's a string
-            if isinstance(user_id, str):
-                user_uuid = UUID(user_id)
-            else:
-                user_uuid = user_id
-            
-            # Use atomic update to prevent race conditions
-            # Only assign if not already assigned (assigned_to is null)
-            updated_rows = SupportTicket.objects.filter(
-                id=ticket_id,
-                assigned_to__isnull=True
-            ).update(
-                assigned_to=user_uuid,
-                cse_name=user_email
-            )
-            
-            logger.info(f"Assignment attempt for ticket {ticket_id}: {updated_rows} rows updated")
-            return updated_rows > 0
-            
-        except Exception as e:
-            logger.error(f"Error assigning ticket {ticket_id}: {e}")
-            return False
-
