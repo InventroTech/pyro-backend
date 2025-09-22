@@ -14,7 +14,15 @@ class Role(models.Model):
     name = models.CharField(max_length=128)
     description = models.TextField(blank=True, null=True)
     class Meta:
-        unique_together = (('tenant','key'),)
+        constraints = [
+            models.UniqueConstraint(
+                Lower("key"), "tenant",
+                name="uniq_authz_role_tenant_lower_key"
+            ),
+        ]
+        indexes = [
+            models.Index(Lower("key"), name="authz_role_lower_key_idx"),
+        ]
 
 class RolePermission(models.Model):
     role = models.ForeignKey(Role, on_delete=models.CASCADE)
