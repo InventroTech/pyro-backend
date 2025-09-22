@@ -165,9 +165,10 @@ else:
             'PORT': env("DB_PORT"),
             'OPTIONS': {
                 'sslmode': 'require',
-            }
+            },
+            'CONN_MAX_AGE': 300,  # Keep connections alive for 5 minutes
         }
-}
+    }
 
 
 # Password validation
@@ -228,16 +229,6 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',  # Only authenticated users by default
     ],
-
-    # Throttling (rate limiting)
-    'DEFAULT_THROTTLE_CLASSES': [
-        'rest_framework.throttling.UserRateThrottle',  # Basic user-based throttle
-        'rest_framework.throttling.AnonRateThrottle',  # Throttle for anonymous users
-    ],
-    'DEFAULT_THROTTLE_RATES': {
-        'anon': '60/min',    # Anonymous users: 60 per min
-        'user': '1000/hour'
-    },
 
     # Exception handling (optional: improves error responses)
     'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
