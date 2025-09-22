@@ -4,6 +4,7 @@ import requests
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.permissions import AllowAny
 
 # Create your views here.
 # Logging and config
@@ -17,7 +18,7 @@ class SupabaseAuthCheckView(APIView):
     Returns user info if valid, else error.
     """
     authentication_classes = []
-    permission_classes = []
+    permission_classes = [AllowAny]
 
     def post(self, request):
         email = request.data.get("email")
