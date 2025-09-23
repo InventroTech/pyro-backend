@@ -1,6 +1,7 @@
 import logging
 import json
 import base64
+from uuid import UUID
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
@@ -318,14 +319,10 @@ class GetNextTicketView(APIView):
     def get(self, request):
         """Main get-next-ticket handler - exactly like edge function"""
         try:
-            # Get user from authentication middleware
-            if not request.user or not request.user.is_authenticated:
-                return Response({
-                    'error': 'Authentication required'
-                }, status=status.HTTP_401_UNAUTHORIZED)
-            
-            user_id = request.user.supabase_uid
-            user_email = request.user.email
+            # Get user from authentication middleware (IsTenantAuthenticated already handles auth)
+            user = request.user
+            user_id = user.supabase_uid
+            user_email = user.email
             
             logger.info(f"=== TICKET ORDERING VALIDATION ===")
             logger.info(f"Current time: {timezone.now()}")
@@ -334,7 +331,7 @@ class GetNextTicketView(APIView):
             
             # Get the next ticket
             with transaction.atomic():
-                next_ticket = self._get_and_assign_ticket(user_id, user_email)
+                next_ticket = self._get_and_assign_ticket(user, user_email)
                 
             
             # If no tickets available, return empty object
@@ -359,7 +356,7 @@ class GetNextTicketView(APIView):
             response['Access-Control-Allow-Origin'] = '*'
             return response
     
-    def _get_and_assign_ticket(self, user_id, user_email):
+    def _get_and_assign_ticket(self, user, user_email):
         """
         Simplified logic to get and assign a ticket to the user.
         1. First get the newest unassigned ticket (LIFO - Last In, First Out)
@@ -367,6 +364,8 @@ class GetNextTicketView(APIView):
         """
         current_time = timezone.now()
         
+        
+        logger.info("1 - Searching for unassigned tickets with row locking")
         
         unassigned_ticket = SupportTicket.objects.select_for_update(
             skip_locked=True,
@@ -380,32 +379,21 @@ class GetNextTicketView(APIView):
             logger.info(f"UNASSIGNED TICKET FOUND: ID {unassigned_ticket.id}")
             logger.info(f"Ticket created at: {unassigned_ticket.created_at}")
             
-            # Convert user_id to UUID before assignment
-            from uuid import UUID
-            if isinstance(user_id, str):
-                user_uuid = UUID(user_id)
-            else:
-                user_uuid = user_id
-            
-            # Try to assign the ticket to the user
-            unassigned_ticket.assigned_to = user_uuid
+            # Assign the ticket to the user (assigned_to is UUIDField, so convert supabase_uid)
+            unassigned_ticket.assigned_to = UUID(user.supabase_uid)
             unassigned_ticket.cse_name = user_email
             unassigned_ticket.save()
+            logger.info("3 - UNASSIGNED TICKET ASSIGNED SUCCESSFULLY")
             return unassigned_ticket
+        else:
+            logger.info("2 - NO UNASSIGNED TICKETS FOUND")
         
         # 2. Look for snoozed tickets for this user as fallback
-        logger.info(f"5 - Looking for snoozed tickets for user: {user_id}")
+        logger.info(f"5 - Looking for snoozed tickets for user: {user.supabase_uid}")
         logger.info(f"5 - Current time: {current_time}")
         
-        # Convert user_id to UUID for consistent querying
-        from uuid import UUID
-        if isinstance(user_id, str):
-            user_uuid = UUID(user_id)
-        else:
-            user_uuid = user_id
-            
         snoozed_tickets = SupportTicket.objects.filter(
-            assigned_to=user_uuid,
+            assigned_to=UUID(user.supabase_uid),
             resolution_status__isnull=True,
             snooze_until__isnull=False,
             snooze_until__lte=current_time
@@ -420,6 +408,8 @@ class GetNextTicketView(APIView):
             logger.info(f"Snooze until: {ticket.snooze_until}")
             logger.info(f"Created at: {ticket.created_at}")
             return ticket
+        else:
+            logger.info("6 - NO SNOOZED TICKETS FOUND")
         
         # No tickets available
         logger.info("8 - No tickets available")
