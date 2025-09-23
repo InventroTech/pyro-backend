@@ -10,6 +10,7 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
 from django.conf import settings
+from django.db import transaction
 from config.supabase_auth import SupabaseJWTAuthentication
 import os
 
@@ -317,29 +318,21 @@ class GetNextTicketView(APIView):
     def get(self, request):
         """Main get-next-ticket handler - exactly like edge function"""
         try:
-            # Get JWT claims from the authentication middleware
-            if not hasattr(request, 'jwt_claims'):
-                return Response({
-                    'error': 'Missing or invalid auth header'
-                }, status=status.HTTP_401_UNAUTHORIZED)
-            
-            jwt_claims = request.jwt_claims
-            user_id = jwt_claims.get('sub')
-            user_email = jwt_claims.get('email')
-            
-            if not user_id:
-                return Response({
-                    'error': 'No user id in JWT'
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
+            # Get user from authentication middleware (IsTenantAuthenticated already handles auth)
+            user = request.user
+            user_id = user.supabase_uid
+            user_email = user.email
+
             logger.info(f"=== TICKET ORDERING VALIDATION ===")
             logger.info(f"Current time: {timezone.now()}")
             logger.info(f"User ID: {user_id}")
             logger.info(f"User Email: {user_email}")
-            
+
             # Get the next ticket
-            next_ticket = self._get_and_assign_ticket(user_id, user_email)
-            
+            with transaction.atomic():
+                next_ticket = self._get_and_assign_ticket(user, user_email)
+
+
             # If no tickets available, return empty object
             if not next_ticket:
                 response = Response({}, status=status.HTTP_200_OK)
@@ -361,45 +354,45 @@ class GetNextTicketView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             response['Access-Control-Allow-Origin'] = '*'
             return response
-    
-    def _get_and_assign_ticket(self, user_id, user_email):
+
+    def _get_and_assign_ticket(self, user, user_email):
         """
         Simplified logic to get and assign a ticket to the user.
         1. First get the newest unassigned ticket (LIFO - Last In, First Out)
         2. Then check for snoozed tickets for this user
         """
         current_time = timezone.now()
-        
-        # 1. Get newest unassigned ticket first (LIFO - newest first)
-        logger.info("1 - Getting newest unassigned ticket (LIFO)")
-        
-        unassigned_tickets = SupportTicket.objects.filter(
+
+
+        logger.info("1 - Searching for unassigned tickets with row locking")
+
+        unassigned_ticket = SupportTicket.objects.select_for_update(
+            skip_locked=True,
+            of=("self",)
+        ).filter(
             assigned_to__isnull=True,
             resolution_status__isnull=True
-        ).order_by('-created_at')[:1]
+        ).order_by('-created_at')[:1].first()
         
-        logger.info(f"2 - Found {len(unassigned_tickets)} unassigned tickets")
-        
-        if unassigned_tickets:
-            ticket = unassigned_tickets[0]
-            logger.info(f"UNASSIGNED TICKET FOUND: ID {ticket.id}")
-            logger.info(f"Ticket created at: {ticket.created_at}")
-            
-            # Try to assign the ticket to the user
-            assignment_success = self._try_assign_ticket(ticket.id, user_id, user_email)
-            if assignment_success:
-                logger.info("3 - UNASSIGNED TICKET ASSIGNED")
-                updated_ticket = SupportTicket.objects.get(id=ticket.id)
-                return updated_ticket
-            else:
-                logger.info("4 - Assignment failed for unassigned ticket, trying snoozed tickets")
-        
+        if unassigned_ticket:
+            logger.info(f"UNASSIGNED TICKET FOUND: ID {unassigned_ticket.id}")
+            logger.info(f"Ticket created at: {unassigned_ticket.created_at}")
+
+            # Assign the ticket to the user (assigned_to is UUIDField, so convert supabase_uid)
+            unassigned_ticket.assigned_to = UUID(user.supabase_uid)
+            unassigned_ticket.cse_name = user_email
+            unassigned_ticket.save()
+            logger.info("3 - UNASSIGNED TICKET ASSIGNED SUCCESSFULLY")
+            return unassigned_ticket
+        else:
+            logger.info("2 - NO UNASSIGNED TICKETS FOUND")
+
         # 2. Look for snoozed tickets for this user as fallback
-        logger.info(f"5 - Looking for snoozed tickets for user: {user_id}")
+        logger.info(f"5 - Looking for snoozed tickets for user: {user.supabase_uid}")
         logger.info(f"5 - Current time: {current_time}")
-        
+
         snoozed_tickets = SupportTicket.objects.filter(
-            assigned_to=user_id,
+            assigned_to=UUID(user.supabase_uid),
             resolution_status__isnull=True,
             snooze_until__isnull=False,
             snooze_until__lte=current_time
@@ -414,41 +407,12 @@ class GetNextTicketView(APIView):
             logger.info(f"Snooze until: {ticket.snooze_until}")
             logger.info(f"Created at: {ticket.created_at}")
             return ticket
-        
+        else:
+            logger.info("6 - NO SNOOZED TICKETS FOUND")
+
         # No tickets available
         logger.info("8 - No tickets available")
         return None
-    
-    def _try_assign_ticket(self, ticket_id, user_id, user_email):
-        """
-        Try to assign a ticket to the user.
-        Returns True if successful, False otherwise.
-        """
-        try:
-            from uuid import UUID
-            
-            # Convert user_id to UUID if it's a string
-            if isinstance(user_id, str):
-                user_uuid = UUID(user_id)
-            else:
-                user_uuid = user_id
-            
-            # Use atomic update to prevent race conditions
-            # Only assign if not already assigned (assigned_to is null)
-            updated_rows = SupportTicket.objects.filter(
-                id=ticket_id,
-                assigned_to__isnull=True
-            ).update(
-                assigned_to=user_uuid,
-                cse_name=user_email
-            )
-            
-            logger.info(f"Assignment attempt for ticket {ticket_id}: {updated_rows} rows updated")
-            return updated_rows > 0
-            
-         except Exception as e:
-             logger.error(f"Error assigning ticket {ticket_id}: {e}")
-             return False
 
 
 class SupportTicketUpdateView(APIView):
@@ -544,4 +508,3 @@ class SupportTicketUpdateView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             response['Access-Control-Allow-Origin'] = '*'
             return response
-
