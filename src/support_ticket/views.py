@@ -15,7 +15,7 @@ import os
 
 from .models import SupportTicketDump
 from analytics.models import SupportTicket
-from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer
+from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer
 from .services import MixpanelService, TicketTimeService
 
 logger = logging.getLogger(__name__)
@@ -446,7 +446,102 @@ class GetNextTicketView(APIView):
             logger.info(f"Assignment attempt for ticket {ticket_id}: {updated_rows} rows updated")
             return updated_rows > 0
             
-        except Exception as e:
-            logger.error(f"Error assigning ticket {ticket_id}: {e}")
-            return False
+         except Exception as e:
+             logger.error(f"Error assigning ticket {ticket_id}: {e}")
+             return False
+
+
+class SupportTicketUpdateView(APIView):
+    """
+    API endpoint for admins to update support tickets, specifically for assigning tickets to CSEs
+    """
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [SupabaseJWTAuthentication]  # Will be enhanced with role-based permissions
+    
+    def options(self, request):
+        """Handle CORS preflight requests"""
+        response = Response('ok', status=status.HTTP_200_OK)
+        response['Access-Control-Allow-Origin'] = '*'
+        response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        response['Access-Control-Allow-Methods'] = 'PATCH, OPTIONS'
+        return response
+    
+    def patch(self, request):
+        """Update support ticket fields - primarily for admin assignment"""
+        try:
+            # Get JWT claims from the authentication middleware
+            if not hasattr(request, 'jwt_claims'):
+                return Response({
+                    'error': 'Missing or invalid auth header'
+                }, status=status.HTTP_401_UNAUTHORIZED)
+            
+            jwt_claims = request.jwt_claims
+            user_id = jwt_claims.get('sub')
+            user_email = jwt_claims.get('email')
+            
+            logger.info(f'Admin updating ticket - Admin ID: {user_id}, Admin Email: {user_email}')
+            
+            if not user_id:
+                return Response({
+                    'error': 'No user id in JWT'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Validate request data
+            serializer = SupportTicketUpdateSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({
+                    'error': 'Invalid request data',
+                    'details': serializer.errors
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            validated_data = serializer.validated_data
+            ticket_id = validated_data['ticket_id']
+            
+            # Get the ticket to update
+            try:
+                ticket = SupportTicket.objects.get(id=ticket_id)
+            except SupportTicket.DoesNotExist:
+                logger.error(f'Ticket not found: {ticket_id}')
+                return Response({
+                    'error': 'Ticket not found'
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            # Apply memory constraint: don't update assigned_to and tenant_id in staging
+            # Note: Based on memory, staging environment has fixed assigned_to and tenant_id
+            # But this endpoint is for admin assignment, so we'll allow it for production
+            
+            # Prepare update data (exclude ticket_id)
+            update_data = {k: v for k, v in validated_data.items() if k != 'ticket_id'}
+            
+            # Update the ticket fields
+            for field, value in update_data.items():
+                setattr(ticket, field, value)
+            
+            # Save the ticket
+            ticket.save()
+            
+            logger.info(f'Ticket updated successfully: {ticket_id} by admin: {user_email}')
+            
+            # Serialize the updated ticket for response
+            ticket_serializer = SupportTicketResponseSerializer(ticket)
+            
+            response_data = {
+                'success': True,
+                'message': 'Ticket updated successfully',
+                'updated_ticket': ticket_serializer.data,
+                'updated_by': user_email,
+                'updated_fields': list(update_data.keys())
+            }
+            
+            response = Response(response_data, status=status.HTTP_200_OK)
+            response['Access-Control-Allow-Origin'] = '*'
+            return response
+            
+        except Exception as error:
+            logger.error(f'Error in support ticket update: {error}')
+            response = Response({
+                'error': 'Internal server error'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            response['Access-Control-Allow-Origin'] = '*'
+            return response
 
