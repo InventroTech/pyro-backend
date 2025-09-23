@@ -7,11 +7,13 @@ from django.utils.decorators import method_decorator
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from uuid import UUID
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
 from django.conf import settings
 from django.db import transaction
 from config.supabase_auth import SupabaseJWTAuthentication
+from authz.permissions import IsTenantAuthenticated
 import os
 
 from .models import SupportTicketDump
@@ -420,35 +422,17 @@ class SupportTicketUpdateView(APIView):
     API endpoint for admins to update support tickets, specifically for assigning tickets to CSEs
     """
     authentication_classes = [SupabaseJWTAuthentication]
-    permission_classes = [SupabaseJWTAuthentication]  # Will be enhanced with role-based permissions
-    
-    def options(self, request):
-        """Handle CORS preflight requests"""
-        response = Response('ok', status=status.HTTP_200_OK)
-        response['Access-Control-Allow-Origin'] = '*'
-        response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        response['Access-Control-Allow-Methods'] = 'PATCH, OPTIONS'
-        return response
+    permission_classes = [IsTenantAuthenticated]
     
     def patch(self, request):
         """Update support ticket fields - primarily for admin assignment"""
         try:
-            # Get JWT claims from the authentication middleware
-            if not hasattr(request, 'jwt_claims'):
-                return Response({
-                    'error': 'Missing or invalid auth header'
-                }, status=status.HTTP_401_UNAUTHORIZED)
-            
-            jwt_claims = request.jwt_claims
-            user_id = jwt_claims.get('sub')
-            user_email = jwt_claims.get('email')
+            # Get user from authentication middleware (IsTenantAuthenticated already handles auth)
+            user = request.user
+            user_id = user.supabase_uid
+            user_email = user.email
             
             logger.info(f'Admin updating ticket - Admin ID: {user_id}, Admin Email: {user_email}')
-            
-            if not user_id:
-                return Response({
-                    'error': 'No user id in JWT'
-                }, status=status.HTTP_400_BAD_REQUEST)
             
             # Validate request data
             serializer = SupportTicketUpdateSerializer(data=request.data)
@@ -477,12 +461,13 @@ class SupportTicketUpdateView(APIView):
             # Prepare update data (exclude ticket_id)
             update_data = {k: v for k, v in validated_data.items() if k != 'ticket_id'}
             
-            # Update the ticket fields
-            for field, value in update_data.items():
-                setattr(ticket, field, value)
-            
-            # Save the ticket
-            ticket.save()
+            # Update the ticket fields in atomic transaction
+            with transaction.atomic():
+                for field, value in update_data.items():
+                    setattr(ticket, field, value)
+                
+                # Save the ticket
+                ticket.save()
             
             logger.info(f'Ticket updated successfully: {ticket_id} by admin: {user_email}')
             
