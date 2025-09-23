@@ -318,23 +318,15 @@ class GetNextTicketView(APIView):
     def get(self, request):
         """Main get-next-ticket handler - exactly like edge function"""
         try:
-            # Get JWT claims from the authentication middleware
-            if not hasattr(request, 'jwt_claims'):
+            # Get user from authentication middleware
+            if not request.user or not request.user.is_authenticated:
                 return Response({
-                    'error': 'Missing or invalid auth header'
+                    'error': 'Authentication required'
                 }, status=status.HTTP_401_UNAUTHORIZED)
             
-            jwt_claims = request.jwt_claims
-            user_id = jwt_claims.get('sub')
-            user_email = jwt_claims.get('email')
+            user_id = request.user.supabase_uid
+            user_email = request.user.email
             
-            if not user_id:
-                return Response({
-                    'error': 'No user id in JWT'
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Combine all the logs into one log line
-
             logger.info(f"=== TICKET ORDERING VALIDATION ===")
             logger.info(f"Current time: {timezone.now()}")
             logger.info(f"User ID: {user_id}")
@@ -388,8 +380,15 @@ class GetNextTicketView(APIView):
             logger.info(f"UNASSIGNED TICKET FOUND: ID {unassigned_ticket.id}")
             logger.info(f"Ticket created at: {unassigned_ticket.created_at}")
             
+            # Convert user_id to UUID before assignment
+            from uuid import UUID
+            if isinstance(user_id, str):
+                user_uuid = UUID(user_id)
+            else:
+                user_uuid = user_id
+            
             # Try to assign the ticket to the user
-            unassigned_ticket.assigned_to = user_id
+            unassigned_ticket.assigned_to = user_uuid
             unassigned_ticket.cse_name = user_email
             unassigned_ticket.save()
             return unassigned_ticket
@@ -398,8 +397,15 @@ class GetNextTicketView(APIView):
         logger.info(f"5 - Looking for snoozed tickets for user: {user_id}")
         logger.info(f"5 - Current time: {current_time}")
         
+        # Convert user_id to UUID for consistent querying
+        from uuid import UUID
+        if isinstance(user_id, str):
+            user_uuid = UUID(user_id)
+        else:
+            user_uuid = user_id
+            
         snoozed_tickets = SupportTicket.objects.filter(
-            assigned_to=user_id,
+            assigned_to=user_uuid,
             resolution_status__isnull=True,
             snooze_until__isnull=False,
             snooze_until__lte=current_time
