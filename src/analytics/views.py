@@ -566,7 +566,7 @@ class GetTicketStatusView(APIView):
     API endpoint to get ticket status statistics for the current user.
     Returns various ticket counts including resolved today, pending, WIP, etc.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
         try:
@@ -591,6 +591,7 @@ class GetTicketStatusView(APIView):
             today = timezone.now().date()
             start_of_day = timezone.make_aware(datetime.combine(today, time.min))
             end_of_day = timezone.make_aware(datetime.combine(today, time.max))
+
 
             # ---- Single aggregated query for all scalar counts ----
             agg = SupportTicket.objects.aggregate(
@@ -632,7 +633,7 @@ class GetTicketStatusView(APIView):
                 .annotate(count=Count("id"))
                 .order_by("-count")
             )
-
+            
             # Prepare response
             ticket_stats = {
                 "resolvedByYouToday": agg["resolved_today"],
