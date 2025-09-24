@@ -561,104 +561,107 @@ class SupportTicketFilterOptionsView(APIView):
             "poster_statuses": poster_statuses,
         }, status=status.HTTP_200_OK)
 
-
 class GetTicketStatusView(APIView):
     """
     API endpoint to get ticket status statistics for the current user.
     Returns various ticket counts including resolved today, pending, WIP, etc.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
         try:
             # Get current user info
             user = request.user
-            user_email = getattr(user, 'email', '')
-            user_supabase_uid = getattr(user, 'supabase_uid', None)
-            
-            logger.info(f"User supabase_uid: {user_supabase_uid}")
-            
+            user_email = getattr(user, "email", "")
+            user_supabase_uid = getattr(user, "supabase_uid", None)
+
+            logger.info("GetTicketStatusView called", extra={
+                "event": "get_ticket_status_start",
+                "user_email": user_email,
+                "user_supabase_uid": user_supabase_uid,
+            })
+
             if not user_supabase_uid:
-                return Response({
-                    "error": "User supabase_uid not found"
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Get today's date range (start and end of day)
+                return Response(
+                    {"error": "User supabase_uid not found"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Today's date range (start and end of local day)
             today = timezone.now().date()
             start_of_day = timezone.make_aware(datetime.combine(today, time.min))
             end_of_day = timezone.make_aware(datetime.combine(today, time.max))
-            
-            # 1. Resolved By You Today - For the current CSE
-            # Use assigned_to field with supabase_uid
-            resolved_today_count = SupportTicket.objects.filter(
-                assigned_to=user_supabase_uid,
-                resolution_status='Resolved',
-                completed_at__gte=start_of_day,
-                completed_at__lte=end_of_day
-            ).count()
-            
-            # 2. Total Pending Tickets (Overall. Not specific to this CSE)
-            total_pending_count = SupportTicket.objects.filter(
-                resolution_status__isnull=True
-            ).count()
-            
-            # 2.5. Pending Tickets Breakdown by Poster
-            # First get distinct poster values for pending tickets
-            distinct_posters = SupportTicket.objects.filter(
-                resolution_status__isnull=True,
-                poster__isnull=False
-            ).values_list('poster', flat=True).distinct()
 
-            # Then count for each poster
-            pending_by_poster_array = []
-            for poster in distinct_posters:
-                count = SupportTicket.objects.filter(
-                    resolution_status__isnull=True,
-                    poster=poster
-                ).count()
-                pending_by_poster_array.append({"poster": poster, "count": count})
 
-            # Sort by count (descending)
-            pending_by_poster_array.sort(key=lambda x: x['count'], reverse=True)
-            
-            # 2.6. Total Tickets (All tickets in the system)
-            total_tickets_count = SupportTicket.objects.count()
-            
-            # 3. WIP tickets (For this CSE) - Not filtered by today
-            wip_tickets_count = SupportTicket.objects.filter(
-                assigned_to=user_supabase_uid,
-                resolution_status='WIP'
-            ).count()
-            
-            # 4. Can't Resolve (Today) (For this CSE)
-            cant_resolve_today_count = SupportTicket.objects.filter(
-                assigned_to=user_supabase_uid,
-                resolution_status="Can't Resolve",
-                completed_at__gte=start_of_day,
-                completed_at__lte=end_of_day
-            ).count()
+            # ---- Single aggregated query for all scalar counts ----
+            agg = SupportTicket.objects.aggregate(
+                resolved_today=Count(
+                    "id",
+                    filter=Q(
+                        assigned_to=user_supabase_uid,
+                        resolution_status="Resolved",
+                        completed_at__gte=start_of_day,
+                        completed_at__lte=end_of_day,
+                    ),
+                ),
+                total_pending=Count("id", filter=Q(resolution_status__isnull=True)),
+                total_tickets=Count("id"),
+                wip=Count(
+                    "id",
+                    filter=Q(
+                        assigned_to=user_supabase_uid,
+                        resolution_status="WIP",
+                    ),
+                ),
+                cant_resolve_today=Count(
+                    "id",
+                    filter=Q(
+                        assigned_to=user_supabase_uid,
+                        resolution_status="Can't Resolve",
+                        completed_at__gte=start_of_day,
+                        completed_at__lte=end_of_day,
+                    ),
+                ),
+            )
+
+            # ---- One grouped query for the poster breakdown (no N+1) ----
+            pending_by_poster_array = list(
+                SupportTicket.objects.filter(
+                    resolution_status__isnull=True, poster__isnull=False
+                )
+                .values("poster")
+                .annotate(count=Count("id"))
+                .order_by("-count")
+            )
             
             # Prepare response
             ticket_stats = {
-                "resolvedByYouToday": resolved_today_count,
-                "totalPendingTickets": total_pending_count,
+                "resolvedByYouToday": agg["resolved_today"],
+                "totalPendingTickets": agg["total_pending"],
                 "pendingByPoster": pending_by_poster_array,
-                "totalTickets": total_tickets_count,
-                "wipTickets": wip_tickets_count,
-                "cantResolveToday": cant_resolve_today_count
+                "totalTickets": agg["total_tickets"],
+                "wipTickets": agg["wip"],
+                "cantResolveToday": agg["cant_resolve_today"],
             }
-            
-            return Response({
-                "success": True,
-                "ticketStats": ticket_stats,
-                "dateRange": {
-                    "startOfDay": start_of_day.isoformat(),
-                    "endOfDay": end_of_day.isoformat()
-                }
-            }, status=status.HTTP_200_OK)
-            
+
+            return Response(
+                {
+                    "success": True,
+                    "ticketStats": ticket_stats,
+                    "dateRange": {
+                        "startOfDay": start_of_day.isoformat(),
+                        "endOfDay": end_of_day.isoformat(),
+                    },
+                },
+                status=status.HTTP_200_OK,
+            )
+
         except Exception as error:
-            logger.error('Error in get-ticket-status function: %s', error)
-            return Response({
-                "error": "Internal server error"
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.error("Error in get-ticket-status", exc_info=True, extra={
+                "event": "get_ticket_status_error",
+                "error": str(error),
+            })
+            return Response(
+                {"error": "Internal server error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
