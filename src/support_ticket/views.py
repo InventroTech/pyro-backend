@@ -18,7 +18,7 @@ import os
 
 from .models import SupportTicketDump
 from analytics.models import SupportTicket
-from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer
+from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer
 from .services import MixpanelService, TicketTimeService
 
 logger = logging.getLogger(__name__)
@@ -488,6 +488,91 @@ class SupportTicketUpdateView(APIView):
             
         except Exception as error:
             logger.error(f'Error in support ticket update: {error}')
+            response = Response({
+                'error': 'Internal server error'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            response['Access-Control-Allow-Origin'] = '*'
+            return response
+
+#
+class TakeBreakView(APIView):
+    """
+    Django equivalent of the Supabase take-break edge function.
+    Unassigns a ticket from the current user, unless the ticket is in WIP status.
+    """
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated]
+
+    def options(self, request):
+        """Handle CORS preflight requests"""
+        response = Response('ok', status=status.HTTP_200_OK)
+        response['Access-Control-Allow-Origin'] = '*'
+        response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        response['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        return response
+
+    def post(self, request):
+        """Main take-break handler - exactly like edge function"""
+        try:
+            # Get user from authentication middleware
+            user = request.user
+            user_id = user.supabase_uid
+            user_email = user.email
+            
+            if not user_id:
+                return Response({
+                    'error': 'No user id in JWT'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Validate request data
+            serializer = TakeBreakSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({
+                    'error': 'Invalid request data',
+                    'details': serializer.errors
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            validated_data = serializer.validated_data
+            ticket_id = validated_data['ticketId']
+            resolution_status_payload = validated_data.get('resolutionStatus')
+
+            # Get the ticket to update
+            try:
+                ticket = SupportTicket.objects.get(id=ticket_id)
+            except SupportTicket.DoesNotExist:
+                return Response({
+                    'error': 'Ticket not found'
+                }, status=status.HTTP_404_NOT_FOUND)
+
+            # Only unassign if the ticket is not in WIP status
+            should_unassign = True
+            message = "Ticket unassigned. Taking a break."
+            
+            # If the current ticket's resolution status is 'WIP' or the payload sends 'WIP', we do not unassign.
+            if ticket.resolution_status == "WIP" or resolution_status_payload == "WIP":
+                should_unassign = False
+                message = "Ticket is in progress. Taking a break without unassigning."
+
+            if should_unassign:
+                # Unassign the ticket
+                ticket.assigned_to = None
+                ticket.cse_name = None
+                ticket.save()
+            
+            response_data = {
+                'success': True,
+                'message': message,
+                'ticketUnassigned': should_unassign,
+                'userId': user_id,
+                'userEmail': user_email
+            }
+
+            response = Response(response_data, status=status.HTTP_200_OK)
+            response['Access-Control-Allow-Origin'] = '*'
+            return response
+
+        except Exception as error:
+            logger.error(f'Error in take-break function: {error}')
             response = Response({
                 'error': 'Internal server error'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

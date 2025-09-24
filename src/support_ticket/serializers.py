@@ -179,3 +179,17 @@ class SupportTicketUpdateSerializer(serializers.Serializer):
             raise serializers.ValidationError("At least one field must be provided for update")
         
         return data
+
+#
+class TakeBreakSerializer(serializers.Serializer):
+    """
+    Serializer for the take-break API request
+    """
+    ticketId = serializers.IntegerField(required=True)
+    resolutionStatus = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
+
+    def validate_ticketId(self, value):
+        """Validate that the ticket exists"""
+        if not SupportTicket.objects.filter(id=value).exists():
+            raise serializers.ValidationError("Ticket not found")
+        return value
