@@ -1,4 +1,4 @@
-from analytics.models import SupportTicket
+from support_ticket.models import SupportTicket
 from datetime import datetime, timedelta
 import uuid
 import jwt

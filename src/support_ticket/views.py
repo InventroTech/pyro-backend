@@ -9,15 +9,22 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
-from django.conf import settings
 from django.db import transaction
 from config.supabase_auth import SupabaseJWTAuthentication
 import os
 
 from .models import SupportTicketDump
-from analytics.models import SupportTicket
+from .models import SupportTicket
 from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer
 from .services import MixpanelService, TicketTimeService
+from authz.permissions import IsTenantAuthenticated
+from accounts.models import LegacyUser
+from datetime import timedelta
+from .serializers import (
+    UpdateCallStatusRequestSerializer,
+)
+from .serializers import SupportTicketSerializer
+from .utils import send_to_mixpanel
 
 logger = logging.getLogger(__name__)
 
@@ -418,4 +425,89 @@ class GetNextTicketView(APIView):
         # No tickets available
         logger.info("8 - No tickets available")
         return None
-    
+
+class UpdateCallStatusView(APIView):
+    permission_classes = [IsTenantAuthenticated]
+
+    def post(self, request):
+        try:
+            ser = UpdateCallStatusRequestSerializer(data=request.data)
+            if not ser.is_valid():
+                return Response({"error": ser.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+            payload = ser.validated_data
+            ticket_id = payload["ticketId"]
+            call_status = payload["callStatus"]
+
+            resolution_status = payload.get("resolutionStatus")
+            cse_remarks = payload.get("cseRemarks")
+            resolution_time = payload.get("resolutionTime")
+            other_reasons = payload.get("otherReasons")
+            assigned_to = payload.get("assignedTo")
+
+            with transaction.atomic():
+                ticket = SupportTicket.objects.select_for_update().filter(
+                    id=ticket_id, tenant_id=request.tenant
+                ).first()
+                if not ticket:
+                    return Response({"error": "Ticket not found"}, status=status.HTTP_404_NOT_FOUND)
+
+                now = timezone.now()
+                snooze_until = None
+
+                # Snooze / Close logic
+                if call_status == "Not Connected":
+                    is_first = not ticket.call_attempts
+                    if is_first:
+                        snooze_until = now + timedelta(hours=1)
+                        resolution_status = "Snoozed"
+                    else:
+                        snooze_until = now + timedelta(days=365 * 10)
+                        resolution_status = resolution_status or "Closed"
+
+                # Resolve assignment
+                final_assigned_to = assigned_to or getattr(request.user, "supabase_uid", None)
+                legacy_user = LegacyUser.objects.filter(uid=request.user.supabase_uid).first()
+                final_cse_name = getattr(legacy_user, "name", "")
+
+                # Build update fields
+                update_fields = {
+                    "call_status": call_status,
+                    "call_attempts": (ticket.call_attempts or 0) + 1,
+                    "completed_at": now,
+                    "snooze_until": snooze_until,
+                    "assigned_to_id": str(final_assigned_to) if final_assigned_to else None,
+                    "cse_name": final_cse_name,
+                }
+                if resolution_status is not None:
+                    update_fields["resolution_status"] = resolution_status
+                if cse_remarks is not None:
+                    update_fields["cse_remarks"] = cse_remarks
+                if resolution_time is not None:
+                    update_fields["resolution_time"] = resolution_time
+                if other_reasons is not None:
+                    update_fields["other_reasons"] = other_reasons
+
+                for field, value in update_fields.items():
+                    setattr(ticket, field, value)
+
+                ticket.save()
+
+            # Send Mixpanel event (outside transaction)
+            if call_status == "Not Connected" and ticket.user_id:
+                send_to_mixpanel(
+                    ticket.user_id,
+                    "pyro_not_connected",
+                    {
+                        "support_ticket_id": ticket_id,
+                        "remarks": cse_remarks or "",
+                        "cse_email_id": getattr(request.user, "email", None),
+                        "reasons": other_reasons or [],
+                    },
+                )
+
+            return Response(SupportTicketSerializer(ticket).data, status=200)
+
+        except Exception as e:
+            # log.exception("Error updating call status")
+            return Response({"error": "Internal server error"}, status=500)

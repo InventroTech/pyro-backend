@@ -1,6 +1,7 @@
 from rest_framework import serializers
-from analytics.models import SupportTicket
+from .models import SupportTicket
 from .models import SupportTicketDump
+from analytics.serializers import SupportTicketSerializer
 
 
 class TicketDumpWebhookSerializer(serializers.Serializer):
@@ -149,3 +150,16 @@ class GetNextTicketResponseSerializer(serializers.Serializer):
         if not instance.get('ticket'):
             return {}
         return super().to_representation(instance)
+    
+
+
+class UpdateCallStatusRequestSerializer(serializers.Serializer):
+    ticketId = serializers.IntegerField(required=True)
+    callStatus = serializers.CharField(required=True, allow_blank=False)
+    resolutionStatus = serializers.CharField(required=False, allow_blank=True)
+    cseRemarks = serializers.CharField(required=False, allow_blank=True)
+    resolutionTime = serializers.CharField(required=False, allow_blank=True)
+    otherReasons = serializers.ListField(
+        child=serializers.CharField(), required=False, allow_empty=True
+    )
+    assignedTo = serializers.UUIDField(required=False, allow_null=True)
