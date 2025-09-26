@@ -1,40 +1,21 @@
 import logging
 import numpy as np
-from django.db.models import F, ExpressionWrapper, DurationField, Avg, Count, Q, Func, IntegerField
+import uuid
+from datetime import datetime, time, timedelta
+from django.db.models import F, ExpressionWrapper, DurationField, Avg, Count, Q, Func, IntegerField, Case, When
 from django.db.models.functions import TruncDate
-from django.db import connection
+from django.db import connection, models
+from django.utils import timezone
+from django.contrib.auth import get_user_model
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from .models import SupportTicket
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from datetime import datetime, time
-from django.utils import timezone
-from django.db.models import Count
-import uuid
-from .utils import (
-    extract_date_range_from_request,
-    filter_by_tenant,
-    get_date_range,
-    convert_seconds,
-    convert_timedelta,
-)
-from analytics_ai.executor import execute_safe_sql
-from analytics_ai.formatter import format_results_for_table
-from analytics_ai.llm_query import get_sql_from_llm, clean_llm_sql_output
-from analytics_ai.logging_utils import log_analytics_event
-from analytics_ai.prompt_builder import build_llm_prompt
-from analytics_ai.sql_validator import is_safe_sql
-from analytics_ai.schema_loader import generate_schema_summary
-
-
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
-from analytics.models import AnalyticsRunCore
-from analytics.utils import preview_result
 from rest_framework.generics import ListAPIView
 from rest_framework.exceptions import ValidationError
+from .models import SupportTicket
+from analytics.models import AnalyticsRunCore
+from analytics.utils import preview_result
 from .serializers import SupportTicketSerializer
 from core.pagination import MetaPageNumberPagination
 from .filters import (
@@ -42,11 +23,23 @@ from .filters import (
     POSTER_CHOICES, RESOLUTION_CHOICES,
     SafeSearchFilter, SafeOrderingFilter
 )
-from .utils import tenant_scoped_qs
-from django.db import models
-from django.contrib.auth import get_user_model
+from .utils import (
+    extract_date_range_from_request,
+    filter_by_tenant,
+    get_date_range,
+    convert_seconds,
+    convert_timedelta,
+    tenant_scoped_qs,
+    _distinct_list
+)
 from authz.permissions import IsTenantAuthenticated
-from .utils import _distinct_list
+from analytics_ai.executor import execute_safe_sql
+from analytics_ai.formatter import format_results_for_table
+from analytics_ai.llm_query import get_sql_from_llm, clean_llm_sql_output
+from analytics_ai.logging_utils import log_analytics_event
+from analytics_ai.prompt_builder import build_llm_prompt
+from analytics_ai.sql_validator import is_safe_sql
+from analytics_ai.schema_loader import generate_schema_summary
 
 
 
@@ -672,35 +665,35 @@ class GetCseStatsView(APIView):
     Returns CSE statistics for tickets under a specific tenant slug.
     Uses X-Tenant-Slug header to identify the tenant and returns stats for all CSEs under that tenant.
     
+    Authentication: Requires user authentication and valid tenant membership.
+    Uses IsTenantAuthenticated which validates both user auth and tenant access.
+    
     Response format:
-    - List of CSEs with their ticket statistics (resolved, not-connected, not-resolved, call-later)
+    - Array of objects with x/y structure:
+      - x: CSE name
+      - y1: resolved tickets (connected)
+      - y2: not connected tickets
+      - y3: not resolved tickets  
+      - y4: call later tickets
+      - y5: work in progress tickets
+      - total: total tickets handled
     
     Headers:
     - X-Tenant-Slug: Required tenant slug to identify which tenant's CSEs to analyze
+    - Authorization: Required bearer token for user authentication
     
     Query params:
     - start: Start date (YYYY-MM-DD) - defaults to 7 days ago  
     - end: End date (YYYY-MM-DD) - defaults to today
     - cse_name: Filter by specific CSE name (optional)
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
-        from datetime import datetime, timedelta
-        from django.db.models import Count, Case, When, IntegerField, Q
-        from django.db.models.functions import TruncDate
-        from django.db import models
-        
-        # Check if tenant is resolved from X-Tenant-Slug header
-        if not hasattr(request, 'tenant') or not request.tenant:
-            return Response(
-                {"error": "X-Tenant-Slug header is required"}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
+        # Tenant is automatically validated by IsTenantAuthenticated
+        # No need to manually check - if we reach here, tenant exists
         tenant = request.tenant
-        
-        # Parse date parameters
+    
         end_date = datetime.now().date()
         start_date = end_date - timedelta(days=7)  # Default to last 7 days
         
@@ -808,28 +801,18 @@ class GetCseStatsView(APIView):
             .order_by('cse_name')
         )
         
-        # Format response data - simple list of CSEs with their stats
-        cse_list = []
+        # Format response data in x/y format
+        # x = CSE name, y1 = resolved, y2 = not_connected, y3 = not_resolved, y4 = call_later, y5 = wip
+        cse_data = []
         for stat in stats:
-            cse_list.append({
-                'cse_name': stat['cse_name'],
-                'resolved': stat['resolved'],
-                'not_connected': stat['not_connected'],
-                'not_resolved': stat['not_resolved'],
-                'call_later': stat['call_later'],
-                'wip': stat['wip'],
-                'total_tickets': stat['total_tickets']
+            cse_data.append({
+                'x': stat['cse_name'],
+                'y1': stat['resolved'],           # Connected/Resolved tickets
+                'y2': stat['not_connected'],      # Not connected tickets  
+                'y3': stat['not_resolved'],       # Not resolved tickets
+                'y4': stat['call_later'],         # Call later tickets
+                'y5': stat['wip'],                # Work in progress tickets
+                'total': stat['total_tickets']    # Total tickets (for reference)
             })
-
-            
         
-        return Response({
-            'tenant_slug': tenant.slug,
-            'tenant_name': tenant.name,
-            'date_range': {
-                'start_date': start_date.strftime('%Y-%m-%d'),
-                'end_date': end_date.strftime('%Y-%m-%d')
-            },
-            'cse_stats': cse_list,
-            'total_cses': len(cse_list)
-        }, status=status.HTTP_200_OK)
+        return Response(cse_data, status=status.HTTP_200_OK)
