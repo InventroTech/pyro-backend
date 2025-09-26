@@ -7,22 +7,21 @@ from django.utils.decorators import method_decorator
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from uuid import UUID
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
 from django.db import transaction
 from config.supabase_auth import SupabaseJWTAuthentication
+from authz.permissions import IsTenantAuthenticated
 import os
 
 from .models import SupportTicketDump
-from .models import SupportTicket
-from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer
+from analytics.models import SupportTicket
+from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer,UpdateCallStatusRequestSerializer
 from .services import MixpanelService, TicketTimeService
 from authz.permissions import IsTenantAuthenticated
 from accounts.models import LegacyUser
 from datetime import timedelta
-from .serializers import (
-    UpdateCallStatusRequestSerializer,
-)
 from .serializers import SupportTicketSerializer
 from .utils import send_to_mixpanel
 
@@ -325,33 +324,21 @@ class GetNextTicketView(APIView):
     def get(self, request):
         """Main get-next-ticket handler - exactly like edge function"""
         try:
-            # Get JWT claims from the authentication middleware
-            if not hasattr(request, 'jwt_claims'):
-                return Response({
-                    'error': 'Missing or invalid auth header'
-                }, status=status.HTTP_401_UNAUTHORIZED)
-            
-            jwt_claims = request.jwt_claims
-            user_id = jwt_claims.get('sub')
-            user_email = jwt_claims.get('email')
-            
-            if not user_id:
-                return Response({
-                    'error': 'No user id in JWT'
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Combine all the logs into one log line
+            # Get user from authentication middleware (IsTenantAuthenticated already handles auth)
+            user = request.user
+            user_id = user.supabase_uid
+            user_email = user.email
 
             logger.info(f"=== TICKET ORDERING VALIDATION ===")
             logger.info(f"Current time: {timezone.now()}")
             logger.info(f"User ID: {user_id}")
             logger.info(f"User Email: {user_email}")
-            
+
             # Get the next ticket
             with transaction.atomic():
-                next_ticket = self._get_and_assign_ticket(user_id, user_email)
-                
-            
+                next_ticket = self._get_and_assign_ticket(user, user_email)
+
+
             # If no tickets available, return empty object
             if not next_ticket:
                 response = Response({}, status=status.HTTP_200_OK)
@@ -373,16 +360,18 @@ class GetNextTicketView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             response['Access-Control-Allow-Origin'] = '*'
             return response
-    
-    def _get_and_assign_ticket(self, user_id, user_email):
+
+    def _get_and_assign_ticket(self, user, user_email):
         """
         Simplified logic to get and assign a ticket to the user.
         1. First get the newest unassigned ticket (LIFO - Last In, First Out)
         2. Then check for snoozed tickets for this user
         """
         current_time = timezone.now()
-        
-        
+
+
+        logger.info("1 - Searching for unassigned tickets with row locking")
+
         unassigned_ticket = SupportTicket.objects.select_for_update(
             skip_locked=True,
             of=("self",)
@@ -394,19 +383,22 @@ class GetNextTicketView(APIView):
         if unassigned_ticket:
             logger.info(f"UNASSIGNED TICKET FOUND: ID {unassigned_ticket.id}")
             logger.info(f"Ticket created at: {unassigned_ticket.created_at}")
-            
-            # Try to assign the ticket to the user
-            unassigned_ticket.assigned_to = user_id
+
+            # Assign the ticket to the user (assigned_to is UUIDField, so convert supabase_uid)
+            unassigned_ticket.assigned_to = UUID(user.supabase_uid)
             unassigned_ticket.cse_name = user_email
             unassigned_ticket.save()
+            logger.info("3 - UNASSIGNED TICKET ASSIGNED SUCCESSFULLY")
             return unassigned_ticket
-        
+        else:
+            logger.info("2 - NO UNASSIGNED TICKETS FOUND")
+
         # 2. Look for snoozed tickets for this user as fallback
-        logger.info(f"5 - Looking for snoozed tickets for user: {user_id}")
+        logger.info(f"5 - Looking for snoozed tickets for user: {user.supabase_uid}")
         logger.info(f"5 - Current time: {current_time}")
-        
+
         snoozed_tickets = SupportTicket.objects.filter(
-            assigned_to=user_id,
+            assigned_to=UUID(user.supabase_uid),
             resolution_status__isnull=True,
             snooze_until__isnull=False,
             snooze_until__lte=current_time
@@ -421,7 +413,9 @@ class GetNextTicketView(APIView):
             logger.info(f"Snooze until: {ticket.snooze_until}")
             logger.info(f"Created at: {ticket.created_at}")
             return ticket
-        
+        else:
+            logger.info("6 - NO SNOOZED TICKETS FOUND")
+
         # No tickets available
         logger.info("8 - No tickets available")
         return None
@@ -511,3 +505,165 @@ class UpdateCallStatusView(APIView):
         except Exception as e:
             # log.exception("Error updating call status")
             return Response({"error": "Internal server error"}, status=500)
+
+class SupportTicketUpdateView(APIView):
+    """
+    API endpoint for admins to update support tickets, specifically for assigning tickets to CSEs
+    """
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated]
+    
+    def patch(self, request):
+        """Update support ticket fields - primarily for admin assignment"""
+        try:
+            # Get user from authentication middleware (IsTenantAuthenticated already handles auth)
+            user = request.user
+            user_id = user.supabase_uid
+            user_email = user.email
+            
+            logger.info(f'Admin updating ticket - Admin ID: {user_id}, Admin Email: {user_email}')
+            
+            # Validate request data
+            serializer = SupportTicketUpdateSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({
+                    'error': 'Invalid request data',
+                    'details': serializer.errors
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            validated_data = serializer.validated_data
+            ticket_id = validated_data['ticket_id']
+            
+            # Get the ticket to update
+            try:
+                ticket = SupportTicket.objects.get(id=ticket_id)
+            except SupportTicket.DoesNotExist:
+                logger.error(f'Ticket not found: {ticket_id}')
+                return Response({
+                    'error': 'Ticket not found'
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            # Apply memory constraint: don't update assigned_to and tenant_id in staging
+            # Note: Based on memory, staging environment has fixed assigned_to and tenant_id
+            # But this endpoint is for admin assignment, so we'll allow it for production
+            
+            # Prepare update data (exclude ticket_id)
+            update_data = {k: v for k, v in validated_data.items() if k != 'ticket_id'}
+            
+            # Update the ticket fields in atomic transaction
+            with transaction.atomic():
+                for field, value in update_data.items():
+                    setattr(ticket, field, value)
+                
+                # Save the ticket
+                ticket.save()
+            
+            logger.info(f'Ticket updated successfully: {ticket_id} by admin: {user_email}')
+            
+            # Serialize the updated ticket for response
+            ticket_serializer = SupportTicketResponseSerializer(ticket)
+            
+            response_data = {
+                'success': True,
+                'message': 'Ticket updated successfully',
+                'updated_ticket': ticket_serializer.data,
+                'updated_by': user_email,
+                'updated_fields': list(update_data.keys())
+            }
+            
+            response = Response(response_data, status=status.HTTP_200_OK)
+            response['Access-Control-Allow-Origin'] = '*'
+            return response
+            
+        except Exception as error:
+            logger.error(f'Error in support ticket update: {error}')
+            response = Response({
+                'error': 'Internal server error'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            response['Access-Control-Allow-Origin'] = '*'
+            return response
+
+#
+class TakeBreakView(APIView):
+    """
+    Django equivalent of the Supabase take-break edge function.
+    Unassigns a ticket from the current user, unless the ticket is in WIP status.
+    """
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated]
+
+    def options(self, request):
+        """Handle CORS preflight requests"""
+        response = Response('ok', status=status.HTTP_200_OK)
+        response['Access-Control-Allow-Origin'] = '*'
+        response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        response['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        return response
+
+    def post(self, request):
+        """Main take-break handler - exactly like edge function"""
+        try:
+            # Get user from authentication middleware
+            user = request.user
+            user_id = user.supabase_uid
+            user_email = user.email
+            
+            if not user_id:
+                return Response({
+                    'error': 'No user id in JWT'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Validate request data
+            serializer = TakeBreakSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response({
+                    'error': 'Invalid request data',
+                    'details': serializer.errors
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            validated_data = serializer.validated_data
+            ticket_id = validated_data['ticketId']
+            resolution_status_payload = validated_data.get('resolutionStatus')
+
+            # Get the ticket to update
+            try:
+                ticket = SupportTicket.objects.get(id=ticket_id)
+            except SupportTicket.DoesNotExist:
+                return Response({
+                    'error': 'Ticket not found'
+                }, status=status.HTTP_404_NOT_FOUND)
+
+            # Only unassign if the ticket is not in WIP status
+            should_unassign = True
+            message = "Ticket unassigned. Taking a break."
+            
+            # If the current ticket's resolution status is 'WIP' or the payload sends 'WIP', we do not unassign.
+            if ticket.resolution_status == "WIP" or resolution_status_payload == "WIP":
+                should_unassign = False
+                message = "Ticket is in progress. Taking a break without unassigning."
+
+            if should_unassign:
+                # Unassign the ticket
+                ticket.assigned_to = None
+                ticket.cse_name = None
+                ticket.save()
+            
+            response_data = {
+                'success': True,
+                'message': message,
+                'ticketUnassigned': should_unassign,
+                'userId': user_id,
+                'userEmail': user_email
+            }
+
+            response = Response(response_data, status=status.HTTP_200_OK)
+            response['Access-Control-Allow-Origin'] = '*'
+            return response
+
+        except Exception as error:
+            logger.error(f'Error in take-break function: {error}')
+            response = Response({
+                'error': 'Internal server error'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            response['Access-Control-Allow-Origin'] = '*'
+            return response

@@ -163,3 +163,47 @@ class UpdateCallStatusRequestSerializer(serializers.Serializer):
         child=serializers.CharField(), required=False, allow_empty=True
     )
     assignedTo = serializers.UUIDField(required=False, allow_null=True)
+
+
+class SupportTicketUpdateSerializer(serializers.Serializer):
+    """
+    Serializer for updating support tickets - specifically for admin assignment
+    """
+    ticket_id = serializers.IntegerField(required=True)
+    assigned_to = serializers.UUIDField(required=False, allow_null=True)
+    resolution_status = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    layout_status = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    cse_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    cse_remarks = serializers.CharField(required=False, allow_blank=True)
+    call_status = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    snooze_until = serializers.DateTimeField(required=False, allow_null=True)
+    
+    def validate_ticket_id(self, value):
+        """Validate that the ticket exists"""
+        if not SupportTicket.objects.filter(id=value).exists():
+            raise serializers.ValidationError("Ticket not found")
+        return value
+    
+    def validate(self, data):
+        """Validate that at least one field is being updated"""
+        ticket_id = data.get('ticket_id')
+        update_fields = {k: v for k, v in data.items() if k != 'ticket_id'}
+        
+        if not update_fields:
+            raise serializers.ValidationError("At least one field must be provided for update")
+        
+        return data
+
+#
+class TakeBreakSerializer(serializers.Serializer):
+    """
+    Serializer for the take-break API request
+    """
+    ticketId = serializers.IntegerField(required=True)
+    resolutionStatus = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
+
+    def validate_ticketId(self, value):
+        """Validate that the ticket exists"""
+        if not SupportTicket.objects.filter(id=value).exists():
+            raise serializers.ValidationError("Ticket not found")
+        return value
