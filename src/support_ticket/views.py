@@ -161,6 +161,7 @@ class SaveAndContinueView(APIView):
             cse_remarks = validated_data.get('cseRemarks')
             resolution_time = validated_data.get('resolutionTime')
             other_reasons = validated_data.get('otherReasons', [])
+            review_requested = validated_data.get('reviewRequested')
             
             logger.info(f'Processing ticket: {ticket_id} with resolution status: {resolution_status}')
             
@@ -217,6 +218,10 @@ class SaveAndContinueView(APIView):
                 'other_reasons': other_reasons
             }
             
+            # Add review_requested if provided
+            if review_requested is not None:
+                update_data['review_requested'] = review_requested
+            
             # Convert user_id string to UUID if needed and update assigned_to
             try:
                 from uuid import UUID
@@ -269,6 +274,23 @@ class SaveAndContinueView(APIView):
                     mixpanel_event_name, 
                     mixpanel_properties
                 )
+                
+                # Send review request event if review was requested
+                if review_requested is True:
+                    logger.info(f'Sending review request event for user_id: {current_ticket.user_id}')
+                    review_properties = {
+                        'support_ticket_id': ticket_id,
+                        'cse_email_id': user_email,
+                        'resolution_status': resolution_status or '',
+                        'review_requested': True
+                    }
+                    
+                    mixpanel_service.send_to_mixpanel_sync(
+                        current_ticket.user_id,
+                        'pyro_review_requested',
+                        review_properties
+                    )
+                    
             elif mixpanel_event_name and not current_ticket.user_id:
                 logger.info(f'No customer user_id found in ticket, skipping Mixpanel event for: {mixpanel_event_name}')
             else:
