@@ -657,11 +657,178 @@ class GetTicketStatusView(APIView):
             )
 
         except Exception as error:
-            logger.error("Error in get-ticket-status", exc_info=True, extra={
-                "event": "get_ticket_status_error",
-                "error": str(error),
-            })
+            logger.error('Error in get-ticket-status function: %s', error)
+            return Response({
+                "error": "Internal server error"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+
+class GetCseStatsView(APIView):
+
+    """
+    Returns CSE statistics for tickets under a specific tenant slug.
+    Uses X-Tenant-Slug header to identify the tenant and returns stats for all CSEs under that tenant.
+    
+    Response format:
+    - List of CSEs with their ticket statistics (resolved, not-connected, not-resolved, call-later)
+    
+    Headers:
+    - X-Tenant-Slug: Required tenant slug to identify which tenant's CSEs to analyze
+    
+    Query params:
+    - start: Start date (YYYY-MM-DD) - defaults to 7 days ago  
+    - end: End date (YYYY-MM-DD) - defaults to today
+    - cse_name: Filter by specific CSE name (optional)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from datetime import datetime, timedelta
+        from django.db.models import Count, Case, When, IntegerField, Q
+        from django.db.models.functions import TruncDate
+        from django.db import models
+        
+        # Check if tenant is resolved from X-Tenant-Slug header
+        if not hasattr(request, 'tenant') or not request.tenant:
             return Response(
-                {"error": "Internal server error"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                {"error": "X-Tenant-Slug header is required"}, 
+                status=status.HTTP_400_BAD_REQUEST
             )
+        
+        tenant = request.tenant
+        
+        # Parse date parameters
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=7)  # Default to last 7 days
+        
+        start_param = request.query_params.get('start', '').strip()
+        end_param = request.query_params.get('end', '').strip()
+        
+        if start_param:
+            try:
+                start_date = datetime.strptime(start_param, "%Y-%m-%d").date()
+            except ValueError:
+                return Response(
+                    {"error": "Invalid start date format. Use YYYY-MM-DD"}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+                
+        if end_param:
+            try:
+                end_date = datetime.strptime(end_param, "%Y-%m-%d").date()
+            except ValueError:
+                return Response(
+                    {"error": "Invalid end date format. Use YYYY-MM-DD"}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Validate date range
+        if start_date > end_date:
+            return Response(
+                {"error": "Start date cannot be after end date"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Base queryset - filter for CSE activity under this tenant
+        qs = SupportTicket.objects.filter(
+            tenant_id=tenant.id,      # Filter by tenant from X-Tenant-Slug
+            cse_name__isnull=False,   # Only tickets assigned to a CSE
+        ).exclude(cse_name='')
+        
+        # Apply date filter based on CSE activity date
+        # For resolved/not-resolved tickets, use completed_at (when CSE completed work)
+        # For other tickets, use dumped_at (when ticket was assigned/created)
+        date_filter = Q()
+        
+        # Tickets completed by CSE in date range
+        date_filter |= Q(
+            completed_at__isnull=False,
+            completed_at__date__gte=start_date,
+            completed_at__date__lte=end_date
+        )
+        
+        # Active/pending tickets assigned to CSE (use dumped_at for assignment date)
+        date_filter |= Q(
+            completed_at__isnull=True,
+            dumped_at__isnull=False,
+            dumped_at__date__gte=start_date,
+            dumped_at__date__lte=end_date
+        )
+        
+        qs = qs.filter(date_filter)
+        
+        # Apply optional CSE name filter
+        cse_name_filter = request.query_params.get('cse_name', '').strip()
+        if cse_name_filter:
+            qs = qs.filter(cse_name__icontains=cse_name_filter)
+        
+        # Aggregate data by CSE (no daily breakdown, just totals per CSE)
+        stats = (
+            qs.values('cse_name')
+            .annotate(
+                resolved=Count(
+                    Case(
+                        When(resolution_status__iexact='resolved', then=1),
+                        output_field=IntegerField()
+                    )
+                ),
+                not_resolved=Count(
+                    Case(
+                        When(resolution_status__iexact="can't resolve", then=1),
+                        output_field=IntegerField()
+                    )
+                ),
+                wip=Count(
+                    Case(
+                        When(resolution_status__iexact='wip', then=1),
+                        output_field=IntegerField()
+                    )
+                ),
+                not_connected=Count(
+                    Case(
+                        When(call_status__icontains='not connected', then=1),
+                        When(call_status__icontains='no answer', then=1),
+                        When(call_status__icontains='unreachable', then=1),
+                        output_field=IntegerField()
+                    )
+                ),
+                call_later=Count(
+                    Case(
+                        When(call_status__icontains='call later', then=1),
+                        When(call_status__icontains='callback', then=1),
+                        When(snooze_until__isnull=False, then=1),
+                        output_field=IntegerField()
+                    )
+                ),
+                total_tickets=Count('id')
+            )
+            .order_by('cse_name')
+        )
+        
+        # Format response data - simple list of CSEs with their stats
+        cse_list = []
+        for stat in stats:
+            cse_list.append({
+                'cse_name': stat['cse_name'],
+                'resolved': stat['resolved'],
+                'not_connected': stat['not_connected'],
+                'not_resolved': stat['not_resolved'],
+                'call_later': stat['call_later'],
+                'wip': stat['wip'],
+                'total_tickets': stat['total_tickets']
+            })
+
+            
+        
+        return Response({
+            'tenant_slug': tenant.slug,
+            'tenant_name': tenant.name,
+            'date_range': {
+                'start_date': start_date.strftime('%Y-%m-%d'),
+                'end_date': end_date.strftime('%Y-%m-%d')
+            },
+            'cse_stats': cse_list,
+            'total_cses': len(cse_list)
+        }, status=status.HTTP_200_OK)

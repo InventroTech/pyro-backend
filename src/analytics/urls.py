@@ -10,12 +10,18 @@ from .views import (
     CSEAverageResolutionTimeView,
     SupportTicketListView,
     SupportTicketFilterOptionsView,
-    GetTicketStatusView
+    GetTicketStatusView,
+    GetCseStatsView
 
 )
 app_name = "analytics"
 
 urlpatterns = [
+    path(
+        'get-cse-stats/',
+        GetCseStatsView.as_view(),
+        name="get-cse-stats"
+    ),
     path(
         'ticket-close-time/',
         TicketClosureTimeAnalytics.as_view(),

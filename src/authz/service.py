@@ -1,12 +1,17 @@
 from typing import Dict
 from datetime import timedelta
 from django.utils import timezone
-from django.db import transaction
 from authz.models import (
     TenantMembership, RolePermission, Permission,
     GroupMembership, GroupPermission, GroupRole, UserPermission
 )
 from accounts.models import LegacyUser, LegacyRole
+
+import uuid
+from django.db import transaction, IntegrityError
+from django.db.models import Q
+from authz.models import Role as AuthzRole
+from accounts.models import LegacyRole
 
 _CACHE: Dict[str, dict] = {}
 _TTL = timedelta(minutes=10)
@@ -185,4 +190,97 @@ def link_user_uid_and_activate(email: str, uid: str) -> dict:
             'success': False,
             'error': str(e),
             'message': f'Failed to link user: {str(e)}'
+        }
+
+
+
+def create_or_sync_role(tenant, key: str, name: str, description: str = ""):
+    """
+    Idempotent, tenant-scoped role creation.
+    - Case-insensitive uniqueness on key.
+    - Creates in authz_role and legacy roles with the SAME UUID.
+    - If already exists, returns the existing record and ensures legacy mirror exists.
+    Returns: { created: bool, role: {...} }
+    """
+    norm_key = (key or "").strip()
+    norm_name = (name or "").strip()
+    norm_desc = (description or "").strip() or None
+
+    # quick path: if exists (any case), return existing and sync legacy
+    existing = AuthzRole.objects.filter(tenant=tenant, key__iexact=norm_key).first()
+    if existing:
+        with transaction.atomic():
+            LegacyRole.objects.get_or_create(
+                id=existing.id,
+                defaults={
+                    "name": norm_name or existing.name,
+                    "description": norm_desc,
+                    "tenant": tenant,
+                },
+            )
+        return {
+            "created": False,
+            "role": {
+                "id": str(existing.id),
+                "tenant_id": str(tenant.id),
+                "key": existing.key,
+                "name": existing.name,
+                "description": existing.description,
+                "legacy_created": True,   # or “ensured”
+                "authz_created": False,
+            },
+        }
+
+    # create new in a race-safe way
+    new_id = uuid.uuid4()
+    try:
+        with transaction.atomic():
+            authz_role = AuthzRole.objects.create(
+                id=new_id,
+                tenant=tenant,
+                key=norm_key,
+                name=norm_name,
+                description=norm_desc,
+            )
+            LegacyRole.objects.create(
+                id=new_id,
+                name=norm_name,
+                description=norm_desc,
+                tenant=tenant,
+            )
+        return {
+            "created": True,
+            "role": {
+                "id": str(new_id),
+                "tenant_id": str(tenant.id),
+                "key": authz_role.key,
+                "name": authz_role.name,
+                "description": authz_role.description,
+                "legacy_created": True,
+                "authz_created": True,
+            },
+        }
+    except IntegrityError:
+        # Another request created it concurrently. Re-fetch and sync legacy.
+        with transaction.atomic():
+            winner = AuthzRole.objects.get(tenant=tenant, key__iexact=norm_key)
+            LegacyRole.objects.get_or_create(
+                id=winner.id,
+                defaults={
+                    "name": norm_name or winner.name,
+                    "description": norm_desc,
+                    "tenant": tenant,
+                },
+            )
+        return {
+            "created": False,
+            "role": {
+                "id": str(winner.id),
+                "tenant_id": str(tenant.id),
+                "key": winner.key,
+                "name": winner.name,
+                "description": winner.description,
+                "legacy_created": True,
+                "authz_created": False,
+            },
         }
