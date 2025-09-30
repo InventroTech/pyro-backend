@@ -129,22 +129,12 @@ class SaveAndContinueView(APIView):
     def post(self, request):
         """Main save-and-continue handler - exactly like edge function"""
         try:
-            # Get JWT claims from the authentication middleware
-            if not hasattr(request, 'jwt_claims'):
-                return Response({
-                    'error': 'Missing or invalid auth header'
-                }, status=status.HTTP_401_UNAUTHORIZED)
-            
-            jwt_claims = request.jwt_claims
-            user_id = jwt_claims.get('sub')
-            user_email = jwt_claims.get('email')
+            # Get user from authentication middleware (IsTenantAuthenticated already handles auth)
+            user = request.user
+            user_id = user.supabase_uid
+            user_email = user.email
             
             logger.info(f'CSE processing request - CSE ID: {user_id}, CSE Email: {user_email}')
-            
-            if not user_id:
-                return Response({
-                    'error': 'No user id in JWT'
-                }, status=status.HTTP_400_BAD_REQUEST)
             
             # Validate request data
             serializer = SaveAndContinueSerializer(data=request.data)
@@ -276,13 +266,13 @@ class SaveAndContinueView(APIView):
                 )
                 
                 # Send review request event if review was requested
-                if review_requested is True:
+                if review_requested is not None:
                     logger.info(f'Sending review request event for user_id: {current_ticket.user_id}')
                     review_properties = {
                         'support_ticket_id': ticket_id,
                         'cse_email_id': user_email,
                         'resolution_status': resolution_status or '',
-                        'review_requested': True
+                        'review_requested': update_data['review_requested']
                     }
                     
                     mixpanel_service.send_to_mixpanel_sync(
