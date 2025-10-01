@@ -221,15 +221,8 @@ class SaveAndContinueView(APIView):
             # Add review_requested if provided
             if review_requested is not None:
                 update_data['review_requested'] = review_requested
-            # Convert user_id string to UUID if needed and update assigned_to
-            try:
-                from uuid import UUID
-                if isinstance(user_id, str):
-                    update_data['assigned_to'] = UUID(user_id)
-                else:
-                    update_data['assigned_to'] = user_id
-            except ValueError:
-                logger.warning(f'Invalid UUID format for user_id: {user_id}, skipping assigned_to update')
+                update_data['assigned_to_id'] = UUID(user_id)
+
                 # Don't update assigned_to if user_id is not a valid UUID
             
             for field, value in update_data.items():
