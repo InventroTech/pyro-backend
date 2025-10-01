@@ -16,7 +16,7 @@ from authz.permissions import IsTenantAuthenticated
 import os
 
 from .models import SupportTicketDump
-from analytics.models import SupportTicket
+from .models import SupportTicket
 from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer,UpdateCallStatusRequestSerializer
 from .services import MixpanelService, TicketTimeService
 from authz.permissions import IsTenantAuthenticated

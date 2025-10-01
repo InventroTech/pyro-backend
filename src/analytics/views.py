@@ -10,7 +10,7 @@ from support_ticket.models import SupportTicket
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from datetime import datetime, time
 from django.utils import timezone
-from django.db.models import Count
+from django.db.models import Count, Sum, Avg
 import uuid
 from .utils import (
     extract_date_range_from_request,
