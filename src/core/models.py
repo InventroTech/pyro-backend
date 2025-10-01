@@ -18,20 +18,20 @@ class TimeStampedModel(models.Model):
 
 class Tenant(models.Model):
     """
-    Tenant Model.
+    Unmanaged mirror of public.tenants.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.TextField()
+    created_at = models.DateTimeField(default=timezone.now)
     slug = models.CharField(
-        max_length=255,
+        max_length=64,    
         unique=True,
         validators=[RegexValidator(regex=r'^[a-z0-9]+(-[a-z0-9]+)*$')],
     )
-    created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
-        db_table = 'tenants'
-        managed = False 
+        db_table = "tenants"   
+        managed = False
 
     def __str__(self):
         return f"{self.name} ({self.slug})"

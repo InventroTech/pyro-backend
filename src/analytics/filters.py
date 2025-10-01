@@ -29,7 +29,7 @@ POSTER_CHOICES = {
     "auto_pay_not_set_up","premium_expired","autopay_setup_no_layout",
     "in_grace_period","in_trial_extension"
 }
-RESOLUTION_CHOICES = {"WIP","Resolved","Can't Resolve"}
+RESOLUTION_CHOICES = {"WIP","Resolved","Can't Resolve", "Closed", "Snoozed"}
 
 def build_nullable_in_q(field_name, values, allowed):
     """Builds Q for field IN values plus NULL if 'null' present."""

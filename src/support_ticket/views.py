@@ -10,16 +10,20 @@ from rest_framework import status
 from uuid import UUID
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
-from django.conf import settings
 from django.db import transaction
 from config.supabase_auth import SupabaseJWTAuthentication
 from authz.permissions import IsTenantAuthenticated
 import os
 
 from .models import SupportTicketDump
-from analytics.models import SupportTicket
-from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer
+from .models import SupportTicket
+from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer,UpdateCallStatusRequestSerializer
 from .services import MixpanelService, TicketTimeService
+from authz.permissions import IsTenantAuthenticated
+from accounts.models import LegacyUser
+from datetime import timedelta
+from .serializers import SupportTicketSerializer
+from .utils import send_to_mixpanel
 
 logger = logging.getLogger(__name__)
 
@@ -130,14 +134,9 @@ class SaveAndContinueView(APIView):
         """Main save-and-continue handler - exactly like edge function"""
         try:
             # Get JWT claims from the authentication middleware
-            if not hasattr(request, 'jwt_claims'):
-                return Response({
-                    'error': 'Missing or invalid auth header'
-                }, status=status.HTTP_401_UNAUTHORIZED)
-            
-            jwt_claims = request.jwt_claims
-            user_id = jwt_claims.get('sub')
-            user_email = jwt_claims.get('email')
+            user = request.user
+            user_id = user.supabase_uid
+            user_email = user.email
             
             logger.info(f'CSE processing request - CSE ID: {user_id}, CSE Email: {user_email}')
             
@@ -161,6 +160,7 @@ class SaveAndContinueView(APIView):
             cse_remarks = validated_data.get('cseRemarks')
             resolution_time = validated_data.get('resolutionTime')
             other_reasons = validated_data.get('otherReasons', [])
+            review_requested = validated_data.get('reviewRequested')
             
             logger.info(f'Processing ticket: {ticket_id} with resolution status: {resolution_status}')
             
@@ -217,15 +217,12 @@ class SaveAndContinueView(APIView):
                 'other_reasons': other_reasons
             }
             
-            # Convert user_id string to UUID if needed and update assigned_to
-            try:
-                from uuid import UUID
-                if isinstance(user_id, str):
-                    update_data['assigned_to'] = UUID(user_id)
-                else:
-                    update_data['assigned_to'] = user_id
-            except ValueError:
-                logger.warning(f'Invalid UUID format for user_id: {user_id}, skipping assigned_to update')
+
+            # Add review_requested if provided
+            if review_requested is not None:
+                update_data['review_requested'] = review_requested
+                update_data['assigned_to_id'] = UUID(user_id)
+
                 # Don't update assigned_to if user_id is not a valid UUID
             
             for field, value in update_data.items():
@@ -269,6 +266,22 @@ class SaveAndContinueView(APIView):
                     mixpanel_event_name, 
                     mixpanel_properties
                 )
+
+                # Send review request event if review was requested
+                if review_requested is not None:
+                    logger.info(f'Sending review request event for user_id: {current_ticket.user_id}')
+                    review_properties = {
+                        'support_ticket_id': ticket_id,
+                        'cse_email_id': user_email,
+                        'resolution_status': resolution_status or '',
+                        'review_requested': update_data['review_requested']
+                    }
+
+                    mixpanel_service.send_to_mixpanel_sync(
+                        current_ticket.user_id,
+                        'pyro_review_requested',
+                        review_properties
+                    )
             elif mixpanel_event_name and not current_ticket.user_id:
                 logger.info(f'No customer user_id found in ticket, skipping Mixpanel event for: {mixpanel_event_name}')
             else:
@@ -381,7 +394,7 @@ class GetNextTicketView(APIView):
             logger.info(f"Ticket created at: {unassigned_ticket.created_at}")
 
             # Assign the ticket to the user (assigned_to is UUIDField, so convert supabase_uid)
-            unassigned_ticket.assigned_to = UUID(user.supabase_uid)
+            unassigned_ticket.assigned_to_id = (user.supabase_uid)
             unassigned_ticket.cse_name = user_email
             unassigned_ticket.save()
             logger.info("3 - UNASSIGNED TICKET ASSIGNED SUCCESSFULLY")
@@ -416,6 +429,91 @@ class GetNextTicketView(APIView):
         logger.info("8 - No tickets available")
         return None
 
+class UpdateCallStatusView(APIView):
+    permission_classes = [IsTenantAuthenticated]
+
+    def post(self, request):
+        try:
+            ser = UpdateCallStatusRequestSerializer(data=request.data)
+            if not ser.is_valid():
+                return Response({"error": ser.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+            payload = ser.validated_data
+            ticket_id = payload["ticketId"]
+            call_status = payload["callStatus"]
+
+            resolution_status = payload.get("resolutionStatus")
+            cse_remarks = payload.get("cseRemarks")
+            resolution_time = payload.get("resolutionTime")
+            other_reasons = payload.get("otherReasons")
+            assigned_to = payload.get("assignedTo")
+
+            with transaction.atomic():
+                ticket = SupportTicket.objects.select_for_update().filter(
+                    id=ticket_id, tenant_id=request.tenant
+                ).first()
+                if not ticket:
+                    return Response({"error": "Ticket not found"}, status=status.HTTP_404_NOT_FOUND)
+
+                now = timezone.now()
+                snooze_until = None
+
+                # Snooze / Close logic
+                if call_status == "Not Connected":
+                    is_first = not ticket.call_attempts
+                    if is_first:
+                        snooze_until = now + timedelta(hours=1)
+                        resolution_status = "Snoozed"
+                    else:
+                        snooze_until = now + timedelta(days=365 * 10)
+                        resolution_status = resolution_status or "Closed"
+
+                # Resolve assignment
+                final_assigned_to = assigned_to or getattr(request.user, "supabase_uid", None)
+                legacy_user = LegacyUser.objects.filter(uid=request.user.supabase_uid).first()
+                final_cse_name = getattr(legacy_user, "name", "")
+
+                # Build update fields
+                update_fields = {
+                    "call_status": call_status,
+                    "call_attempts": (ticket.call_attempts or 0) + 1,
+                    "completed_at": now,
+                    "snooze_until": snooze_until,
+                    "assigned_to_id": str(final_assigned_to) if final_assigned_to else None,
+                    "cse_name": final_cse_name,
+                }
+                if resolution_status is not None:
+                    update_fields["resolution_status"] = resolution_status
+                if cse_remarks is not None:
+                    update_fields["cse_remarks"] = cse_remarks
+                if resolution_time is not None:
+                    update_fields["resolution_time"] = resolution_time
+                if other_reasons is not None:
+                    update_fields["other_reasons"] = other_reasons
+
+                for field, value in update_fields.items():
+                    setattr(ticket, field, value)
+
+                ticket.save()
+
+            # Send Mixpanel event (outside transaction)
+            if call_status == "Not Connected" and ticket.user_id:
+                send_to_mixpanel(
+                    ticket.user_id,
+                    "pyro_not_connected",
+                    {
+                        "support_ticket_id": ticket_id,
+                        "remarks": cse_remarks or "",
+                        "cse_email_id": getattr(request.user, "email", None),
+                        "reasons": other_reasons or [],
+                    },
+                )
+
+            return Response(SupportTicketSerializer(ticket).data, status=200)
+
+        except Exception as e:
+            # log.exception("Error updating call status")
+            return Response({"error": "Internal server error"}, status=500)
 
 class SupportTicketUpdateView(APIView):
     """
