@@ -6,7 +6,7 @@ from unittest.mock import patch
 from model_bakery import baker
 from uuid import uuid4
 
-from analytics.models import SupportTicket
+from support_ticket.models import SupportTicket
 
 # Use the Django DB marker to ensure each test runs with a clean database.
 @pytest.mark.django_db

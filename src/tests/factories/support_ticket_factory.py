@@ -1,6 +1,6 @@
 import factory
 import uuid
-from analytics.models import SupportTicket
+from support_ticket.models import SupportTicket
 from datetime import datetime, timedelta
 
 class SupportTicketFactory(factory.django.DjangoModelFactory):
