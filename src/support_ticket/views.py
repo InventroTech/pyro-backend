@@ -401,7 +401,7 @@ class GetNextTicketView(APIView):
             logger.info(f"Ticket created at: {unassigned_ticket.created_at}")
 
             # Assign the ticket to the user (assigned_to is UUIDField, so convert supabase_uid)
-            unassigned_ticket.assigned_to = UUID(user.supabase_uid)
+            unassigned_ticket.assigned_to_id = (user.supabase_uid)
             unassigned_ticket.cse_name = user_email
             unassigned_ticket.save()
             logger.info("3 - UNASSIGNED TICKET ASSIGNED SUCCESSFULLY")
