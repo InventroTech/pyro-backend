@@ -1,8 +1,9 @@
 from django.db import models
 
+
 class SupabaseAuthUser(models.Model):
     """
-    Read-only mirror of Supabase's auth.users table.
+    Unmanaged mirror of auth.users
     """
     id = models.UUIDField(primary_key=True)
     email = models.EmailField(null=True, blank=True)
@@ -19,8 +20,11 @@ class SupabaseAuthUser(models.Model):
 
     class Meta:
         managed = False
-        db_table = 'auth"."users' 
+        db_table = 'auth"."users'
 
+    def __str__(self):
+        return self.email or f"{self.id}"
+    
 class LegacyUser(models.Model):
     id=models.BigAutoField(primary_key=True)
     name = models.TextField()

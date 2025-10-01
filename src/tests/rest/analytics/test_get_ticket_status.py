@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import jwt
 from tests.base.test_setup import BaseAPITestCase
 from tests.factories.support_ticket_factory import SupportTicketFactory
-from analytics.models import SupportTicket
+from support_ticket.models import SupportTicket
 
 
 class TestGetTicketStatusView(BaseAPITestCase):

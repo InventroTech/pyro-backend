@@ -1,5 +1,5 @@
 from datetime import timedelta, datetime
-from .models import SupportTicket
+from support_ticket.models import SupportTicket
 from uuid import UUID
 
 from typing import Optional

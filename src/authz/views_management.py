@@ -7,7 +7,7 @@ from authz.models import Role, TenantMembership
 from .serializers import RoleListSerializer, CreateSyncedRoleSerializer, TenantMembershipUserSerializer
 from .service import create_or_sync_role
 from django.db.models.functions import Lower
-from accounts.models import LegacyRole 
+from accounts.models import LegacyRole, LegacyUser 
 
 
 class RolesView(APIView):
@@ -63,10 +63,28 @@ class ListTenantUsersView(APIView):
     permission_classes = [IsTenantAuthenticated, HasTenantRole("GM")]
 
     def get(self, request):
+        from django.db.models import Q, OuterRef, Subquery
+        
+        # Create a subquery to get the name from LegacyUser
+        legacy_user_subquery = LegacyUser.objects.filter(
+            email=OuterRef('email'),
+            role_id=OuterRef('role__id'),
+            tenant=request.tenant
+        ).values('name')[:1]
+        
+        # Query TenantMembership with left join to LegacyUser
         qs = (TenantMembership.objects
               .select_related("role")
               .filter(tenant=request.tenant)
+              .annotate(name=Subquery(legacy_user_subquery))
               .order_by("-is_active", "email"))
+        
+        # Serialize the data
         data = TenantMembershipUserSerializer(qs, many=True).data
+        
+        # Add name field to each result
+        for i, item in enumerate(data):
+            item['name'] = qs[i].name or ''
+        
         return Response({"count": len(data), "results": data}, status=status.HTTP_200_OK)
 

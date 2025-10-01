@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import SupportTicket
+from support_ticket.models import SupportTicket
 
 class SupportTicketSerializer(serializers.ModelSerializer):
     class Meta:
@@ -10,5 +10,5 @@ class SupportTicketSerializer(serializers.ModelSerializer):
             "badge","poster","tenant_id","assigned_to","layout_status",
             "resolution_status","resolution_time","cse_name","cse_remarks",
             "call_status","call_attempts","rm_name","completed_at","snooze_until",
-            "praja_dashboard_user_link","display_pic_url","dumped_at"
+            "praja_dashboard_user_link","display_pic_url","dumped_at","review_requested"
         ]
