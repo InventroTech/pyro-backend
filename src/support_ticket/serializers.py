@@ -97,6 +97,7 @@ class SaveAndContinueSerializer(serializers.Serializer):
     )
     ticketStartTime = serializers.CharField(required=False, allow_blank=True)
     isReadOnly = serializers.BooleanField(default=False)
+    reviewRequested = serializers.BooleanField(required=False, allow_null=True)
 
     def validate_ticketId(self, value):
         """Validate that the ticket exists"""
@@ -134,7 +135,7 @@ class SupportTicketResponseSerializer(serializers.ModelSerializer):
             'source', 'subscription_status', 'atleast_paid_once', 'reason',
             'other_reasons', 'badge', 'poster', 'tenant_id', 'assigned_to', 'layout_status',
             'resolution_status', 'resolution_time', 'cse_name', 'cse_remarks',
-            'call_status', 'call_attempts', 'completed_at', 'dumped_at', 'snooze_until'
+            'call_status', 'call_attempts', 'completed_at', 'dumped_at', 'snooze_until', 'review_requested'
         ]
         read_only_fields = ['id', 'created_at', 'dumped_at']
 
@@ -177,6 +178,7 @@ class SupportTicketUpdateSerializer(serializers.Serializer):
     cse_remarks = serializers.CharField(required=False, allow_blank=True)
     call_status = serializers.CharField(max_length=255, required=False, allow_blank=True)
     snooze_until = serializers.DateTimeField(required=False, allow_null=True)
+    review_requested = serializers.BooleanField(required=False, allow_null=True)
     
     def validate_ticket_id(self, value):
         """Validate that the ticket exists"""

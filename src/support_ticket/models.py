@@ -88,6 +88,7 @@ class SupportTicket(models.Model):
     praja_dashboard_user_link = models.TextField(null=True, blank=True)
     display_pic_url = models.TextField(null=True, blank=True)
     dumped_at = models.DateTimeField(null=True, blank=True)
+    review_requested = models.BooleanField(null=True, blank=True, help_text="Whether CSE requested customer to post a review")
 
     class Meta:
         db_table = "support_ticket"
