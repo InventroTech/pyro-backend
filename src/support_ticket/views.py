@@ -484,7 +484,8 @@ class UpdateCallStatusView(APIView):
 
             # Send Mixpanel event (outside transaction)
             if call_status == "Not Connected" and ticket.user_id:
-                send_to_mixpanel(
+                mixpanel_service = MixpanelService()
+                mixpanel_service.send_to_mixpanel_sync(
                     ticket.user_id,
                     "pyro_not_connected",
                     {
@@ -494,7 +495,6 @@ class UpdateCallStatusView(APIView):
                         "reasons": other_reasons or [],
                     },
                 )
-
             return Response(SupportTicketSerializer(ticket).data, status=200)
 
         except Exception as e:
