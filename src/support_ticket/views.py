@@ -214,15 +214,15 @@ class SaveAndContinueView(APIView):
                 'resolution_time': final_resolution_time,
                 'call_attempts': (current_ticket.call_attempts or 0) + 1,
                 'completed_at': current_time,
-                'other_reasons': other_reasons
+                'other_reasons': other_reasons,
+                'assigned_to_id': UUID(user_id)
             }
             
 
             # Add review_requested if provided
             if review_requested is not None:
                 update_data['review_requested'] = review_requested
-                update_data['assigned_to_id'] = UUID(user_id)
-
+                
                 # Don't update assigned_to if user_id is not a valid UUID
             
             for field, value in update_data.items():
@@ -249,7 +249,8 @@ class SaveAndContinueView(APIView):
                     'support_ticket_id': ticket_id,
                     'remarks': cse_remarks or '',
                     'cse_email_id': user_email,
-                    'reasons': other_reasons or []
+                    'reasons': other_reasons or [],
+                    'review_requested': review_requested
                 }
                 
                 jwt_token = getattr(request, 'token', None)
@@ -267,21 +268,6 @@ class SaveAndContinueView(APIView):
                     mixpanel_properties
                 )
 
-                # Send review request event if review was requested
-                if review_requested is not None:
-                    logger.info(f'Sending review request event for user_id: {current_ticket.user_id}')
-                    review_properties = {
-                        'support_ticket_id': ticket_id,
-                        'cse_email_id': user_email,
-                        'resolution_status': resolution_status or '',
-                        'review_requested': update_data['review_requested']
-                    }
-
-                    mixpanel_service.send_to_mixpanel_sync(
-                        current_ticket.user_id,
-                        'pyro_review_requested',
-                        review_properties
-                    )
             elif mixpanel_event_name and not current_ticket.user_id:
                 logger.info(f'No customer user_id found in ticket, skipping Mixpanel event for: {mixpanel_event_name}')
             else:
