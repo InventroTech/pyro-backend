@@ -33,16 +33,7 @@ class GetWIPTicketsView(APIView):
     Django equivalent of the Supabase get-wip-tickets edge function.
     Fetches tickets assigned to the authenticated user with 'WIP' status.
     """
-    authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
-    
-    def options(self, request):
-        """Handle CORS preflight requests"""
-        response = Response('ok', status=status.HTTP_200_OK)
-        response['Access-Control-Allow-Origin'] = '*'
-        response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        response['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-        return response
     
     def get(self, request):
         """
@@ -66,23 +57,14 @@ class GetWIPTicketsView(APIView):
             # Serialize the tickets
             serializer = SupportTicketSerializer(wip_tickets, many=True)
             
-            response = Response(serializer.data, status=status.HTTP_200_OK)
-            response['Access-Control-Allow-Origin'] = '*'
-            response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-            response['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-            
-            return response
+            return Response(serializer.data, status=status.HTTP_200_OK)
             
         except Exception as error:
             logger.error(f'Unexpected error in get-wip-tickets: {error}')
-            response = Response({
+            return Response({
                 'error': 'An unexpected error occurred.',
                 'details': str(error)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-            response['Access-Control-Allow-Origin'] = '*'
-            response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-            response['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-            return response
 
 # Define the exact list of fields to accept from the payload (matching edge function)
 ALLOWED_FIELDS = [
