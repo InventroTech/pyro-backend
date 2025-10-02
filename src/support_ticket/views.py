@@ -433,7 +433,7 @@ class GetNextTicketView(APIView):
 
         snoozed_tickets = SupportTicket.objects.filter(
             assigned_to=UUID(user.supabase_uid),
-            resolution_status__isnull=True,
+            resolution_status="Snoozed",
             snooze_until__isnull=False,
             snooze_until__lte=current_time
         ).order_by('-snooze_until')[:1]
