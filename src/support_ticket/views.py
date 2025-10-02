@@ -22,10 +22,49 @@ from .services import MixpanelService, TicketTimeService
 from authz.permissions import IsTenantAuthenticated
 from accounts.models import LegacyUser
 from datetime import timedelta
-from .serializers import SupportTicketSerializer
+from analytics.serializers import SupportTicketSerializer
 from .utils import send_to_mixpanel
 
 logger = logging.getLogger(__name__)
+
+
+class GetWIPTicketsView(APIView):
+    """
+    Django equivalent of the Supabase get-wip-tickets edge function.
+    Fetches tickets assigned to the authenticated user with 'WIP' status.
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    def get(self, request):
+        """
+        Get WIP tickets assigned to the authenticated user.
+        Returns tickets sorted by creation date (newest first).
+        """
+        try:
+            # Get user from authentication middleware
+            user = request.user
+            user_id = user.supabase_uid
+            
+            logger.info(f'Querying for user ID: {user_id}')
+            
+            # Query for tickets assigned to the user with 'Work in Progress' status
+            # Sorted by creation date, newest first
+            wip_tickets = SupportTicket.objects.filter(
+                assigned_to=user_id,
+                resolution_status='WIP'
+            ).order_by('-created_at')
+            
+            # Serialize the tickets
+            serializer = SupportTicketSerializer(wip_tickets, many=True)
+            
+            return Response(serializer.data, status=status.HTTP_200_OK)
+            
+        except Exception as error:
+            logger.error(f'Unexpected error in get-wip-tickets: {error}')
+            return Response({
+                'error': 'An unexpected error occurred.',
+                'details': str(error)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 # Define the exact list of fields to accept from the payload (matching edge function)
 ALLOWED_FIELDS = [
@@ -394,7 +433,7 @@ class GetNextTicketView(APIView):
 
         snoozed_tickets = SupportTicket.objects.filter(
             assigned_to=UUID(user.supabase_uid),
-            resolution_status__isnull=True,
+            resolution_status="Snoozed",
             snooze_until__isnull=False,
             snooze_until__lte=current_time
         ).order_by('-snooze_until')[:1]
