@@ -5,6 +5,7 @@ from .views import (
     TicketClosureTimeAnalytics,
     DailyResolvedTicketsView,
     DailyPercentileResolutionTimeView,
+    DailyAverageResolutionTimeView,
     StackedBarResolvedUnresolvedView,
     AnalyticsQueryView,
     CSEAverageResolutionTimeView,
@@ -36,6 +37,11 @@ urlpatterns = [
         'tickets/daily-percentile/',
         DailyPercentileResolutionTimeView.as_view(),
         name='daily-resolution-percentile'
+    ),
+    path(
+        'tickets/daily-average/',
+        DailyAverageResolutionTimeView.as_view(),
+        name='daily-resolution-average'
     ),
     path(
         'tickets/stacked-bar-daily/',
