@@ -437,7 +437,7 @@ class GetNextTicketView(APIView):
             snooze_until__isnull=False,
             snooze_until__lte=current_time
         ).order_by('-snooze_until')[:1]
-        
+
         logger.info(f"6 - Found {len(snoozed_tickets)} snoozed tickets")
         
         if snoozed_tickets:
@@ -449,6 +449,23 @@ class GetNextTicketView(APIView):
             return ticket
         else:
             logger.info("6 - NO SNOOZED TICKETS FOUND")
+
+        # 3. Get the ticket with resolution_status null that is assigned to the user and is not snoozed
+        logger.info(f"7 - Looking for tickets with resolution_status null and assigned to user: {user.supabase_uid}")
+        logger.info(f"7 - Current time: {current_time}")
+        tickets = SupportTicket.objects.filter(
+            assigned_to=UUID(user.supabase_uid),
+            resolution_status__isnull=True,
+        ).order_by('created_at')[:1]
+        logger.info(f"8 - Found {len(tickets)} tickets with resolution_status null and assigned to user")
+        if tickets:
+            ticket = tickets[0]
+            logger.info("9 - TICKET FOUND WITH RESOLUTION_STATUS NULL AND ASSIGNED TO USER")
+            logger.info(f"Ticket ID: {ticket.id}")
+            logger.info(f"Created at: {ticket.created_at}")
+            return ticket
+        else:
+            logger.info("8 - NO TICKETS FOUND WITH RESOLUTION_STATUS NULL AND ASSIGNED TO USER")
 
         # No tickets available
         logger.info("8 - No tickets available")
