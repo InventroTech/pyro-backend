@@ -96,7 +96,7 @@ class DailyPercentileResolutionTimeView(APIView):
     Returns daily Nth percentile (default 90th) of ticket resolution time for a date range.
     Query params: percentile, unit, start, end, tenant_id
     """
-    permission_classes = []
+    permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
         logger.info("DailyPercentileResolutionTimeView called with query_params: %s", request.query_params)
@@ -108,10 +108,9 @@ class DailyPercentileResolutionTimeView(APIView):
                 {"detail": "Percentile must be a number."},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        unit = request.query_params.get('unit', 'hours').lower()
+        unit = request.query_params.get('unit', 'minutes').lower()
 
-        qs = SupportTicket.objects.filter(completed_at__isnull=False, dumped_at__isnull=False)
-        qs = filter_by_tenant(qs, request)
+        qs = SupportTicket.objects.filter(completed_at__isnull=False, dumped_at__isnull=False, tenant_id=request.tenant.id, resolution_status__in=['Resolved', "Can't Resolve"])
         if not qs.exists():
             today = datetime.today().date()
             logger.warning("No support tickets found for given filters. Returning today's date with y=0.")
@@ -121,14 +120,26 @@ class DailyPercentileResolutionTimeView(APIView):
         qs = qs.filter(completed_at__date__gte=start_date, completed_at__date__lte=end_date)
         qs = qs.annotate(resolved_date=TruncDate('completed_at'))
 
+        # Filter out tickets without resolution_time
+        qs = qs.filter(resolution_time__isnull=False, resolution_status__in=['Resolved', "Can't Resolve"]).exclude(resolution_time='')
+        
         data_by_day = {}
         for ticket in qs:
             try:
                 day = ticket.resolved_date
-                res_time = (ticket.completed_at - ticket.dumped_at).total_seconds()
-                data_by_day.setdefault(day, []).append(res_time)
+                # Convert MM:SS format to seconds
+                if ticket.resolution_time and ':' in ticket.resolution_time:
+                    time_parts = ticket.resolution_time.split(':')
+                    if len(time_parts) == 2:
+                        minutes = int(time_parts[0])
+                        seconds = int(time_parts[1])
+                        res_time_seconds = minutes * 60 + seconds
+                        data_by_day.setdefault(day, []).append(res_time_seconds)
+            except (ValueError, IndexError) as e:
+                logger.warning("Failed to parse resolution time '%s' for ticket %s: %s", 
+                             getattr(ticket, 'resolution_time', None), getattr(ticket, 'id', None), e)
             except Exception as e:
-                logger.warning("Failed to calculate resolution time for ticket %s: %s", getattr(ticket, 'id', None), e)
+                logger.warning("Failed to process resolution time for ticket %s: %s", getattr(ticket, 'id', None), e)
 
         result = []
         for date in get_date_range(start_date, end_date):
@@ -144,6 +155,67 @@ class DailyPercentileResolutionTimeView(APIView):
         logger.info("Returning %d data points", len(result))
         return Response(result)
 
+class DailyAverageResolutionTimeView(APIView):
+    """
+    Returns daily average of ticket resolution time for a date range.
+    Query params: unit, start, end, tenant_id
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        logger.info("DailyAverageResolutionTimeView called with query_params: %s", request.query_params)
+
+        unit = request.query_params.get('unit', 'minutes').lower()
+
+        qs = SupportTicket.objects.filter(
+            completed_at__isnull=False,
+            dumped_at__isnull=False,
+            tenant_id=request.tenant.id,
+            resolution_status__in=['Resolved', "Can't Resolve"]
+        )
+        if not qs.exists():
+            today = datetime.today().date()
+            logger.warning("No support tickets found for given filters. Returning today's date with y=0.")
+            return Response([{"x": today.strftime("%Y-%m-%d"), "y": 0}])
+
+        start_date, end_date = extract_date_range_from_request(qs, request, created_field='completed_at')
+        qs = qs.filter(completed_at__date__gte=start_date, completed_at__date__lte=end_date)
+        qs = qs.annotate(resolved_date=TruncDate('completed_at'))
+
+        # Filter out tickets without resolution_time
+        qs = qs.filter(resolution_time__isnull=False, resolution_status__in=['Resolved', "Can't Resolve"]).exclude(resolution_time='')
+
+        data_by_day = {}
+        for ticket in qs:
+            try:
+                day = ticket.resolved_date
+                # Convert MM:SS format to seconds
+                if ticket.resolution_time and ':' in ticket.resolution_time:
+                    time_parts = ticket.resolution_time.split(':')
+                    if len(time_parts) == 2:
+                        minutes = int(time_parts[0])
+                        seconds = int(time_parts[1])
+                        res_time_seconds = minutes * 60 + seconds
+                        data_by_day.setdefault(day, []).append(res_time_seconds)
+            except (ValueError, IndexError) as e:
+                logger.warning("Failed to parse resolution time '%s' for ticket %s: %s",
+                             getattr(ticket, 'resolution_time', None), getattr(ticket, 'id', None), e)
+            except Exception as e:
+                logger.warning("Failed to process resolution time for ticket %s: %s", getattr(ticket, 'id', None), e)
+
+        result = []
+        for date in get_date_range(start_date, end_date):
+            times = data_by_day.get(date, [])
+            y = 0
+            if times:
+                try:
+                    avg_val = float(np.mean(times))
+                    y = convert_seconds(avg_val, unit)
+                except Exception as e:
+                    logger.warning("Average calculation failed on %s: %s", date, e)
+            result.append({"x": date.strftime("%Y-%m-%d"), "y": y})
+        logger.info("Returning %d data points", len(result))
+        return Response(result)
 class DailyResolvedTicketsView(APIView):
     permission_classes = []
 
@@ -174,11 +246,11 @@ class TicketClosureTimeAnalytics(APIView):
     Returns daily average ticket closure time.
     Query params: start, end, unit
     """
-    permission_classes = []
+    permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
-        qs = SupportTicket.objects.filter(completed_at__isnull=False, dumped_at__isnull=False)
-        qs = filter_by_tenant(qs, request)
+        qs = SupportTicket.objects.filter(completed_at__isnull=False, dumped_at__isnull=False, tenant_id=request.tenant.id)
+        
         start_date, end_date = extract_date_range_from_request(qs, request, created_field='completed_at')
         if not start_date or not end_date:
             today = datetime.today().date()
