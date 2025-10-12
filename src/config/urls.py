@@ -34,6 +34,7 @@ urlpatterns = [
     path('membership/', include('authz.urls')),
     path('cron-jobs/',include('cron_jobs.urls')),
     path('crm/', include('crm.urls')),
+    path('crm-records/', include('crm_records.urls')),
     path('accounts/', include('accounts.urls')),
     path('support-ticket/', include('support_ticket.urls')),
     # OpenAPI schema
