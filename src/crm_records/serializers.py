@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Record
+from .models import Record, EventLog
 
 
 class RecordSerializer(serializers.ModelSerializer):
@@ -44,3 +44,47 @@ class RecordSerializer(serializers.ModelSerializer):
         if len(value) > 100:
             raise serializers.ValidationError("Entity type cannot exceed 100 characters.")
         return value.strip()
+
+
+class EventLogSerializer(serializers.ModelSerializer):
+    """
+    Serializer for EventLog model with tenant isolation.
+    Controls event creation payload and output format for API responses.
+    """
+    tenant_id = serializers.UUIDField(read_only=True, source='tenant.id')
+    record_id = serializers.IntegerField(read_only=True, source='record.id')
+    
+    class Meta:
+        model = EventLog
+        fields = [
+            "id",
+            "record_id", 
+            "tenant_id",
+            "event",
+            "payload",
+            "timestamp"
+        ]
+        read_only_fields = [
+            "id",
+            "record_id",
+            "tenant_id", 
+            "timestamp"
+        ]
+    
+    def validate_event(self, value):
+        """
+        Validate event name is not empty and has reasonable length.
+        """
+        if not value or not value.strip():
+            raise serializers.ValidationError("Event name cannot be empty.")
+        if len(value) > 100:
+            raise serializers.ValidationError("Event name cannot exceed 100 characters.")
+        return value.strip()
+    
+    def validate_payload(self, value):
+        """
+        Validate that payload is a dictionary/object.
+        """
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("Payload must be a valid JSON object.")
+        return value
