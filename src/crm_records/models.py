@@ -39,3 +39,47 @@ class EventLog(BaseModel):
 
     def __str__(self):
         return f"{self.event} for {self.record} at {self.timestamp}"
+
+
+class RuleSet(BaseModel):
+    """
+    Rule configuration model for declarative event-driven workflows.
+    Allows tenants to define rules that trigger actions when specific events occur.
+    """
+    event_name = models.CharField(max_length=100, db_index=True)
+    condition = models.JSONField(default=dict, blank=True)   # e.g. JSONLogic
+    actions = models.JSONField(default=list, blank=True)     # list of action objects
+    enabled = models.BooleanField(default=True)
+    description = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = "rule_sets"
+        indexes = [
+            models.Index(fields=["tenant", "event_name", "enabled"]),
+        ]
+
+    def __str__(self):
+        return f"Rule: {self.event_name} ({'enabled' if self.enabled else 'disabled'})"
+
+
+class RuleExecutionLog(BaseModel):
+    """
+    Execution logging model for tracking rule executions.
+    Stores every time a rule is evaluated and executed for debugging and auditing.
+    """
+    record = models.ForeignKey("Record", on_delete=models.CASCADE, related_name="rule_executions")
+    rule = models.ForeignKey("RuleSet", on_delete=models.SET_NULL, null=True, blank=True)
+    event_name = models.CharField(max_length=100, db_index=True)
+    matched = models.BooleanField(default=False)
+    actions = models.JSONField(default=list, blank=True)
+    errors = models.JSONField(default=list, blank=True)
+    duration_ms = models.FloatField(null=True, blank=True)
+
+    class Meta:
+        db_table = "rule_exec_logs"
+        indexes = [
+            models.Index(fields=["tenant", "event_name", "-created_at"]),
+        ]
+
+    def __str__(self):
+        return f"Rule execution: {self.event_name} ({'matched' if self.matched else 'no match'}) at {self.created_at}"
