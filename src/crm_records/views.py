@@ -5,6 +5,7 @@ from rest_framework.exceptions import ValidationError
 from authz.permissions import IsTenantAuthenticated
 from core.pagination import MetaPageNumberPagination
 from django.utils import timezone
+from django.db.models import Q
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample
 from drf_spectacular.types import OpenApiTypes
 from .models import Record, EventLog
@@ -21,15 +22,67 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
     
     def get_queryset(self):
         """
-        Filter records by tenant and optionally by entity_type.
-        Supports dynamic entity filtering for config-driven UIs.
+        Filter records by tenant and support dynamic filtering on any field.
+        Supports both direct model fields and JSON data fields.
+        
+        Query Parameters:
+        - entity_type: Filter by entity type
+        - resolution_status: Filter by resolution_status in data JSON
+        - Any other field: Will be searched in the data JSON field
+        
+        Examples:
+        - ?entity_type=lead&resolution_status=WIP
+        - ?entity_type=ticket&resolution_status=Scheduled
+        - ?priority=high&status=active
         """
         queryset = super().get_queryset()
         
-        # Get entity_type from query params (optional)
-        entity_type = self.request.query_params.get('entity_type')
+        # Get all query parameters
+        query_params = self.request.query_params
+        
+        # Filter by entity_type (direct model field)
+        entity_type = query_params.get('entity_type')
         if entity_type:
             queryset = queryset.filter(entity_type=entity_type)
+        
+        # Filter by name (direct model field)
+        name = query_params.get('name')
+        if name:
+            queryset = queryset.filter(name__icontains=name)
+        
+        # Dynamic filtering on data JSON field
+        # Get all query params except known model fields
+        model_fields = {'entity_type', 'name', 'page', 'page_size', 'ordering'}
+        data_filters = {k: v for k, v in query_params.items() if k not in model_fields}
+        
+        # Build Q objects for JSON field filtering
+        q_objects = Q()
+        for field_name, field_value in data_filters.items():
+            # Support multiple values for the same field (comma-separated)
+            if ',' in field_value:
+                values = [v.strip() for v in field_value.split(',')]
+                field_q = Q()
+                for value in values:
+                    field_q |= Q(**{f'data__{field_name}': value})
+                q_objects &= field_q
+            else:
+                # Single value - exact match
+                q_objects &= Q(**{f'data__{field_name}': field_value})
+        
+        if q_objects:
+            queryset = queryset.filter(q_objects)
+        
+        # Support ordering
+        ordering = query_params.get('ordering')
+        if ordering:
+            # Handle ordering for JSON fields
+            if ordering.startswith('data__'):
+                queryset = queryset.order_by(ordering)
+            else:
+                queryset = queryset.order_by(ordering)
+        else:
+            # Default ordering
+            queryset = queryset.order_by('-created_at')
             
         return queryset
     
