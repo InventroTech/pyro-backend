@@ -403,7 +403,29 @@ class GetNextTicketView(APIView):
         """
         current_time = timezone.now()
 
+        # 1. Get the ticket with resolution_status null that is assigned to the user and is not snoozed
+        logger.info(f"7 - Looking for tickets with resolution_status null and assigned to user: {user.supabase_uid}")
+        logger.info(f"7 - Current time: {current_time}")
+        already_assigned_ticket = SupportTicket.objects.select_for_update(
+            skip_locked=True,
+            of=("self",)
+        ).filter(
+            assigned_to=UUID(user.supabase_uid),
+            resolution_status__isnull=True,
+        ).order_by('created_at').first()
+        logger.info(f"8 - Found {len(already_assigned_ticket)} tickets with resolution_status null and assigned to user")
+        if already_assigned_ticket:
+            logger.info("9 - TICKET FOUND WITH RESOLUTION_STATUS NULL AND ASSIGNED TO USER")
+            logger.info(f"Ticket ID: {already_assigned_ticket.id}")
+            logger.info(f"Created at: {already_assigned_ticket.created_at}")
+            already_assigned_ticket.assigned_to_id = (user.supabase_uid)
+            already_assigned_ticket.cse_name = user_email
+            return already_assigned_ticket
+        else:
+            logger.info("8 - NO TICKETS FOUND WITH RESOLUTION_STATUS NULL AND ASSIGNED TO USER")
 
+
+        # 2. LIFO logic: get the newest unassigned ticket
         logger.info("1 - Searching for unassigned tickets with row locking")
 
         unassigned_ticket = SupportTicket.objects.select_for_update(
@@ -427,46 +449,35 @@ class GetNextTicketView(APIView):
         else:
             logger.info("2 - NO UNASSIGNED TICKETS FOUND")
 
-        # 2. Look for snoozed tickets for this user as fallback
+        # 3. Look for snoozed tickets for this user as fallback
         logger.info(f"5 - Looking for snoozed tickets for user: {user.supabase_uid}")
         logger.info(f"5 - Current time: {current_time}")
 
-        snoozed_tickets = SupportTicket.objects.filter(
-            assigned_to=UUID(user.supabase_uid),
+        snoozed_ticket = SupportTicket.objects.select_for_update(
+            skip_locked=True,
+            of=("self",)
+        ).filter(
             resolution_status="Snoozed",
             snooze_until__isnull=False,
             snooze_until__lte=current_time
-        ).order_by('-snooze_until')[:1]
+        ).order_by('-snooze_until').first()
 
-        logger.info(f"6 - Found {len(snoozed_tickets)} snoozed tickets")
+        logger.info(f"6 - Found {len(snoozed_ticket)} snoozed tickets")
         
-        if snoozed_tickets:
-            ticket = snoozed_tickets[0]
+        if snoozed_ticket:
             logger.info("7 - SNOOZED TICKET FOUND")
-            logger.info(f"Snoozed ticket ID: {ticket.id}")
-            logger.info(f"Snooze until: {ticket.snooze_until}")
-            logger.info(f"Created at: {ticket.created_at}")
-            return ticket
+            logger.info(f"Snoozed ticket ID: {snoozed_ticket.id}")
+            logger.info(f"Snooze until: {snoozed_ticket.snooze_until}")
+            logger.info(f"Created at: {snoozed_ticket.created_at}")
+            
+            snoozed_ticket.assigned_to_id = (user.supabase_uid)
+            snoozed_ticket.cse_name = user_email
+            snoozed_ticket.save()
+            return snoozed_ticket
         else:
             logger.info("6 - NO SNOOZED TICKETS FOUND")
 
-        # 3. Get the ticket with resolution_status null that is assigned to the user and is not snoozed
-        logger.info(f"7 - Looking for tickets with resolution_status null and assigned to user: {user.supabase_uid}")
-        logger.info(f"7 - Current time: {current_time}")
-        tickets = SupportTicket.objects.filter(
-            assigned_to=UUID(user.supabase_uid),
-            resolution_status__isnull=True,
-        ).order_by('created_at')[:1]
-        logger.info(f"8 - Found {len(tickets)} tickets with resolution_status null and assigned to user")
-        if tickets:
-            ticket = tickets[0]
-            logger.info("9 - TICKET FOUND WITH RESOLUTION_STATUS NULL AND ASSIGNED TO USER")
-            logger.info(f"Ticket ID: {ticket.id}")
-            logger.info(f"Created at: {ticket.created_at}")
-            return ticket
-        else:
-            logger.info("8 - NO TICKETS FOUND WITH RESOLUTION_STATUS NULL AND ASSIGNED TO USER")
-
+        
         # No tickets available
         logger.info("8 - No tickets available")
         return None
