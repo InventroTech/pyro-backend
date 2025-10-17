@@ -413,7 +413,6 @@ class GetNextTicketView(APIView):
             assigned_to=UUID(user.supabase_uid),
             resolution_status__isnull=True,
         ).order_by('created_at').first()
-        logger.info(f"8 - Found {len(already_assigned_ticket)} tickets with resolution_status null and assigned to user")
         if already_assigned_ticket:
             logger.info("9 - TICKET FOUND WITH RESOLUTION_STATUS NULL AND ASSIGNED TO USER")
             logger.info(f"Ticket ID: {already_assigned_ticket.id}")
@@ -462,7 +461,7 @@ class GetNextTicketView(APIView):
             snooze_until__lte=current_time
         ).order_by('-snooze_until').first()
 
-        logger.info(f"6 - Found {len(snoozed_ticket)} snoozed tickets")
+        logger.info(f"6 - Found snoozed ticket")
         
         if snoozed_ticket:
             logger.info("7 - SNOOZED TICKET FOUND")
