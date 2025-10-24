@@ -64,7 +64,8 @@ INSTALLED_APPS = [
     'core',
     'scheduler',
     'accounts',
-    'support_ticket'
+    'support_ticket',
+    'user_settings'
 ]
 
 MIDDLEWARE = [

@@ -50,9 +50,27 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         if name:
             queryset = queryset.filter(name__icontains=name)
         
+        # Multi-field search parameter (searches across name, phone_no, email)
+        search = query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) |
+                Q(data__phone_no__icontains=search) |
+                Q(data__email__icontains=search)
+            )
+        
+        # Date range filtering on created_at (model field)
+        created_at_gte = query_params.get('created_at__gte')
+        if created_at_gte:
+            queryset = queryset.filter(created_at__gte=created_at_gte)
+        
+        created_at_lte = query_params.get('created_at__lte')
+        if created_at_lte:
+            queryset = queryset.filter(created_at__lte=created_at_lte)
+        
         # Dynamic filtering on data JSON field
         # Get all query params except known model fields
-        model_fields = {'entity_type', 'name', 'page', 'page_size', 'ordering'}
+        model_fields = {'entity_type', 'name', 'search', 'page', 'page_size', 'ordering', 'created_at__gte', 'created_at__lte'}
         data_filters = {k: v for k, v in query_params.items() if k not in model_fields}
         
         # Build Q objects for JSON field filtering
