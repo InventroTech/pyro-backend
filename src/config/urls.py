@@ -37,6 +37,7 @@ urlpatterns = [
     path('crm-records/', include('crm_records.urls')),
     path('accounts/', include('accounts.urls')),
     path('support-ticket/', include('support_ticket.urls')),
+    path('user-settings/', include('user_settings.urls')),
     # OpenAPI schema
     path("api/schema/", SpectacularAPIView.as_view(
         permission_classes=[permissions.AllowAny]
