@@ -1,18 +1,22 @@
 """
 Event dispatcher module for handling event processing and rule execution.
-This module provides the foundation for future rule-based workflows.
+This module provides the foundation for rule-based workflows.
 """
 
 from typing import Dict, Any, Optional
+import logging
 from .models import Record, EventLog
+from .rule_engine import execute_rules
+
+logger = logging.getLogger(__name__)
 
 
-def dispatch_event(event_name , record, payload):
+def dispatch_event(event_name: str, record: Record, payload: Dict[str, Any]) -> bool:
     """
-    Placeholder dispatcher for event handling.
+    Event dispatcher that triggers rule execution.
     
-    This function will be called after an event is logged to the EventLog.
-    Future implementation will match tenant rules and trigger actions.
+    This function is called after an event is logged to the EventLog.
+    It executes all matching rules for the tenant and event.
     
     Args:
         event_name (str): The name of the event (e.g., 'button_click', 'win_clicked')
@@ -25,16 +29,19 @@ def dispatch_event(event_name , record, payload):
     Example:
         dispatch_event("win_clicked", record, {"button_type": "win", "user_id": "123"})
     """
-    print(f"[DISPATCH] Event '{event_name}' for Record {record.id} (tenant {record.tenant.id})")
-    print(f"[DISPATCH] Payload: {payload}")
+    logger.info(f"[DISPATCH] Event '{event_name}' for Record {record.id} (tenant {record.tenant.id})")
+    logger.debug(f"[DISPATCH] Payload: {payload}")
     
-    # 1. Query RuleSet for matching rules based on event_name and tenant
-    # 2. Evaluate rule conditions
-    # 3. Execute rule actions (update_fields, send_webhook, etc.)
-    # 4. Log rule executions in RuleExecutionLog
-    
-    # For now, just simulate successful processing
-    return True
+    try:
+        # Execute rules for this event
+        execute_rules(event_name, record, payload, str(record.tenant.id))
+        
+        logger.info(f"[DISPATCH] Successfully processed event '{event_name}' for Record {record.id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"[DISPATCH] Failed to process event '{event_name}' for Record {record.id}: {e}")
+        return False
 
 
 def get_event_history(record: Record, event_name: Optional[str] = None) -> list:
