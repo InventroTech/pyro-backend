@@ -200,4 +200,3 @@ class UserLeadTypesView(APIView):
             'user_id': str(user_id),
             'lead_types': lead_types
         })
-    vhvhjj
