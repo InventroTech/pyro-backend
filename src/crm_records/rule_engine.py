@@ -9,6 +9,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from django.utils import timezone
 from json_logic import jsonLogic
+import re
 
 from .models import RuleSet, RuleExecutionLog, Record
 
@@ -33,6 +34,65 @@ def register_action(name: str):
     return wrapper
 
 
+# ----------------------
+# Template resolution
+# ----------------------
+_TEMPLATE_RE = re.compile(r"\{\{\s*([^}]+)\s*\}\}")
+
+
+def _get_ctx_path(ctx: Dict[str, Any], path: str) -> Any:
+    """Resolve a dotted path against the context dict (supports dicts and objects)."""
+    parts = path.split(".")
+    value: Any = ctx
+    for part in parts:
+        if isinstance(value, dict):
+            value = value.get(part)
+        else:
+            # Fallback to attribute access (e.g., record.id)
+            value = getattr(value, part, None)
+        if value is None:
+            break
+    return value
+
+
+def _resolve_token(token: str, ctx: Dict[str, Any]) -> Any:
+    token = token.strip()
+    if token == "now":
+        return timezone.now().isoformat()
+    # Allow direct ctx keys (record, payload, event, record_data) and dotted paths
+    if "." in token:
+        return _get_ctx_path(ctx, token)
+    return ctx.get(token)
+
+
+def _resolve_string_templates(s: str, ctx: Dict[str, Any]) -> Any:
+    """
+    Resolve template expressions within a string. If the entire string is a single
+    template like "{{payload.x}}", return the resolved value preserving type.
+    Otherwise, perform string replacement for any embedded templates.
+    """
+    match = _TEMPLATE_RE.fullmatch(s)
+    if match:
+        return _resolve_token(match.group(1), ctx)
+
+    def repl(m: re.Match) -> str:
+        val = _resolve_token(m.group(1), ctx)
+        return "" if val is None else str(val)
+
+    return _TEMPLATE_RE.sub(repl, s)
+
+
+def _resolve_templates_in(value: Any, ctx: Dict[str, Any]) -> Any:
+    """Recursively resolve templates in dicts/lists/strings."""
+    if isinstance(value, dict):
+        return {k: _resolve_templates_in(v, ctx) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_resolve_templates_in(v, ctx) for v in value]
+    if isinstance(value, str):
+        return _resolve_string_templates(value, ctx)
+    return value
+
+
 @register_action("update_fields")
 def action_update_fields(ctx: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -46,16 +106,19 @@ def action_update_fields(ctx: Dict[str, Any], updates: Dict[str, Any]) -> Dict[s
         Dictionary with execution result
     """
     record = ctx["record"]
-    
+
+    # Resolve any templates in updates based on current context
+    resolved_updates = _resolve_templates_in(updates, ctx)
+
     # Update the record's data field
-    for key, value in updates.items():
+    for key, value in resolved_updates.items():
         record.data[key] = value
     
     # Save only the data and updated_at fields for efficiency
     record.save(update_fields=["data", "updated_at"])
     
-    logger.info(f"Updated record {record.id} fields: {updates}")
-    return {"updated_fields": updates}
+    logger.info(f"Updated record {record.id} fields: {resolved_updates}")
+    return {"updated_fields": resolved_updates}
 
 
 @register_action("send_webhook")
@@ -75,6 +138,7 @@ def action_send_webhook(ctx: Dict[str, Any], url: str, payload: Optional[Dict[st
     
     record = ctx["record"]
     webhook_payload = payload or record.data
+    webhook_payload = _resolve_templates_in(webhook_payload, ctx)
     
     try:
         response = requests.post(url, json=webhook_payload, timeout=5)
