@@ -23,6 +23,7 @@ h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
 idna==3.10
+json-logic==0.6.3
 inflection==0.5.1
 iniconfig==2.1.0
 jiter==0.10.0

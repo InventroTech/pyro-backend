@@ -60,10 +60,12 @@ INSTALLED_APPS = [
     'analytics',
     'cron_jobs',
     'crm',
+    'crm_records',
     'core',
     'scheduler',
     'accounts',
-    'support_ticket'
+    'support_ticket',
+    'user_settings'
 ]
 
 MIDDLEWARE = [
