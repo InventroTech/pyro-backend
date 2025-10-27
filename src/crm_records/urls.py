@@ -6,8 +6,8 @@ from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 urlpatterns = [
     # Universal endpoint - supports entity_type filtering
     path("records/", RecordListCreateView.as_view(), name="record-list"),
-    path("records/<int:pk>/", RecordDetailView.as_view(), name="record-detail"),
-    path("records/<int:pk>/events/", RecordEventView.as_view(), name="record-events"),
+    path("records/detail/", RecordDetailView.as_view(), name="record-detail"),
+    path("records/events/", RecordEventView.as_view(), name="record-events"),
     
     # Event logging endpoints (admin only)
     path("events/", EventLogListView.as_view(), name="event-log-list"),
