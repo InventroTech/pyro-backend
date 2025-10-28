@@ -606,20 +606,8 @@ class GetNextLeadView(APIView):
     
     @extend_schema(
         summary="Get next lead from queue",
-        description="Atomically fetches and optionally assigns the next available lead from the queue for CRM records. "
-                   "First checks for leads already assigned to the current user, then finds unassigned leads in queue. "
-                   "Leads are ordered by score (if available) and creation date. "
-                   "Use query parameter 'assign=false' to preview the next lead without assigning it.",
-        parameters=[
-            OpenApiParameter(
-                name='assign',
-                description='Whether to assign the lead to the current user (default: true). Set to false to preview without assigning.',
-                required=False,
-                type=OpenApiTypes.BOOL,
-                location=OpenApiParameter.QUERY,
-                default=True
-            )
-        ],
+        description="Atomically fetches and assigns the next available lead from the queue for CRM records. "
+                   "Leads are ordered by score (if available) and creation date.",
         responses={
             200: OpenApiResponse(
                 description="Lead assigned successfully or no leads available",
@@ -670,19 +658,13 @@ class GetNextLeadView(APIView):
     )
     def get(self, request):
         """
-        Get next lead from the queue and optionally assign it to the current user.
-        
-        Query Parameters:
-            assign: bool - Whether to assign the lead (default: true). Set to false to preview without assigning.
+        Get next unassigned lead from the queue and assign it to the current user.
         
         Logic:
-        1. First check for leads already assigned to the user with queueable status
-        2. If no such leads, atomically select and assign an unassigned lead
-        3. Update the lead's data with assigned_to and status (unless assign=false)
+        1. Find the next unassigned lead in queue
+        2. Assign it to the current user atomically
+        3. Return the assigned lead
         """
-        # Check if we should assign the lead
-        assign = request.query_params.get('assign', 'true').lower() not in ('false', '0', 'no', 'n')
-        
         user = request.user
         tenant = request.tenant
         
@@ -697,115 +679,7 @@ class GetNextLeadView(APIView):
             logger.warning("[GetNextLead] No user identifier available")
             return Response({}, status=status.HTTP_200_OK)
         
-        # 1. First, check if there are any leads already assigned to this user with queueable status
-        mine = Record.objects.filter(
-            tenant=tenant,
-            entity_type='lead',
-            data__assigned_to=user_identifier,
-            data__lead_stage__in=self.QUEUEABLE_STATUSES
-        )
-        
-        mine_candidate = self._order_by_score(mine).first()
-        
-        if mine_candidate:
-            logger.info(
-                "[GetNextLead] Found existing lead for user: record_id=%s user=%s assign=%s",
-                mine_candidate.id,
-                user_identifier,
-                assign
-            )
-            
-            if assign:
-                # Lock and assign
-                with transaction.atomic():
-                    locked = Record.objects.select_for_update(skip_locked=True).filter(pk=mine_candidate.pk)
-                    
-                    if tenant:
-                        locked = locked.filter(tenant=tenant)
-                    
-                    locked_obj = locked.first()
-                    
-                    if not locked_obj:
-                        logger.debug("[GetNextLead] Mine vanished/raced, falling through to unassigned fetch")
-                    else:
-                        # Update lead_stage if not already assigned
-                        data = locked_obj.data.copy() if locked_obj.data else {}
-                        if data.get('lead_stage') != self.ASSIGNED_STATUS:
-                            data['lead_stage'] = self.ASSIGNED_STATUS
-                            data['assigned_to'] = user_identifier
-                            locked_obj.data = data
-                            locked_obj.updated_at = timezone.now()
-                            locked_obj.save(update_fields=['data', 'updated_at'])
-                        
-                        # Flatten response for frontend
-                        lead_data = locked_obj.data or {}
-                        serialized_data = RecordSerializer(locked_obj).data
-                        flattened_response = {
-                            "id": locked_obj.id,
-                            "name": locked_obj.name or lead_data.get('customer_full_name') or '',
-                            "phone_no": lead_data.get('phone_number', ''),
-                            "user_id": lead_data.get('user_id'),
-                            "lead_status": lead_data.get('lead_stage') or '',
-                            "lead_score": lead_data.get('lead_score'),
-                            "assigned_to": lead_data.get('assigned_to'),
-                            "attempt_count": lead_data.get('call_attempts', 0),
-                            "last_call_outcome": lead_data.get('last_call_outcome'),
-                            "next_call_at": lead_data.get('next_call_at'),
-                            "do_not_call": lead_data.get('do_not_call', False),
-                            "resolved_at": lead_data.get('closure_time'),
-                            "premium_poster_count": lead_data.get('premium_poster_count'),
-                            "package_to_pitch": lead_data.get('package_to_pitch'),
-                            "last_active_date_time": lead_data.get('last_active_date_time'),
-                            "latest_remarks": lead_data.get('latest_remarks'),
-                            "lead_description": lead_data.get('lead_description'),
-                            "affiliated_party": lead_data.get('affiliated_party'),
-                            "rm_dashboard": lead_data.get('rm_dashboard'),
-                            "user_profile_link": lead_data.get('user_profile_link'),
-                            "whatsapp_link": lead_data.get('whatsapp_link'),
-                            "lead_source": lead_data.get('lead_source'),
-                            "created_at": serialized_data.get('created_at'),
-                            "updated_at": serialized_data.get('updated_at'),
-                            "data": lead_data,
-                            "record": serialized_data
-                        }
-                        
-                        return Response(flattened_response, status=status.HTTP_200_OK)
-            else:
-                # Just return the existing lead without updating
-                lead_data = mine_candidate.data or {}
-                serialized_data = RecordSerializer(mine_candidate).data
-                flattened_response = {
-                    "id": mine_candidate.id,
-                    "name": mine_candidate.name or lead_data.get('customer_full_name') or '',
-                    "phone_no": lead_data.get('phone_number', ''),
-                    "user_id": lead_data.get('user_id'),
-                    "lead_status": lead_data.get('lead_stage') or '',
-                    "lead_score": lead_data.get('lead_score'),
-                    "assigned_to": lead_data.get('assigned_to'),
-                    "attempt_count": lead_data.get('call_attempts', 0),
-                    "last_call_outcome": lead_data.get('last_call_outcome'),
-                    "next_call_at": lead_data.get('next_call_at'),
-                    "do_not_call": lead_data.get('do_not_call', False),
-                    "resolved_at": lead_data.get('closure_time'),
-                    "premium_poster_count": lead_data.get('premium_poster_count'),
-                    "package_to_pitch": lead_data.get('package_to_pitch'),
-                    "last_active_date_time": lead_data.get('last_active_date_time'),
-                    "latest_remarks": lead_data.get('latest_remarks'),
-                    "lead_description": lead_data.get('lead_description'),
-                    "affiliated_party": lead_data.get('affiliated_party'),
-                    "rm_dashboard": lead_data.get('rm_dashboard'),
-                    "user_profile_link": lead_data.get('user_profile_link'),
-                    "whatsapp_link": lead_data.get('whatsapp_link'),
-                    "lead_source": lead_data.get('lead_source'),
-                    "created_at": serialized_data.get('created_at'),
-                    "updated_at": serialized_data.get('updated_at'),
-                    "data": lead_data,
-                    "record": serialized_data
-                }
-                
-                return Response(flattened_response, status=status.HTTP_200_OK)
-        
-        # 2. Find unassigned queued lead
+        # Find unassigned queued lead and assign it
         # Note: For JSONB, when assigned_to is null in JSON, data->>'assigned_to' returns None
         from django.db.models import Q
         unassigned = Record.objects.filter(
@@ -828,33 +702,27 @@ class GetNextLeadView(APIView):
             logger.info("[GetNextLead] No unassigned leads available")
             return Response({}, status=status.HTTP_200_OK)
         
-        if assign:
-            # Lock and assign
-            with transaction.atomic():
-                candidate = Record.objects.select_for_update(skip_locked=True).filter(pk=candidate.pk).first()
-                
-                if not candidate:
-                    logger.info("[GetNextLead] Lead was taken by another request")
-                    return Response({}, status=status.HTTP_200_OK)
-                
-                # Update the candidate's data
-                data = candidate.data.copy() if candidate.data else {}
-                data['assigned_to'] = user_identifier
-                data['lead_stage'] = self.ASSIGNED_STATUS
-                
-                candidate.data = data
-                candidate.updated_at = timezone.now()
-                candidate.save(update_fields=['data', 'updated_at'])
-                
-                logger.info(
-                    "[GetNextLead] Assigned new lead: record_id=%s user=%s",
-                    candidate.id,
-                    user_identifier
-                )
-        else:
+        # Lock and assign the lead
+        with transaction.atomic():
+            candidate = Record.objects.select_for_update(skip_locked=True).filter(pk=candidate.pk).first()
+            
+            if not candidate:
+                logger.info("[GetNextLead] Lead was taken by another request")
+                return Response({}, status=status.HTTP_200_OK)
+            
+            # Update the candidate's data
+            data = candidate.data.copy() if candidate.data else {}
+            data['assigned_to'] = user_identifier
+            data['lead_stage'] = self.ASSIGNED_STATUS
+            
+            candidate.data = data
+            candidate.updated_at = timezone.now()
+            candidate.save(update_fields=['data', 'updated_at'])
+            
             logger.info(
-                "[GetNextLead] Preview mode - found lead without assigning: record_id=%s",
-                candidate.id
+                "[GetNextLead] Assigned new lead: record_id=%s user=%s",
+                candidate.id,
+                user_identifier
             )
         
         # Refresh from database to ensure we have latest data
