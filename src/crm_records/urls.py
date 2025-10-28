@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView
+from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, GetNextLeadView, LeadStatsView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 
 
@@ -18,5 +18,11 @@ urlpatterns = [
     
     # Entity-specific aliases (friendly URLs)
     path("leads/", EntityProxyView.as_view(entity_type="lead"), name="lead-list"),
+    
+    # Get next lead endpoint
+    path("leads/next/", GetNextLeadView.as_view(), name="get-next-lead"),
+    
+    # Lead statistics
+    path("leads/stats/", LeadStatsView.as_view(), name="lead-stats"),
     
 ]
