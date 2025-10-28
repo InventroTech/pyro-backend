@@ -5,8 +5,9 @@ from rest_framework.exceptions import ValidationError
 from authz.permissions import IsTenantAuthenticated
 from core.pagination import MetaPageNumberPagination
 from django.utils import timezone
-from django.db.models import Q
-from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample
+from django.db.models import Q, F
+from django.db import transaction
+from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 import logging
 
@@ -502,3 +503,275 @@ class EventLogListView(TenantScopedMixin, generics.ListAPIView):
         
         # Order by most recent first
         return queryset.order_by('-timestamp')
+
+
+class LeadStatsView(APIView):
+    """
+    Get lead statistics for the current tenant's CRM records.
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    @extend_schema(
+        summary="Get lead statistics",
+        description="Returns statistics about leads for the current tenant, including counts by status.",
+        responses={
+            200: OpenApiResponse(
+                description="Lead statistics",
+                examples=[
+                    OpenApiExample(
+                        name="Stats Response",
+                        value={
+                            "total_leads": 100,
+                            "in_queue": 27,
+                            "assigned": 26,
+                            "call_later": 22,
+                            "scheduled": 15,
+                            "won": 6,
+                            "lost": 2,
+                            "closed": 2
+                        }
+                    )
+                ]
+            )
+        },
+        tags=["Leads", "Statistics"]
+    )
+    def get(self, request):
+        """Get statistics about leads for the current tenant."""
+        tenant = request.tenant
+        
+        if not tenant:
+            return Response({
+                "total_leads": 0,
+                "in_queue": 0,
+                "assigned": 0,
+                "call_later": 0,
+                "scheduled": 0,
+                "won": 0,
+                "lost": 0,
+                "closed": 0
+            }, status=status.HTTP_200_OK)
+        
+        # Get all leads for this tenant
+        leads = Record.objects.filter(tenant=tenant, entity_type='lead')
+        
+        # Count by stage
+        stats = {
+            "total_leads": leads.count(),
+            "in_queue": 0,
+            "assigned": 0,
+            "call_later": 0,
+            "scheduled": 0,
+            "won": 0,
+            "lost": 0,
+            "closed": 0
+        }
+        
+        # Count by stage
+        for lead in leads:
+            stage = lead.data.get('lead_stage') if lead.data else None
+            if stage in stats:
+                stats[stage] += 1
+        
+        return Response(stats, status=status.HTTP_200_OK)
+
+
+class GetNextLeadView(APIView):
+    """
+    Get and assign the next available lead from the queue for CRM records.
+    Atomically fetches and assigns the highest-scoring unassigned lead to the caller.
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    QUEUEABLE_STATUSES = ('in_queue', 'assigned', 'call_later', 'scheduled')
+    ASSIGNED_STATUS = 'assigned'
+    
+    def _order_by_score(self, qs):
+        """
+        Order queryset by lead score (if exists in data), then creation date.
+        Higher scores and older creation dates take priority.
+        """
+        # Order by score if it exists in the data field, then by creation date
+        # Using PostgreSQL JSONB operators for ordering
+        qs = qs.extra(
+            select={
+                'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
+            }
+        ).order_by(
+            F('lead_score').desc(nulls_last=True),
+            'created_at',
+            'id'
+        )
+        return qs
+    
+    @extend_schema(
+        summary="Get next lead from queue",
+        description="Atomically fetches and assigns the next available lead from the queue for CRM records. "
+                   "Leads are ordered by score (if available) and creation date.",
+        responses={
+            200: OpenApiResponse(
+                description="Lead assigned successfully or no leads available",
+                examples=[
+                    OpenApiExample(
+                        name="Lead Found",
+                        value={
+                            "record": {
+                                "id": 123,
+                                "tenant_id": "e35e7279-d92d-4cdf-8014-98deaab639c0",
+                                "entity_type": "lead",
+                                "name": "John Doe",
+                                "data": {
+                                    "lead_stage": "assigned",
+                                    "customer_full_name": "John Doe",
+                                    "user_id": "USR123456",
+                                    "phone_number": "+919876543210",
+                                    "lead_score": 85.5,
+                                    "assigned_to": "user123",
+                                    "call_attempts": 2,
+                                    "next_call_at": "2025-01-02T10:00:00Z",
+                                    "closure_time": None,
+                                    "lead_source": "Website",
+                                    "package_to_pitch": "Premium Plan - ₹999/month"
+                                },
+                                "created_at": "2025-01-01T00:00:00Z",
+                                "updated_at": "2025-01-01T00:00:00Z"
+                            }
+                        }
+                    ),
+                    OpenApiExample(
+                        name="No Leads Available",
+                        value={}
+                    )
+                ]
+            ),
+            403: OpenApiResponse(
+                description="Authentication required",
+                examples=[
+                    OpenApiExample(
+                        name="Auth Error",
+                        value={"detail": "Authentication credentials were not provided."}
+                    )
+                ]
+            )
+        },
+        tags=["Leads", "CRM Records"]
+    )
+    def get(self, request):
+        """
+        Get next unassigned lead from the queue and assign it to the current user.
+        
+        Logic:
+        1. Find the next unassigned lead in queue
+        2. Assign it to the current user atomically
+        3. Return the assigned lead
+        """
+        user = request.user
+        tenant = request.tenant
+        
+        if not tenant:
+            logger.warning("[GetNextLead] No tenant context available")
+            return Response({}, status=status.HTTP_200_OK)
+        
+        # Get user identifier (supabase_uid or email)
+        user_identifier = getattr(user, 'supabase_uid', None) or getattr(user, 'email', None)
+        
+        if not user_identifier:
+            logger.warning("[GetNextLead] No user identifier available")
+            return Response({}, status=status.HTTP_200_OK)
+        
+        # Find unassigned queued lead and assign it
+        # Note: For JSONB, when assigned_to is null in JSON, data->>'assigned_to' returns None
+        from django.db.models import Q
+        unassigned = Record.objects.filter(
+            tenant=tenant,
+            entity_type='lead'
+        ).extra(
+            where=["""
+                (data->>'assigned_to' IS NULL OR 
+                 data->>'assigned_to' = '' OR
+                 data->>'assigned_to' = 'null' OR
+                 data->>'assigned_to' = 'None')
+            """]
+        ).filter(
+            Q(data__lead_stage__in=self.QUEUEABLE_STATUSES) | Q(data__lead_stage__isnull=True)
+        )
+        
+        candidate = self._order_by_score(unassigned).first()
+        
+        if not candidate:
+            logger.info("[GetNextLead] No unassigned leads available")
+            return Response({}, status=status.HTTP_200_OK)
+        
+        # Lock and assign the lead
+        with transaction.atomic():
+            candidate = Record.objects.select_for_update(skip_locked=True).filter(pk=candidate.pk).first()
+            
+            if not candidate:
+                logger.info("[GetNextLead] Lead was taken by another request")
+                return Response({}, status=status.HTTP_200_OK)
+            
+            # Update the candidate's data
+            data = candidate.data.copy() if candidate.data else {}
+            data['assigned_to'] = user_identifier
+            data['lead_stage'] = self.ASSIGNED_STATUS
+            
+            candidate.data = data
+            candidate.updated_at = timezone.now()
+            candidate.save(update_fields=['data', 'updated_at'])
+            
+            logger.info(
+                "[GetNextLead] Assigned new lead: record_id=%s user=%s",
+                candidate.id,
+                user_identifier
+            )
+        
+        # Refresh from database to ensure we have latest data
+        candidate.refresh_from_db()
+        
+        # Serialize and flatten for frontend compatibility
+        serialized_data = RecordSerializer(candidate).data
+        lead_data = candidate.data or {}
+        
+        # Flatten the response structure for easier frontend access
+        # Map data fields to top-level for backward compatibility with defaults
+        flattened_response = {
+            "id": candidate.id,
+            "name": candidate.name or lead_data.get('customer_full_name') or '',
+            "phone_no": lead_data.get('phone_number', ''),
+            "user_id": lead_data.get('user_id'),
+            "lead_status": lead_data.get('lead_stage') or '',
+            "lead_score": lead_data.get('lead_score'),
+            "assigned_to": lead_data.get('assigned_to'),
+            "attempt_count": lead_data.get('call_attempts', 0),
+            "last_call_outcome": lead_data.get('last_call_outcome'),
+            "next_call_at": lead_data.get('next_call_at'),
+            "do_not_call": lead_data.get('do_not_call', False),
+            "resolved_at": lead_data.get('closure_time'),
+            "premium_poster_count": lead_data.get('premium_poster_count'),
+            "package_to_pitch": lead_data.get('package_to_pitch'),
+            "last_active_date_time": lead_data.get('last_active_date_time'),
+            "latest_remarks": lead_data.get('latest_remarks'),
+            "lead_description": lead_data.get('lead_description'),
+            "affiliated_party": lead_data.get('affiliated_party'),
+            "rm_dashboard": lead_data.get('rm_dashboard'),
+            "user_profile_link": lead_data.get('user_profile_link'),
+            "whatsapp_link": lead_data.get('whatsapp_link'),
+            "lead_source": lead_data.get('lead_source'),
+            "created_at": serialized_data.get('created_at'),
+            "updated_at": serialized_data.get('updated_at'),
+            # Include full nested structure for detailed data
+            "data": lead_data,
+            # Include full record for compatibility
+            "record": serialized_data
+        }
+        
+        logger.info(
+            "[GetNextLead] Returning lead data: record_id=%s name=%s phone_no=%s source=%s last_active=%s",
+            candidate.id,
+            flattened_response.get('name'),
+            flattened_response.get('phone_no'),
+            flattened_response.get('lead_source'),
+            flattened_response.get('last_active_date_time')
+        )
+        
+        return Response(flattened_response, status=status.HTTP_200_OK)
