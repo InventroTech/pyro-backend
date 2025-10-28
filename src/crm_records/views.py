@@ -1,7 +1,7 @@
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import ValidationError, NotFound
 from authz.permissions import IsTenantAuthenticated
 from core.pagination import MetaPageNumberPagination
 from django.utils import timezone
@@ -53,15 +53,6 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         name = query_params.get('name')
         if name:
             queryset = queryset.filter(name__icontains=name)
-        
-        # Date range filtering on created_at (model field)
-        created_at_gte = query_params.get('created_at__gte')
-        if created_at_gte:
-            queryset = queryset.filter(created_at__gte=created_at_gte)
-        
-        created_at_lte = query_params.get('created_at__lte')
-        if created_at_lte:
-            queryset = queryset.filter(created_at__lte=created_at_lte)
         
         # Dynamic filtering on data JSON field
         # Get all query params except known model fields
@@ -172,6 +163,25 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
     serializer_class = RecordSerializer
     permission_classes = [IsTenantAuthenticated]
 
+    def get_object(self):
+        """
+        Prefer record_id from request body; fall back to URL pk for compatibility.
+        """
+        record_id = self.request.data.get('record_id')
+        if record_id is not None:
+            try:
+                record_id_int = int(record_id)
+            except (TypeError, ValueError):
+                raise ValidationError({'record_id': 'Must be an integer.'})
+
+            try:
+                return self.get_queryset().get(id=record_id_int)
+            except Record.DoesNotExist:
+                raise NotFound('Record not found or access denied')
+
+        # Fallback: use default URL kwarg (pk)
+        return super().get_object()
+
 
 class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
     """
@@ -281,7 +291,7 @@ class RecordEventView(TenantScopedMixin, APIView):
         },
         tags=["Events"]
     )
-    def post(self, request):
+    def post(self, request, pk=None):
         """
         Log an event for a specific record.
         Validates record exists and belongs to tenant, then creates EventLog entry.
@@ -298,7 +308,7 @@ class RecordEventView(TenantScopedMixin, APIView):
         )
         # Find the record, ensuring it belongs to the current tenant
         try:
-            record = Record.objects.get(id=record_id)
+            record = Record.objects.get(id=record_id, tenant=tenant)
             logger.debug("[EventAPI] Found record id=%s entity_type=%s", record.id, record.entity_type)
         except Record.DoesNotExist:
             logger.warning(
