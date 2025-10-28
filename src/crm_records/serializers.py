@@ -7,7 +7,7 @@ class RecordSerializer(serializers.ModelSerializer):
     Serializer for Record model with tenant isolation.
     Prevents tenant spoofing by making tenant_id read-only.
     """
-    tenant_id = serializers.UUIDField(read_only=True, source='tenant_id')
+    tenant_id = serializers.UUIDField(read_only=True)
     
     class Meta:
         model = Record
@@ -51,8 +51,8 @@ class EventLogSerializer(serializers.ModelSerializer):
     Serializer for EventLog model with tenant isolation.
     Controls event creation payload and output format for API responses.
     """
-    tenant_id = serializers.UUIDField(read_only=True, source='tenant_id')
-    record_id = serializers.IntegerField(read_only=True, source='record_id')
+    tenant_id = serializers.UUIDField(read_only=True)
+    record_id = serializers.IntegerField(read_only=True)
     
     class Meta:
         model = EventLog
@@ -95,7 +95,7 @@ class RuleSetSerializer(serializers.ModelSerializer):
     Serializer for RuleSet model with tenant isolation.
     Allows tenant implementors to manage rule configurations.
     """
-    tenant_id = serializers.UUIDField(read_only=True, source='tenant_id')
+    tenant_id = serializers.UUIDField(read_only=True)
     
     class Meta:
         model = RuleSet
@@ -156,9 +156,9 @@ class RuleExecutionLogSerializer(serializers.ModelSerializer):
     Serializer for RuleExecutionLog model with tenant isolation.
     Provides read-only access to rule execution history for debugging.
     """
-    tenant_id = serializers.UUIDField(read_only=True, source='tenant_id')
-    record_id = serializers.IntegerField(read_only=True, source='record_id')
-    rule_id = serializers.IntegerField(read_only=True, source='rule_id', allow_null=True)
+    tenant_id = serializers.UUIDField(read_only=True)
+    record_id = serializers.IntegerField(read_only=True)
+    rule_id = serializers.IntegerField(read_only=True, allow_null=True)
     
     class Meta:
         model = RuleExecutionLog
