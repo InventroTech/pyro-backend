@@ -93,8 +93,51 @@ def _resolve_templates_in(value: Any, ctx: Dict[str, Any]) -> Any:
     return value
 
 
+def _build_jsonlogic_data(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a JSON-serializable data context for JSONLogic evaluation."""
+    record = ctx.get("record")
+    data: Dict[str, Any] = {
+        "record_data": ctx.get("record_data"),
+        "payload": ctx.get("payload"),
+        "event": ctx.get("event"),
+    }
+    # Only expose safe/serializable parts of record
+    if record is not None:
+        data["record"] = {
+            "id": getattr(record, "id", None),
+        }
+    else:
+        data["record"] = {"id": None}
+    return data
+
+
+def _evaluate_condition(condition: Dict[str, Any], ctx: Dict[str, Any]) -> bool:
+    """
+    Evaluate a rule condition using JSONLogic with template resolution.
+
+    Falls back to the simple evaluator on errors for robustness.
+    """
+    if not condition:
+        return True
+
+    # Resolve templates (e.g., {{now}}, {{payload.x}}) inside the condition
+    resolved_condition = _resolve_templates_in(condition, ctx)
+
+    try:
+        data = _build_jsonlogic_data(ctx)
+        result = jsonLogic(resolved_condition, data)
+        return bool(result)
+    except Exception as e:
+        logger.debug(f"JSONLogic evaluation failed, falling back to simple evaluator: {e}")
+        return _evaluate_simple_condition(resolved_condition, ctx)
+
+
 @register_action("update_fields")
-def action_update_fields(ctx: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+def action_update_fields(
+    ctx: Dict[str, Any],
+    updates: Dict[str, Any],
+    **kwargs: Any,
+) -> Dict[str, Any]:
     """
     Action to update record fields.
     
@@ -108,17 +151,43 @@ def action_update_fields(ctx: Dict[str, Any], updates: Dict[str, Any]) -> Dict[s
     record = ctx["record"]
 
     # Resolve any templates in updates based on current context
-    resolved_updates = _resolve_templates_in(updates, ctx)
+    resolved_updates = _resolve_templates_in(updates or {}, ctx)
 
-    # Update the record's data field
+    # Apply direct field updates
     for key, value in resolved_updates.items():
         record.data[key] = value
-    
+
+    # Support numeric increments via optional args: "increments" or "$inc" or "inc"
+    increments: Optional[Dict[str, Any]] = (
+        kwargs.get("increments")
+    )
+
+    applied_increments: Dict[str, Any] = {}
+    if increments:
+        # Resolve templates inside increment values too
+        resolved_increments = _resolve_templates_in(increments, ctx)
+        for key, delta in resolved_increments.items():
+            current_value = record.data.get(key, 0)
+            try:
+                new_value = (current_value or 0) + float(delta)
+                # Cast back to int when appropriate to avoid 1.0 style values
+                if isinstance(current_value, int) and float(delta).is_integer():
+                    new_value = int(new_value)
+                record.data[key] = new_value
+                applied_increments[key] = new_value
+            except Exception:
+                # If increment fails (non-numeric), leave as-is and log warning
+                logger.warning(
+                    f"Increment skipped for field '{key}' on record {record.id}: current='{current_value}' delta='{delta}'"
+                )
+
     # Save only the data and updated_at fields for efficiency
     record.save(update_fields=["data", "updated_at"])
-    
-    logger.info(f"Updated record {record.id} fields: {resolved_updates}")
-    return {"updated_fields": resolved_updates}
+
+    logger.info(
+        f"Updated record {record.id} fields: {resolved_updates}; increments applied: {applied_increments}"
+    )
+    return {"updated_fields": resolved_updates, "increments": applied_increments}
 
 
 @register_action("send_webhook")
@@ -244,9 +313,8 @@ def execute_rules(event_name: str, record: Record, payload: Dict[str, Any], tena
         }
         
         try:
-            # Evaluate rule condition - simplified for now
-            # TODO: Implement proper JSONLogic evaluation when library issues are resolved
-            matched = _evaluate_simple_condition(rule.condition or {}, ctx)
+            # Evaluate rule condition using JSONLogic with template resolution
+            matched = _evaluate_condition(rule.condition or {}, ctx)
             log_data["matched"] = bool(matched)
             
             logger.debug(f"Rule {rule.id} condition evaluated to: {matched}")
