@@ -16,6 +16,7 @@ from .models import Record, EventLog, RuleSet, RuleExecutionLog
 from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
+from user_settings.models import UserSettings
 
 
 class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
@@ -589,16 +590,17 @@ class GetNextLeadView(APIView):
     def _order_by_score(self, qs):
         """
         Order queryset by lead score (if exists in data), then creation date.
-        Higher scores and older creation dates take priority.
+        Higher scores first (100, 90, 80, etc. - descending), then older creation dates.
         """
         # Order by score if it exists in the data field, then by creation date
         # Using PostgreSQL JSONB operators for ordering
+        # Score ordering: 100, 90, 80, 70, etc. (descending)
         qs = qs.extra(
             select={
                 'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
             }
         ).order_by(
-            F('lead_score').desc(nulls_last=True),
+            F('lead_score').desc(nulls_last=True),  # Descending: 100, 90, 80, etc.
             'created_at',
             'id'
         )
@@ -607,7 +609,9 @@ class GetNextLeadView(APIView):
     @extend_schema(
         summary="Get next lead from queue",
         description="Atomically fetches and assigns the next available lead from the queue for CRM records. "
-                   "Leads are ordered by score (if available) and creation date.",
+                   "Logic: 1) Get user's info from request 2) Check RM's eligible lead types from user settings "
+                   "3) Filter leads by eligible lead types (poster field) 4) Order by lead score (100, 90, 80 descending) "
+                   "5) Return first entry.",
         responses={
             200: OpenApiResponse(
                 description="Lead assigned successfully or no leads available",
@@ -661,9 +665,11 @@ class GetNextLeadView(APIView):
         Get next unassigned lead from the queue and assign it to the current user.
         
         Logic:
-        1. Find the next unassigned lead in queue
-        2. Assign it to the current user atomically
-        3. Return the assigned lead
+        1. Get user's info from request
+        2. Check the RM is eligible for what leads (from user settings)
+        3. Filter leads by eligible lead types (poster field)
+        4. Order them according to lead score (100, 90, 80, etc. - descending)
+        5. Return first entry
         """
         user = request.user
         tenant = request.tenant
@@ -672,15 +678,56 @@ class GetNextLeadView(APIView):
             logger.warning("[GetNextLead] No tenant context available")
             return Response({}, status=status.HTTP_200_OK)
         
-        # Get user identifier (supabase_uid or email)
+        # Step 1: Get user identifier (supabase_uid or email)
         user_identifier = getattr(user, 'supabase_uid', None) or getattr(user, 'email', None)
         
         if not user_identifier:
             logger.warning("[GetNextLead] No user identifier available")
             return Response({}, status=status.HTTP_200_OK)
         
-        # Find unassigned queued lead and assign it
-        # Note: For JSONB, when assigned_to is null in JSON, data->>'assigned_to' returns None
+        logger.info("[GetNextLead] Getting next lead for user: %s", user_identifier)
+        
+        # Step 2: Check the RM is eligible for what leads - get from user settings
+        eligible_lead_types = []
+        try:
+            # Try to get user settings for lead type assignments
+            # user_id could be UUID string or we might need to look it up
+            import uuid
+            try:
+                user_uuid = uuid.UUID(str(user_identifier))
+            except (ValueError, AttributeError):
+                # If not a UUID, try to find user by other means
+                from accounts.models import LegacyUser
+                legacy_user = LegacyUser.objects.filter(
+                    tenant=tenant,
+                    email=user_identifier
+                ).first()
+                user_uuid = legacy_user.uid if legacy_user and legacy_user.uid else None
+            
+            if user_uuid:
+                try:
+                    setting = UserSettings.objects.get(
+                        tenant=tenant,
+                        user_id=user_uuid,
+                        key='LEAD_TYPE_ASSIGNMENT'
+                    )
+                    eligible_lead_types = setting.value if isinstance(setting.value, list) else []
+                    logger.info("[GetNextLead] Found eligible lead types for user %s: %s", user_identifier, eligible_lead_types)
+                except UserSettings.DoesNotExist:
+                    logger.info("[GetNextLead] No lead type assignment found for user %s - will return no leads", user_identifier)
+                    eligible_lead_types = []
+            else:
+                logger.warning("[GetNextLead] Could not resolve user UUID for %s", user_identifier)
+        except Exception as e:
+            logger.error("[GetNextLead] Error fetching user settings: %s", str(e))
+            eligible_lead_types = []
+        
+        # If user has no eligible lead types assigned, return empty
+        if not eligible_lead_types:
+            logger.info("[GetNextLead] User %s has no eligible lead types assigned", user_identifier)
+            return Response({}, status=status.HTTP_200_OK)
+        
+        # Step 3: Filter leads by eligible lead types (poster field) and unassigned status
         from django.db.models import Q
         unassigned = Record.objects.filter(
             tenant=tenant,
@@ -691,12 +738,28 @@ class GetNextLeadView(APIView):
                  data->>'assigned_to' = '' OR
                  data->>'assigned_to' = 'null' OR
                  data->>'assigned_to' = 'None')
+                AND data->>'poster' IS NOT NULL
+                AND data->>'poster' != ''
+                AND data->>'poster' != 'null'
             """]
         ).filter(
             Q(data__lead_stage__in=self.QUEUEABLE_STATUSES) | Q(data__lead_stage__isnull=True)
         )
         
+        # Filter by eligible lead types (poster field must match one of the eligible types)
+        # Use Q objects to build OR conditions for each eligible lead type
+        poster_filter = Q()
+        for lead_type in eligible_lead_types:
+            poster_filter |= Q(data__poster=lead_type)
+        
+        unassigned = unassigned.filter(poster_filter)
+        
+        logger.info("[GetNextLead] Filtered unassigned leads by eligible types: %s", eligible_lead_types)
+        
+        # Step 4: Order by lead score (descending: 100, 90, 80, etc.)
         candidate = self._order_by_score(unassigned).first()
+        
+        # Step 5: Return first entry (or empty if none found)
         
         if not candidate:
             logger.info("[GetNextLead] No unassigned leads available")
@@ -741,6 +804,7 @@ class GetNextLeadView(APIView):
             "user_id": lead_data.get('user_id'),
             "lead_status": lead_data.get('lead_stage') or '',
             "lead_score": lead_data.get('lead_score'),
+            "lead_type": lead_data.get('poster'),  # poster from data JSONB exposed as lead_type
             "assigned_to": lead_data.get('assigned_to'),
             "attempt_count": lead_data.get('call_attempts', 0),
             "last_call_outcome": lead_data.get('last_call_outcome'),
