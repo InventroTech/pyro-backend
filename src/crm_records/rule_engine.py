@@ -6,10 +6,12 @@ It handles fetching rules, evaluating conditions using JSONLogic, and executing 
 """
 import time
 import logging
+import json
 from typing import Dict, Any, List, Optional
 from django.utils import timezone
-from json_logic import jsonLogic
+from datetime import timedelta
 import re
+import copy
 
 from .models import RuleSet, RuleExecutionLog, Record
 
@@ -93,43 +95,18 @@ def _resolve_templates_in(value: Any, ctx: Dict[str, Any]) -> Any:
     return value
 
 
-def _build_jsonlogic_data(ctx: Dict[str, Any]) -> Dict[str, Any]:
-    """Build a JSON-serializable data context for JSONLogic evaluation."""
-    record = ctx.get("record")
-    data: Dict[str, Any] = {
-        "record_data": ctx.get("record_data"),
-        "payload": ctx.get("payload"),
-        "event": ctx.get("event"),
-    }
-    # Only expose safe/serializable parts of record
-    if record is not None:
-        data["record"] = {
-            "id": getattr(record, "id", None),
-        }
-    else:
-        data["record"] = {"id": None}
-    return data
+    
 
 
 def _evaluate_condition(condition: Dict[str, Any], ctx: Dict[str, Any]) -> bool:
-    """
-    Evaluate a rule condition using JSONLogic with template resolution.
-
-    Falls back to the simple evaluator on errors for robustness.
-    """
+    """Evaluate a rule condition using template resolution + simple evaluator only."""
     if not condition:
         return True
 
     # Resolve templates (e.g., {{now}}, {{payload.x}}) inside the condition
     resolved_condition = _resolve_templates_in(condition, ctx)
 
-    try:
-        data = _build_jsonlogic_data(ctx)
-        result = jsonLogic(resolved_condition, data)
-        return bool(result)
-    except Exception as e:
-        logger.debug(f"JSONLogic evaluation failed, falling back to simple evaluator: {e}")
-        return _evaluate_simple_condition(resolved_condition, ctx)
+    return _evaluate_simple_condition(resolved_condition, ctx)
 
 
 @register_action("update_fields")
@@ -221,6 +198,36 @@ def action_send_webhook(ctx: Dict[str, Any], url: str, payload: Optional[Dict[st
         raise
 
 
+@register_action("compute_next_call_from_attempts")
+def action_compute_next_call_from_attempts(
+    ctx: Dict[str, Any],
+    base_minutes_per_attempt: int = 30,
+    attempts_field: str = "call_attempts",
+    target_field: str = "next_call_at",
+) -> Dict[str, Any]:
+    """
+    Compute next_call_at = now + (base_minutes_per_attempt * current_attempts) minutes
+    using attempts from record.data[attempts_field], then write to record.data[target_field].
+    """
+    record = ctx["record"]
+    attempts_raw = record.data.get(attempts_field, 0)
+    try:
+        attempts = int(attempts_raw or 0)
+    except Exception:
+        attempts = 0
+
+    minutes = base_minutes_per_attempt * attempts
+    next_time = timezone.now() + timedelta(minutes=minutes)
+    iso_ts = next_time.isoformat()
+
+    record.data[target_field] = iso_ts
+    record.save(update_fields=["data", "updated_at"])
+    logger.info(
+        f"Computed {target_field} for record {record.id} using attempts={attempts}: {iso_ts}"
+    )
+    return {"attempts": attempts, "target_field": target_field, "value": iso_ts}
+
+
 def _evaluate_simple_condition(condition: Dict[str, Any], ctx: Dict[str, Any]) -> bool:
     """
     Simple condition evaluation without JSONLogic.
@@ -236,32 +243,121 @@ def _evaluate_simple_condition(condition: Dict[str, Any], ctx: Dict[str, Any]) -
     if not condition:
         return True  # Empty condition always matches
     
-    # Simple equality check: {"==": [{"var": "field"}, "value"]}
-    if "==" in condition:
-        eq_parts = condition["=="]
-        if len(eq_parts) == 2:
-            var_part = eq_parts[0]
-            expected_value = eq_parts[1]
-            
-            if "var" in var_part:
-                field_path = var_part["var"]
-                # Handle nested field paths like "record_data.status"
-                if "." in field_path:
-                    parts = field_path.split(".")
-                    value = ctx
-                    for part in parts:
-                        if isinstance(value, dict):
-                            value = value.get(part)
-                        else:
-                            value = None
-                            break
-                    actual_value = value
+    def _resolve_operand(operand: Any) -> Any:
+        if isinstance(operand, dict) and "var" in operand:
+            field_path = operand["var"]
+            parts = field_path.split(".")
+            value: Any = ctx
+            for part in parts:
+                if isinstance(value, dict):
+                    value = value.get(part)
                 else:
-                    # Get value from context
-                    actual_value = ctx.get(field_path)
-                return actual_value == expected_value
+                    value = getattr(value, part, None)
+                if value is None:
+                    break
+            return value
+        return operand
+
+    # Logical NOT
+    if "!" in condition:
+        arg = condition["!"]
+        return not _evaluate_simple_condition(arg if isinstance(arg, dict) else {"==": [arg, True]}, ctx)
+
+    # Logical AND
+    if "and" in condition:
+        args = condition["and"]
+        if isinstance(args, list):
+            return all(_evaluate_simple_condition(a, ctx) if isinstance(a, dict) else bool(a) for a in args)
+        return False
+
+    # Logical OR
+    if "or" in condition:
+        args = condition["or"]
+        if isinstance(args, list):
+            return any(_evaluate_simple_condition(a, ctx) if isinstance(a, dict) else bool(a) for a in args)
+        return False
+
+    # Equality
+    if "==" in condition:
+        args = condition["=="]
+        if isinstance(args, list) and len(args) == 2:
+            left = _resolve_operand(args[0])
+            right = _resolve_operand(args[1])
+            return left == right
+
+    # Less than
+    if "<" in condition:
+        args = condition["<"]
+        if isinstance(args, list) and len(args) == 2:
+            left = _resolve_operand(args[0])
+            right = _resolve_operand(args[1])
+            try:
+                return left < right
+            except Exception:
+                return False
+
+    # Greater than
+    if ">" in condition:
+        args = condition[">"]
+        if isinstance(args, list) and len(args) == 2:
+            left = _resolve_operand(args[0])
+            right = _resolve_operand(args[1])
+            try:
+                return left > right
+            except Exception:
+                return False
+
+    # Less than or equal
+    if "<=" in condition:
+        args = condition["<="]
+        if isinstance(args, list) and len(args) == 2:
+            left = _resolve_operand(args[0])
+            right = _resolve_operand(args[1])
+            try:
+                return left <= right
+            except Exception:
+                return False
+
+    # Greater than or equal
+    if ">=" in condition:
+        args = condition[">="]
+        if isinstance(args, list) and len(args) == 2:
+            left = _resolve_operand(args[0])
+            right = _resolve_operand(args[1])
+            try:
+                return left >= right
+            except Exception:
+                return False
     
-    # Default to True for unknown conditions (for now)
+    # Default to False for unknown/unsupported conditions to avoid false positives
+    return False
+
+
+def _is_simple_condition(condition: Any) -> bool:
+    """Return True if the condition only uses simple ops we support."""
+    if not isinstance(condition, dict) or len(condition) != 1:
+        return False
+    (op, value), = condition.items()
+    simple_ops = {"==", "<", ">", "<=", ">=", "and", "or", "!"}
+    if op not in simple_ops:
+        return False
+    if op in {"and", "or"}:
+        if not isinstance(value, list):
+            return False
+        return all(_is_simple_condition(v) if isinstance(v, dict) else True for v in value)
+    if op == "!":
+        return _is_simple_condition(value) if isinstance(value, dict) else True
+    # Comparators & equality expect 2 args which can be literals or {"var": path}
+    if not (isinstance(value, list) and len(value) == 2):
+        return False
+    for v in value:
+        if isinstance(v, dict) and "var" in v:
+            # var path must be string
+            if not isinstance(v.get("var"), str):
+                return False
+        elif isinstance(v, dict):
+            # Nested condition not supported inside operands
+            return False
     return True
 
 
@@ -291,6 +387,9 @@ def execute_rules(event_name: str, record: Record, payload: Dict[str, Any], tena
     )
     
     logger.info(f"Evaluating {rules.count()} rules for event '{event_name}' on record {record.id}")
+
+    # Snapshot record data once per event so all rule conditions see pre-update state
+    record_data_snapshot = copy.deepcopy(record.data)
     
     for rule in rules:
         rule_start = time.time()
@@ -302,7 +401,7 @@ def execute_rules(event_name: str, record: Record, payload: Dict[str, Any], tena
             "payload": payload,
             "event": event_name,
             # Add record data directly for easier access
-            "record_data": record.data
+            "record_data": record_data_snapshot
         }
         
         # Initialize log data
@@ -314,13 +413,35 @@ def execute_rules(event_name: str, record: Record, payload: Dict[str, Any], tena
         
         try:
             # Evaluate rule condition using JSONLogic with template resolution
+            # Log evaluation context and condition (shortened for readability)
+            def _short(obj: Any, limit: int = 400) -> str:
+                try:
+                    s = json.dumps(obj, default=str)
+                except Exception:
+                    s = str(obj)
+                return s if len(s) <= limit else s[:limit] + "... (truncated)"
+
+            snapshot_attempts = record_data_snapshot.get("call_attempts") if isinstance(record_data_snapshot, dict) else None
+            payload_keys = list(payload.keys()) if isinstance(payload, dict) else []
+            logger.info(
+                f"Rule {rule.id} evaluate: event='{event_name}' record={record.id} attempts_snapshot={snapshot_attempts} "
+                f"condition={_short(rule.condition)} payload_keys={payload_keys}"
+            )
+
+            # Also log resolved condition at debug level
+            resolved_for_log = _resolve_templates_in(rule.condition or {}, ctx)
+            logger.debug(
+                f"Rule {rule.id} resolved_condition={_short(resolved_for_log)}"
+            )
+
             matched = _evaluate_condition(rule.condition or {}, ctx)
             log_data["matched"] = bool(matched)
             
-            logger.debug(f"Rule {rule.id} condition evaluated to: {matched}")
+            logger.info(f"Rule {rule.id} condition result: matched={matched}")
             
             # Execute actions if condition matched
             if matched:
+                logger.info(f"Rule {rule.id} executing {len(rule.actions)} action(s)")
                 for action_config in rule.actions:
                     action_name = action_config.get("action")
                     action_args = action_config.get("args", {})
@@ -334,6 +455,9 @@ def execute_rules(event_name: str, record: Record, payload: Dict[str, Any], tena
                     try:
                         # Execute the action
                         action_func = ACTIONS[action_name]
+                        logger.info(
+                            f"Rule {rule.id} -> action '{action_name}' args={_short(action_args)}"
+                        )
                         result = action_func(ctx, **action_args)
                         log_data["actions"].append({
                             "action": action_name,
@@ -346,6 +470,8 @@ def execute_rules(event_name: str, record: Record, payload: Dict[str, Any], tena
                         error_msg = f"Action '{action_name}' failed: {str(e)}"
                         log_data["errors"].append(error_msg)
                         logger.error(f"Rule {rule.id}: {error_msg}")
+            else:
+                logger.info(f"Rule {rule.id} did not match. Skipping actions.")
             
         except Exception as e:
             error_msg = f"Rule evaluation failed: {str(e)}"
@@ -384,25 +510,9 @@ def get_available_actions() -> List[str]:
 
 
 def validate_rule_condition(condition: Dict[str, Any]) -> bool:
-    """
-    Validate a rule condition without executing it.
-    
-    Args:
-        condition: JSONLogic condition to validate
-        
-    Returns:
-        True if condition is valid, False otherwise
-    """
+    """Validate a rule condition for syntax supported by the simple evaluator."""
     try:
-        # Test with dummy context
-        dummy_ctx = {
-            "record": {"data": {}},
-            "payload": {},
-            "event": "test"
-        }
-        # Just try to parse the condition, don't actually evaluate it
-        jsonLogic(condition, dummy_ctx)
-        return True
+        return _is_simple_condition(condition) or _evaluate_simple_condition(condition, {"record_data": {}, "payload": {}, "event": "test"}) in [True, False]
     except Exception as e:
         logger.warning(f"Invalid rule condition: {e}")
         return False
