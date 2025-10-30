@@ -16,6 +16,7 @@ from .models import Record, EventLog, RuleSet, RuleExecutionLog
 from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
+from user_settings.models import UserSettings
 
 
 class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
@@ -596,19 +597,32 @@ class GetNextLeadView(APIView):
     QUEUEABLE_STATUSES = ('in_queue', 'assigned', 'call_later', 'scheduled')
     ASSIGNED_STATUS = 'assigned'
     
+    def _poster_aliases(self, lead_type: str):
+        """
+        Normalize known poster type typos/synonyms so filtering matches real data.
+        Keep both canonical and legacy spellings to be safe.
+        """
+        aliases = {
+            # common typo observed in data/user settings
+            'in_trail': ['in_trial', 'in_trail'],
+            'in_trial': ['in_trial', 'in_trail'],
+        }
+        return aliases.get(lead_type, [lead_type])
+    
     def _order_by_score(self, qs):
         """
         Order queryset by lead score (if exists in data), then creation date.
-        Higher scores and older creation dates take priority.
+        Higher scores first (100, 90, 80, etc. - descending), then older creation dates.
         """
         # Order by score if it exists in the data field, then by creation date
         # Using PostgreSQL JSONB operators for ordering
+        # Score ordering: 100, 90, 80, 70, etc. (descending)
         qs = qs.extra(
             select={
                 'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
             }
         ).order_by(
-            F('lead_score').desc(nulls_last=True),
+            F('lead_score').desc(nulls_last=True),  # Descending: 100, 90, 80, etc.
             'created_at',
             'id'
         )
@@ -617,7 +631,9 @@ class GetNextLeadView(APIView):
     @extend_schema(
         summary="Get next lead from queue",
         description="Atomically fetches and assigns the next available lead from the queue for CRM records. "
-                   "Leads are ordered by score (if available) and creation date.",
+                   "Logic: 1) Get user's info from request 2) Check RM's eligible lead types from user settings "
+                   "3) Filter leads by eligible lead types (poster field) 4) Order by lead score (100, 90, 80 descending) "
+                   "5) Return first entry.",
         responses={
             200: OpenApiResponse(
                 description="Lead assigned successfully or no leads available",
@@ -669,88 +685,221 @@ class GetNextLeadView(APIView):
     def get(self, request):
         """
         Get next unassigned lead from the queue and assign it to the current user.
-        
-        Logic:
-        1. Find the next unassigned lead in queue
-        2. Assign it to the current user atomically
-        3. Return the assigned lead
+        Added enhanced logging for diagnosis when no leads are assigned,
+        especially to help debug why we are not getting leads even when there are some in queueable states.
         """
         user = request.user
         tenant = request.tenant
-        
+
         if not tenant:
             logger.warning("[GetNextLead] No tenant context available")
             return Response({}, status=status.HTTP_200_OK)
-        
-        # Get user identifier (supabase_uid or email)
+
+        # Step 1: Get user identifier (supabase_uid or email)
         user_identifier = getattr(user, 'supabase_uid', None) or getattr(user, 'email', None)
-        
+
         if not user_identifier:
             logger.warning("[GetNextLead] No user identifier available")
             return Response({}, status=status.HTTP_200_OK)
-        
-        # Find unassigned queued lead and assign it
-        # Note: For JSONB, when assigned_to is null in JSON, data->>'assigned_to' returns None
+
+        logger.info("[GetNextLead] Getting next lead for user: %s", user_identifier)
+
+        # Step 2: Check the RM is eligible for what leads - get from user settings
+        eligible_lead_types = []
+        user_uuid = None
+        try:
+            import uuid
+            try:
+                user_uuid = uuid.UUID(str(user_identifier))
+                logger.debug("[GetNextLead] User identifier %s parsed as UUID: %s", user_identifier, user_uuid)
+            except (ValueError, AttributeError):
+                from accounts.models import LegacyUser
+                legacy_user = LegacyUser.objects.filter(
+                    tenant=tenant,
+                    email=user_identifier
+                ).first()
+                user_uuid = legacy_user.uid if legacy_user and legacy_user.uid else None
+                logger.debug("[GetNextLead] Resolved user_uuid from LegacyUser: %s", user_uuid)
+
+            if user_uuid:
+                try:
+                    setting = UserSettings.objects.get(
+                        tenant=tenant,
+                        user_id=user_uuid,
+                        key='LEAD_TYPE_ASSIGNMENT'
+                    )
+                    eligible_lead_types = setting.value if isinstance(setting.value, list) else []
+                    logger.info("[GetNextLead] Found eligible lead types for user %s: %s", user_identifier, eligible_lead_types)
+                except UserSettings.DoesNotExist:
+                    logger.info("[GetNextLead] No lead type assignment found for user %s - will return no leads", user_identifier)
+                    eligible_lead_types = []
+            else:
+                logger.warning("[GetNextLead] Could not resolve user UUID for %s", user_identifier)
+        except Exception as e:
+            logger.error("[GetNextLead] Error fetching user settings: %s", str(e))
+            eligible_lead_types = []
+
+        # If user has no eligible lead types assigned, return empty
+        if not eligible_lead_types:
+            logger.info("[GetNextLead] User %s has no eligible lead types assigned", user_identifier)
+            
+            # --- Enhanced Logging Block ---
+            from django.db.models import Q
+            # Count all leads in any queueable state regardless of assignment
+            possible_leads_cnt = Record.objects.filter(
+                tenant=tenant,
+                entity_type='lead'
+            ).filter(
+                Q(data__lead_stage__in=self.QUEUEABLE_STATUSES) | Q(data__lead_stage__isnull=True)
+            ).count()
+            # Count those unassigned
+            possible_unassigned_cnt = Record.objects.filter(
+                tenant=tenant,
+                entity_type='lead'
+            ).extra(
+                where=["""
+                    (
+                        (data->>'assigned_to' IS NULL OR 
+                         data->>'assigned_to' = '' OR
+                         data->>'assigned_to' = 'null' OR
+                         data->>'assigned_to' = 'None')
+                        OR data->>'lead_stage' = 'in_queue'
+                    )
+                    AND data->>'poster' IS NOT NULL
+                    AND data->>'poster' != ''
+                    AND data->>'poster' != 'null'
+                """]
+            ).filter(
+                Q(data__lead_stage__in=self.QUEUEABLE_STATUSES) | Q(data__lead_stage__isnull=True)
+            ).count()
+            logger.info("[GetNextLead] Diagnostic: queueable leads for tenant=%s: count_in_queueable_state=%d, count_unassigned=%d, eligible_lead_types=None", tenant, possible_leads_cnt, possible_unassigned_cnt)
+            # --- End Enhanced Logging Block ---
+            
+            return Response({}, status=status.HTTP_200_OK)
+
+        # Step 3: Filter leads by eligible lead types (poster field) and unassigned status
         from django.db.models import Q
-        unassigned = Record.objects.filter(
+        base_qs = Record.objects.filter(
             tenant=tenant,
             entity_type='lead'
         ).extra(
             where=["""
-                (data->>'assigned_to' IS NULL OR 
-                 data->>'assigned_to' = '' OR
-                 data->>'assigned_to' = 'null' OR
-                 data->>'assigned_to' = 'None')
+                (
+                    (data->>'assigned_to' IS NULL OR 
+                     data->>'assigned_to' = '' OR
+                     data->>'assigned_to' = 'null' OR
+                     data->>'assigned_to' = 'None')
+                    OR data->>'lead_stage' = 'in_queue'
+                )
+                AND data->>'poster' IS NOT NULL
+                AND data->>'poster' != ''
+                AND data->>'poster' != 'null'
             """]
         ).filter(
             Q(data__lead_stage__in=self.QUEUEABLE_STATUSES) | Q(data__lead_stage__isnull=True)
         )
-        
+
+        # Filter by eligible lead types (poster field must match one of the eligible types)
+        poster_filter = Q()
+        for lead_type in eligible_lead_types:
+            for alias in self._poster_aliases(lead_type):
+                poster_filter |= Q(data__poster=alias)
+        unassigned = base_qs.filter(poster_filter)
+
+        logger.info("[GetNextLead] Filtered unassigned leads by eligible types: %s", eligible_lead_types)
+
+        # --- Enhanced Diagnostics: Log possible unassigned counts for debugging ---
+        unassigned_cnt = unassigned.count()
+        total_unassigned_cnt = base_qs.count()
+        logger.info("[GetNextLead] Diagnostic: total_unassigned_in_queueable=%d, unassigned_matching_types=%d for user=%s",
+                    total_unassigned_cnt, unassigned_cnt, user_identifier)
+
+        if unassigned_cnt == 0 and total_unassigned_cnt > 0:
+            # There are unassigned queueable leads, but none matching the user's eligible lead types
+            lead_types_in_queue = list(base_qs.values_list("data__poster", flat=True).distinct())
+            logger.info(
+                "[GetNextLead] No unassigned leads matching user's eligible types. Present types in queueable/unassigned leads: %s. User eligible types: %s",
+                lead_types_in_queue, eligible_lead_types
+            )
+        elif total_unassigned_cnt == 0:
+            logger.info("[GetNextLead] There are currently no unassigned leads in any queueable status for tenant=%s", tenant)
+            # Relaxed fallback: drop lead_stage filter to recover from inconsistent/missing stages
+            relaxed_qs = Record.objects.filter(
+                tenant=tenant,
+                entity_type='lead'
+            ).extra(
+                where=["""
+                    (
+                        (data->>'assigned_to' IS NULL OR 
+                         data->>'assigned_to' = '' OR
+                         data->>'assigned_to' = 'null' OR
+                         data->>'assigned_to' = 'None')
+                        OR data->>'lead_stage' = 'in_queue'
+                    )
+                    AND data->>'poster' IS NOT NULL
+                    AND data->>'poster' != ''
+                    AND data->>'poster' != 'null'
+                """]
+            )
+            relaxed_unassigned = relaxed_qs.filter(poster_filter)
+            relaxed_cnt = relaxed_unassigned.count()
+            if relaxed_cnt > 0:
+                logger.info("[GetNextLead] Relaxed fallback found %d unassigned leads ignoring lead_stage filter", relaxed_cnt)
+                unassigned = relaxed_unassigned
+                unassigned_cnt = relaxed_cnt
+
+        # Step 4: Order by lead score (descending: 100, 90, 80, etc.)
         candidate = self._order_by_score(unassigned).first()
-        
+
+        # Step 5: Return first entry (or empty if none found)
+
         if not candidate:
-            logger.info("[GetNextLead] No unassigned leads available")
+            logger.info("[GetNextLead] No unassigned leads available after filtering and sorting by score")
+            # --- Extra Diagnostics ---
+            if unassigned_cnt > 0:
+                logger.info("[GetNextLead] Unassigned leads exist but none passed the lead score ordering filter")
             return Response({}, status=status.HTTP_200_OK)
-        
+
         # Lock and assign the lead
         with transaction.atomic():
-            candidate = Record.objects.select_for_update(skip_locked=True).filter(pk=candidate.pk).first()
-            
-            if not candidate:
+            candidate_locked = Record.objects.select_for_update(skip_locked=True).filter(pk=candidate.pk).first()
+
+            if not candidate_locked:
                 logger.info("[GetNextLead] Lead was taken by another request")
                 return Response({}, status=status.HTTP_200_OK)
-            
+
             # Update the candidate's data
-            data = candidate.data.copy() if candidate.data else {}
+            data = candidate_locked.data.copy() if candidate_locked.data else {}
             data['assigned_to'] = user_identifier
             data['lead_stage'] = self.ASSIGNED_STATUS
-            
-            candidate.data = data
-            candidate.updated_at = timezone.now()
-            candidate.save(update_fields=['data', 'updated_at'])
-            
+
+            candidate_locked.data = data
+            candidate_locked.updated_at = timezone.now()
+            candidate_locked.save(update_fields=['data', 'updated_at'])
+
             logger.info(
                 "[GetNextLead] Assigned new lead: record_id=%s user=%s",
-                candidate.id,
+                candidate_locked.id,
                 user_identifier
             )
-        
+
         # Refresh from database to ensure we have latest data
-        candidate.refresh_from_db()
-        
+        candidate_locked.refresh_from_db()
+
         # Serialize and flatten for frontend compatibility
-        serialized_data = RecordSerializer(candidate).data
-        lead_data = candidate.data or {}
-        
+        serialized_data = RecordSerializer(candidate_locked).data
+        lead_data = candidate_locked.data or {}
+
         # Flatten the response structure for easier frontend access
         # Map data fields to top-level for backward compatibility with defaults
         flattened_response = {
-            "id": candidate.id,
-            "name": candidate.name or lead_data.get('customer_full_name') or '',
+            "id": candidate_locked.id,
+            "name": candidate_locked.name or lead_data.get('customer_full_name') or '',
             "phone_no": lead_data.get('phone_number', ''),
             "user_id": lead_data.get('user_id'),
             "lead_status": lead_data.get('lead_stage') or '',
             "lead_score": lead_data.get('lead_score'),
+            "lead_type": lead_data.get('poster'),
             "assigned_to": lead_data.get('assigned_to'),
             "attempt_count": lead_data.get('call_attempts', 0),
             "last_call_outcome": lead_data.get('last_call_outcome'),
@@ -769,19 +918,17 @@ class GetNextLeadView(APIView):
             "lead_source": lead_data.get('lead_source'),
             "created_at": serialized_data.get('created_at'),
             "updated_at": serialized_data.get('updated_at'),
-            # Include full nested structure for detailed data
             "data": lead_data,
-            # Include full record for compatibility
             "record": serialized_data
         }
-        
+
         logger.info(
             "[GetNextLead] Returning lead data: record_id=%s name=%s phone_no=%s source=%s last_active=%s",
-            candidate.id,
+            candidate_locked.id,
             flattened_response.get('name'),
             flattened_response.get('phone_no'),
             flattened_response.get('lead_source'),
             flattened_response.get('last_active_date_time')
         )
-        
+
         return Response(flattened_response, status=status.HTTP_200_OK)
