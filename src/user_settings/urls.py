@@ -3,7 +3,8 @@ from .views import (
     UserSettingsListView,
     UserSettingsDetailView,
     LeadTypeAssignmentView,
-    UserLeadTypesView
+    UserLeadTypesView,
+    LeadTypesListView
 )
 
 urlpatterns = [
@@ -14,4 +15,5 @@ urlpatterns = [
     # Lead type assignment endpoints
     path('lead-type-assignments/', LeadTypeAssignmentView.as_view(), name='lead-type-assignments'),
     path('users/<uuid:user_id>/lead-types/', UserLeadTypesView.as_view(), name='user-lead-types'),
+    path('lead-types/', LeadTypesListView.as_view(), name='lead-types-list'),
 ]

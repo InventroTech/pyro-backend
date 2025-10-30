@@ -45,12 +45,27 @@ class UserSettingsCreateSerializer(serializers.ModelSerializer):
 
 class LeadTypeAssignmentSerializer(serializers.Serializer):
     """Serializer specifically for lead type assignments"""
-    user_id = serializers.UUIDField()
+    user_id = serializers.CharField()  # Accept both UUID and integer ID
     lead_types = serializers.ListField(
         child=serializers.CharField(max_length=100),
         allow_empty=True,
         help_text="List of lead types assigned to the user"
     )
+    
+    def validate_user_id(self, value):
+        """Validate and normalize user_id - can be UUID string or integer string"""
+        # Try to parse as UUID first
+        try:
+            import uuid
+            return str(uuid.UUID(value))
+        except (ValueError, AttributeError):
+            # If not a valid UUID, assume it's an integer ID
+            try:
+                int_id = int(value)
+                # Store as-is for lookup - we'll handle conversion in the view
+                return str(int_id)
+            except (ValueError, TypeError):
+                raise serializers.ValidationError("user_id must be a valid UUID or integer ID")
 
     def validate_lead_types(self, value):
         """Validate lead types list"""
