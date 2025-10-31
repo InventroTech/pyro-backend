@@ -226,6 +226,9 @@ CORS_ALLOW_ALL_ORIGINS = True # for dev only not to be added in prod
 AUTH_USER_MODEL = 'authentication.User'
 SUPABASE_JWT_SECRET = env("SUPABASE_JWT_SECRET")
 
+# Praja secret for external API access (used in X-Secret-Praja header)
+PRAJA_SECRET = env("PRAJA_SECRET", default="")
+
 REST_FRAMEWORK = {
     # Enable API-wide permissions
     'DEFAULT_PERMISSION_CLASSES': [
@@ -316,6 +319,7 @@ else:
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
     "X-Tenant-Slug",  # custom tenant header
+    "X-Secret-Praja",  # Praja API secret header
 ]
 
 import config.spectacular_auth
