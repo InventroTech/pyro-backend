@@ -853,27 +853,35 @@ class PrajaLeadsAPIView(APIView):
     - PATCH: UPDATE lead score (requires lead_id in query or body)
     - DELETE: DELETE a lead (requires lead_id in query or body)
     
-    Requires X-Secret-Praja header and X-Tenant-Slug header.
+    Requires X-Secret-Praja header for authentication.
+    Automatically uses DEFAULT_TENANT_SLUG from settings (no X-Tenant-Slug header needed).
     Does NOT require IsTenantAuthenticated - uses HasPrajaSecret instead.
     """
+    authentication_classes = []  # No authentication required - only secret header
     permission_classes = [HasPrajaSecret]
     
     def _get_tenant(self, request):
-        """Helper to get tenant from X-Tenant-Slug header"""
-        tenant_slug = request.headers.get('X-Tenant-Slug')
-        if not tenant_slug:
-            return None, Response(
-                {'error': 'X-Tenant-Slug header is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        """Helper to get tenant - uses default tenant from settings (no header required)"""
+        from django.conf import settings
+        
+        # Get default tenant slug from settings
+        default_slug = getattr(settings, 'DEFAULT_TENANT_SLUG', 'bibhab-thepyro-ai')
         
         try:
-            return Tenant.objects.get(slug=tenant_slug), None
+            tenant = Tenant.objects.get(slug=default_slug)
+            logger.info(f"[PrajaLeadsAPI] Using default tenant: {default_slug}")
+            return tenant, None
         except Tenant.DoesNotExist:
-            return None, Response(
-                {'error': f'Tenant with slug "{tenant_slug}" not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            # Fallback to first tenant if default doesn't exist
+            tenant = Tenant.objects.first()
+            if tenant:
+                logger.warning(f"[PrajaLeadsAPI] Default tenant '{default_slug}' not found, using first tenant: {tenant.slug}")
+                return tenant, None
+            else:
+                return None, Response(
+                    {'error': 'No tenant found in database'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
     
     def post(self, request):
         """

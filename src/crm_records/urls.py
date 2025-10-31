@@ -25,8 +25,8 @@ urlpatterns = [
     # Lead statistics
     path("leads/stats/", LeadStatsView.as_view(), name="lead-stats"),
     
-    # Praja API endpoint - Single endpoint for all CRUD operations
+    # External API endpoint - Single endpoint for all CRUD operations
     # POST: CREATE, GET: READ, PATCH: UPDATE score, DELETE: DELETE
-    path("praja/leads/", PrajaLeadsAPIView.as_view(), name="praja-leads"),
+    path("external/leads/", PrajaLeadsAPIView.as_view(), name="external-leads"),
     
 ]
