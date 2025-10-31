@@ -14,6 +14,7 @@ import re
 import copy
 
 from .models import RuleSet, RuleExecutionLog, Record
+from support_ticket.services import MixpanelService
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +198,54 @@ def action_send_webhook(ctx: Dict[str, Any], url: str, payload: Optional[Dict[st
         logger.error(f"Webhook failed for record {record.id} to {url}: {e}")
         raise
 
+
+@register_action("send_mixpanel_event")
+def action_send_mixpanel_event(
+    ctx: Dict[str, Any],
+    user_id: Any,
+    event_name: str,
+    properties: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Action to send an event to Mixpanel via the custom API used by MixpanelService.
+    Supports template resolution on all arguments.
+
+    Args:
+        ctx: Rule context containing 'record', 'payload', etc.
+        user_id: The Mixpanel distinct_id (will be cast to int in the service). Can be templated.
+        event_name: The event name to send. Can be templated.
+        properties: Dict of event properties. Can be templated.
+
+    Returns:
+        Dict with execution result including success flag and echoed inputs.
+    """
+    record = ctx["record"]
+
+    # Resolve templates for all arguments
+    resolved_user_id = _resolve_templates_in(user_id, ctx)
+    resolved_event_name = _resolve_templates_in(event_name, ctx)
+    resolved_properties = _resolve_templates_in(properties or {}, ctx)
+
+    try:
+        service = MixpanelService()
+        success = service.send_to_mixpanel_sync(
+            str(resolved_user_id),
+            str(resolved_event_name),
+            resolved_properties,
+        )
+        logger.info(
+            f"Mixpanel event sent for record {record.id}: event='{resolved_event_name}' success={success}"
+        )
+        return {
+            "success": bool(success),
+            "event_name": resolved_event_name,
+            "user_id": resolved_user_id,
+        }
+    except Exception as e:
+        logger.error(
+            f"Mixpanel event failed for record {record.id}: event='{resolved_event_name}' error={e}"
+        )
+        raise
 
 @register_action("compute_next_call_from_attempts")
 def action_compute_next_call_from_attempts(
