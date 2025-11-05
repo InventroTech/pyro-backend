@@ -71,23 +71,33 @@ def _get_or_create_profile(claims):
     return user
 
 def _enrich_claims(claims: dict, request) -> dict:
-    """Enrich JWT claims with tenant_id, user_id, role_id, role_key, and tenant_slug"""
+    """Enrich JWT claims with tenant_id, user_id, role_id, and role_key"""
     user_id = claims.get("sub") or claims.get("user_id")
     if not user_id:
         return claims  # Can't enrich without user_id
     
-    # Resolve tenant slug from request
-    tenant_slug = _resolve_tenant_slug(request)
+    # If tenant_id is already in the token (from login enrichment), use it directly
+    tenant_id_from_token = claims.get("tenant_id")
+    tenant = None
     
-    # Resolve tenant
-    try:
-        tenant = Tenant.objects.filter(slug=tenant_slug).first()
-        if not tenant:
-            # If tenant not found, return claims without enrichment
-            # This allows authentication to proceed but without tenant-specific data
-            return claims
-    except Exception:
-        # If tenant lookup fails, return original claims
+    if tenant_id_from_token:
+        # Use tenant_id from token - no need to resolve by slug
+        try:
+            tenant = Tenant.objects.filter(id=tenant_id_from_token).first()
+        except Exception:
+            pass
+    
+    # Fallback: resolve tenant by slug if tenant_id not in token (backward compatibility)
+    if not tenant:
+        tenant_slug = _resolve_tenant_slug(request)
+        try:
+            tenant = Tenant.objects.filter(slug=tenant_slug).first()
+        except Exception:
+            pass
+    
+    if not tenant:
+        # If tenant not found, return claims without enrichment
+        # This allows authentication to proceed but without tenant-specific data
         return claims
     
     # Get role information
@@ -109,7 +119,6 @@ def _enrich_claims(claims: dict, request) -> dict:
             "user_id": user_id,
             "role_id": role_id,
             "role_key": role_key,
-            "tenant_slug": tenant_slug,
         }
         
         return enriched_claims
