@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, GetNextLeadView, LeadStatsView
+from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 
 
@@ -24,5 +24,9 @@ urlpatterns = [
     
     # Lead statistics
     path("leads/stats/", LeadStatsView.as_view(), name="lead-stats"),
+    
+    # External API endpoint - Single endpoint for all CRUD operations
+    # POST: CREATE, GET: READ, PATCH: UPDATE score, DELETE: DELETE
+    path("external/leads/", PrajaLeadsAPIView.as_view(), name="external-leads"),
     
 ]

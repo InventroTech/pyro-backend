@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError, NotFound
 from authz.permissions import IsTenantAuthenticated
 from core.pagination import MetaPageNumberPagination
+from core.models import Tenant
 from django.utils import timezone
 from django.db.models import Q, F
 from django.db import transaction
@@ -17,6 +18,7 @@ from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
 from user_settings.models import UserSettings
+from .permissions import HasPrajaSecret
 
 
 class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
@@ -932,3 +934,275 @@ class GetNextLeadView(APIView):
         )
 
         return Response(flattened_response, status=status.HTTP_200_OK)
+
+
+class PrajaLeadsAPIView(APIView):
+    """
+    Single API endpoint for all lead CRUD operations.
+    
+    Supports 4 operations via different methods:
+    - POST: CREATE a new lead
+    - GET: READ all leads (with optional filters)
+    - PATCH: UPDATE lead score (requires lead_id in query or body)
+    - DELETE: DELETE a lead (requires lead_id in query or body)
+    
+    Requires X-Secret-Praja header for authentication.
+    Automatically uses DEFAULT_TENANT_SLUG from settings (no X-Tenant-Slug header needed).
+    Does NOT require IsTenantAuthenticated - uses HasPrajaSecret instead.
+    """
+    authentication_classes = []  # No authentication required - only secret header
+    permission_classes = [HasPrajaSecret]
+    
+    def _get_tenant(self, request):
+        """Helper to get tenant - uses default tenant from settings (no header required)"""
+        from django.conf import settings
+        
+        # Get default tenant slug from settings
+        default_slug = getattr(settings, 'DEFAULT_TENANT_SLUG', 'bibhab-thepyro-ai')
+        
+        try:
+            tenant = Tenant.objects.get(slug=default_slug)
+            logger.info(f"[PrajaLeadsAPI] Using default tenant: {default_slug}")
+            return tenant, None
+        except Tenant.DoesNotExist:
+            # Fallback to first tenant if default doesn't exist
+            tenant = Tenant.objects.first()
+            if tenant:
+                logger.warning(f"[PrajaLeadsAPI] Default tenant '{default_slug}' not found, using first tenant: {tenant.slug}")
+                return tenant, None
+            else:
+                return None, Response(
+                    {'error': 'No tenant found in database'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+    
+    def post(self, request):
+        """
+        CREATE - Create a new lead record.
+        
+        Body:
+        {
+            "name": "Customer Name",
+            "data": {
+                "customer_full_name": "Customer Name",
+                "phone_number": "+1234567890",
+                "lead_score": 85,
+                "lead_stage": "in_queue",
+                "poster": "free"
+            }
+        }
+        """
+        tenant, error_response = self._get_tenant(request)
+        if error_response:
+            return error_response
+        
+        serializer = RecordSerializer(data=request.data)
+        if serializer.is_valid():
+            record = serializer.save(
+                tenant=tenant,
+                entity_type='lead'
+            )
+            
+            logger.info(
+                "[PrajaLeadsAPI] Created lead: id=%s tenant=%s name=%s",
+                record.id,
+                tenant.slug,
+                record.name
+            )
+            
+            return Response(
+                RecordSerializer(record).data,
+                status=status.HTTP_201_CREATED
+            )
+        
+        return Response(
+            serializer.errors,
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    def get(self, request):
+        """
+        READ - Get all leads for the specified tenant.
+        
+        Query parameters:
+        - lead_id: Get specific lead by ID (optional)
+        - page: Page number for pagination
+        - page_size: Items per page
+        - lead_stage: Filter by lead_stage (optional)
+        - poster: Filter by poster/lead_type (optional)
+        """
+        tenant, error_response = self._get_tenant(request)
+        if error_response:
+            return error_response
+        
+        # If lead_id is provided, return single lead
+        lead_id = request.query_params.get('lead_id')
+        if lead_id:
+            try:
+                lead = Record.objects.get(
+                    id=lead_id,
+                    tenant=tenant,
+                    entity_type='lead'
+                )
+                return Response(
+                    RecordSerializer(lead).data,
+                    status=status.HTTP_200_OK
+                )
+            except Record.DoesNotExist:
+                return Response(
+                    {'error': f'Lead with id {lead_id} not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        
+        # Get all leads for this tenant
+        queryset = Record.objects.filter(
+            tenant=tenant,
+            entity_type='lead'
+        )
+        
+        # Optional filters
+        lead_stage = request.query_params.get('lead_stage')
+        if lead_stage:
+            queryset = queryset.filter(data__lead_stage=lead_stage)
+        
+        poster = request.query_params.get('poster')
+        if poster:
+            queryset = queryset.filter(data__poster=poster)
+        
+        # Order by creation date (newest first)
+        queryset = queryset.order_by('-created_at')
+        
+        # Pagination
+        paginator = MetaPageNumberPagination()
+        page = paginator.paginate_queryset(queryset, request)
+        
+        if page is not None:
+            serializer = RecordSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+        
+        # No pagination
+        serializer = RecordSerializer(queryset, many=True)
+        return Response({
+            'count': queryset.count(),
+            'results': serializer.data
+        }, status=status.HTTP_200_OK)
+    
+    def patch(self, request):
+        """
+        UPDATE - Update lead score.
+        
+        Query parameter or body: lead_id (required)
+        Body:
+        {
+            "lead_id": 123,  # or use ?lead_id=123 in URL
+            "lead_score": 95
+        }
+        """
+        tenant, error_response = self._get_tenant(request)
+        if error_response:
+            return error_response
+        
+        # Get lead_id from query params or body
+        lead_id = request.query_params.get('lead_id') or request.data.get('lead_id')
+        if not lead_id:
+            return Response(
+                {'error': 'lead_id is required (in query param or body)'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            lead = Record.objects.get(
+                id=lead_id,
+                tenant=tenant,
+                entity_type='lead'
+            )
+        except Record.DoesNotExist:
+            return Response(
+                {'error': f'Lead with id {lead_id} not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get lead_score from request
+        lead_score = request.data.get('lead_score')
+        if lead_score is None:
+            return Response(
+                {'error': 'lead_score field is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            lead_score = float(lead_score)
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'lead_score must be a valid number'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Update the data JSONB field
+        data = lead.data.copy() if lead.data else {}
+        data['lead_score'] = lead_score
+        lead.data = data
+        lead.updated_at = timezone.now()
+        lead.save(update_fields=['data', 'updated_at'])
+        
+        logger.info(
+            "[PrajaLeadsAPI] Updated lead score: id=%s tenant=%s score=%s",
+            lead.id,
+            tenant.slug,
+            lead_score
+        )
+        
+        return Response(
+            RecordSerializer(lead).data,
+            status=status.HTTP_200_OK
+        )
+    
+    def delete(self, request):
+        """
+        DELETE - Delete a lead remotely.
+        
+        Query parameter or body: lead_id (required)
+        Body:
+        {
+            "lead_id": 123  # or use ?lead_id=123 in URL
+        }
+        """
+        tenant, error_response = self._get_tenant(request)
+        if error_response:
+            return error_response
+        
+        # Get lead_id from query params or body
+        lead_id = request.query_params.get('lead_id') or request.data.get('lead_id')
+        if not lead_id:
+            return Response(
+                {'error': 'lead_id is required (in query param or body)'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            lead = Record.objects.get(
+                id=lead_id,
+                tenant=tenant,
+                entity_type='lead'
+            )
+        except Record.DoesNotExist:
+            return Response(
+                {'error': f'Lead with id {lead_id} not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        lead_id_for_log = lead.id
+        lead_name = lead.name
+        lead.delete()
+        
+        logger.info(
+            "[PrajaLeadsAPI] Deleted lead: id=%s tenant=%s name=%s",
+            lead_id_for_log,
+            tenant.slug,
+            lead_name
+        )
+        
+        return Response(
+            {'message': f'Lead {lead_id} deleted successfully'},
+            status=status.HTTP_200_OK
+        )
