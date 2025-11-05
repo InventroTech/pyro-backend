@@ -80,6 +80,7 @@ class CurrentUserRoleView(APIView):
     """
     Get the current authenticated user's role from TenantMembership (backend source of truth).
     This ensures frontend uses the same role that backend permissions check against.
+    Also returns tenant_id from enriched jwt_claims or request.tenant.
     """
     permission_classes = [IsTenantAuthenticated]
 
@@ -98,6 +99,13 @@ class CurrentUserRoleView(APIView):
                 'error': 'User supabase_uid not found'
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        # Get tenant_id from enriched jwt_claims or fallback to request.tenant
+        tenant_id = None
+        if hasattr(request, 'jwt_claims') and request.jwt_claims:
+            tenant_id = request.jwt_claims.get('tenant_id')
+        if not tenant_id:
+            tenant_id = str(tenant.id) if tenant else None
+        
         # Get the membership from TenantMembership (same source backend uses)
         membership = TenantMembership.objects.filter(
             tenant=tenant,
@@ -107,13 +115,16 @@ class CurrentUserRoleView(APIView):
         
         if not membership:
             return Response({
+                'tenant_id': tenant_id,
                 'role_key': None,
                 'role_name': None,
                 'error': 'No active tenant membership found'
             }, status=status.HTTP_200_OK)
         
         return Response({
+            'tenant_id': tenant_id,
             'role_key': membership.role.key,
             'role_name': membership.role.name,
+            'role_id': str(membership.role.id),
             'is_active': membership.is_active
         }, status=status.HTTP_200_OK)
