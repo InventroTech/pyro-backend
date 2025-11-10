@@ -94,8 +94,15 @@ def get_authz_role_from_legacy_role(legacy_role_id: str, tenant):
     except LegacyRole.DoesNotExist:
         raise Exception(f"Legacy role with ID {legacy_role_id} not found")
     
+    # Since legacy roles and authz roles share the same UUID (per create_or_sync_role),
+    # try to get the authz role by the same ID first
+    try:
+        return AuthzRole.objects.get(id=legacy_role_id, tenant=tenant)
+    except AuthzRole.DoesNotExist:
+        pass
+    
+    # If not found by ID, fall back to name/key mapping
     # Map legacy role name to authz role key
-    # This mapping can be customized based on your role naming conventions
     role_name_mapping = {
         'General Manager': 'GM',
         'GM': 'GM',
@@ -114,14 +121,14 @@ def get_authz_role_from_legacy_role(legacy_role_id: str, tenant):
     
     if authz_role_key:
         try:
-            return LegacyRole.objects.get(tenant=tenant, key=authz_role_key)
-        except LegacyRole.DoesNotExist:
+            return AuthzRole.objects.get(tenant=tenant, key__iexact=authz_role_key)
+        except AuthzRole.DoesNotExist:
             pass
     
     # If no direct mapping, try to find by name match
     try:
-        return LegacyRole.objects.get(tenant=tenant, name__iexact=legacy_role.name).id
-    except LegacyRole.DoesNotExist:
+        return AuthzRole.objects.get(tenant=tenant, name__iexact=legacy_role.name)
+    except AuthzRole.DoesNotExist:
         raise Exception(f"No corresponding authz role found for legacy role '{legacy_role.name}'")
 
 
