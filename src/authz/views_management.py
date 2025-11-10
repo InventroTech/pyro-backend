@@ -42,7 +42,19 @@ class RolesView(APIView):
     def post(self, request):
         # Enforce GM only for create, while GET stays open to tenant users.
         # Atomic guarantee: both tables written or none.
-        return Response({"success": True, "role": result}, status=status.HTTP_201_CREATED)
+        serializer = CreateSyncedRoleSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        tenant = request.tenant
+        result = create_or_sync_role(
+            tenant=tenant,
+            key=serializer.validated_data['key'],
+            name=serializer.validated_data['name'],
+            description=serializer.validated_data.get('description', '')
+        )
+        
+        return Response({"success": True, "role": result['role']}, status=status.HTTP_201_CREATED)
 
 
 
