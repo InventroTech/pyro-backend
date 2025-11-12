@@ -9,7 +9,6 @@ urlpatterns = [
     path("records/", RecordListCreateView.as_view(), name="record-list"),
     path("records/detail/", RecordDetailView.as_view(), name="record-detail"),
     path("records/events/", RecordEventView.as_view(), name="record-events"),
-    path("records/public/", RecordListCreatePublicView.as_view(), name="record-list-public"),
     # Event logging endpoints (admin only)
     path("events/", EventLogListView.as_view(), name="event-log-list"),
     
