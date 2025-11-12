@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, RecordListCreatePublicView
+from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 from .public_views import PublicJobsView, PublicJobApplicationView
 
