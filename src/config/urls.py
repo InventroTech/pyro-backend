@@ -38,6 +38,7 @@ urlpatterns = [
     path('accounts/', include('accounts.urls')),
     path('support-ticket/', include('support_ticket.urls')),
     path('user-settings/', include('user_settings.urls')),
+    path('openai/', include('openai_api.urls')),
     
     # OpenAPI schema
     path("api/schema/", SpectacularAPIView.as_view(
