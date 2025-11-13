@@ -69,9 +69,10 @@ class PublicJobsView(TenantScopedMixin, generics.ListAPIView):
 
     @extend_schema(
         summary="List Public Job Postings",
-        description="Get job postings without authentication. Requires tenant slug parameter. No default tenant fallback.",
+        description="Get job postings without authentication. Provide tenant via X-Tenant-Slug header or ?tenant=slug parameter.",
         parameters=[
-            OpenApiParameter("tenant", OpenApiTypes.STR, description="REQUIRED: Tenant slug to filter jobs", required=True),
+            OpenApiParameter("tenant", OpenApiTypes.STR, description="Tenant slug to filter jobs (alternative to X-Tenant-Slug header)", required=False),
+            OpenApiParameter("X-Tenant-Slug", OpenApiTypes.STR, location=OpenApiParameter.HEADER, description="Tenant slug to filter jobs (preferred method)", required=False),
             OpenApiParameter("department", OpenApiTypes.STR, description="Optional: Filter by department"),
             OpenApiParameter("location", OpenApiTypes.STR, description="Optional: Filter by location"),
             OpenApiParameter("title", OpenApiTypes.STR, description="Optional: Filter by job title"),
@@ -113,29 +114,33 @@ class PublicJobApplicationView(TenantScopedMixin, generics.CreateAPIView):
     
     def perform_create(self, serializer):
         """
-        Create job application with automatic tenant assignment from TenantScopedMixin.
+        Create job application with tenant assignment.
         
-        REQUIREMENTS FROM TECH LEAD:
-        - Use TenantScopedMixin for tenant assignment
-        - No default tenant fallback
-        - Only create for the specific tenant from ?tenant=slug
+        APPROACH:
+        - Tenant middleware resolves tenant from X-Tenant-Slug header or ?tenant=slug
+        - TenantScopedMixin handles tenant assignment automatically
+        - We just need to add entity_type and logging
         """
-        # TenantScopedMixin automatically handles tenant assignment
-        # No need for manual tenant lookup or default fallback
-        # The mixin gets tenant from ?tenant=slug parameter
+        # Verify tenant was resolved by middleware (TenantScopedMixin will also check this)
+        if not hasattr(self.request, 'tenant') or not self.request.tenant:
+            raise ValidationError("Tenant not found. Please provide X-Tenant-Slug header or ?tenant=slug parameter.")
         
-        # Force entity_type to 'application' so it's categorized correctly
-        serializer.save(entity_type='application')
+        # Call parent perform_create which handles tenant assignment
+        # But we need to pass entity_type as well
+        serializer.save(
+            tenant=self.request.tenant,  # Explicit tenant assignment
+            entity_type='application'    # Force entity_type
+        )
         
-        # Log the creation (tenant info available via self.request.tenant if needed)
-        tenant_slug = self.request.query_params.get('tenant', 'unknown')
-        logger.info(f"[PublicApplications] Created application for tenant: {tenant_slug}")
+        # Log the creation with resolved tenant info
+        logger.info(f"[PublicApplications] Created application for tenant: {self.request.tenant.slug} (ID: {self.request.tenant.id})")
 
     @extend_schema(
         summary="Submit Job Application",
-        description="Submit job application without authentication. Requires tenant slug parameter. No default tenant fallback.",
+        description="Submit job application without authentication. Provide tenant via X-Tenant-Slug header or ?tenant=slug parameter.",
         parameters=[
-            OpenApiParameter("tenant", OpenApiTypes.STR, description="REQUIRED: Tenant slug for application submission", required=True),
+            OpenApiParameter("tenant", OpenApiTypes.STR, description="Tenant slug for application submission (alternative to X-Tenant-Slug header)", required=False),
+            OpenApiParameter("X-Tenant-Slug", OpenApiTypes.STR, location=OpenApiParameter.HEADER, description="Tenant slug for application submission (preferred method)", required=False),
         ],
         request=RecordSerializer,
         responses={201: RecordSerializer}

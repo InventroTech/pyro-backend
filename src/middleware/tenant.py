@@ -44,23 +44,39 @@ def _get_tenant_id_from_jwt(request) -> str | None:
 
 def _resolve_slug(request) -> str | None:
     """
-    Resolve tenant slug from path or subdomain.
-    Used as fallback when JWT tenant_id is not available.
-    Note: X-Tenant-Slug header is NOT used for security reasons.
+    Resolve tenant slug from various sources when JWT tenant_id is not available.
+    
+    Priority order:
+    1. X-Tenant-Slug header (for public APIs without authentication)
+    2. Path: /t/<slug>/...
+    3. Subdomain
+    4. Query parameter ?tenant=slug (for public APIs)
+    5. Default tenant slug from settings
     """
-    # 1) Path: /t/<slug>/...
+    # 1) X-Tenant-Slug header (for public APIs without JWT)
+    tenant_slug_header = request.META.get("HTTP_X_TENANT_SLUG") or request.headers.get("X-Tenant-Slug")
+    if tenant_slug_header:
+        return tenant_slug_header.strip()
+    
+    # 2) Query parameter ?tenant=slug (for public APIs)
+    tenant_query_param = request.GET.get('tenant')
+    if tenant_query_param:
+        return tenant_query_param.strip()
+    
+    # 3) Path: /t/<slug>/...
     if request.path.startswith("/t/"):
         parts = request.path.split("/", 3)
         if len(parts) >= 3 and parts[2]:
             return parts[2].strip()
 
-    # 2) Subdomain (enable by setting TENANCY_BASE_DOMAIN)
+    # 4) Subdomain (enable by setting TENANCY_BASE_DOMAIN)
     base = getattr(settings, "TENANCY_BASE_DOMAIN", None)
     if base:
         host = (request.get_host() or "").split(":")[0]
         if host.endswith("." + base):
             return host[:-(len(base) + 1)].split(".")[0].strip() or None
 
+    # 5) Default tenant slug from settings (fallback)
     return getattr(settings, "DEFAULT_TENANT_SLUG", "bibhab-thepyro-ai")
 
 class TenantResolver(MiddlewareMixin):
@@ -68,12 +84,15 @@ class TenantResolver(MiddlewareMixin):
     Resolves tenant from JWT token (preferred) or slug-based methods (fallback).
     
     Priority order:
-    1. JWT token tenant_id (most secure, can't be spoofed)
-    2. Path-based (/t/<slug>/...)
-    3. Subdomain-based
-    4. Default tenant slug from settings
+    1. JWT token tenant_id (most secure, for authenticated requests)
+    2. X-Tenant-Slug header (for public APIs without authentication)
+    3. Query parameter ?tenant=slug (for public APIs)
+    4. Path-based (/t/<slug>/...)
+    5. Subdomain-based
+    6. Default tenant slug from settings
     
-    Note: X-Tenant-Slug header is NOT used for security reasons.
+    For public APIs: Use X-Tenant-Slug header or ?tenant=slug parameter.
+    For authenticated APIs: JWT token tenant_id takes priority.
     """
     def process_request(self, request):
         for pfx in SKIP_PATH_PREFIXES:
