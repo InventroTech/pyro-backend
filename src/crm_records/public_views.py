@@ -12,18 +12,19 @@ import logging
 logger = logging.getLogger(__name__)
 from .models import Record
 from .serializers import RecordSerializer
+from .mixins import TenantScopedMixin
 
 
-class PublicJobsView(generics.ListAPIView):
+class PublicJobsView(TenantScopedMixin, generics.ListAPIView):
     """
     Public jobs listing endpoint - NO authentication required.
     
-    This endpoint allows anyone to view job postings without any authentication.
-    Perfect for public job boards, career pages, or third-party integrations.
+    Uses TenantScopedMixin to automatically filter by tenant.
+    Requires ?tenant=slug parameter - no default tenant fallback.
     
-    GET: List all job postings (READ-ONLY)
+    GET: List job postings for specific tenant only (READ-ONLY)
     
-    No JWT token, no tenant headers required!
+    No JWT token required, but tenant slug is mandatory!
     """
     queryset = Record.objects.all()
     serializer_class = RecordSerializer
@@ -33,49 +34,23 @@ class PublicJobsView(generics.ListAPIView):
     
     def get_queryset(self):
         """
-        Get job postings from all tenants or a specific tenant.
-        Filters for entity_type='job' automatically.
+        Get job postings for the specified tenant only.
+        Uses TenantScopedMixin for automatic tenant filtering.
         
-        WHY TENANT SLUG IS IMPORTANT:
-        - Multi-tenancy: Different companies use the same system
-        - Data isolation: Company A shouldn't see Company B's jobs
-        - Flexibility: Can show jobs from specific company or default company
-        
-        Examples:
-        - ?tenant=google -> Shows only Google's jobs
-        - ?tenant=microsoft -> Shows only Microsoft's jobs  
-        - No tenant param -> Shows default company's jobs
+        REQUIREMENTS FROM TECH LEAD:
+        - Use TenantScopedMixin to fetch only tenant data
+        - No default tenant fallback
+        - Only show data for the specific tenant
+        - No default slug usage
         """
-        # STEP 1: Start with all job records only (filter out leads, applications, etc.)
-        queryset = Record.objects.filter(entity_type='job')
+        # Get tenant-scoped queryset from TenantScopedMixin
+        # This automatically filters by the tenant from ?tenant=slug parameter
+        queryset = super().get_queryset()
         
-        # STEP 2: Handle tenant filtering - WHO'S JOBS TO SHOW?
-        tenant_slug = self.request.query_params.get('tenant')  # Get ?tenant=company-name from URL
+        # Filter for jobs only (entity_type='job')
+        queryset = queryset.filter(entity_type='job')
         
-        if tenant_slug:
-            # User specified a specific company's jobs to view
-            try:
-                tenant = Tenant.objects.get(slug=tenant_slug)  # Find the company by slug
-                queryset = queryset.filter(tenant=tenant)      # Show only that company's jobs
-                logger.info(f"[PublicJobs] Filtering by tenant: {tenant_slug}")
-            except Tenant.DoesNotExist:
-                # Company doesn't exist - return empty results
-                logger.warning(f"[PublicJobs] Tenant '{tenant_slug}' not found")
-                return Record.objects.none()
-        else:
-            # No specific company requested - use default company
-            default_tenant = self._get_default_tenant()
-            if default_tenant:
-                queryset = queryset.filter(tenant=default_tenant)  # Show default company's jobs
-                logger.info(f"[PublicJobs] Using default tenant: {default_tenant.slug}")
-            else:
-                logger.warning("[PublicJobs] No default tenant found")
-        
-        # STEP 3: Log how many jobs we found for debugging
-        job_count = queryset.count()
-        logger.info(f"[PublicJobs] Found {job_count} job records")
-        
-        # STEP 4: Apply additional filters from URL parameters
+        # Apply additional filters from URL parameters
         query_params = self.request.query_params
         
         # Filter by job data fields (department, location, title, etc.)
@@ -84,65 +59,36 @@ class PublicJobsView(generics.ListAPIView):
             # Skip pagination and system parameters
             if key not in ['tenant', 'page', 'page_size', 'ordering']:
                 # Use JSONB field lookup to search inside the 'data' column
-                # data__department__icontains means: data.department contains "engineering"
                 queryset = queryset.filter(**{f'data__{key}__icontains': value})
-                logger.info(f"[PublicJobs] Filtered by {key}='{value}', found {queryset.count()} records")
         
-        # STEP 5: Apply ordering (newest first by default)
-        ordering = query_params.get('ordering', '-created_at')  # Default: newest jobs first
+        # Apply ordering (newest first by default)
+        ordering = query_params.get('ordering', '-created_at')
         queryset = queryset.order_by(ordering)
         
         return queryset
-    
-    def _get_default_tenant(self):
-        """
-        Get default tenant from settings.
-        
-        WHY WE NEED THIS:
-        - When no specific company is requested, we need a fallback
-        - Prevents errors when tenant parameter is missing
-        - Provides a "main" company for the job board
-        
-        FALLBACK STRATEGY:
-        1. Try to get company from DEFAULT_TENANT_SLUG setting
-        2. If that doesn't exist, use the first company in database
-        3. If no companies exist, return None (will cause error)
-        """
-        from django.conf import settings
-        
-        # Get default company slug from environment variables (.env file)
-        # Example: DEFAULT_TENANT_SLUG=bibhab-thepyro-ai
-        default_slug = getattr(settings, 'DEFAULT_TENANT_SLUG', 'bibhab-thepyro-ai')
-        
-        try:
-            # Try to find the default company
-            return Tenant.objects.get(slug=default_slug)
-        except Tenant.DoesNotExist:
-            # Default company doesn't exist - use any company as fallback
-            return Tenant.objects.first()
 
     @extend_schema(
         summary="List Public Job Postings",
-        description="Get job postings without authentication. No JWT token required! READ-ONLY endpoint.",
+        description="Get job postings without authentication. Requires tenant slug parameter. No default tenant fallback.",
         parameters=[
-            OpenApiParameter("tenant", OpenApiTypes.STR, description="Optional: Filter by tenant slug"),
-            OpenApiParameter("department", OpenApiTypes.STR, description="Filter by department"),
-            OpenApiParameter("location", OpenApiTypes.STR, description="Filter by location"),
-            OpenApiParameter("title", OpenApiTypes.STR, description="Filter by job title"),
+            OpenApiParameter("tenant", OpenApiTypes.STR, description="REQUIRED: Tenant slug to filter jobs", required=True),
+            OpenApiParameter("department", OpenApiTypes.STR, description="Optional: Filter by department"),
+            OpenApiParameter("location", OpenApiTypes.STR, description="Optional: Filter by location"),
+            OpenApiParameter("title", OpenApiTypes.STR, description="Optional: Filter by job title"),
         ]
     )
     def get(self, request, *args, **kwargs):
         return super().get(request, *args, **kwargs)
 
 
-class PublicJobApplicationView(generics.CreateAPIView):
+class PublicJobApplicationView(TenantScopedMixin, generics.CreateAPIView):
     """
     Public job application submission endpoint - NO authentication required.
     
-    This allows job seekers to submit applications without creating accounts.
-    Perfect for career pages where people can apply directly.
+    Uses TenantScopedMixin for automatic tenant assignment.
+    Requires ?tenant=slug parameter - no default tenant fallback.
     
-    POST: Submit job applications
+    POST: Submit job applications to specific tenant only
     
     PAYLOAD: Same as CRM records POST request format:
     {
@@ -158,7 +104,7 @@ class PublicJobApplicationView(generics.CreateAPIView):
         }
     }
     
-    No JWT token, no tenant headers required!
+    No JWT token required, but tenant slug is mandatory!
     """
     queryset = Record.objects.all()
     serializer_class = RecordSerializer
@@ -167,59 +113,30 @@ class PublicJobApplicationView(generics.CreateAPIView):
     
     def perform_create(self, serializer):
         """
-        Create job application with automatic tenant assignment.
+        Create job application with automatic tenant assignment from TenantScopedMixin.
         
-        This runs when someone submits a job application.
-        We need to decide which company receives this application.
-        
-        TENANT ASSIGNMENT LOGIC:
-        1. If ?tenant=company-name in URL -> Application goes to that company
-        2. If no tenant specified -> Application goes to default company
-        3. This ensures applications reach the right HR department
+        REQUIREMENTS FROM TECH LEAD:
+        - Use TenantScopedMixin for tenant assignment
+        - No default tenant fallback
+        - Only create for the specific tenant from ?tenant=slug
         """
-        # STEP 1: Determine which company should receive this application
-        tenant_slug = self.request.query_params.get('tenant')  # Check URL for ?tenant=company-name
+        # TenantScopedMixin automatically handles tenant assignment
+        # No need for manual tenant lookup or default fallback
+        # The mixin gets tenant from ?tenant=slug parameter
         
-        if tenant_slug:
-            # User specified which company they're applying to
-            try:
-                tenant = Tenant.objects.get(slug=tenant_slug)  # Find the company
-            except Tenant.DoesNotExist:
-                # Company doesn't exist - reject the application
-                raise ValidationError(f"Tenant '{tenant_slug}' not found")
-        else:
-            # No company specified - send to default company
-            tenant = self._get_default_tenant()
-            if not tenant:
-                raise ValidationError("No default tenant available")
-        
-        # STEP 2: Save the application with the determined company
         # Force entity_type to 'application' so it's categorized correctly
-        serializer.save(tenant=tenant, entity_type='application')
-        logger.info(f"[PublicApplications] Created application in tenant: {tenant.slug}")
-    
-    def _get_default_tenant(self):
-        """
-        Get default tenant from settings.
+        serializer.save(entity_type='application')
         
-        Same logic as PublicJobsView - provides fallback company
-        when no specific company is mentioned in the application.
-        """
-        from django.conf import settings
-        
-        # Get default company from environment settings
-        default_slug = getattr(settings, 'DEFAULT_TENANT_SLUG', 'bibhab-thepyro-ai')
-        
-        try:
-            # Try to find the default company
-            return Tenant.objects.get(slug=default_slug)
-        except Tenant.DoesNotExist:
-            # Default company doesn't exist - use first available company
-            return Tenant.objects.first()
+        # Log the creation (tenant info available via self.request.tenant if needed)
+        tenant_slug = self.request.query_params.get('tenant', 'unknown')
+        logger.info(f"[PublicApplications] Created application for tenant: {tenant_slug}")
 
     @extend_schema(
         summary="Submit Job Application",
-        description="Submit job application without authentication. No JWT token required!",
+        description="Submit job application without authentication. Requires tenant slug parameter. No default tenant fallback.",
+        parameters=[
+            OpenApiParameter("tenant", OpenApiTypes.STR, description="REQUIRED: Tenant slug for application submission", required=True),
+        ],
         request=RecordSerializer,
         responses={201: RecordSerializer}
     )
