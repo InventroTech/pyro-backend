@@ -14,6 +14,40 @@ from openai import OpenAI
 logger = logging.getLogger(__name__)
 
 
+def parse_json_response(response_text):
+    """
+    Try to parse OpenAI response as JSON. If it's valid JSON, return parsed object.
+    If not, return the original text.
+    """
+    import json
+    
+    if not response_text:
+        return response_text
+    
+    # Clean up the response text
+    cleaned_text = response_text.strip()
+    
+    # Remove markdown code blocks if present
+    if cleaned_text.startswith('```json'):
+        cleaned_text = cleaned_text[7:]  # Remove ```json
+    if cleaned_text.startswith('```'):
+        cleaned_text = cleaned_text[3:]   # Remove ```
+    if cleaned_text.endswith('```'):
+        cleaned_text = cleaned_text[:-3]  # Remove trailing ```
+    
+    cleaned_text = cleaned_text.strip()
+    
+    # Try to parse as JSON
+    try:
+        parsed_json = json.loads(cleaned_text)
+        logger.info("Successfully parsed OpenAI response as JSON")
+        return parsed_json
+    except json.JSONDecodeError as e:
+        logger.warning(f"Could not parse OpenAI response as JSON: {str(e)}")
+        # Return original text if JSON parsing fails
+        return response_text
+
+
 class OpenAIFileAnalysisView(APIView):
     """
     Simple OpenAI file upload and analysis API.
@@ -168,11 +202,11 @@ class OpenAIFileAnalysisView(APIView):
                     
                     # Now use chat completions with the actual file content
                     response = client.chat.completions.create(
-                        model="gpt-4",  # Using GPT-4 which definitely exists
+                        model="gpt-3.5-turbo",  # Using GPT-3.5 Turbo - faster and cheaper
                         messages=[
                             {
                                 "role": "system",
-                                "content": "You are a helpful assistant that analyzes document content. Provide detailed and accurate responses based on the document text provided."
+                                "content": "You are a helpful assistant that analyzes document content. If the user asks for JSON format, return valid JSON only without any markdown formatting or additional text."
                             },
                             {
                                 "role": "user", 
@@ -184,6 +218,8 @@ class OpenAIFileAnalysisView(APIView):
                     )
                     
                     analysis_result = response.choices[0].message.content
+                    # Try to parse as JSON if the response looks like JSON
+                    analysis_result = parse_json_response(analysis_result)
                     
                 except Exception as e:
                     logger.warning(f"File content retrieval failed, trying direct file reference: {str(e)}")
@@ -194,7 +230,7 @@ class OpenAIFileAnalysisView(APIView):
                         assistant = client.beta.assistants.create(
                             name="Document Analyzer",
                             instructions="You are a helpful assistant that analyzes documents. Provide detailed and accurate responses based on the document content.",
-                            model="gpt-4",
+                            model="gpt-3.5-turbo",
                             tools=[{"type": "retrieval"}]
                         )
                         
@@ -227,6 +263,8 @@ class OpenAIFileAnalysisView(APIView):
                         # Get the response
                         messages = client.beta.threads.messages.list(thread_id=thread.id)
                         analysis_result = messages.data[0].content[0].text.value
+                        # Try to parse as JSON if the response looks like JSON
+                        analysis_result = parse_json_response(analysis_result)
                         
                         # Cleanup
                         client.beta.assistants.delete(assistant.id)
@@ -247,11 +285,11 @@ class OpenAIFileAnalysisView(APIView):
                             
                             # Analyze extracted text
                             response = client.chat.completions.create(
-                                model="gpt-4",
+                                model="gpt-3.5-turbo",
                                 messages=[
                                     {
                                         "role": "system",
-                                        "content": "You are a helpful assistant that analyzes document content."
+                                        "content": "You are a helpful assistant that analyzes document content. If the user asks for JSON format, return valid JSON only without any markdown formatting or additional text."
                                     },
                                     {
                                         "role": "user", 
@@ -263,6 +301,8 @@ class OpenAIFileAnalysisView(APIView):
                             )
                             
                             analysis_result = response.choices[0].message.content
+                            # Try to parse as JSON if the response looks like JSON
+                            analysis_result = parse_json_response(analysis_result)
                             
                         except Exception as e3:
                             logger.error(f"All methods failed: {str(e3)}")
@@ -367,11 +407,11 @@ class OpenAITextAnalysisView(APIView):
             
             # Create analysis request
             response = client.chat.completions.create(
-                model="gpt-4",
+                model="gpt-3.5-turbo",
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a helpful assistant that analyzes text content. Provide detailed and accurate responses."
+                        "content": "You are a helpful assistant that analyzes text content. If the user asks for JSON format, return valid JSON only without any markdown formatting or additional text."
                     },
                     {
                         "role": "user",
@@ -383,6 +423,8 @@ class OpenAITextAnalysisView(APIView):
             )
             
             analysis_result = response.choices[0].message.content
+            # Try to parse as JSON if the response looks like JSON
+            analysis_result = parse_json_response(analysis_result)
             processing_time = time.time() - start_time
             
             return Response({
