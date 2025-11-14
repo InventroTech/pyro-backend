@@ -1206,3 +1206,5 @@ class PrajaLeadsAPIView(APIView):
             {'message': f'Lead {lead_id} deleted successfully'},
             status=status.HTTP_200_OK
         )
+
+
