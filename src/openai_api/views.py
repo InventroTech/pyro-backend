@@ -38,9 +38,18 @@ class OpenAIFileAnalysisView(APIView):
         # Extract text from PDF
         try:
             pdf_text = ""
-            pdf_reader = PyPDF2.PdfReader(file)
-            for page in pdf_reader.pages:
-                pdf_text += page.extract_text() + "\n"
+            # Handle both old and new PyPDF2 versions
+            try:
+                # PyPDF2 >= 3.0 (newer version)
+                pdf_reader = PyPDF2.PdfReader(file)
+                for page in pdf_reader.pages:
+                    pdf_text += page.extract_text() + "\n"
+            except AttributeError:
+                # PyPDF2 < 3.0 (older version like 1.26.0)
+                pdf_reader = PyPDF2.PdfFileReader(file)
+                for i in range(pdf_reader.numPages):
+                    page = pdf_reader.getPage(i)
+                    pdf_text += page.extractText() + "\n"
             
             if not pdf_text.strip():
                 return Response({'error': 'Could not extract text from PDF'}, status=400)
