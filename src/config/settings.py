@@ -65,7 +65,8 @@ INSTALLED_APPS = [
     'scheduler',
     'accounts',
     'support_ticket',
-    'user_settings'
+    'user_settings',
+    'openai_api'
 ]
 
 MIDDLEWARE = [
