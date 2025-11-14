@@ -457,6 +457,7 @@ class GetNextTicketView(APIView):
             of=("self",)
         ).filter(
             resolution_status="Snoozed",
+            assigned_to__isnull=True,
             snooze_until__isnull=False,
             snooze_until__lte=current_time
         ).order_by('-snooze_until').first()
@@ -521,9 +522,8 @@ class UpdateCallStatusView(APIView):
                         resolution_status = resolution_status or "Closed"
 
                 # Resolve assignment
-                final_assigned_to = assigned_to or getattr(request.user, "supabase_uid", None)
-                legacy_user = LegacyUser.objects.filter(uid=request.user.supabase_uid).first()
-                final_cse_name = getattr(legacy_user, "name", "")
+                final_assigned_to = None
+                final_cse_name = None
 
                 # Build update fields
                 update_fields = {
