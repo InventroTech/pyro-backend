@@ -11,6 +11,7 @@ from uuid import UUID
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
 from django.db import transaction
+from django.db.models import Q
 from config.supabase_auth import SupabaseJWTAuthentication
 from authz.permissions import IsTenantAuthenticated
 import os
@@ -403,7 +404,7 @@ class GetNextTicketView(APIView):
         """
         current_time = timezone.now()
 
-        # 1. Get the ticket with resolution_status null that is assigned to the user and is not snoozed
+        # 1. Get the ticket with resolution_status null that is assigned to the user or is snoozed and assigned to current user only
         logger.info(f"7 - Looking for tickets with resolution_status null and assigned to user: {user.supabase_uid}")
         logger.info(f"7 - Current time: {current_time}")
         already_assigned_ticket = SupportTicket.objects.select_for_update(
@@ -411,7 +412,8 @@ class GetNextTicketView(APIView):
             of=("self",)
         ).filter(
             assigned_to=UUID(user.supabase_uid),
-            resolution_status__isnull=True,
+        ).filter(
+            Q(resolution_status__isnull=True) | Q(resolution_status="Snoozed")
         ).order_by('created_at').first()
         if already_assigned_ticket:
             logger.info("9 - TICKET FOUND WITH RESOLUTION_STATUS NULL AND ASSIGNED TO USER")
