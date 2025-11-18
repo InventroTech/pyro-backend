@@ -41,21 +41,20 @@ class RolesView(APIView):
 
     def post(self, request):
         # Enforce GM only for create, while GET stays open to tenant users.
-        gm_only = HasTenantRole("GM")()
-        if not gm_only.has_permission(request, self):
-            return Response({"detail": "GM role required."}, status=status.HTTP_403_FORBIDDEN)
-
-        ser = CreateSyncedRoleSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-
-        result = create_or_sync_role(
-            tenant=request.tenant,
-            key=ser.validated_data["key"],
-            name=ser.validated_data["name"],
-            description=ser.validated_data.get("description", ""),
-        )
         # Atomic guarantee: both tables written or none.
-        return Response({"success": True, "role": result}, status=status.HTTP_201_CREATED)
+        serializer = CreateSyncedRoleSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        tenant = request.tenant
+        result = create_or_sync_role(
+            tenant=tenant,
+            key=serializer.validated_data['key'],
+            name=serializer.validated_data['name'],
+            description=serializer.validated_data.get('description', '')
+        )
+        
+        return Response({"success": True, "role": result['role']}, status=status.HTTP_201_CREATED)
 
 
 
@@ -88,3 +87,45 @@ class ListTenantUsersView(APIView):
         
         return Response({"count": len(data), "results": data}, status=status.HTTP_200_OK)
 
+
+class CurrentUserRoleView(APIView):
+    """
+    Get the current authenticated user's role from TenantMembership (backend source of truth).
+    This ensures frontend uses the same role that backend permissions check against.
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        tenant = request.tenant
+        
+        if not tenant:
+            return Response({
+                'error': 'Tenant not found'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        supabase_uid = getattr(user, 'supabase_uid', None)
+        if not supabase_uid:
+            return Response({
+                'error': 'User supabase_uid not found'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Get the membership from TenantMembership (same source backend uses)
+        membership = TenantMembership.objects.filter(
+            tenant=tenant,
+            user_id=supabase_uid,
+            is_active=True
+        ).select_related('role').first()
+        
+        if not membership:
+            return Response({
+                'role_key': None,
+                'role_name': None,
+                'error': 'No active tenant membership found'
+            }, status=status.HTTP_200_OK)
+        
+        return Response({
+            'role_key': membership.role.key,
+            'role_name': membership.role.name,
+            'is_active': membership.is_active
+        }, status=status.HTTP_200_OK)

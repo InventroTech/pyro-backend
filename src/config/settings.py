@@ -60,10 +60,13 @@ INSTALLED_APPS = [
     'analytics',
     'cron_jobs',
     'crm',
+    'crm_records',
     'core',
     'scheduler',
     'accounts',
-    'support_ticket'
+    'support_ticket',
+    'user_settings',
+    'openai_api'
 ]
 
 MIDDLEWARE = [
@@ -166,7 +169,7 @@ else:
             'OPTIONS': {
                 'sslmode': 'require',
             },
-            'CONN_MAX_AGE': 300,  # Keep connections alive for 5 minutes
+            'CONN_MAX_AGE': 120,  # Keep connections alive for 5 minutes
         }
     }
 
@@ -223,6 +226,9 @@ CORS_ALLOW_ALL_ORIGINS = True # for dev only not to be added in prod
 
 AUTH_USER_MODEL = 'authentication.User'
 SUPABASE_JWT_SECRET = env("SUPABASE_JWT_SECRET")
+
+# Praja secret for external API access (used in X-Secret-Praja header)
+PRAJA_SECRET = env("PRAJA_SECRET", default="")
 
 REST_FRAMEWORK = {
     # Enable API-wide permissions
@@ -314,6 +320,7 @@ else:
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
     "X-Tenant-Slug",  # custom tenant header
+    "X-Secret-Praja",  # Praja API secret header
 ]
 
 import config.spectacular_auth

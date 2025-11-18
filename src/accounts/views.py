@@ -62,7 +62,7 @@ class LegacyUserCreateView(APIView):
                         tenant=tenant,
                         email=email,
                         defaults={
-                            'role_id': authz_role,
+                            'role': authz_role,
                             'user_id': uid,  # Link to UID if provided
                             'is_active': bool(uid)  # Activate if UID is provided
                         }
