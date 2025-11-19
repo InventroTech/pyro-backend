@@ -1,7 +1,8 @@
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError, NotFound
+from rest_framework.exceptions import ValidationError
+from rest_framework.permissions import AllowAny
 from authz.permissions import IsTenantAuthenticated
 from core.pagination import MetaPageNumberPagination
 from core.models import Tenant
@@ -159,6 +160,62 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
             tenant=self.request.tenant,
             entity_type=entity_type
         )
+    
+    def put(self, request, *args, **kwargs):
+        """
+        Update an existing record by record_id.
+        
+        Record ID can be provided in:
+        1. URL path: /crm-records/records/123 (if URL is configured with <int:pk>)
+        2. Query parameter: /crm-records/records/?record_id=123
+        3. Request body: {"record_id": 123, ...}
+        
+        Expected payload:
+        {
+            "record_id": 123,  // optional if provided in URL/query
+            "name": "Updated Name",
+            "data": {"updated": "fields"},
+            "entity_type": "lead"  // optional
+        }
+        """
+        # Try to get record_id from multiple sources
+        record_id = None
+        
+        # 1. Try URL parameter (if configured as /records/<int:pk>/)
+        if 'pk' in kwargs:
+            record_id = kwargs['pk']
+        
+        # 2. Try query parameter
+        if not record_id:
+            record_id = request.query_params.get('record_id')
+        
+        # 3. Try request body
+        if not record_id:
+            record_id = request.data.get('record_id')
+        
+        if not record_id:
+            return Response(
+                {'error': 'record_id is required for updates. Provide it in URL, query parameter, or request body.'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Get the record within tenant scope
+            record = self.get_queryset().get(id=record_id)
+        except Record.DoesNotExist:
+            return Response(
+                {'error': f'Record with id {record_id} not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Update the record
+        serializer = self.get_serializer(record, data=request.data, partial=False)
+        serializer.is_valid(raise_exception=True)
+        
+        # Preserve tenant (don't allow changing tenant)
+        serializer.save(tenant=self.request.tenant)
+        
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
