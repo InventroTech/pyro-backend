@@ -216,6 +216,61 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         serializer.save(tenant=self.request.tenant)
         
         return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    def delete(self, request, *args, **kwargs):
+        """
+        Delete an existing record by record_id.
+        
+        Record ID can be provided in:
+        1. URL path: /crm-records/records/123/ (if URL is configured with <int:pk>)
+        2. Query parameter: /crm-records/records/?record_id=123
+        3. Request body: {"record_id": 123}
+        """
+        # Try to get record_id from multiple sources
+        record_id = None
+        
+        # 1. Try URL parameter (if configured as /records/<int:pk>/)
+        if 'pk' in kwargs:
+            record_id = kwargs['pk']
+        
+        # 2. Try query parameter
+        if not record_id:
+            record_id = request.query_params.get('record_id')
+        
+        # 3. Try request body
+        if not record_id:
+            record_id = request.data.get('record_id')
+        
+        if not record_id:
+            return Response(
+                {'error': 'record_id is required for deletion. Provide it in URL, query parameter, or request body.'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Get the record within tenant scope
+            record = self.get_queryset().get(id=record_id)
+        except Record.DoesNotExist:
+            return Response(
+                {'error': f'Record with id {record_id} not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Delete the record
+        record_data = {
+            'id': record.id,
+            'name': record.name,
+            'entity_type': record.entity_type,
+            'tenant_id': str(record.tenant_id)
+        }
+        
+        record.delete()
+        
+        return Response({
+            'success': True,
+            'message': f'Record {record_id} deleted successfully',
+            'deleted_record': record_data
+        }, status=status.HTTP_200_OK)
 
 
 class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
