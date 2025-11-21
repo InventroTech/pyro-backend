@@ -219,31 +219,17 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
     
     def delete(self, request, *args, **kwargs):
         """
-        Delete an existing record by record_id.
+        Delete an existing record by record_id from URL path.
         
-        Record ID can be provided in:
-        1. URL path: /crm-records/records/123/ (if URL is configured with <int:pk>)
-        2. Query parameter: /crm-records/records/?record_id=123
-        3. Request body: {"record_id": 123}
+        URL: /crm-records/records/538/
+        The record ID (538) comes from the URL path parameter.
         """
-        # Try to get record_id from multiple sources
-        record_id = None
-        
-        # 1. Try URL parameter (if configured as /records/<int:pk>/)
-        if 'pk' in kwargs:
-            record_id = kwargs['pk']
-        
-        # 2. Try query parameter
-        if not record_id:
-            record_id = request.query_params.get('record_id')
-        
-        # 3. Try request body
-        if not record_id:
-            record_id = request.data.get('record_id')
+        # Get record_id from URL path parameter
+        record_id = kwargs.get('pk')
         
         if not record_id:
             return Response(
-                {'error': 'record_id is required for deletion. Provide it in URL, query parameter, or request body.'}, 
+                {'error': 'Record ID is required in URL path'}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
