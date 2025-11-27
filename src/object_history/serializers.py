@@ -1,10 +1,42 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Tuple
+from uuid import UUID
+import datetime
+from decimal import Decimal
+import math
 
 from django.db import models
 
 from .registry import HistoryConfig
+
+
+def _coerce_json_safe(v):
+    """
+    Convert non-JSON-serializable types to JSON-serializable formats.
+    Handles UUIDs, datetime objects, Decimal, and nested structures.
+    """
+    if v is None:
+        return None
+    if isinstance(v, (datetime.datetime, datetime.date)):
+        if isinstance(v, datetime.datetime) and v.tzinfo is None:
+            return v.isoformat() + "Z"
+        return v.isoformat()
+    if isinstance(v, Decimal):
+        try:
+            f = float(v)
+            return None if (math.isinf(f) or math.isnan(f)) else f
+        except Exception:
+            return None
+    if isinstance(v, float):
+        return None if (math.isinf(v) or math.isnan(v)) else v
+    if isinstance(v, UUID):
+        return str(v)
+    if isinstance(v, (list, tuple)):
+        return [_coerce_json_safe(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _coerce_json_safe(val) for k, val in v.items()}
+    return v
 
 
 def serialize_instance(instance: models.Model, config: HistoryConfig) -> Dict[str, Any]:
@@ -15,11 +47,12 @@ def serialize_instance(instance: models.Model, config: HistoryConfig) -> Dict[st
         data = config.custom_serializer(instance)
         if not isinstance(data, dict):
             raise ValueError("custom_serializer must return a dict")
-        return data
+        return _coerce_json_safe(data)
 
     tracked = {}
     for field_name in config.track_fields:
-        tracked[field_name] = getattr(instance, field_name, None)
+        value = getattr(instance, field_name, None)
+        tracked[field_name] = _coerce_json_safe(value)
     if config.snapshot_strategy == "minimal":
         # minimal strategy defers to diff computation to prune unchanged fields
         return tracked
