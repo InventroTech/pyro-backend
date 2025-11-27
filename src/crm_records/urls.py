@@ -7,6 +7,7 @@ from .public_views import PublicJobsView, PublicJobApplicationView
 urlpatterns = [
     # Universal endpoint - supports entity_type filtering
     path("records/", RecordListCreateView.as_view(), name="record-list"),
+    path("records/<int:pk>/", RecordListCreateView.as_view(), name="record-update"),  # For PUT with ID in URL
     path("records/detail/", RecordDetailView.as_view(), name="record-detail"),
     path("records/events/", RecordEventView.as_view(), name="record-events"),
     # Event logging endpoints (admin only)

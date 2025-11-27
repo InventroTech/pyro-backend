@@ -5,6 +5,7 @@ from django.db.models import Q
 from django.utils import timezone
 from core.models import Tenant
 from accounts.models import SupabaseAuthUser
+from object_history.models import HistoryTrackedModel
 
 
 class SupportTicketDump(models.Model):
@@ -43,7 +44,7 @@ class SupportTicketDump(models.Model):
 
 
 
-class SupportTicket(models.Model):
+class SupportTicket(HistoryTrackedModel):
     id = models.BigAutoField(primary_key=True)
     created_at = models.DateTimeField(default=timezone.now)
     ticket_date = models.DateTimeField(null=True, blank=True)
