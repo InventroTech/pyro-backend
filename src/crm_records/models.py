@@ -1,8 +1,9 @@
 from django.db import models
 from core.models import BaseModel
+from object_history.models import HistoryTrackedModel
 
 
-class Record(BaseModel):
+class Record(HistoryTrackedModel, BaseModel):
     """
     Universal record model that can hold any tenant's data dynamically using JSONB.
     All future entities (leads, tickets, job applications, etc.) will be built on top of this.

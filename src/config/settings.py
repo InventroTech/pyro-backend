@@ -66,7 +66,8 @@ INSTALLED_APPS = [
     'accounts',
     'support_ticket',
     'user_settings',
-    'openai_api'
+    'openai_api',
+    'object_history',
 ]
 
 MIDDLEWARE = [
@@ -78,6 +79,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'object_history.middleware.HistoryMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -139,6 +141,11 @@ LOGGING = {
         'api': {
             'handlers': ['console'],
             'level': 'DEBUG',
+            'propagate': False,
+        },
+        'object_history': {
+            'handlers': ['console'],
+            'level': 'DEBUG' if IS_DEV else 'INFO',
             'propagate': False,
         },
     },
