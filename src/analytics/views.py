@@ -676,7 +676,20 @@ class GetTicketStatusView(APIView):
                         completed_at__lte=end_of_day,
                     ),
                 ),
-                total_pending=Count("id", filter=Q(resolution_status__isnull=True)),
+                # Include unassigned pending tickets plus snoozed tickets owned by this CSE
+                total_pending=Count(
+                    "id",
+                    filter=(
+                        Q(
+                            resolution_status__isnull=True,
+                            assigned_to__isnull=True,
+                        )
+                        | Q(
+                            resolution_status="Snoozed",
+                            assigned_to=user_supabase_uid,
+                        )
+                    ),
+                ),
                 total_tickets=Count("id"),
                 wip=Count(
                     "id",
@@ -697,9 +710,11 @@ class GetTicketStatusView(APIView):
             )
 
             # ---- One grouped query for the poster breakdown (no N+1) ----
+            # Fix: Only count unassigned pending tickets to match GetNextTicketView logic
             pending_by_poster_array = list(
                 SupportTicket.objects.filter(
-                    resolution_status__isnull=True, poster__isnull=False
+                    resolution_status__isnull=True,
+                    assigned_to__isnull=True,poster__isnull=False
                 )
                 .values("poster")
                 .annotate(count=Count("id"))
