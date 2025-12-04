@@ -1041,8 +1041,10 @@ class PrajaLeadsAPIView(APIView):
     Supports 4 operations via different methods:
     - POST: CREATE a new lead
     - GET: READ all leads (with optional filters)
-    - PATCH: UPDATE lead score (requires lead_id in query or body)
-    - DELETE: DELETE a lead (requires lead_id in query or body)
+    - PATCH: UPDATE lead score (requires praja_id in query or body)
+    - DELETE: DELETE a lead (requires praja_id in query or body)
+    
+    Note: praja_id should be stored in the data JSON field when creating leads.
     
     Requires X-Secret-Praja header for authentication.
     Automatically uses DEFAULT_TENANT_SLUG from settings (no X-Tenant-Slug header needed).
@@ -1082,6 +1084,7 @@ class PrajaLeadsAPIView(APIView):
         {
             "name": "Customer Name",
             "data": {
+                "praja_id": "PRAJA123",  # Required: unique identifier for Praja system
                 "customer_full_name": "Customer Name",
                 "phone_number": "+1234567890",
                 "lead_score": 85,
@@ -1089,6 +1092,8 @@ class PrajaLeadsAPIView(APIView):
                 "poster": "free"
             }
         }
+        
+        Note: praja_id in the data field is required for UPDATE and DELETE operations.
         """
         tenant, error_response = self._get_tenant(request)
         if error_response:
@@ -1189,10 +1194,10 @@ class PrajaLeadsAPIView(APIView):
         """
         UPDATE - Update lead score.
         
-        Query parameter or body: lead_id (required)
+        Query parameter or body: praja_id (required) - uses praja_id from data field to identify lead
         Body:
         {
-            "lead_id": 123,  # or use ?lead_id=123 in URL
+            "praja_id": "PRAJA123",  # or use ?praja_id=PRAJA123 in URL
             "lead_score": 95
         }
         """
@@ -1200,24 +1205,29 @@ class PrajaLeadsAPIView(APIView):
         if error_response:
             return error_response
         
-        # Get lead_id from query params or body
-        lead_id = request.query_params.get('lead_id') or request.data.get('lead_id')
-        if not lead_id:
+        # Get praja_id from query params or body
+        praja_id = request.query_params.get('praja_id') or request.data.get('praja_id')
+        if not praja_id:
             return Response(
-                {'error': 'lead_id is required (in query param or body)'},
+                {'error': 'praja_id is required (in query param or body)'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
         try:
             lead = Record.objects.get(
-                id=lead_id,
+                data__praja_id=praja_id,
                 tenant=tenant,
                 entity_type='lead'
             )
         except Record.DoesNotExist:
             return Response(
-                {'error': f'Lead with id {lead_id} not found'},
+                {'error': f'Lead with praja_id {praja_id} not found'},
                 status=status.HTTP_404_NOT_FOUND
+            )
+        except Record.MultipleObjectsReturned:
+            return Response(
+                {'error': f'Multiple leads found with praja_id {praja_id}. Please ensure praja_id is unique.'},
+                status=status.HTTP_400_BAD_REQUEST
             )
         
         # Get lead_score from request
@@ -1244,8 +1254,9 @@ class PrajaLeadsAPIView(APIView):
         lead.save(update_fields=['data', 'updated_at'])
         
         logger.info(
-            "[PrajaLeadsAPI] Updated lead score: id=%s tenant=%s score=%s",
+            "[PrajaLeadsAPI] Updated lead score: id=%s praja_id=%s tenant=%s score=%s",
             lead.id,
+            praja_id,
             tenant.slug,
             lead_score
         )
@@ -1259,34 +1270,39 @@ class PrajaLeadsAPIView(APIView):
         """
         DELETE - Delete a lead remotely.
         
-        Query parameter or body: lead_id (required)
+        Query parameter or body: praja_id (required) - uses praja_id from data field to identify lead
         Body:
         {
-            "lead_id": 123  # or use ?lead_id=123 in URL
+            "praja_id": "PRAJA123"  # or use ?praja_id=PRAJA123 in URL
         }
         """
         tenant, error_response = self._get_tenant(request)
         if error_response:
             return error_response
         
-        # Get lead_id from query params or body
-        lead_id = request.query_params.get('lead_id') or request.data.get('lead_id')
-        if not lead_id:
+        # Get praja_id from query params or body
+        praja_id = request.query_params.get('praja_id') or request.data.get('praja_id')
+        if not praja_id:
             return Response(
-                {'error': 'lead_id is required (in query param or body)'},
+                {'error': 'praja_id is required (in query param or body)'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
         try:
             lead = Record.objects.get(
-                id=lead_id,
+                data__praja_id=praja_id,
                 tenant=tenant,
                 entity_type='lead'
             )
         except Record.DoesNotExist:
             return Response(
-                {'error': f'Lead with id {lead_id} not found'},
+                {'error': f'Lead with praja_id {praja_id} not found'},
                 status=status.HTTP_404_NOT_FOUND
+            )
+        except Record.MultipleObjectsReturned:
+            return Response(
+                {'error': f'Multiple leads found with praja_id {praja_id}. Please ensure praja_id is unique.'},
+                status=status.HTTP_400_BAD_REQUEST
             )
         
         lead_id_for_log = lead.id
@@ -1294,14 +1310,15 @@ class PrajaLeadsAPIView(APIView):
         lead.delete()
         
         logger.info(
-            "[PrajaLeadsAPI] Deleted lead: id=%s tenant=%s name=%s",
+            "[PrajaLeadsAPI] Deleted lead: id=%s praja_id=%s tenant=%s name=%s",
             lead_id_for_log,
+            praja_id,
             tenant.slug,
             lead_name
         )
         
         return Response(
-            {'message': f'Lead {lead_id} deleted successfully'},
+            {'message': f'Lead with praja_id {praja_id} deleted successfully'},
             status=status.HTTP_200_OK
         )
 
