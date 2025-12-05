@@ -940,10 +940,11 @@ class PrajaLeadsAPIView(APIView):
     """
     Single API endpoint for all lead CRUD operations.
     
-    Supports 4 operations via different methods:
+    Supports 5 operations via different methods:
     - POST: CREATE a new lead
     - GET: READ all leads (with optional filters)
-    - PATCH: UPDATE lead score (requires praja_id in query or body)
+    - PATCH: UPDATE lead fields (partial update, requires praja_id in query or body)
+    - PUT: UPDATE lead fields (full/partial update, requires praja_id in query or body)
     - DELETE: DELETE a lead (requires praja_id in query or body)
     
     Note: praja_id should be stored in the data JSON field when creating leads.
@@ -1138,7 +1139,7 @@ class PrajaLeadsAPIView(APIView):
                 {'error': f'Lead with praja_id {praja_id} not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
-        except Record.MultipleObjectsReturned:
+            except Record.MultipleObjectsReturned:
             return Response(
                 {'error': f'Multiple leads found with praja_id {praja_id}. Please ensure praja_id is unique.'},
                 status=status.HTTP_400_BAD_REQUEST
@@ -1151,11 +1152,38 @@ class PrajaLeadsAPIView(APIView):
         if 'data' in request.data and isinstance(request.data.get('data'), dict):
             data.update(request.data['data'])
         
+        # Handle single task update before processing other fields
+        if 'update_task' in request.data:
+            update_task_data = request.data['update_task']
+            if isinstance(update_task_data, dict) and 'task_name' in update_task_data:
+                task_name = update_task_data['task_name']
+                new_status = update_task_data.get('status')
+                
+                # Get existing tasks or initialize empty list
+                tasks = data.get('tasks', [])
+                if not isinstance(tasks, list):
+                    tasks = []
+                
+                # Find and update the specific task
+                task_found = False
+                for i, task in enumerate(tasks):
+                    if isinstance(task, dict) and task.get('task') == task_name:
+                        if new_status is not None:
+                            tasks[i]['status'] = new_status
+                        task_found = True
+                        break
+                
+                # If task not found, add it
+                if not task_found and new_status is not None:
+                    tasks.append({'task': task_name, 'status': new_status})
+                
+                data['tasks'] = tasks
+        
         # Also allow root-level fields to be merged into data
         # Common fields that should go into data JSON
         root_fields_to_data = ['lead_score', 'lead_stage', 'latest_remarks', 'next_call_at', 
                                'assigned_to', 'call_attempts', 'last_active_date_time',
-                               'disqualification_reason', 'poster', 'phone_number']
+                               'disqualification_reason', 'poster', 'phone_number', 'tasks']
         
         for field in root_fields_to_data:
             if field in request.data:
@@ -1182,6 +1210,101 @@ class PrajaLeadsAPIView(APIView):
             praja_id,
             tenant.slug,
             list(request.data.keys())
+        )
+        
+        return Response(
+            RecordSerializer(lead).data,
+            status=status.HTTP_200_OK
+        )
+    
+    def put(self, request):
+        """
+        UPDATE - Full replacement of lead data (PUT method).
+        
+        PUT performs FULL REPLACEMENT of the data field (REST semantics).
+        All fields not provided will be removed. Use PATCH for partial updates.
+        
+        Query parameter or body: praja_id (required) - uses praja_id from data field to identify lead
+        Body:
+        {
+            "praja_id": "PRAJA123",  # or use ?praja_id=PRAJA123 in URL
+            "name": "Updated Name",  # Optional: update name
+            "data": {  # REQUIRED: Complete data object - replaces entire data field
+                "praja_id": "PRAJA123",  # Must include praja_id in data
+                "lead_score": 95,
+                "lead_stage": "assigned",
+                "latest_remarks": "Updated remarks",
+                "next_call_at": "2025-12-15T10:00:00Z",
+                "tasks": [...],  # Complete tasks array
+                # All other fields you want to keep
+            }
+        }
+        
+        Note: PUT replaces the entire data object. Fields not included will be removed.
+        Always include praja_id in the data object to maintain consistency.
+        Use PATCH if you only want to update specific fields.
+        """
+        tenant, error_response = self._get_tenant(request)
+        if error_response:
+            return error_response
+        
+        # Get praja_id from query params or body
+        praja_id = request.query_params.get('praja_id') or request.data.get('praja_id')
+        if not praja_id:
+            return Response(
+                {'error': 'praja_id is required (in query param or body)'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            lead = Record.objects.get(
+                data__praja_id=praja_id,
+                tenant=tenant,
+                entity_type='lead'
+            )
+        except Record.DoesNotExist:
+            return Response(
+                {'error': f'Lead with praja_id {praja_id} not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Record.MultipleObjectsReturned:
+            return Response(
+                {'error': f'Multiple leads found with praja_id {praja_id}. Please ensure praja_id is unique.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # PUT: Full replacement - require 'data' object
+        if 'data' not in request.data or not isinstance(request.data.get('data'), dict):
+            return Response(
+                {'error': 'PUT requires a complete "data" object for full replacement. Use PATCH for partial updates.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Ensure praja_id is in the data object
+        data = request.data['data'].copy()
+        if 'praja_id' not in data:
+            data['praja_id'] = praja_id
+        
+        # Update name if provided
+        if 'name' in request.data:
+            lead.name = request.data['name']
+        
+        # Full replacement of data field
+        lead.data = data
+        lead.updated_at = timezone.now()
+        
+        # Determine which fields to update
+        update_fields = ['data', 'updated_at']
+        if 'name' in request.data:
+            update_fields.append('name')
+        
+        lead.save(update_fields=update_fields)
+        
+        logger.info(
+            "[PrajaLeadsAPI] Updated lead (PUT - full replacement): id=%s praja_id=%s tenant=%s",
+            lead.id,
+            praja_id,
+            tenant.slug
         )
         
         return Response(
