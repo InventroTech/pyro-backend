@@ -1192,14 +1192,26 @@ class PrajaLeadsAPIView(APIView):
     
     def patch(self, request):
         """
-        UPDATE - Update lead score.
+        UPDATE - Update lead fields.
         
         Query parameter or body: praja_id (required) - uses praja_id from data field to identify lead
         Body:
         {
             "praja_id": "PRAJA123",  # or use ?praja_id=PRAJA123 in URL
-            "lead_score": 95
+            "lead_score": 95,  # Optional: update lead_score
+            "lead_stage": "assigned",  # Optional: update lead_stage
+            "name": "Updated Name",  # Optional: update name
+            "data": {  # Optional: update any fields in data JSON
+                "lead_score": 95,
+                "lead_stage": "assigned",
+                "latest_remarks": "Updated remarks",
+                "next_call_at": "2025-12-15T10:00:00Z"
+            }
         }
+        
+        Note: You can update any fields in the data JSON. Fields provided in the root level
+        (like lead_score, lead_stage) will be merged into the data JSON. If both root level
+        and data object are provided, data object takes precedence.
         """
         tenant, error_response = self._get_tenant(request)
         if error_response:
@@ -1230,35 +1242,44 @@ class PrajaLeadsAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Get lead_score from request
-        lead_score = request.data.get('lead_score')
-        if lead_score is None:
-            return Response(
-                {'error': 'lead_score field is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # Start with existing data
+        data = lead.data.copy() if lead.data else {}
         
-        try:
-            lead_score = float(lead_score)
-        except (ValueError, TypeError):
-            return Response(
-                {'error': 'lead_score must be a valid number'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # If 'data' object is provided in request, merge it (takes precedence)
+        if 'data' in request.data and isinstance(request.data.get('data'), dict):
+            data.update(request.data['data'])
+        
+        # Also allow root-level fields to be merged into data
+        # Common fields that should go into data JSON
+        root_fields_to_data = ['lead_score', 'lead_stage', 'latest_remarks', 'next_call_at', 
+                               'assigned_to', 'call_attempts', 'last_active_date_time',
+                               'disqualification_reason', 'poster', 'phone_number']
+        
+        for field in root_fields_to_data:
+            if field in request.data:
+                data[field] = request.data[field]
+        
+        # Update name if provided
+        if 'name' in request.data:
+            lead.name = request.data['name']
         
         # Update the data JSONB field
-        data = lead.data.copy() if lead.data else {}
-        data['lead_score'] = lead_score
         lead.data = data
         lead.updated_at = timezone.now()
-        lead.save(update_fields=['data', 'updated_at'])
+        
+        # Determine which fields to update
+        update_fields = ['data', 'updated_at']
+        if 'name' in request.data:
+            update_fields.append('name')
+        
+        lead.save(update_fields=update_fields)
         
         logger.info(
-            "[PrajaLeadsAPI] Updated lead score: id=%s praja_id=%s tenant=%s score=%s",
+            "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s fields=%s",
             lead.id,
             praja_id,
             tenant.slug,
-            lead_score
+            list(request.data.keys())
         )
         
         return Response(
