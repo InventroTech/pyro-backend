@@ -12,6 +12,7 @@ from django.utils import timezone
 from datetime import timedelta
 import re
 import copy
+from django.core.cache import cache
 
 from .models import RuleSet, RuleExecutionLog, Record
 from support_ticket.services import MixpanelService
@@ -442,13 +443,19 @@ def execute_rules(event_name: str, record: Record, payload: Dict[str, Any], tena
         tenant_id: ID of the tenant (for isolation)
     """
     start_time = time.time()
-    
+    cache_key = f"rules:{tenant_id}:{event_name}"
+    rules = cache.get(cache_key)
+    if rules is None:
     # Fetch all enabled rules for this tenant and event
-    rules = RuleSet.objects.filter(
-        tenant_id=tenant_id,
-        event_name=event_name,
-        enabled=True
-    )
+        rules = RuleSet.objects.filter(
+            tenant_id=tenant_id,
+            event_name=event_name,
+            enabled=True
+        ).only('id', 'condition', 'actions')  # Only fetch needed fields
+        cache.set(cache_key, rules, 60 * 5)  # 5 minutes
+
+    if not rules.exists():  # Early exit - no database query needed
+        return
     
     logger.info(f"Evaluating {rules.count()} rules for event '{event_name}' on record {record.id}")
 
