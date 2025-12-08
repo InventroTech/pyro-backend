@@ -1,8 +1,10 @@
 from django.db import models
+from django.contrib.postgres.fields import ArrayField
 from core.models import BaseModel
+from object_history.models import HistoryTrackedModel
 
 
-class Record(BaseModel):
+class Record(HistoryTrackedModel, BaseModel):
     """
     Universal record model that can hold any tenant's data dynamically using JSONB.
     All future entities (leads, tickets, job applications, etc.) will be built on top of this.
@@ -83,3 +85,33 @@ class RuleExecutionLog(BaseModel):
 
     def __str__(self):
         return f"Rule execution: {self.event_name} ({'matched' if self.matched else 'no match'}) at {self.created_at}"
+
+
+class EntityTypeSchema(BaseModel):
+    """
+    Schema definition for entity types - stores the list of attributes for each entity type.
+    This allows defining the structure/schema of each entity type.
+    """
+    entity_type = models.CharField(max_length=100, db_index=True, help_text="The entity type (e.g., 'lead', 'ticket', 'job')")
+    attributes = ArrayField(
+        models.CharField(max_length=255),
+        default=list,
+        blank=True,
+        help_text="List of all attribute paths for this entity type (e.g., ['id', 'name', 'data.email', 'data.phone'])"
+    )
+    rules = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of scoring rules for this entity type. Each rule has 'attr', 'operator', 'value', and 'weight'."
+    )
+    description = models.TextField(null=True, blank=True, help_text="Optional description of this entity type schema")
+    
+    class Meta:
+        db_table = "entity_type_schemas"
+        unique_together = [['tenant', 'entity_type']]  # One schema per entity_type per tenant
+        indexes = [
+            models.Index(fields=["tenant", "entity_type"]),
+        ]
+    
+    def __str__(self):
+        return f"{self.entity_type} ({len(self.attributes)} attributes, {len(self.rules)} rules)"

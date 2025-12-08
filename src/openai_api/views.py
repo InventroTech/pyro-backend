@@ -23,7 +23,56 @@ class OpenAIFileAnalysisView(APIView):
             return Response({'error': 'No file provided'}, status=400)
         
         file = request.FILES['file']
-        prompt = request.data.get('prompt', 'Analyze this document')
+        
+        # Default ATS resume parser prompt
+        default_prompt = """You are an ATS resume parser. Extract all important details from the uploaded resume and return the result ONLY in valid JSON format.
+
+Follow these rules:
+1. Do NOT include explanations or text outside JSON.
+2. If any field is missing in the resume, return it as an empty string "".
+3. The JSON must be strictly valid and must not contain trailing commas.
+
+Extract the following fields:
+
+{
+  "name": "",
+  "email": "",
+  "phone": "",
+  "location": "",
+  "linkedin": "",
+  "github": "",
+  "portfolio": "",
+  "skills": [],
+  "experience": [
+      {
+        "company": "",
+        "position": "",
+        "duration": "",
+        "description": ""
+      }
+  ],
+  "education": [
+      {
+        "college": "",
+        "degree": "",
+        "start_year": "",
+        "end_year": ""
+      }
+  ],
+  "projects": [
+      {
+        "name": "",
+        "description": "",
+        "tech_stack": []
+      }
+  ],
+  "ats_score": 0,
+  "summary": ""
+}
+
+Return only the JSON. No extra text."""
+        
+        prompt = request.data.get('prompt', default_prompt)
         
         if not file.name.lower().endswith('.pdf'):
             return Response({'error': 'Only PDF files supported'}, status=400)
@@ -62,7 +111,7 @@ class OpenAIFileAnalysisView(APIView):
             response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
-                    {"role": "system", "content": "Analyze documents and provide helpful responses."},
+                    {"role": "system", "content": "You are an expert ATS resume parser. Extract structured data from resumes and return only valid JSON. Never include explanations or additional text."},
                     {"role": "user", "content": f"{prompt}\n\nDocument:\n{pdf_text[:8000]}"}
                 ],
                 max_tokens=2000,
@@ -97,7 +146,56 @@ class OpenAITextAnalysisView(APIView):
     def post(self, request):
         # Validate inputs
         text = request.data.get('text', '').strip()
-        prompt = request.data.get('prompt', 'Analyze this text')
+        
+        # Default ATS resume parser prompt (same as file analysis)
+        default_prompt = """You are an ATS resume parser. Extract all important details from the uploaded resume and return the result ONLY in valid JSON format.
+
+Follow these rules:
+1. Do NOT include explanations or text outside JSON.
+2. If any field is missing in the resume, return it as an empty string "".
+3. The JSON must be strictly valid and must not contain trailing commas.
+
+Extract the following fields:
+
+{
+  "name": "",
+  "email": "",
+  "phone": "",
+  "location": "",
+  "linkedin": "",
+  "github": "",
+  "portfolio": "",
+  "skills": [],
+  "experience": [
+      {
+        "company": "",
+        "position": "",
+        "duration": "",
+        "description": ""
+      }
+  ],
+  "education": [
+      {
+        "college": "",
+        "degree": "",
+        "start_year": "",
+        "end_year": ""
+      }
+  ],
+  "projects": [
+      {
+        "name": "",
+        "description": "",
+        "tech_stack": []
+      }
+  ],
+  "ats_score": 0,
+  "summary": ""
+}
+
+Return only the JSON. No extra text."""
+        
+        prompt = request.data.get('prompt', default_prompt)
         
         if not text:
             return Response({'error': 'No text provided'}, status=400)
@@ -114,7 +212,7 @@ class OpenAITextAnalysisView(APIView):
             response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
-                    {"role": "system", "content": "Analyze text and provide helpful responses."},
+                    {"role": "system", "content": "You are an expert ATS resume parser. Extract structured data from resumes and return only valid JSON. Never include explanations or additional text."},
                     {"role": "user", "content": f"{prompt}\n\nText:\n{text}"}
                 ],
                 max_tokens=2000,

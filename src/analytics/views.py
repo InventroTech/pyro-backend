@@ -676,11 +676,20 @@ class GetTicketStatusView(APIView):
                         completed_at__lte=end_of_day,
                     ),
                 ),
-                # Fix: Only count unassigned pending tickets to match GetNextTicketView logic
-                total_pending=Count("id", filter=Q(
-                    resolution_status__isnull=True,
-                    assigned_to__isnull=True
-                )),
+                # Include unassigned pending tickets plus snoozed tickets owned by this CSE
+                total_pending=Count(
+                    "id",
+                    filter=(
+                        Q(
+                            resolution_status__isnull=True,
+                            assigned_to__isnull=True,
+                        )
+                        | Q(
+                            resolution_status="Snoozed",
+                            assigned_to=user_supabase_uid,
+                        )
+                    ),
+                ),
                 total_tickets=Count("id"),
                 wip=Count(
                     "id",
