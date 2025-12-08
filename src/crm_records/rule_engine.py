@@ -444,25 +444,32 @@ def execute_rules(event_name: str, record: Record, payload: Dict[str, Any], tena
     """
     start_time = time.time()
     cache_key = f"rules:{tenant_id}:{event_name}"
-    rules = cache.get(cache_key)
-    if rules is None:
-    # Fetch all enabled rules for this tenant and event
+    rules_data = cache.get(cache_key)
+    
+    if rules_data is None:
+        # Fetch rules from DB if not in cache
         rules = RuleSet.objects.filter(
             tenant_id=tenant_id,
             event_name=event_name,
             enabled=True
-        ).only('id', 'condition', 'actions')  # Only fetch needed fields
-        cache.set(cache_key, rules, 60 * 5)  # 5 minutes
+        ).only('id', 'condition', 'actions')
+        # Cache the data as a list of dicts, not the queryset
+        rules_data = list(rules.values('id', 'condition', 'actions'))
+        cache.set(cache_key, rules_data, 60 * 5)  # 5 minutes
 
-    if not rules.exists():  # Early exit - no database query needed
+    if not rules_data:  # Early exit if no rules
         return
     
-    logger.info(f"Evaluating {rules.count()} rules for event '{event_name}' on record {record.id}")
+    logger.info(f"Evaluating {len(rules_data)} rules for event '{event_name}' on record {record.id}")
 
     # Snapshot record data once per event so all rule conditions see pre-update state
     record_data_snapshot = copy.deepcopy(record.data)
     
-    for rule in rules:
+    for rule_data in rules_data:
+        # Re-hydrate a RuleSet instance from cached data.
+        # This is an in-memory object, not hitting the DB.
+        # It has an ID, so it can be used for FK relations.
+        rule = RuleSet(**rule_data)
         rule_start = time.time()
         
         # Create context for rule evaluation

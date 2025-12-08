@@ -69,12 +69,11 @@ class JobProcessor:
                 )
                 
                 if job:
-                    # Lock the job
-                    job.status = JobStatus.PROCESSING
-                    job.locked_by = self.worker_id
-                    job.locked_at = now
-                    # Use F() to increment attempts atomically
+                    # Lock the job and increment attempts atomically
                     BackgroundJob.objects.filter(pk=job.pk).update(
+                        status=JobStatus.PROCESSING,
+                        locked_by=self.worker_id,
+                        locked_at=now,
                         attempts=F('attempts') + 1
                     )
                     job.refresh_from_db()
