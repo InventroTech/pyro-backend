@@ -1,3 +1,6 @@
+"""
+Custom SMTP backend for Django email
+"""
 import ssl
 import logging
 import smtplib
@@ -81,4 +84,3 @@ class CustomSMTPBackend(EmailBackend):
                 raise
             logger.error(f"Failed to open SMTP connection: {e}")
             return False
-
