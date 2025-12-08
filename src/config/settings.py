@@ -331,4 +331,25 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     "X-Secret-Praja",  # Praja API secret header
 ]
 
+# Email configuration
+# Use custom backend for better SSL handling
+# Check if EMAIL_BACKEND is explicitly set in env, otherwise use our custom backend
+if 'EMAIL_BACKEND' in os.environ:
+    EMAIL_BACKEND = env('EMAIL_BACKEND')
+    print(f"Using EMAIL_BACKEND from environment: {EMAIL_BACKEND}")
+else:
+    EMAIL_BACKEND = 'email_protocol.backends.CustomSMTPBackend'
+    print(f"Using default custom EMAIL_BACKEND: {EMAIL_BACKEND}")
+EMAIL_HOST = env('EMAIL_HOST', default='smtp.gmail.com')
+EMAIL_PORT = env.int('EMAIL_PORT', default=587)
+EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=True)
+EMAIL_USE_SSL = env.bool('EMAIL_USE_SSL', default=False)
+EMAIL_HOST_USER = env('EMAIL_HOST_USER', default='')
+EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD', default='')
+DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default=EMAIL_HOST_USER)
+
+# SSL Certificate verification (set to False for development if having SSL issues)
+# WARNING: Only disable in development, never in production!
+EMAIL_SSL_VERIFY = env.bool('EMAIL_SSL_VERIFY', default=not IS_DEV)  # Disable in dev by default
+
 import config.spectacular_auth
