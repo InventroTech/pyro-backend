@@ -1139,7 +1139,7 @@ class PrajaLeadsAPIView(APIView):
                 {'error': f'Lead with praja_id {praja_id} not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
-            except Record.MultipleObjectsReturned:
+        except Record.MultipleObjectsReturned:
             return Response(
                 {'error': f'Multiple leads found with praja_id {praja_id}. Please ensure praja_id is unique.'},
                 status=status.HTTP_400_BAD_REQUEST
