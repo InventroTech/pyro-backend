@@ -1544,9 +1544,11 @@ class EntityTypeAttributesView(TenantScopedMixin, APIView):
 
 class LeadScoringView(TenantScopedMixin, APIView):
     """
-    POST endpoint to score all leads based on rules.
+    POST endpoint to save scoring rules and apply them to leads.
     
     POST /crm-records/leads/score/
+    
+    Saves the rules to EntityTypeSchema table and applies them to score all leads.
     
     Payload:
     {
@@ -1654,7 +1656,8 @@ class LeadScoringView(TenantScopedMixin, APIView):
     
     def post(self, request):
         """
-        Score all leads based on provided rules.
+        Save scoring rules and apply them to all leads.
+        Saves/updates the rules in EntityTypeSchema table for the entity_type.
         """
         serializer = LeadScoringRequestSerializer(data=request.data)
         
@@ -1662,6 +1665,18 @@ class LeadScoringView(TenantScopedMixin, APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
         rules = serializer.validated_data['rules']
+        entity_type = 'lead'  # Default entity type for lead scoring
+        
+        # Save/update rules in EntityTypeSchema table (replace previous rules)
+        EntityTypeSchema.objects.update_or_create(
+            tenant=request.tenant,
+            entity_type=entity_type,
+            defaults={
+                'rules': rules
+            }
+        )
+        
+        logger.info(f"LeadScoringView: Saved {len(rules)} rules to EntityTypeSchema for entity_type '{entity_type}'")
         
         # Get all leads for the current tenant
         leads = Record.objects.filter(
@@ -1708,23 +1723,19 @@ class LeadScoringView(TenantScopedMixin, APIView):
                 f"Total score added: {total_score_added}"
             )
             
+            # Simple response format - no nested objects that could cause toast errors
             return Response({
-                'success': True,
-                'message': f'Scored {updated_count} leads',
-                'stats': {
-                    'total_leads': leads.count(),
-                    'updated_leads': updated_count,
-                    'unmatched_leads': leads.count() - updated_count,
-                    'total_score_added': total_score_added
-                }
+                'message': f'Rules saved and applied to {updated_count} leads',
+                'total_leads': leads.count(),
+                'updated_leads': updated_count,
+                'total_score_added': total_score_added
             }, status=status.HTTP_200_OK)
             
         except Exception as e:
             logger.error(f"Error in LeadScoringView: {e}", exc_info=True)
             return Response({
-                'success': False,
-                'error': 'Failed to score leads',
-                'details': str(e)
+                'error': 'Failed to save rules and score leads',
+                'message': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 

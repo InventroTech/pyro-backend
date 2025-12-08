@@ -202,6 +202,7 @@ class EntityTypeSchemaSerializer(serializers.ModelSerializer):
             "tenant_id",
             "entity_type",
             "attributes",
+            "rules",
             "description",
             "created_at",
             "updated_at"
@@ -235,6 +236,23 @@ class EntityTypeSchemaSerializer(serializers.ModelSerializer):
         # Remove duplicates and sort
         unique_attrs = sorted(list(set([attr.strip() for attr in value if attr.strip()])))
         return unique_attrs
+    
+    def validate_rules(self, value):
+        """Validate rules is a list of rule objects."""
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Rules must be a list.")
+        
+        for i, rule in enumerate(value):
+            if not isinstance(rule, dict):
+                raise serializers.ValidationError(f"Rule at index {i} must be a dictionary.")
+            
+            # Validate required fields
+            required_fields = ['attr', 'operator', 'value', 'weight']
+            for field in required_fields:
+                if field not in rule:
+                    raise serializers.ValidationError(f"Rule at index {i} is missing required field: {field}")
+        
+        return value
 
 
 class ScoringRuleSerializer(serializers.Serializer):
