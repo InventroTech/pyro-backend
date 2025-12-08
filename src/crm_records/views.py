@@ -14,8 +14,8 @@ from drf_spectacular.types import OpenApiTypes
 import logging
 
 logger = logging.getLogger(__name__)
-from .models import Record, EventLog, RuleSet, RuleExecutionLog
-from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer
+from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema
+from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
 from user_settings.models import UserSettings
@@ -1304,5 +1304,389 @@ class PrajaLeadsAPIView(APIView):
             {'message': f'Lead {lead_id} deleted successfully'},
             status=status.HTTP_200_OK
         )
+
+
+class EntityTypeSchemaListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
+    """
+    List all entity type schemas for the current tenant, or create a new one.
+    
+    GET /crm-records/entity-schemas/
+    POST /crm-records/entity-schemas/
+    """
+    permission_classes = [IsTenantAuthenticated]
+    serializer_class = EntityTypeSchemaSerializer
+    pagination_class = MetaPageNumberPagination
+    
+    def get_queryset(self):
+        """Return schemas filtered by tenant."""
+        return EntityTypeSchema.objects.filter(tenant=self.request.tenant).order_by('entity_type')
+    
+    def perform_create(self, serializer):
+        """Set tenant automatically on create."""
+        serializer.save(tenant=self.request.tenant)
+
+
+class EntityTypeSchemaDetailView(TenantScopedMixin, generics.RetrieveUpdateDestroyAPIView):
+    """
+    Retrieve, update, or delete an entity type schema.
+    
+    GET /crm-records/entity-schemas/{id}/
+    PUT /crm-records/entity-schemas/{id}/
+    PATCH /crm-records/entity-schemas/{id}/
+    DELETE /crm-records/entity-schemas/{id}/
+    """
+    permission_classes = [IsTenantAuthenticated]
+    serializer_class = EntityTypeSchemaSerializer
+    
+    def get_queryset(self):
+        """Return schemas filtered by tenant."""
+        return EntityTypeSchema.objects.filter(tenant=self.request.tenant)
+
+
+class EntityTypeSchemaByTypeView(TenantScopedMixin, APIView):
+    """
+    Get or create/update entity type schema by entity_type.
+    
+    GET /crm-records/entity-schemas/by-type/?entity_type=lead
+    POST /crm-records/entity-schemas/by-type/ - with entity_type and attributes in body
+    PUT /crm-records/entity-schemas/by-type/ - update existing schema
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    def get(self, request):
+        """Get schema by entity_type."""
+        entity_type = request.query_params.get('entity_type')
+        
+        if not entity_type:
+            return Response({
+                'error': 'entity_type query parameter is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            schema = EntityTypeSchema.objects.get(
+                tenant=request.tenant,
+                entity_type=entity_type.strip()
+            )
+            serializer = EntityTypeSchemaSerializer(schema)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except EntityTypeSchema.DoesNotExist:
+            return Response({
+                'error': f'Schema not found for entity_type "{entity_type}"'
+            }, status=status.HTTP_404_NOT_FOUND)
+    
+    def post(self, request):
+        """Create a new schema."""
+        serializer = EntityTypeSchemaSerializer(data=request.data)
+        if serializer.is_valid():
+            # Check if schema already exists
+            entity_type = serializer.validated_data.get('entity_type')
+            existing = EntityTypeSchema.objects.filter(
+                tenant=request.tenant,
+                entity_type=entity_type
+            ).first()
+            
+            if existing:
+                return Response({
+                    'error': f'Schema already exists for entity_type "{entity_type}". Use PUT to update.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            serializer.save(tenant=request.tenant)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    def put(self, request):
+        """Update existing schema or create if not exists."""
+        entity_type = request.data.get('entity_type')
+        
+        if not entity_type:
+            return Response({
+                'error': 'entity_type is required in request body'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            schema = EntityTypeSchema.objects.get(
+                tenant=request.tenant,
+                entity_type=entity_type.strip()
+            )
+            serializer = EntityTypeSchemaSerializer(schema, data=request.data, partial=False)
+        except EntityTypeSchema.DoesNotExist:
+            serializer = EntityTypeSchemaSerializer(data=request.data)
+        
+        if serializer.is_valid():
+            serializer.save(tenant=request.tenant)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    def patch(self, request):
+        """Partially update existing schema."""
+        entity_type = request.data.get('entity_type')
+        
+        if not entity_type:
+            return Response({
+                'error': 'entity_type is required in request body'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            schema = EntityTypeSchema.objects.get(
+                tenant=request.tenant,
+                entity_type=entity_type.strip()
+            )
+            serializer = EntityTypeSchemaSerializer(schema, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_200_OK)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except EntityTypeSchema.DoesNotExist:
+            return Response({
+                'error': f'Schema not found for entity_type "{entity_type}"'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+
+class EntityTypeAttributesView(TenantScopedMixin, APIView):
+    """
+    Get attributes list for an entity type.
+    
+    GET /crm-records/entity-attributes/?entity_type=lead
+    
+    Returns a simple list of attributes for the specified entity_type.
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    def get(self, request):
+        """
+        Get attributes list by entity_type.
+        
+        Query Parameters:
+        - entity_type: Required. The entity type to get attributes for (e.g., 'lead', 'ticket')
+        
+        Returns:
+        {
+            "entity_type": "lead",
+            "attributes": [
+                "id",
+                "tenant_id",
+                "entity_type",
+                "name",
+                "data",
+                "data.user_id",
+                "data.lead_score",
+                ...
+            ],
+            "total_count": 29
+        }
+        """
+        entity_type = request.query_params.get('entity_type')
+        
+        if not entity_type:
+            return Response({
+                'error': 'entity_type query parameter is required. Example: ?entity_type=lead'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        entity_type = entity_type.strip()
+        
+        try:
+            schema = EntityTypeSchema.objects.get(
+                tenant=request.tenant,
+                entity_type=entity_type
+            )
+            
+            return Response({
+                'entity_type': schema.entity_type,
+                'attributes': schema.attributes,
+                'total_count': len(schema.attributes)
+            }, status=status.HTTP_200_OK)
+            
+        except EntityTypeSchema.DoesNotExist:
+            return Response({
+                'error': f'Schema not found for entity_type "{entity_type}"',
+                'entity_type': entity_type,
+                'suggestion': 'Create a schema first using POST /crm-records/entity-schemas/'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+
+class LeadScoringView(TenantScopedMixin, APIView):
+    """
+    POST endpoint to score all leads based on rules.
+    
+    POST /crm-records/leads/score/
+    
+    Payload:
+    {
+        "rules": [
+            {
+                "attr": "data.assigned_to",
+                "operator": "==",
+                "value": "ami",
+                "weight": 19900
+            },
+            {
+                "attr": "data.affiliated_party",
+                "operator": "==",
+                "value": "bjp",
+                "weight": 1233
+            }
+        ]
+    }
+    
+    For each lead, checks all rules and sums up weights for matching rules.
+    Updates data.lead_score with the total weight.
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    def _get_nested_value(self, data, attr_path):
+        """
+        Get nested value from data dict using dot notation path.
+        Example: data.assigned_to -> data['assigned_to']
+        Example: data.user.profile.name -> data['user']['profile']['name']
+        """
+        if not attr_path or not data:
+            return None
+        
+        # Remove 'data.' prefix if present
+        if attr_path.startswith('data.'):
+            attr_path = attr_path[5:]  # Remove 'data.' prefix
+        
+        keys = attr_path.split('.')
+        value = data
+        
+        try:
+            for key in keys:
+                if isinstance(value, dict) and key in value:
+                    value = value[key]
+                else:
+                    return None
+            return value
+        except (TypeError, KeyError, AttributeError):
+            return None
+    
+    def _evaluate_rule(self, lead_data, rule):
+        """
+        Evaluate if a rule matches the lead data.
+        
+        Args:
+            lead_data: The data dict from the lead record
+            rule: Dict with 'attr', 'operator', 'value', 'weight'
+        
+        Returns:
+            True if rule matches, False otherwise
+        """
+        attr_path = rule.get('attr', '')
+        operator = rule.get('operator', '==')
+        expected_value = rule.get('value', '')
+        
+        # Get the actual value from lead data
+        actual_value = self._get_nested_value(lead_data, attr_path)
+        
+        if actual_value is None:
+            return False
+        
+        # Convert to string for comparison (handles different types)
+        actual_str = str(actual_value).lower() if actual_value is not None else ''
+        expected_str = str(expected_value).lower() if expected_value is not None else ''
+        
+        try:
+            if operator == '==':
+                return actual_str == expected_str
+            elif operator == '!=':
+                return actual_str != expected_str
+            elif operator == '>':
+                return float(actual_value) > float(expected_value)
+            elif operator == '<':
+                return float(actual_value) < float(expected_value)
+            elif operator == '>=':
+                return float(actual_value) >= float(expected_value)
+            elif operator == '<=':
+                return float(actual_value) <= float(expected_value)
+            elif operator == 'contains':
+                return expected_str in actual_str
+            elif operator == 'in':
+                # expected_value should be a comma-separated list or list
+                if isinstance(expected_value, list):
+                    return actual_str in [str(v).lower() for v in expected_value]
+                else:
+                    values = [v.strip().lower() for v in str(expected_value).split(',')]
+                    return actual_str in values
+            else:
+                return False
+        except (ValueError, TypeError):
+            # If conversion fails, fall back to string comparison
+            if operator in ['==', '!=']:
+                return actual_str == expected_str if operator == '==' else actual_str != expected_str
+            return False
+    
+    def post(self, request):
+        """
+        Score all leads based on provided rules.
+        """
+        serializer = LeadScoringRequestSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        rules = serializer.validated_data['rules']
+        
+        # Get all leads for the current tenant
+        leads = Record.objects.filter(
+            tenant=request.tenant,
+            entity_type='lead'
+        )
+        
+        updated_count = 0
+        total_score_added = 0
+        errors = []
+        
+        try:
+            with transaction.atomic():
+                for lead in leads:
+                    lead_data = lead.data if lead.data else {}
+                    total_weight = 0
+                    matched_rules = []
+                    
+                    # Check each rule
+                    for rule in rules:
+                        if self._evaluate_rule(lead_data, rule):
+                            weight = rule.get('weight', 0)
+                            total_weight += weight
+                            matched_rules.append({
+                                'attr': rule.get('attr'),
+                                'weight': weight
+                            })
+                    
+                    # Update lead_score if any rules matched
+                    if total_weight > 0 or 'lead_score' in lead_data:
+                        lead_data['lead_score'] = total_weight
+                        lead.data = lead_data
+                        lead.save(update_fields=['data', 'updated_at'])
+                        updated_count += 1
+                        total_score_added += total_weight
+                        
+                        logger.debug(
+                            f"Updated lead {lead.id}: matched {len(matched_rules)} rules, "
+                            f"total weight: {total_weight}"
+                        )
+            
+            logger.info(
+                f"LeadScoringView: Updated {updated_count} leads out of {leads.count()} total leads. "
+                f"Total score added: {total_score_added}"
+            )
+            
+            return Response({
+                'success': True,
+                'message': f'Scored {updated_count} leads',
+                'stats': {
+                    'total_leads': leads.count(),
+                    'updated_leads': updated_count,
+                    'unmatched_leads': leads.count() - updated_count,
+                    'total_score_added': total_score_added
+                }
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error in LeadScoringView: {e}", exc_info=True)
+            return Response({
+                'success': False,
+                'error': 'Failed to score leads',
+                'details': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
