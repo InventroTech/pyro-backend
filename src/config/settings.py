@@ -68,6 +68,7 @@ INSTALLED_APPS = [
     'user_settings',
     'openai_api',
     'object_history',
+    'email_protocol',
 ]
 
 MIDDLEWARE = [
