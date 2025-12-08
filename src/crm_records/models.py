@@ -99,6 +99,11 @@ class EntityTypeSchema(BaseModel):
         blank=True,
         help_text="List of all attribute paths for this entity type (e.g., ['id', 'name', 'data.email', 'data.phone'])"
     )
+    rules = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of scoring rules for this entity type. Each rule has 'attr', 'operator', 'value', and 'weight'."
+    )
     description = models.TextField(null=True, blank=True, help_text="Optional description of this entity type schema")
     
     class Meta:
@@ -109,4 +114,4 @@ class EntityTypeSchema(BaseModel):
         ]
     
     def __str__(self):
-        return f"{self.entity_type} ({len(self.attributes)} attributes)"
+        return f"{self.entity_type} ({len(self.attributes)} attributes, {len(self.rules)} rules)"
