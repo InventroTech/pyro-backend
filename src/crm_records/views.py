@@ -1224,12 +1224,29 @@ class PrajaLeadsAPIView(APIView):
                 entity_type='lead'
             )
             
-            logger.info(
-                "[PrajaLeadsAPI] Created lead: id=%s tenant=%s name=%s",
-                record.id,
-                tenant.slug,
-                record.name
-            )
+            # Calculate and save lead score automatically
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(record, tenant_id=tenant.id, save=True)
+                logger.info(
+                    "[PrajaLeadsAPI] Created lead: id=%s tenant=%s name=%s score=%s",
+                    record.id,
+                    tenant.slug,
+                    record.name,
+                    score
+                )
+            except Exception as e:
+                logger.error(f"[PrajaLeadsAPI] Error calculating lead score for lead {record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
+                logger.info(
+                    "[PrajaLeadsAPI] Created lead: id=%s tenant=%s name=%s (scoring failed)",
+                    record.id,
+                    tenant.slug,
+                    record.name
+                )
+            
+            # Refresh record from DB to get updated score
+            record.refresh_from_db()
             
             return Response(
                 RecordSerializer(record).data,
@@ -1392,13 +1409,31 @@ class PrajaLeadsAPIView(APIView):
         
         lead.save(update_fields=update_fields)
         
-        logger.info(
-            "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s fields=%s",
-            lead.id,
-            praja_id,
-            tenant.slug,
-            list(request.data.keys())
-        )
+        # Recalculate and save lead score automatically (overwrites any manually set score)
+        try:
+            from .scoring import calculate_and_update_lead_score
+            score = calculate_and_update_lead_score(lead, tenant_id=tenant.id, save=True)
+            logger.info(
+                "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s score=%s fields=%s",
+                lead.id,
+                praja_id,
+                tenant.slug,
+                score,
+                list(request.data.keys())
+            )
+        except Exception as e:
+            logger.error(f"[PrajaLeadsAPI] Error calculating lead score for updated lead {lead.id}: {e}")
+            # Don't fail the request if scoring fails, just log the error
+            logger.info(
+                "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s fields=%s (scoring failed)",
+                lead.id,
+                praja_id,
+                tenant.slug,
+                list(request.data.keys())
+            )
+        
+        # Refresh record from DB to get updated score
+        lead.refresh_from_db()
         
         return Response(
             RecordSerializer(lead).data,
