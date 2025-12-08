@@ -67,8 +67,8 @@ INSTALLED_APPS = [
     'support_ticket',
     'user_settings',
     'openai_api',
-    'object_history',
     'email_protocol',
+    'object_history',
 ]
 
 MIDDLEWARE = [
