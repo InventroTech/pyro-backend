@@ -22,6 +22,7 @@ from drf_spectacular.views import (
     SpectacularRedocView,
     SpectacularSwaggerView,
 )
+from crm_records.views import PrajaLeadsAPIView
 
 def trigger_error(request):
     division_by_zero = 1 / 0
@@ -39,6 +40,9 @@ urlpatterns = [
     path('support-ticket/', include('support_ticket.urls')),
     path('user-settings/', include('user_settings.urls')),
     path('openai/', include('openai_api.urls')),
+    
+    # Top-level entity endpoint (from crm_records)
+    path('entity/', PrajaLeadsAPIView.as_view(), name='entity-api'),
     
     # OpenAPI schema
     path("api/schema/", SpectacularAPIView.as_view(

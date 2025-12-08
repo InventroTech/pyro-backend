@@ -19,6 +19,7 @@ from .mixins import TenantScopedMixin
 from .events import dispatch_event
 from user_settings.models import UserSettings
 from .permissions import HasPrajaSecret
+from support_ticket.services import MixpanelService
 
 
 class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
@@ -956,6 +957,11 @@ class PrajaLeadsAPIView(APIView):
     authentication_classes = []  # No authentication required - only secret header
     permission_classes = [HasPrajaSecret]
     
+    def get_entity_type(self, request):
+        """Get entity_type from query params, request body, or default to 'lead'"""
+        entity_type = request.query_params.get('entity') or request.data.get('entity_type')
+        return entity_type if entity_type else 'lead'
+    
     def _get_tenant(self, request):
         """Helper to get tenant - uses default tenant from settings (no header required)"""
         from django.conf import settings
@@ -1002,15 +1008,17 @@ class PrajaLeadsAPIView(APIView):
         if error_response:
             return error_response
         
+        entity_type = self.get_entity_type(request)
         serializer = RecordSerializer(data=request.data)
         if serializer.is_valid():
             record = serializer.save(
                 tenant=tenant,
-                entity_type='lead'
+                entity_type=entity_type
             )
             
             logger.info(
-                "[PrajaLeadsAPI] Created lead: id=%s tenant=%s name=%s",
+                "[PrajaLeadsAPI] Created %s: id=%s tenant=%s name=%s",
+                entity_type,
                 record.id,
                 tenant.slug,
                 record.name
@@ -1028,10 +1036,11 @@ class PrajaLeadsAPIView(APIView):
     
     def get(self, request):
         """
-        READ - Get all leads for the specified tenant.
+        READ - Get all entity records for the specified tenant.
         
         Query parameters:
-        - lead_id: Get specific lead by ID (optional)
+        - entity: Entity type (e.g., 'lead', 'ticket') - defaults to 'lead' if not provided
+        - record_id or lead_id: Get specific record by ID (optional)
         - page: Page number for pagination
         - page_size: Items per page
         - lead_stage: Filter by lead_stage (optional)
@@ -1041,29 +1050,31 @@ class PrajaLeadsAPIView(APIView):
         if error_response:
             return error_response
         
-        # If lead_id is provided, return single lead
-        lead_id = request.query_params.get('lead_id')
-        if lead_id:
+        entity_type = self.get_entity_type(request)
+        
+        # If record_id or lead_id is provided, return single record
+        record_id = request.query_params.get('record_id') or request.query_params.get('lead_id')
+        if record_id:
             try:
-                lead = Record.objects.get(
-                    id=lead_id,
+                record = Record.objects.get(
+                    id=record_id,
                     tenant=tenant,
-                    entity_type='lead'
+                    entity_type=entity_type
                 )
                 return Response(
-                    RecordSerializer(lead).data,
+                    RecordSerializer(record).data,
                     status=status.HTTP_200_OK
                 )
             except Record.DoesNotExist:
                 return Response(
-                    {'error': f'Lead with id {lead_id} not found'},
+                    {'error': f'{entity_type.capitalize()} with id {record_id} not found'},
                     status=status.HTTP_404_NOT_FOUND
                 )
         
-        # Get all leads for this tenant
+        # Get all records for this tenant and entity type
         queryset = Record.objects.filter(
             tenant=tenant,
-            entity_type='lead'
+            entity_type=entity_type
         )
         
         # Optional filters
@@ -1191,40 +1202,44 @@ class PrajaLeadsAPIView(APIView):
         
         # Update name if provided
         if 'name' in request.data:
-            lead.name = request.data['name']
+            record.name = request.data['name']
         
         # Update the data JSONB field
-        lead.data = data
-        lead.updated_at = timezone.now()
+        record.data = data
+        record.updated_at = timezone.now()
         
         # Determine which fields to update
         update_fields = ['data', 'updated_at']
         if 'name' in request.data:
             update_fields.append('name')
         
-        lead.save(update_fields=update_fields)
+        record.save(update_fields=update_fields)
         
         logger.info(
-            "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s fields=%s",
-            lead.id,
+            "[PrajaLeadsAPI] Updated %s: id=%s praja_id=%s tenant=%s fields=%s",
+            entity_type,
+            record.id,
             praja_id,
             tenant.slug,
             list(request.data.keys())
         )
         
         return Response(
-            RecordSerializer(lead).data,
+            RecordSerializer(record).data,
             status=status.HTTP_200_OK
         )
     
     def put(self, request):
         """
-        UPDATE - Full replacement of lead data (PUT method).
+        UPDATE - Full replacement of entity data (PUT method).
         
         PUT performs FULL REPLACEMENT of the data field (REST semantics).
         All fields not provided will be removed. Use PATCH for partial updates.
         
-        Query parameter or body: praja_id (required) - uses praja_id from data field to identify lead
+        Query parameters:
+        - entity: Entity type (e.g., 'lead', 'ticket') - defaults to 'lead' if not provided
+        - praja_id: (required) - uses praja_id from data field to identify record
+        
         Body:
         {
             "praja_id": "PRAJA123",  # or use ?praja_id=PRAJA123 in URL
@@ -1248,6 +1263,8 @@ class PrajaLeadsAPIView(APIView):
         if error_response:
             return error_response
         
+        entity_type = self.get_entity_type(request)
+        
         # Get praja_id from query params or body
         praja_id = request.query_params.get('praja_id') or request.data.get('praja_id')
         if not praja_id:
@@ -1257,19 +1274,19 @@ class PrajaLeadsAPIView(APIView):
             )
         
         try:
-            lead = Record.objects.get(
+            record = Record.objects.get(
                 data__praja_id=praja_id,
                 tenant=tenant,
-                entity_type='lead'
+                entity_type=entity_type
             )
         except Record.DoesNotExist:
             return Response(
-                {'error': f'Lead with praja_id {praja_id} not found'},
+                {'error': f'{entity_type.capitalize()} with praja_id {praja_id} not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         except Record.MultipleObjectsReturned:
             return Response(
-                {'error': f'Multiple leads found with praja_id {praja_id}. Please ensure praja_id is unique.'},
+                {'error': f'Multiple {entity_type}s found with praja_id {praja_id}. Please ensure praja_id is unique.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -1287,28 +1304,29 @@ class PrajaLeadsAPIView(APIView):
         
         # Update name if provided
         if 'name' in request.data:
-            lead.name = request.data['name']
+            record.name = request.data['name']
         
         # Full replacement of data field
-        lead.data = data
-        lead.updated_at = timezone.now()
+        record.data = data
+        record.updated_at = timezone.now()
         
         # Determine which fields to update
         update_fields = ['data', 'updated_at']
         if 'name' in request.data:
             update_fields.append('name')
         
-        lead.save(update_fields=update_fields)
+        record.save(update_fields=update_fields)
         
         logger.info(
-            "[PrajaLeadsAPI] Updated lead (PUT - full replacement): id=%s praja_id=%s tenant=%s",
-            lead.id,
+            "[PrajaLeadsAPI] Updated %s (PUT - full replacement): id=%s praja_id=%s tenant=%s",
+            entity_type,
+            record.id,
             praja_id,
             tenant.slug
         )
         
         return Response(
-            RecordSerializer(lead).data,
+            RecordSerializer(record).data,
             status=status.HTTP_200_OK
         )
     
@@ -1326,6 +1344,8 @@ class PrajaLeadsAPIView(APIView):
         if error_response:
             return error_response
         
+        entity_type = self.get_entity_type(request)
+        
         # Get praja_id from query params or body
         praja_id = request.query_params.get('praja_id') or request.data.get('praja_id')
         if not praja_id:
@@ -1335,36 +1355,37 @@ class PrajaLeadsAPIView(APIView):
             )
         
         try:
-            lead = Record.objects.get(
+            record = Record.objects.get(
                 data__praja_id=praja_id,
                 tenant=tenant,
-                entity_type='lead'
+                entity_type=entity_type
             )
         except Record.DoesNotExist:
             return Response(
-                {'error': f'Lead with praja_id {praja_id} not found'},
+                {'error': f'{entity_type.capitalize()} with praja_id {praja_id} not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         except Record.MultipleObjectsReturned:
             return Response(
-                {'error': f'Multiple leads found with praja_id {praja_id}. Please ensure praja_id is unique.'},
+                {'error': f'Multiple {entity_type}s found with praja_id {praja_id}. Please ensure praja_id is unique.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        lead_id_for_log = lead.id
-        lead_name = lead.name
-        lead.delete()
+        record_id_for_log = record.id
+        record_name = record.name
+        record.delete()
         
         logger.info(
-            "[PrajaLeadsAPI] Deleted lead: id=%s praja_id=%s tenant=%s name=%s",
-            lead_id_for_log,
+            "[PrajaLeadsAPI] Deleted %s: id=%s praja_id=%s tenant=%s name=%s",
+            entity_type,
+            record_id_for_log,
             praja_id,
             tenant.slug,
-            lead_name
+            record_name
         )
         
         return Response(
-            {'message': f'Lead with praja_id {praja_id} deleted successfully'},
+            {'message': f'{entity_type.capitalize()} with praja_id {praja_id} deleted successfully'},
             status=status.HTTP_200_OK
         )
 
