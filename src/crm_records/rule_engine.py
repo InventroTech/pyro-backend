@@ -262,12 +262,6 @@ def action_send_mixpanel_event(
     mixpanel_properties.update(resolved_properties)
 
     try:
-
-        service = MixpanelService()
-        success = service.send_to_mixpanel_sync(
-            str(resolved_user_id),
-            str(resolved_event_name),
-            mixpanel_properties,
         # Enqueue job for async processing
         queue_service = get_queue_service()
         job = queue_service.enqueue_job(
@@ -278,6 +272,14 @@ def action_send_mixpanel_event(
                 "properties": resolved_properties,
             },
             tenant_id=tenant_id,
+        )
+        
+        # Also send sync for immediate tracking (optional)
+        service = MixpanelService()
+        success = service.send_to_mixpanel_sync(
+            str(resolved_user_id),
+            str(resolved_event_name),
+            mixpanel_properties,
         )
         
         logger.info(
