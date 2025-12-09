@@ -39,7 +39,8 @@ DEBUG = IS_DEV or IS_STAGING
 ALLOWED_HOSTS = (
     ["*"] if IS_DEV else  # local convenience
     ["pyro-backend-1.onrender.com"] if IS_STAGING else
-    ["pyro-prod-backend.onrender.com"]
+    ["pyro-prod-backend.onrender.com",
+    "api.thepyro.ai"]
 )
 # Application definition
 
