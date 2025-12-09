@@ -61,6 +61,7 @@ INSTALLED_APPS = [
     'cron_jobs',
     'crm',
     'crm_records',
+    'background_jobs',
     'core',
     'scheduler',
     'accounts',

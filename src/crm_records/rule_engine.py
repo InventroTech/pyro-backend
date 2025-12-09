@@ -12,9 +12,12 @@ from django.utils import timezone
 from datetime import timedelta
 import re
 import copy
+from django.core.cache import cache
 
 from .models import RuleSet, RuleExecutionLog, Record
 from support_ticket.services import MixpanelService
+from background_jobs.queue_service import get_queue_service
+from background_jobs.models import JobType
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +212,7 @@ def action_send_mixpanel_event(
     """
     Action to send an event to Mixpanel via the custom API used by MixpanelService.
     Supports template resolution on all arguments.
+    Enqueues the event to be processed asynchronously by a background worker.
 
     Args:
         ctx: Rule context containing 'record', 'payload', etc.
@@ -217,9 +221,10 @@ def action_send_mixpanel_event(
         properties: Dict of event properties. Can be templated.
 
     Returns:
-        Dict with execution result including success flag and echoed inputs.
+        Dict with execution result including job_id.
     """
     record = ctx["record"]
+    tenant_id = ctx.get("tenant_id") or (record.tenant_id if hasattr(record, 'tenant_id') else None)
 
     # Resolve templates for all arguments
     resolved_user_id = _resolve_templates_in(user_id, ctx)
@@ -227,23 +232,34 @@ def action_send_mixpanel_event(
     resolved_properties = _resolve_templates_in(properties or {}, ctx)
 
     try:
-        service = MixpanelService()
-        success = service.send_to_mixpanel_sync(
-            str(resolved_user_id),
-            str(resolved_event_name),
-            resolved_properties,
+        # Enqueue job for async processing
+        queue_service = get_queue_service()
+        job = queue_service.enqueue_job(
+            job_type=JobType.SEND_MIXPANEL_EVENT,
+            payload={
+                "user_id": str(resolved_user_id),
+                "event_name": str(resolved_event_name),
+                "properties": resolved_properties,
+            },
+            tenant_id=tenant_id,
         )
+        
         logger.info(
-            f"Mixpanel event sent for record {record.id}: event='{resolved_event_name}' success={success}"
+            f"Mixpanel event queued for record {record.id}: job_id={job.id}, "
+            f"event='{resolved_event_name}'"
         )
+        
         return {
-            "success": bool(success),
+            "success": True,
+            "job_id": job.id,
             "event_name": resolved_event_name,
             "user_id": resolved_user_id,
+            "queued": True
         }
     except Exception as e:
         logger.error(
-            f"Mixpanel event failed for record {record.id}: event='{resolved_event_name}' error={e}"
+            f"Failed to queue Mixpanel event for record {record.id}: "
+            f"event='{resolved_event_name}' error={e}"
         )
         raise
 
@@ -427,20 +443,33 @@ def execute_rules(event_name: str, record: Record, payload: Dict[str, Any], tena
         tenant_id: ID of the tenant (for isolation)
     """
     start_time = time.time()
+    cache_key = f"rules:{tenant_id}:{event_name}"
+    rules_data = cache.get(cache_key)
     
-    # Fetch all enabled rules for this tenant and event
-    rules = RuleSet.objects.filter(
-        tenant_id=tenant_id,
-        event_name=event_name,
-        enabled=True
-    )
+    if rules_data is None:
+        # Fetch rules from DB if not in cache
+        rules = RuleSet.objects.filter(
+            tenant_id=tenant_id,
+            event_name=event_name,
+            enabled=True
+        ).only('id', 'condition', 'actions')
+        # Cache the data as a list of dicts, not the queryset
+        rules_data = list(rules.values('id', 'condition', 'actions'))
+        cache.set(cache_key, rules_data, 60 * 5)  # 5 minutes
+
+    if not rules_data:  # Early exit if no rules
+        return
     
-    logger.info(f"Evaluating {rules.count()} rules for event '{event_name}' on record {record.id}")
+    logger.info(f"Evaluating {len(rules_data)} rules for event '{event_name}' on record {record.id}")
 
     # Snapshot record data once per event so all rule conditions see pre-update state
     record_data_snapshot = copy.deepcopy(record.data)
     
-    for rule in rules:
+    for rule_data in rules_data:
+        # Re-hydrate a RuleSet instance from cached data.
+        # This is an in-memory object, not hitting the DB.
+        # It has an ID, so it can be used for FK relations.
+        rule = RuleSet(**rule_data)
         rule_start = time.time()
         
         # Create context for rule evaluation
