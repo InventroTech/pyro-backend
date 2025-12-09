@@ -18,6 +18,7 @@ from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchem
 from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
+from .scoring import calculate_and_update_lead_score
 from user_settings.models import UserSettings
 from .permissions import HasPrajaSecret
 from support_ticket.services import MixpanelService
@@ -146,6 +147,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         """
         Create record with tenant and entity_type assignment.
         entity_type can come from query params or request body.
+        Automatically calculates and saves lead score if entity_type is 'lead'.
         """
         # Get entity_type from query params or request data
         entity_type = self.request.query_params.get('entity_type')
@@ -157,10 +159,20 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 'entity_type': 'This field is required. Provide it in query params or request body.'
             })
         
-        serializer.save(
+        record = serializer.save(
             tenant=self.request.tenant,
             entity_type=entity_type
         )
+        
+        # Calculate and save lead score if entity_type is 'lead'
+        if entity_type == 'lead':
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(record, tenant_id=self.request.tenant.id, save=True)
+                logger.debug(f"RecordListCreateView: Calculated lead score {score} for new lead {record.id}")
+            except Exception as e:
+                logger.error(f"RecordListCreateView: Error calculating lead score for new lead {record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
     
     def put(self, request, *args, **kwargs):
         """
@@ -214,7 +226,87 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         serializer.is_valid(raise_exception=True)
         
         # Preserve tenant (don't allow changing tenant)
-        serializer.save(tenant=self.request.tenant)
+        updated_record = serializer.save(tenant=self.request.tenant)
+        
+        # Calculate and save lead score if entity_type is 'lead'
+        if updated_record.entity_type == 'lead':
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(updated_record, tenant_id=self.request.tenant.id, save=True)
+                logger.debug(f"RecordListCreateView: Calculated lead score {score} for updated lead {updated_record.id}")
+                # Refresh serializer data to include updated score
+                serializer = self.get_serializer(updated_record)
+            except Exception as e:
+                logger.error(f"RecordListCreateView: Error calculating lead score for updated lead {updated_record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
+        
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    def patch(self, request, *args, **kwargs):
+        """
+        Partially update an existing record by record_id.
+        
+        Record ID can be provided in:
+        1. URL path: /crm-records/records/123 (if URL is configured with <int:pk>)
+        2. Query parameter: /crm-records/records/?record_id=123
+        3. Request body: {"record_id": 123, ...}
+        
+        Expected payload:
+        {
+            "record_id": 123,  // optional if provided in URL/query
+            "name": "Updated Name",  // partial update - only include fields to update
+            "data": {"updated": "fields"},
+            "entity_type": "lead"  // optional
+        }
+        """
+        # Try to get record_id from multiple sources
+        record_id = None
+        
+        # 1. Try URL parameter (if configured as /records/<int:pk>/)
+        if 'pk' in kwargs:
+            record_id = kwargs['pk']
+        
+        # 2. Try query parameter
+        if not record_id:
+            record_id = request.query_params.get('record_id')
+        
+        # 3. Try request body
+        if not record_id:
+            record_id = request.data.get('record_id')
+        
+        if not record_id:
+            return Response(
+                {'error': 'record_id is required for updates. Provide it in URL, query parameter, or request body.'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Get the record within tenant scope
+            record = self.get_queryset().get(id=record_id)
+        except Record.DoesNotExist:
+            return Response(
+                {'error': f'Record with id {record_id} not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Partially update the record
+        serializer = self.get_serializer(record, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        
+        # Preserve tenant (don't allow changing tenant)
+        updated_record = serializer.save(tenant=self.request.tenant)
+        
+        # Calculate and save lead score if entity_type is 'lead'
+        if updated_record.entity_type == 'lead':
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(updated_record, tenant_id=self.request.tenant.id, save=True)
+                logger.debug(f"RecordListCreateView: Calculated lead score {score} for patched lead {updated_record.id}")
+                # Refresh serializer data to include updated score
+                serializer = self.get_serializer(updated_record)
+            except Exception as e:
+                logger.error(f"RecordListCreateView: Error calculating lead score for patched lead {updated_record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
         
         return Response(serializer.data, status=status.HTTP_200_OK)
     
@@ -283,6 +375,22 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
 
         # Fallback: use default URL kwarg (pk)
         return super().get_object()
+    
+    def perform_update(self, serializer):
+        """
+        Update record and calculate lead score if entity_type is 'lead'.
+        """
+        updated_record = serializer.save()
+        
+        # Calculate and save lead score if entity_type is 'lead'
+        if updated_record.entity_type == 'lead':
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(updated_record, tenant_id=self.request.tenant.id, save=True)
+                logger.debug(f"RecordDetailView: Calculated lead score {score} for updated lead {updated_record.id}")
+            except Exception as e:
+                logger.error(f"RecordDetailView: Error calculating lead score for updated lead {updated_record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
 
 
 class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
@@ -304,11 +412,21 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
         return queryset
     
     def perform_create(self, serializer):
-        """Create record with tenant and the specific entity type."""
-        serializer.save(
+        """Create record with tenant and the specific entity type. Automatically calculates lead score if entity_type is 'lead'."""
+        record = serializer.save(
             tenant=self.request.tenant,
             entity_type=self.entity_type
         )
+        
+        # Calculate and save lead score if entity_type is 'lead'
+        if self.entity_type == 'lead':
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(record, tenant_id=self.request.tenant.id, save=True)
+                logger.debug(f"EntityProxyView: Calculated lead score {score} for new lead {record.id}")
+            except Exception as e:
+                logger.error(f"EntityProxyView: Error calculating lead score for new lead {record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
 
 
 class RecordEventView(TenantScopedMixin, APIView):
@@ -1121,6 +1239,29 @@ class PrajaLeadsAPIView(APIView):
                 tenant.slug,
                 record.name
             )
+            # Calculate and save lead score automatically
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(record, tenant_id=tenant.id, save=True)
+                logger.info(
+                    "[PrajaLeadsAPI] Created lead: id=%s tenant=%s name=%s score=%s",
+                    record.id,
+                    tenant.slug,
+                    record.name,
+                    score
+                )
+            except Exception as e:
+                logger.error(f"[PrajaLeadsAPI] Error calculating lead score for lead {record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
+                logger.info(
+                    "[PrajaLeadsAPI] Created lead: id=%s tenant=%s name=%s (scoring failed)",
+                    record.id,
+                    tenant.slug,
+                    record.name
+                )
+            
+            # Refresh record from DB to get updated score
+            record.refresh_from_db()
             
             return Response(
                 RecordSerializer(record).data,
@@ -1321,6 +1462,31 @@ class PrajaLeadsAPIView(APIView):
             tenant.slug,
             list(request.data.keys())
         )
+        # Recalculate and save lead score automatically (overwrites any manually set score)
+        try:
+            from .scoring import calculate_and_update_lead_score
+            score = calculate_and_update_lead_score(lead, tenant_id=tenant.id, save=True)
+            logger.info(
+                "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s score=%s fields=%s",
+                lead.id,
+                praja_id,
+                tenant.slug,
+                score,
+                list(request.data.keys())
+            )
+        except Exception as e:
+            logger.error(f"[PrajaLeadsAPI] Error calculating lead score for updated lead {lead.id}: {e}")
+            # Don't fail the request if scoring fails, just log the error
+            logger.info(
+                "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s fields=%s (scoring failed)",
+                lead.id,
+                praja_id,
+                tenant.slug,
+                list(request.data.keys())
+            )
+        
+        # Refresh record from DB to get updated score
+        lead.refresh_from_db()
         
         return Response(
             RecordSerializer(record).data,
@@ -1835,31 +2001,15 @@ class LeadScoringView(TenantScopedMixin, APIView):
         try:
             with transaction.atomic():
                 for lead in leads:
-                    lead_data = lead.data if lead.data else {}
-                    total_weight = 0
-                    matched_rules = []
+                    # Use the utility function to calculate and update score
+                    score = calculate_and_update_lead_score(lead, tenant_id=request.tenant.id, save=True)
                     
-                    # Check each rule
-                    for rule in rules:
-                        if self._evaluate_rule(lead_data, rule):
-                            weight = rule.get('weight', 0)
-                            total_weight += weight
-                            matched_rules.append({
-                                'attr': rule.get('attr'),
-                                'weight': weight
-                            })
-                    
-                    # Update lead_score if any rules matched
-                    if total_weight > 0 or 'lead_score' in lead_data:
-                        lead_data['lead_score'] = total_weight
-                        lead.data = lead_data
-                        lead.save(update_fields=['data', 'updated_at'])
+                    if score > 0:
                         updated_count += 1
-                        total_score_added += total_weight
+                        total_score_added += score
                         
                         logger.debug(
-                            f"Updated lead {lead.id}: matched {len(matched_rules)} rules, "
-                            f"total weight: {total_weight}"
+                            f"Updated lead {lead.id} with score {score}"
                         )
             
             logger.info(

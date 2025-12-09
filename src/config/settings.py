@@ -61,6 +61,7 @@ INSTALLED_APPS = [
     'cron_jobs',
     'crm',
     'crm_records',
+    'background_jobs',
     'core',
     'scheduler',
     'accounts',
@@ -147,6 +148,11 @@ LOGGING = {
         'object_history': {
             'handlers': ['console'],
             'level': 'DEBUG' if IS_DEV else 'INFO',
+            'propagate': False,
+        },
+        'background_jobs': {
+            'handlers': ['console'],
+            'level': 'INFO',
             'propagate': False,
         },
     },
