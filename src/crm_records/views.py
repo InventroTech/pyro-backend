@@ -1,7 +1,8 @@
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError, NotFound
+from rest_framework.exceptions import ValidationError
+from rest_framework.permissions import AllowAny
 from authz.permissions import IsTenantAuthenticated
 from core.pagination import MetaPageNumberPagination
 from core.models import Tenant
@@ -13,10 +14,11 @@ from drf_spectacular.types import OpenApiTypes
 import logging
 
 logger = logging.getLogger(__name__)
-from .models import Record, EventLog, RuleSet, RuleExecutionLog
-from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer
+from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema
+from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
+from .scoring import calculate_and_update_lead_score
 from user_settings.models import UserSettings
 from .permissions import HasPrajaSecret
 from support_ticket.services import MixpanelService
@@ -145,6 +147,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         """
         Create record with tenant and entity_type assignment.
         entity_type can come from query params or request body.
+        Automatically calculates and saves lead score if entity_type is 'lead'.
         """
         # Get entity_type from query params or request data
         entity_type = self.request.query_params.get('entity_type')
@@ -156,10 +159,197 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 'entity_type': 'This field is required. Provide it in query params or request body.'
             })
         
-        serializer.save(
+        record = serializer.save(
             tenant=self.request.tenant,
             entity_type=entity_type
         )
+        
+        # Calculate and save lead score if entity_type is 'lead'
+        if entity_type == 'lead':
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(record, tenant_id=self.request.tenant.id, save=True)
+                logger.debug(f"RecordListCreateView: Calculated lead score {score} for new lead {record.id}")
+            except Exception as e:
+                logger.error(f"RecordListCreateView: Error calculating lead score for new lead {record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
+    
+    def put(self, request, *args, **kwargs):
+        """
+        Update an existing record by record_id.
+        
+        Record ID can be provided in:
+        1. URL path: /crm-records/records/123 (if URL is configured with <int:pk>)
+        2. Query parameter: /crm-records/records/?record_id=123
+        3. Request body: {"record_id": 123, ...}
+        
+        Expected payload:
+        {
+            "record_id": 123,  // optional if provided in URL/query
+            "name": "Updated Name",
+            "data": {"updated": "fields"},
+            "entity_type": "lead"  // optional
+        }
+        """
+        # Try to get record_id from multiple sources
+        record_id = None
+        
+        # 1. Try URL parameter (if configured as /records/<int:pk>/)
+        if 'pk' in kwargs:
+            record_id = kwargs['pk']
+        
+        # 2. Try query parameter
+        if not record_id:
+            record_id = request.query_params.get('record_id')
+        
+        # 3. Try request body
+        if not record_id:
+            record_id = request.data.get('record_id')
+        
+        if not record_id:
+            return Response(
+                {'error': 'record_id is required for updates. Provide it in URL, query parameter, or request body.'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Get the record within tenant scope
+            record = self.get_queryset().get(id=record_id)
+        except Record.DoesNotExist:
+            return Response(
+                {'error': f'Record with id {record_id} not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Update the record
+        serializer = self.get_serializer(record, data=request.data, partial=False)
+        serializer.is_valid(raise_exception=True)
+        
+        # Preserve tenant (don't allow changing tenant)
+        updated_record = serializer.save(tenant=self.request.tenant)
+        
+        # Calculate and save lead score if entity_type is 'lead'
+        if updated_record.entity_type == 'lead':
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(updated_record, tenant_id=self.request.tenant.id, save=True)
+                logger.debug(f"RecordListCreateView: Calculated lead score {score} for updated lead {updated_record.id}")
+                # Refresh serializer data to include updated score
+                serializer = self.get_serializer(updated_record)
+            except Exception as e:
+                logger.error(f"RecordListCreateView: Error calculating lead score for updated lead {updated_record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
+        
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    def patch(self, request, *args, **kwargs):
+        """
+        Partially update an existing record by record_id.
+        
+        Record ID can be provided in:
+        1. URL path: /crm-records/records/123 (if URL is configured with <int:pk>)
+        2. Query parameter: /crm-records/records/?record_id=123
+        3. Request body: {"record_id": 123, ...}
+        
+        Expected payload:
+        {
+            "record_id": 123,  // optional if provided in URL/query
+            "name": "Updated Name",  // partial update - only include fields to update
+            "data": {"updated": "fields"},
+            "entity_type": "lead"  // optional
+        }
+        """
+        # Try to get record_id from multiple sources
+        record_id = None
+        
+        # 1. Try URL parameter (if configured as /records/<int:pk>/)
+        if 'pk' in kwargs:
+            record_id = kwargs['pk']
+        
+        # 2. Try query parameter
+        if not record_id:
+            record_id = request.query_params.get('record_id')
+        
+        # 3. Try request body
+        if not record_id:
+            record_id = request.data.get('record_id')
+        
+        if not record_id:
+            return Response(
+                {'error': 'record_id is required for updates. Provide it in URL, query parameter, or request body.'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Get the record within tenant scope
+            record = self.get_queryset().get(id=record_id)
+        except Record.DoesNotExist:
+            return Response(
+                {'error': f'Record with id {record_id} not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Partially update the record
+        serializer = self.get_serializer(record, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        
+        # Preserve tenant (don't allow changing tenant)
+        updated_record = serializer.save(tenant=self.request.tenant)
+        
+        # Calculate and save lead score if entity_type is 'lead'
+        if updated_record.entity_type == 'lead':
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(updated_record, tenant_id=self.request.tenant.id, save=True)
+                logger.debug(f"RecordListCreateView: Calculated lead score {score} for patched lead {updated_record.id}")
+                # Refresh serializer data to include updated score
+                serializer = self.get_serializer(updated_record)
+            except Exception as e:
+                logger.error(f"RecordListCreateView: Error calculating lead score for patched lead {updated_record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
+        
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    def delete(self, request, *args, **kwargs):
+        """
+        Delete an existing record by record_id from URL path.
+        
+        URL: /crm-records/records/538/
+        The record ID (538) comes from the URL path parameter.
+        """
+        # Get record_id from URL path parameter
+        record_id = kwargs.get('pk')
+        
+        if not record_id:
+            return Response(
+                {'error': 'Record ID is required in URL path'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Get the record within tenant scope
+            record = self.get_queryset().get(id=record_id)
+        except Record.DoesNotExist:
+            return Response(
+                {'error': f'Record with id {record_id} not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Delete the record
+        record_data = {
+            'id': record.id,
+            'name': record.name,
+            'entity_type': record.entity_type,
+            'tenant_id': str(record.tenant_id)
+        }
+        
+        record.delete()
+        
+        return Response({
+            'success': True,
+            'message': f'Record {record_id} deleted successfully',
+            'deleted_record': record_data
+        }, status=status.HTTP_200_OK)
 
 
 class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
@@ -185,6 +375,22 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
 
         # Fallback: use default URL kwarg (pk)
         return super().get_object()
+    
+    def perform_update(self, serializer):
+        """
+        Update record and calculate lead score if entity_type is 'lead'.
+        """
+        updated_record = serializer.save()
+        
+        # Calculate and save lead score if entity_type is 'lead'
+        if updated_record.entity_type == 'lead':
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(updated_record, tenant_id=self.request.tenant.id, save=True)
+                logger.debug(f"RecordDetailView: Calculated lead score {score} for updated lead {updated_record.id}")
+            except Exception as e:
+                logger.error(f"RecordDetailView: Error calculating lead score for updated lead {updated_record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
 
 
 class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
@@ -206,11 +412,21 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
         return queryset
     
     def perform_create(self, serializer):
-        """Create record with tenant and the specific entity type."""
-        serializer.save(
+        """Create record with tenant and the specific entity type. Automatically calculates lead score if entity_type is 'lead'."""
+        record = serializer.save(
             tenant=self.request.tenant,
             entity_type=self.entity_type
         )
+        
+        # Calculate and save lead score if entity_type is 'lead'
+        if self.entity_type == 'lead':
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(record, tenant_id=self.request.tenant.id, save=True)
+                logger.debug(f"EntityProxyView: Calculated lead score {score} for new lead {record.id}")
+            except Exception as e:
+                logger.error(f"EntityProxyView: Error calculating lead score for new lead {record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
 
 
 class RecordEventView(TenantScopedMixin, APIView):
@@ -1023,6 +1239,29 @@ class PrajaLeadsAPIView(APIView):
                 tenant.slug,
                 record.name
             )
+            # Calculate and save lead score automatically
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(record, tenant_id=tenant.id, save=True)
+                logger.info(
+                    "[PrajaLeadsAPI] Created lead: id=%s tenant=%s name=%s score=%s",
+                    record.id,
+                    tenant.slug,
+                    record.name,
+                    score
+                )
+            except Exception as e:
+                logger.error(f"[PrajaLeadsAPI] Error calculating lead score for lead {record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
+                logger.info(
+                    "[PrajaLeadsAPI] Created lead: id=%s tenant=%s name=%s (scoring failed)",
+                    record.id,
+                    tenant.slug,
+                    record.name
+                )
+            
+            # Refresh record from DB to get updated score
+            record.refresh_from_db()
             
             return Response(
                 RecordSerializer(record).data,
@@ -1223,6 +1462,31 @@ class PrajaLeadsAPIView(APIView):
             tenant.slug,
             list(request.data.keys())
         )
+        # Recalculate and save lead score automatically (overwrites any manually set score)
+        try:
+            from .scoring import calculate_and_update_lead_score
+            score = calculate_and_update_lead_score(lead, tenant_id=tenant.id, save=True)
+            logger.info(
+                "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s score=%s fields=%s",
+                lead.id,
+                praja_id,
+                tenant.slug,
+                score,
+                list(request.data.keys())
+            )
+        except Exception as e:
+            logger.error(f"[PrajaLeadsAPI] Error calculating lead score for updated lead {lead.id}: {e}")
+            # Don't fail the request if scoring fails, just log the error
+            logger.info(
+                "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s fields=%s (scoring failed)",
+                lead.id,
+                praja_id,
+                tenant.slug,
+                list(request.data.keys())
+            )
+        
+        # Refresh record from DB to get updated score
+        lead.refresh_from_db()
         
         return Response(
             RecordSerializer(record).data,
@@ -1388,5 +1652,384 @@ class PrajaLeadsAPIView(APIView):
             {'message': f'{entity_type.capitalize()} with praja_id {praja_id} deleted successfully'},
             status=status.HTTP_200_OK
         )
+
+
+class EntityTypeSchemaListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
+    """
+    List all entity type schemas for the current tenant, or create a new one.
+    
+    GET /crm-records/entity-schemas/
+    POST /crm-records/entity-schemas/
+    """
+    permission_classes = [IsTenantAuthenticated]
+    serializer_class = EntityTypeSchemaSerializer
+    pagination_class = MetaPageNumberPagination
+    
+    def get_queryset(self):
+        """Return schemas filtered by tenant."""
+        return EntityTypeSchema.objects.filter(tenant=self.request.tenant).order_by('entity_type')
+    
+    def perform_create(self, serializer):
+        """Set tenant automatically on create."""
+        serializer.save(tenant=self.request.tenant)
+
+
+class EntityTypeSchemaDetailView(TenantScopedMixin, generics.RetrieveUpdateDestroyAPIView):
+    """
+    Retrieve, update, or delete an entity type schema.
+    
+    GET /crm-records/entity-schemas/{id}/
+    PUT /crm-records/entity-schemas/{id}/
+    PATCH /crm-records/entity-schemas/{id}/
+    DELETE /crm-records/entity-schemas/{id}/
+    """
+    permission_classes = [IsTenantAuthenticated]
+    serializer_class = EntityTypeSchemaSerializer
+    
+    def get_queryset(self):
+        """Return schemas filtered by tenant."""
+        return EntityTypeSchema.objects.filter(tenant=self.request.tenant)
+
+
+class EntityTypeSchemaByTypeView(TenantScopedMixin, APIView):
+    """
+    Get or create/update entity type schema by entity_type.
+    
+    GET /crm-records/entity-schemas/by-type/?entity_type=lead
+    POST /crm-records/entity-schemas/by-type/ - with entity_type and attributes in body
+    PUT /crm-records/entity-schemas/by-type/ - update existing schema
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    def get(self, request):
+        """Get schema by entity_type."""
+        entity_type = request.query_params.get('entity_type')
+        
+        if not entity_type:
+            return Response({
+                'error': 'entity_type query parameter is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            schema = EntityTypeSchema.objects.get(
+                tenant=request.tenant,
+                entity_type=entity_type.strip()
+            )
+            serializer = EntityTypeSchemaSerializer(schema)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except EntityTypeSchema.DoesNotExist:
+            return Response({
+                'error': f'Schema not found for entity_type "{entity_type}"'
+            }, status=status.HTTP_404_NOT_FOUND)
+    
+    def post(self, request):
+        """Create a new schema."""
+        serializer = EntityTypeSchemaSerializer(data=request.data)
+        if serializer.is_valid():
+            # Check if schema already exists
+            entity_type = serializer.validated_data.get('entity_type')
+            existing = EntityTypeSchema.objects.filter(
+                tenant=request.tenant,
+                entity_type=entity_type
+            ).first()
+            
+            if existing:
+                return Response({
+                    'error': f'Schema already exists for entity_type "{entity_type}". Use PUT to update.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            serializer.save(tenant=request.tenant)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    def put(self, request):
+        """Update existing schema or create if not exists."""
+        entity_type = request.data.get('entity_type')
+        
+        if not entity_type:
+            return Response({
+                'error': 'entity_type is required in request body'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            schema = EntityTypeSchema.objects.get(
+                tenant=request.tenant,
+                entity_type=entity_type.strip()
+            )
+            serializer = EntityTypeSchemaSerializer(schema, data=request.data, partial=False)
+        except EntityTypeSchema.DoesNotExist:
+            serializer = EntityTypeSchemaSerializer(data=request.data)
+        
+        if serializer.is_valid():
+            serializer.save(tenant=request.tenant)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    def patch(self, request):
+        """Partially update existing schema."""
+        entity_type = request.data.get('entity_type')
+        
+        if not entity_type:
+            return Response({
+                'error': 'entity_type is required in request body'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            schema = EntityTypeSchema.objects.get(
+                tenant=request.tenant,
+                entity_type=entity_type.strip()
+            )
+            serializer = EntityTypeSchemaSerializer(schema, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_200_OK)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except EntityTypeSchema.DoesNotExist:
+            return Response({
+                'error': f'Schema not found for entity_type "{entity_type}"'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+
+class EntityTypeAttributesView(TenantScopedMixin, APIView):
+    """
+    Get attributes list for an entity type.
+    
+    GET /crm-records/entity-attributes/?entity_type=lead
+    
+    Returns a simple list of attributes for the specified entity_type.
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    def get(self, request):
+        """
+        Get attributes list by entity_type.
+        
+        Query Parameters:
+        - entity_type: Required. The entity type to get attributes for (e.g., 'lead', 'ticket')
+        
+        Returns:
+        {
+            "entity_type": "lead",
+            "attributes": [
+                "id",
+                "tenant_id",
+                "entity_type",
+                "name",
+                "data",
+                "data.user_id",
+                "data.lead_score",
+                ...
+            ],
+            "total_count": 29
+        }
+        """
+        entity_type = request.query_params.get('entity_type')
+        
+        if not entity_type:
+            return Response({
+                'error': 'entity_type query parameter is required. Example: ?entity_type=lead'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        entity_type = entity_type.strip()
+        
+        try:
+            schema = EntityTypeSchema.objects.get(
+                tenant=request.tenant,
+                entity_type=entity_type
+            )
+            
+            return Response({
+                'entity_type': schema.entity_type,
+                'attributes': schema.attributes,
+                'total_count': len(schema.attributes)
+            }, status=status.HTTP_200_OK)
+            
+        except EntityTypeSchema.DoesNotExist:
+            return Response({
+                'error': f'Schema not found for entity_type "{entity_type}"',
+                'entity_type': entity_type,
+                'suggestion': 'Create a schema first using POST /crm-records/entity-schemas/'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+
+class LeadScoringView(TenantScopedMixin, APIView):
+    """
+    POST endpoint to save scoring rules and apply them to leads.
+    
+    POST /crm-records/leads/score/
+    
+    Saves the rules to EntityTypeSchema table and applies them to score all leads.
+    
+    Payload:
+    {
+        "rules": [
+            {
+                "attr": "data.assigned_to",
+                "operator": "==",
+                "value": "ami",
+                "weight": 19900
+            },
+            {
+                "attr": "data.affiliated_party",
+                "operator": "==",
+                "value": "bjp",
+                "weight": 1233
+            }
+        ]
+    }
+    
+    For each lead, checks all rules and sums up weights for matching rules.
+    Updates data.lead_score with the total weight.
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    def _get_nested_value(self, data, attr_path):
+        """
+        Get nested value from data dict using dot notation path.
+        Example: data.assigned_to -> data['assigned_to']
+        Example: data.user.profile.name -> data['user']['profile']['name']
+        """
+        if not attr_path or not data:
+            return None
+        
+        # Remove 'data.' prefix if present
+        if attr_path.startswith('data.'):
+            attr_path = attr_path[5:]  # Remove 'data.' prefix
+        
+        keys = attr_path.split('.')
+        value = data
+        
+        try:
+            for key in keys:
+                if isinstance(value, dict) and key in value:
+                    value = value[key]
+                else:
+                    return None
+            return value
+        except (TypeError, KeyError, AttributeError):
+            return None
+    
+    def _evaluate_rule(self, lead_data, rule):
+        """
+        Evaluate if a rule matches the lead data.
+        
+        Args:
+            lead_data: The data dict from the lead record
+            rule: Dict with 'attr', 'operator', 'value', 'weight'
+        
+        Returns:
+            True if rule matches, False otherwise
+        """
+        attr_path = rule.get('attr', '')
+        operator = rule.get('operator', '==')
+        expected_value = rule.get('value', '')
+        
+        # Get the actual value from lead data
+        actual_value = self._get_nested_value(lead_data, attr_path)
+        
+        if actual_value is None:
+            return False
+        
+        # Convert to string for comparison (handles different types)
+        actual_str = str(actual_value).lower() if actual_value is not None else ''
+        expected_str = str(expected_value).lower() if expected_value is not None else ''
+        
+        try:
+            if operator == '==':
+                return actual_str == expected_str
+            elif operator == '!=':
+                return actual_str != expected_str
+            elif operator == '>':
+                return float(actual_value) > float(expected_value)
+            elif operator == '<':
+                return float(actual_value) < float(expected_value)
+            elif operator == '>=':
+                return float(actual_value) >= float(expected_value)
+            elif operator == '<=':
+                return float(actual_value) <= float(expected_value)
+            elif operator == 'contains':
+                return expected_str in actual_str
+            elif operator == 'in':
+                # expected_value should be a comma-separated list or list
+                if isinstance(expected_value, list):
+                    return actual_str in [str(v).lower() for v in expected_value]
+                else:
+                    values = [v.strip().lower() for v in str(expected_value).split(',')]
+                    return actual_str in values
+            else:
+                return False
+        except (ValueError, TypeError):
+            # If conversion fails, fall back to string comparison
+            if operator in ['==', '!=']:
+                return actual_str == expected_str if operator == '==' else actual_str != expected_str
+            return False
+    
+    def post(self, request):
+        """
+        Save scoring rules and apply them to all leads.
+        Saves/updates the rules in EntityTypeSchema table for the entity_type.
+        """
+        serializer = LeadScoringRequestSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        rules = serializer.validated_data['rules']
+        entity_type = 'lead'  # Default entity type for lead scoring
+        
+        # Save/update rules in EntityTypeSchema table (replace previous rules)
+        EntityTypeSchema.objects.update_or_create(
+            tenant=request.tenant,
+            entity_type=entity_type,
+            defaults={
+                'rules': rules
+            }
+        )
+        
+        logger.info(f"LeadScoringView: Saved {len(rules)} rules to EntityTypeSchema for entity_type '{entity_type}'")
+        
+        # Get all leads for the current tenant
+        leads = Record.objects.filter(
+            tenant=request.tenant,
+            entity_type='lead'
+        )
+        
+        updated_count = 0
+        total_score_added = 0
+        errors = []
+        
+        try:
+            with transaction.atomic():
+                for lead in leads:
+                    # Use the utility function to calculate and update score
+                    score = calculate_and_update_lead_score(lead, tenant_id=request.tenant.id, save=True)
+                    
+                    if score > 0:
+                        updated_count += 1
+                        total_score_added += score
+                        
+                        logger.debug(
+                            f"Updated lead {lead.id} with score {score}"
+                        )
+            
+            logger.info(
+                f"LeadScoringView: Updated {updated_count} leads out of {leads.count()} total leads. "
+                f"Total score added: {total_score_added}"
+            )
+            
+            # Simple response format - no nested objects that could cause toast errors
+            return Response({
+                'message': f'Rules saved and applied to {updated_count} leads',
+                'total_leads': leads.count(),
+                'updated_leads': updated_count,
+                'total_score_added': total_score_added
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error in LeadScoringView: {e}", exc_info=True)
+            return Response({
+                'error': 'Failed to save rules and score leads',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Record, EventLog, RuleSet, RuleExecutionLog
+from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema
 
 
 class RecordSerializer(serializers.ModelSerializer):
@@ -186,3 +186,96 @@ class RuleExecutionLogSerializer(serializers.ModelSerializer):
             "duration_ms",
             "created_at"
         ]
+
+
+class EntityTypeSchemaSerializer(serializers.ModelSerializer):
+    """
+    Serializer for EntityTypeSchema model.
+    Stores entity type definitions with their attribute lists.
+    """
+    tenant_id = serializers.UUIDField(read_only=True)
+    
+    class Meta:
+        model = EntityTypeSchema
+        fields = [
+            "id",
+            "tenant_id",
+            "entity_type",
+            "attributes",
+            "rules",
+            "description",
+            "created_at",
+            "updated_at"
+        ]
+        read_only_fields = [
+            "id",
+            "tenant_id",
+            "created_at",
+            "updated_at"
+        ]
+    
+    def validate_entity_type(self, value):
+        """Validate entity_type is not empty and has reasonable length."""
+        if not value or not value.strip():
+            raise serializers.ValidationError("Entity type cannot be empty.")
+        if len(value) > 100:
+            raise serializers.ValidationError("Entity type cannot exceed 100 characters.")
+        return value.strip()
+    
+    def validate_attributes(self, value):
+        """Validate attributes is a list of strings."""
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Attributes must be a list.")
+        
+        for i, attr in enumerate(value):
+            if not isinstance(attr, str):
+                raise serializers.ValidationError(f"Attribute at index {i} must be a string.")
+            if not attr.strip():
+                raise serializers.ValidationError(f"Attribute at index {i} cannot be empty.")
+        
+        # Remove duplicates and sort
+        unique_attrs = sorted(list(set([attr.strip() for attr in value if attr.strip()])))
+        return unique_attrs
+    
+    def validate_rules(self, value):
+        """Validate rules is a list of rule objects."""
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Rules must be a list.")
+        
+        for i, rule in enumerate(value):
+            if not isinstance(rule, dict):
+                raise serializers.ValidationError(f"Rule at index {i} must be a dictionary.")
+            
+            # Validate required fields
+            required_fields = ['attr', 'operator', 'value', 'weight']
+            for field in required_fields:
+                if field not in rule:
+                    raise serializers.ValidationError(f"Rule at index {i} is missing required field: {field}")
+        
+        return value
+
+
+class ScoringRuleSerializer(serializers.Serializer):
+    """
+    Serializer for individual scoring rule.
+    """
+    attr = serializers.CharField(help_text="Attribute path (e.g., 'data.assigned_to', 'data.affiliated_party')")
+    operator = serializers.ChoiceField(
+        choices=['==', '!=', '>', '<', '>=', '<=', 'contains', 'in'],
+        help_text="Comparison operator"
+    )
+    value = serializers.CharField(help_text="Value to compare against")
+    weight = serializers.FloatField(help_text="Weight/score to add if rule matches")
+
+
+class LeadScoringRequestSerializer(serializers.Serializer):
+    """
+    Serializer for lead scoring request payload.
+    """
+    rules = ScoringRuleSerializer(many=True, help_text="List of scoring rules")
+    
+    def validate_rules(self, value):
+        """Validate that rules list is not empty."""
+        if not value or len(value) == 0:
+            raise serializers.ValidationError("At least one rule is required.")
+        return value

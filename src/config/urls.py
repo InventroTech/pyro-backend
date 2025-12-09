@@ -36,10 +36,12 @@ urlpatterns = [
     path('cron-jobs/',include('cron_jobs.urls')),
     path('crm/', include('crm.urls')),
     path('crm-records/', include('crm_records.urls')),
+    path('jobs/', include('background_jobs.urls')),
     path('accounts/', include('accounts.urls')),
     path('support-ticket/', include('support_ticket.urls')),
     path('user-settings/', include('user_settings.urls')),
     path('openai/', include('openai_api.urls')),
+    path('email/', include('email_protocol.urls')),
     
     # Top-level entity endpoint (from crm_records)
     path('entity/', PrajaLeadsAPIView.as_view(), name='entity-api'),
