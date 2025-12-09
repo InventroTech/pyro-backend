@@ -149,6 +149,11 @@ LOGGING = {
             'level': 'DEBUG' if IS_DEV else 'INFO',
             'propagate': False,
         },
+        'background_jobs': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
     },
 }
 
