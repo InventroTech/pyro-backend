@@ -44,6 +44,8 @@ class UserSettingsListView(APIView):
             if existing_setting:
                 # Update existing setting
                 existing_setting.value = serializer.validated_data['value']
+                if 'assigned_leads_count' in serializer.validated_data:
+                    existing_setting.assigned_leads_count = serializer.validated_data['assigned_leads_count']
                 existing_setting.save()
                 response_serializer = UserSettingsSerializer(existing_setting)
                 return Response(response_serializer.data, status=status.HTTP_200_OK)
@@ -78,6 +80,18 @@ class UserSettingsDetailView(APIView):
 
     def put(self, request, user_id, key):
         """Update a specific user setting"""
+        tenant = request.tenant
+        setting = self.get_object(tenant, user_id, key)
+        serializer = UserSettingsSerializer(setting, data=request.data, partial=True)
+        
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    def patch(self, request, user_id, key):
+        """Partially update a specific user setting"""
         tenant = request.tenant
         setting = self.get_object(tenant, user_id, key)
         serializer = UserSettingsSerializer(setting, data=request.data, partial=True)
@@ -127,8 +141,10 @@ class LeadTypeAssignmentView(APIView):
                     key='LEAD_TYPE_ASSIGNMENT'
                 )
                 lead_types = setting.value if isinstance(setting.value, list) else []
+                assigned_leads_count = setting.assigned_leads_count
             except UserSettings.DoesNotExist:
                 lead_types = []
+                assigned_leads_count = None
             
             # Always use uid (UUID) if available, as that's what the serializer expects
             user_id_value = str(user.uid) if user.uid else None
@@ -140,7 +156,8 @@ class LeadTypeAssignmentView(APIView):
                 'user_id': user_id_value,
                 'user_name': user.name,
                 'user_email': user.email,
-                'lead_types': lead_types
+                'lead_types': lead_types,
+                'assigned_leads_count': assigned_leads_count
             })
         
         return Response(assignments)
@@ -159,6 +176,7 @@ class LeadTypeAssignmentView(APIView):
         if serializer.is_valid():
             user_id = serializer.validated_data['user_id']
             lead_types = serializer.validated_data['lead_types']
+            assigned_leads_count = serializer.validated_data.get('assigned_leads_count', None)
             
             # Verify user exists and has RM role
             # user_id could be a UUID string or integer ID string
@@ -258,17 +276,23 @@ class LeadTypeAssignmentView(APIView):
                 tenant=tenant,
                 user_id=actual_user_id_for_setting,
                 key='LEAD_TYPE_ASSIGNMENT',
-                defaults={'value': lead_types}
+                defaults={
+                    'value': lead_types,
+                    'assigned_leads_count': assigned_leads_count
+                }
             )
             
             if not created:
                 setting.value = lead_types
+                if assigned_leads_count is not None:
+                    setting.assigned_leads_count = assigned_leads_count
                 setting.save()
             
             return Response({
                 'user_id': str(actual_user_id_for_setting),
                 'user_name': user.name,
                 'lead_types': lead_types,
+                'assigned_leads_count': setting.assigned_leads_count,
                 'created': created
             }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
         
