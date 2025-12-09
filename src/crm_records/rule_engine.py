@@ -212,13 +212,15 @@ def action_send_mixpanel_event(
     """
     Action to send an event to Mixpanel via the custom API used by MixpanelService.
     Supports template resolution on all arguments.
+
+    Automatically includes all data properties from the record.
     Enqueues the event to be processed asynchronously by a background worker.
 
     Args:
         ctx: Rule context containing 'record', 'payload', etc.
         user_id: The Mixpanel distinct_id (will be cast to int in the service). Can be templated.
         event_name: The event name to send. Can be templated.
-        properties: Dict of event properties. Can be templated.
+        properties: Dict of event properties. Can be templated. Will be merged with all record data.
 
     Returns:
         Dict with execution result including job_id.
@@ -231,7 +233,41 @@ def action_send_mixpanel_event(
     resolved_event_name = _resolve_templates_in(event_name, ctx)
     resolved_properties = _resolve_templates_in(properties or {}, ctx)
 
+    # Build complete properties dict with all record data
+    mixpanel_properties = {
+        'record_id': record.id,
+        'entity_type': record.entity_type,
+        'name': record.name,
+        'tenant_id': str(record.tenant.id),
+        'tenant_slug': record.tenant.slug,
+        'event_name': resolved_event_name,
+    }
+    
+    # Add all properties from record.data field
+    if record.data:
+        mixpanel_properties.update(record.data)
+    
+    # Add event payload properties (may override data properties if same key)
+    event_payload = ctx.get('payload', {})
+    if event_payload:
+        mixpanel_properties.update(event_payload)
+    
+    # Add timestamps
+    if record.created_at:
+        mixpanel_properties['record_created_at'] = record.created_at.isoformat()
+    if record.updated_at:
+        mixpanel_properties['record_updated_at'] = record.updated_at.isoformat()
+    
+    # Merge with resolved_properties (user-provided properties take precedence)
+    mixpanel_properties.update(resolved_properties)
+
     try:
+
+        service = MixpanelService()
+        success = service.send_to_mixpanel_sync(
+            str(resolved_user_id),
+            str(resolved_event_name),
+            mixpanel_properties,
         # Enqueue job for async processing
         queue_service = get_queue_service()
         job = queue_service.enqueue_job(
@@ -245,6 +281,8 @@ def action_send_mixpanel_event(
         )
         
         logger.info(
+
+            f"Mixpanel event sent for record {record.id}: event='{resolved_event_name}' success={success} properties_count={len(mixpanel_properties)}"
             f"Mixpanel event queued for record {record.id}: job_id={job.id}, "
             f"event='{resolved_event_name}'"
         )

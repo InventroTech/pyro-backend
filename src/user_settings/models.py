@@ -23,6 +23,11 @@ class UserSettings(models.Model):
     value = models.JSONField(
         help_text="The setting value (e.g., ['LEAD_TYPE_1', 'LEAD_TYPE_2'])"
     )
+    assigned_leads_count = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Number of leads assigned to the user (for LEAD_TYPE_ASSIGNMENT key)"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
