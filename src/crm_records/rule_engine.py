@@ -130,13 +130,272 @@ def action_update_fields(
         Dictionary with execution result
     """
     record = ctx["record"]
+    payload = ctx.get("payload", {})
+    
+    # Store original payload for later checks (before we modify it)
+    original_payload = payload.copy() if isinstance(payload, dict) else payload
 
-    # Resolve any templates in updates based on current context
+    # Check if this is a call back later event BEFORE template resolution
+    event_name = ctx.get("event", "")
+    button_type = payload.get("button_type", "")
+    is_call_back_later_event = (
+        event_name == "call_back_later" or 
+        event_name.endswith(".call_back_later") or
+        "call_back_later" in event_name.lower() or
+        button_type == "call_later" or
+        "call_later" in event_name.lower()
+    )
+
+    # Special handling for assigned_to field in call_back_later events
+    # Rules:
+    # 1. When assigned_to: null → set assigned_to to null (always allowed)
+    # 2. When assigned_to has a UUID → require assign_to_me flag to be True
+    # 3. Do not default to user_id when assigned_to is explicitly null
+    
+    # Handle assigned_to in payload for call_back_later events
+    # Also check if assigned_to_user_id is in payload and treat it as assigned_to
+    if is_call_back_later_event:
+        # Use original_payload to check assign_to_me flag (before we modify payload)
+        # If assign_to_self is present, treat it as assign_to_me=True
+        assign_to_me = original_payload.get("assign_to_me") or original_payload.get("assignToMe")
+        if assign_to_me is None and original_payload.get("assign_to_self"):
+            # assign_to_self being present means checkbox is checked
+            assign_to_me = True
+        assign_to_me = assign_to_me is True
+        
+        logger.info(
+            f"Call back later event for record {record.id}: "
+            f"assign_to_me={assign_to_me}, assign_to_self={original_payload.get('assign_to_self')}, "
+            f"original_payload_keys={list(original_payload.keys())}, "
+            f"assigned_to_user_id={original_payload.get('assigned_to_user_id')}, "
+            f"assigned_to={original_payload.get('assigned_to')}"
+        )
+        
+        # Check if assigned_to_user_id is in payload but assigned_to is not
+        if "assigned_to_user_id" in payload and "assigned_to" not in payload:
+            assigned_to_user_id_value = payload.get("assigned_to_user_id")
+            if assign_to_me:
+                # Add assigned_to to payload with assigned_to_user_id value
+                if isinstance(payload, dict):
+                    payload = payload.copy()
+                else:
+                    payload = dict(payload) if payload else {}
+                payload["assigned_to"] = assigned_to_user_id_value
+                ctx["payload"] = payload
+                logger.info(
+                    f"Converting assigned_to_user_id to assigned_to in payload for record {record.id} "
+                    f"in call_back_later event: assigned_to_user_id={assigned_to_user_id_value}"
+                )
+            else:
+                # Remove assigned_to_user_id from payload if assign_to_me is not True
+                logger.info(
+                    f"Removing assigned_to_user_id from payload for record {record.id} in call_back_later event: "
+                    f"assign_to_me flag not set to True"
+                )
+                payload_without_assigned_to_user_id = {k: v for k, v in payload.items() if k != "assigned_to_user_id"}
+                ctx["payload"] = payload_without_assigned_to_user_id
+                payload = payload_without_assigned_to_user_id
+        
+        # Handle assigned_to in payload
+        if "assigned_to" in payload:
+            assigned_to_value = payload.get("assigned_to")
+            
+            # Allow explicit null assignment (always allowed)
+            if assigned_to_value is None or assigned_to_value == "" or assigned_to_value == "null":
+                logger.info(
+                    f"Allowing explicit null assignment for record {record.id} in call_back_later event"
+                )
+                # Keep assigned_to: null in payload
+                pass
+            elif not assign_to_me:
+                # Set assigned_to to null in payload if assign_to_me is not True
+                logger.info(
+                    f"Setting assigned_to to null in payload for record {record.id} in call_back_later event: "
+                    f"assign_to_me flag not set to True (payload had assigned_to={assigned_to_value})"
+                )
+                # Create a copy of payload with assigned_to set to null
+                payload_with_null_assigned_to = payload.copy() if isinstance(payload, dict) else dict(payload) if payload else {}
+                payload_with_null_assigned_to["assigned_to"] = None
+                # Update ctx payload to set assigned_to to null before template resolution
+                ctx["payload"] = payload_with_null_assigned_to
+                payload = payload_with_null_assigned_to  # Update local payload reference too
+            else:
+                logger.info(
+                    f"Allowing assigned_to UUID for record {record.id} in call_back_later event: "
+                    f"assign_to_me flag is True, assigned_to={assigned_to_value}"
+                )
+    
+    # Resolve any templates in updates based on current context (after potentially removing assigned_to from payload)
     resolved_updates = _resolve_templates_in(updates or {}, ctx)
 
+    # Special handling for assigned_to field
+    # Rules for call_back_later events:
+    # 1. When assigned_to: null → set assigned_to to null (always allowed)
+    # 2. When assigned_to has a UUID → require assign_to_me flag to be True
+    # 3. Do not default to user_id when assigned_to is explicitly null
+    if "assigned_to" in resolved_updates:
+        assigned_to_value = resolved_updates.get("assigned_to")
+        
+        logger.info(
+            f"Checking assigned_to for record {record.id}: event={event_name}, "
+            f"button_type={button_type}, assigned_to_value={assigned_to_value}, "
+            f"is_call_back_later={is_call_back_later_event}"
+        )
+        
+        # Allow setting assigned_to to None/null (explicit unassignment) - always allowed
+        if assigned_to_value is None or assigned_to_value == "" or assigned_to_value == "null":
+            # Explicit unassignment is always allowed
+            logger.info(f"Allowing explicit null assignment for record {record.id}")
+            pass
+        elif is_call_back_later_event:
+            # For call back later events, require assign_to_me flag to be explicitly True for UUID assignment
+            # Use original_payload to check assign_to_me flag (before we removed assigned_to)
+            # If assign_to_self is present, treat it as assign_to_me=True
+            assign_to_me = original_payload.get("assign_to_me") or original_payload.get("assignToMe")
+            if assign_to_me is None and original_payload.get("assign_to_self"):
+                # assign_to_self being present means checkbox is checked
+                assign_to_me = True
+            assign_to_me = assign_to_me is True  # Explicitly check for True (boolean)
+            
+            logger.info(
+                f"Call back later event detected for record {record.id}: "
+                f"assign_to_me={assign_to_me}, assign_to_me_raw={original_payload.get('assign_to_me')}, "
+                f"assignToMe_raw={original_payload.get('assignToMe')}, payload_keys={list(original_payload.keys())}"
+            )
+            
+            if not assign_to_me:
+                # Set assigned_to to null if assign_to_me checkbox is not checked
+                logger.info(
+                    f"Setting assigned_to to null for record {record.id} in call back later event: "
+                    f"assign_to_me flag not set to True in payload (value would be: {assigned_to_value})"
+                )
+                resolved_updates["assigned_to"] = None
+            else:
+                logger.info(
+                    f"Allowing assigned_to UUID update for record {record.id} in call back later event: "
+                    f"assign_to_me flag is True, assigned_to={assigned_to_value}"
+                )
+        # For other events (won, lost, etc.), allow assigned_to to be set without the flag
+        else:
+            logger.info(
+                f"Non-call-back-later event for record {record.id}: allowing assigned_to update"
+            )
+
     # Apply direct field updates
+    # For call_back_later events: 
+    # - If assign_to_me is True and assigned_to is in payload but not in resolved_updates, add it to resolved_updates
+    # - If assign_to_me is False and assigned_to is not in resolved_updates, set it to null
+    if is_call_back_later_event:
+        assign_to_me = original_payload.get("assign_to_me") or original_payload.get("assignToMe")
+        if assign_to_me is None and original_payload.get("assign_to_self"):
+            # assign_to_self being present means checkbox is checked
+            assign_to_me = True
+        assign_to_me = assign_to_me is True
+        
+        if assign_to_me and "assigned_to" not in resolved_updates:
+            # Check if assigned_to is in the original payload
+            assigned_to_from_payload = original_payload.get("assigned_to")
+            if assigned_to_from_payload:
+                logger.info(
+                    f"Adding assigned_to from payload to resolved_updates for record {record.id} "
+                    f"in call_back_later event: assigned_to={assigned_to_from_payload}"
+                )
+                resolved_updates["assigned_to"] = assigned_to_from_payload
+            # If assigned_to is not in payload, check for assigned_to_user_id
+            elif original_payload.get("assigned_to_user_id"):
+                assigned_to_user_id_value = original_payload.get("assigned_to_user_id")
+                logger.info(
+                    f"Adding assigned_to_user_id from payload to resolved_updates as assigned_to for record {record.id} "
+                    f"in call_back_later event: assigned_to_user_id={assigned_to_user_id_value}"
+                )
+                resolved_updates["assigned_to"] = assigned_to_user_id_value
+            else:
+                logger.warning(
+                    f"No assigned_to or assigned_to_user_id found in payload for record {record.id} "
+                    f"even though assign_to_me is True. Payload keys: {list(original_payload.keys())}"
+                )
+        elif not assign_to_me and "assigned_to" not in resolved_updates:
+            # If checkbox is not checked and assigned_to is not in updates, set it to null
+            logger.info(
+                f"Setting assigned_to to null in resolved_updates for record {record.id} "
+                f"in call_back_later event: assign_to_me is False"
+            )
+            resolved_updates["assigned_to"] = None
+        
+        logger.info(
+            f"After adding assigned_to check for record {record.id}: "
+            f"assigned_to in resolved_updates={('assigned_to' in resolved_updates)}, "
+            f"value={resolved_updates.get('assigned_to')}"
+        )
+    
+    # Final check: for call_back_later events, ensure assigned_to is not set if assign_to_me is not True
+    if is_call_back_later_event and "assigned_to" in resolved_updates:
+        assign_to_me = original_payload.get("assign_to_me") or original_payload.get("assignToMe")
+        if assign_to_me is None and original_payload.get("assign_to_self"):
+            # assign_to_self being present means checkbox is checked
+            assign_to_me = True
+        assign_to_me = assign_to_me is True
+        
+        assigned_to_value = resolved_updates.get("assigned_to")
+        
+        # Allow explicit null
+        if assigned_to_value is None or assigned_to_value == "" or assigned_to_value == "null":
+            logger.info(f"Final check: Allowing explicit null assignment for record {record.id}")
+            pass
+        elif not assign_to_me:
+            # Double-check: set assigned_to to null if it somehow got in there
+            logger.warning(
+                f"Final check: Setting assigned_to to null in resolved_updates for record {record.id} "
+                f"in call_back_later event (assign_to_me={assign_to_me}, value={assigned_to_value})"
+            )
+            resolved_updates["assigned_to"] = None
+        else:
+            logger.info(
+                f"Final check: Allowing assigned_to for record {record.id} "
+                f"in call_back_later event (assign_to_me={assign_to_me}, value={assigned_to_value})"
+            )
+    
+    logger.info(
+        f"Before applying updates for record {record.id}: "
+        f"resolved_updates_keys={list(resolved_updates.keys())}, "
+        f"assigned_to={resolved_updates.get('assigned_to')}"
+    )
+    
     for key, value in resolved_updates.items():
         record.data[key] = value
+    
+    logger.info(
+        f"After applying updates for record {record.id}: "
+        f"record.data['assigned_to']={record.data.get('assigned_to')}"
+    )
+    
+    # Final safety check: for call_back_later events, remove assigned_to from record.data if assign_to_me is not True
+    if is_call_back_later_event and "assigned_to" in record.data:
+        assign_to_me = original_payload.get("assign_to_me") or original_payload.get("assignToMe")
+        if assign_to_me is None and original_payload.get("assign_to_self"):
+            # assign_to_self being present means checkbox is checked
+            assign_to_me = True
+        assign_to_me = assign_to_me is True
+        
+        assigned_to_in_data = record.data.get("assigned_to")
+        
+        # Allow explicit null
+        if assigned_to_in_data is None or assigned_to_in_data == "" or assigned_to_in_data == "null":
+            logger.info(
+                f"Final safety check: Allowing explicit null assignment in record.data for record {record.id}"
+            )
+            pass
+        elif not assign_to_me:
+            logger.warning(
+                f"Final safety check: Setting assigned_to to null in record.data for record {record.id} "
+                f"in call_back_later event (current value: {assigned_to_in_data}, assign_to_me={assign_to_me})"
+            )
+            record.data["assigned_to"] = None
+        else:
+            logger.info(
+                f"Final safety check: Keeping assigned_to in record.data for record {record.id} "
+                f"(value: {assigned_to_in_data}, assign_to_me={assign_to_me})"
+            )
 
     # Support numeric increments via optional args: "increments" or "$inc" or "inc"
     increments: Optional[Dict[str, Any]] = (
