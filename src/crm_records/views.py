@@ -828,23 +828,49 @@ class GetNextLeadView(APIView):
         }
         return aliases.get(lead_type, [lead_type])
     
-    def _order_by_score(self, qs):
+    def _order_by_score(self, qs, now_iso=None):
         """
-        Order queryset by lead score (if exists in data), then creation date.
+        Order queryset with priority: expired snoozed leads first, then by lead score, then creation date.
         Higher scores first (100, 90, 80, etc. - descending), then older creation dates.
         """
+        # Priority 1: Expired snoozed leads (lead_stage='SNOOZED' AND next_call_at <= now)
+        # Priority 2: Regular leads ordered by score
         # Order by score if it exists in the data field, then by creation date
         # Using PostgreSQL JSONB operators for ordering
         # Score ordering: 100, 90, 80, 70, etc. (descending)
-        qs = qs.extra(
-            select={
-                'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
-            }
-        ).order_by(
-            F('lead_score').desc(nulls_last=True),  # Descending: 100, 90, 80, etc.
-            'created_at',
-            'id'
-        )
+        if now_iso:
+            qs = qs.extra(
+                select={
+                    'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
+                    'is_expired_snoozed': """
+                        CASE 
+                            WHEN data->>'lead_stage' = 'SNOOZED' 
+                            AND data->>'next_call_at' IS NOT NULL 
+                            AND data->>'next_call_at' != '' 
+                            AND data->>'next_call_at' != 'null'
+                            AND (data->>'next_call_at')::timestamptz <= NOW()
+                            THEN 0
+                            ELSE 1
+                        END
+                    """,
+                }
+            ).order_by(
+                'is_expired_snoozed',  # Expired snoozed leads first (0), then others (1)
+                F('lead_score').desc(nulls_last=True),  # Descending: 100, 90, 80, etc.
+                'created_at',
+                'id'
+            )
+        else:
+            # Fallback when now_iso is not provided - just order by score
+            qs = qs.extra(
+                select={
+                    'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
+                }
+            ).order_by(
+                F('lead_score').desc(nulls_last=True),  # Descending: 100, 90, 80, etc.
+                'created_at',
+                'id'
+            )
         return qs
     
     @extend_schema(
@@ -923,6 +949,11 @@ class GetNextLeadView(APIView):
 
         logger.info("[GetNextLead] Getting next lead for user: %s", user_identifier)
 
+        # Get current time for checking snoozed leads expiration
+        from django.utils import timezone
+        now = timezone.now()
+        now_iso = now.isoformat()
+
         # Step 2: Check the RM is eligible for what leads - get from user settings
         eligible_lead_types = []
         user_uuid = None
@@ -964,12 +995,22 @@ class GetNextLeadView(APIView):
             
             # --- Enhanced Logging Block ---
             from django.db.models import Q
-            # Count all leads in any queueable state regardless of assignment
+            # Count all leads in any queueable state regardless of assignment (including expired snoozed)
             possible_leads_cnt = Record.objects.filter(
                 tenant=tenant,
                 entity_type='lead'
-            ).filter(
-                Q(data__lead_stage__in=self.QUEUEABLE_STATUSES) | Q(data__lead_stage__isnull=True)
+            ).extra(
+                where=["""
+                    data->>'lead_stage' IN ('in_queue', 'assigned', 'call_later', 'scheduled')
+                    OR data->>'lead_stage' IS NULL
+                    OR (
+                        data->>'lead_stage' = 'SNOOZED'
+                        AND data->>'next_call_at' IS NOT NULL
+                        AND data->>'next_call_at' != ''
+                        AND data->>'next_call_at' != 'null'
+                        AND (data->>'next_call_at')::timestamptz <= NOW()
+                    )
+                """]
             ).count()
             # Count those unassigned
             possible_unassigned_cnt = Record.objects.filter(
@@ -987,9 +1028,18 @@ class GetNextLeadView(APIView):
                     AND data->>'poster' IS NOT NULL
                     AND data->>'poster' != ''
                     AND data->>'poster' != 'null'
+                    AND (
+                        data->>'lead_stage' IN ('in_queue', 'assigned', 'call_later', 'scheduled')
+                        OR data->>'lead_stage' IS NULL
+                        OR (
+                            data->>'lead_stage' = 'SNOOZED'
+                            AND data->>'next_call_at' IS NOT NULL
+                            AND data->>'next_call_at' != ''
+                            AND data->>'next_call_at' != 'null'
+                            AND (data->>'next_call_at')::timestamptz <= NOW()
+                        )
+                    )
                 """]
-            ).filter(
-                Q(data__lead_stage__in=self.QUEUEABLE_STATUSES) | Q(data__lead_stage__isnull=True)
             ).count()
             logger.info("[GetNextLead] Diagnostic: queueable leads for tenant=%s: count_in_queueable_state=%d, count_unassigned=%d, eligible_lead_types=None", tenant, possible_leads_cnt, possible_unassigned_cnt)
             # --- End Enhanced Logging Block ---
@@ -998,24 +1048,46 @@ class GetNextLeadView(APIView):
 
         # Step 3: Filter leads by eligible lead types (poster field) and unassigned status
         from django.db.models import Q
+        
         base_qs = Record.objects.filter(
             tenant=tenant,
             entity_type='lead'
         ).extra(
             where=["""
                 (
+                    -- Unassigned leads
                     (data->>'assigned_to' IS NULL OR 
                      data->>'assigned_to' = '' OR
                      data->>'assigned_to' = 'null' OR
                      data->>'assigned_to' = 'None')
+                    -- OR in_queue status (can be assigned or unassigned)
                     OR data->>'lead_stage' = 'in_queue'
+                    -- OR expired snoozed leads (should be available regardless of assigned_to)
+                    OR (
+                        data->>'lead_stage' = 'SNOOZED'
+                        AND data->>'next_call_at' IS NOT NULL
+                        AND data->>'next_call_at' != ''
+                        AND data->>'next_call_at' != 'null'
+                        AND (data->>'next_call_at')::timestamptz <= NOW()
+                    )
                 )
                 AND data->>'poster' IS NOT NULL
                 AND data->>'poster' != ''
                 AND data->>'poster' != 'null'
-            """]
-        ).filter(
-            Q(data__lead_stage__in=self.QUEUEABLE_STATUSES) | Q(data__lead_stage__isnull=True)
+                AND (
+                    -- Regular queueable statuses
+                    data->>'lead_stage' IN ('in_queue', 'assigned', 'call_later', 'scheduled')
+                    OR data->>'lead_stage' IS NULL
+                    -- OR snoozed leads where next_call_at has passed
+                    OR (
+                        data->>'lead_stage' = 'SNOOZED'
+                        AND data->>'next_call_at' IS NOT NULL
+                        AND data->>'next_call_at' != ''
+                        AND data->>'next_call_at' != 'null'
+                        AND (data->>'next_call_at')::timestamptz <= NOW()
+                    )
+                )
+                """]
         )
 
         # Filter by eligible lead types (poster field must match one of the eligible types)
@@ -1043,21 +1115,45 @@ class GetNextLeadView(APIView):
         elif total_unassigned_cnt == 0:
             logger.info("[GetNextLead] There are currently no unassigned leads in any queueable status for tenant=%s", tenant)
             # Relaxed fallback: drop lead_stage filter to recover from inconsistent/missing stages
+            # But still include snoozed leads where next_call_at has passed
             relaxed_qs = Record.objects.filter(
                 tenant=tenant,
                 entity_type='lead'
             ).extra(
                 where=["""
                     (
+                        -- Unassigned leads
                         (data->>'assigned_to' IS NULL OR 
                          data->>'assigned_to' = '' OR
                          data->>'assigned_to' = 'null' OR
                          data->>'assigned_to' = 'None')
+                        -- OR in_queue status (can be assigned or unassigned)
                         OR data->>'lead_stage' = 'in_queue'
+                        -- OR expired snoozed leads (should be available regardless of assigned_to)
+                        OR (
+                            data->>'lead_stage' = 'SNOOZED'
+                            AND data->>'next_call_at' IS NOT NULL
+                            AND data->>'next_call_at' != ''
+                            AND data->>'next_call_at' != 'null'
+                            AND (data->>'next_call_at')::timestamptz <= NOW()
+                        )
                     )
                     AND data->>'poster' IS NOT NULL
                     AND data->>'poster' != ''
                     AND data->>'poster' != 'null'
+                    AND (
+                        -- Regular queueable statuses
+                        data->>'lead_stage' IN ('in_queue', 'assigned', 'call_later', 'scheduled')
+                        OR data->>'lead_stage' IS NULL
+                        -- OR snoozed leads where next_call_at has passed
+                        OR (
+                            data->>'lead_stage' = 'SNOOZED'
+                            AND data->>'next_call_at' IS NOT NULL
+                            AND data->>'next_call_at' != ''
+                            AND data->>'next_call_at' != 'null'
+                            AND (data->>'next_call_at')::timestamptz <= NOW()
+                        )
+                    )
                 """]
             )
             relaxed_unassigned = relaxed_qs.filter(poster_filter)
@@ -1067,8 +1163,42 @@ class GetNextLeadView(APIView):
                 unassigned = relaxed_unassigned
                 unassigned_cnt = relaxed_cnt
 
-        # Step 4: Order by lead score (descending: 100, 90, 80, etc.)
-        candidate = self._order_by_score(unassigned).first()
+        # Step 4: Order by priority (expired snoozed first), then lead score (descending: 100, 90, 80, etc.)
+        # Log snoozed leads count for debugging (check before poster filter)
+        all_snoozed_count = Record.objects.filter(
+            tenant=tenant,
+            entity_type='lead',
+            data__lead_stage='SNOOZED'
+        ).count()
+        expired_snoozed_before_filter = Record.objects.filter(
+            tenant=tenant,
+            entity_type='lead'
+        ).extra(
+            where=["""
+                data->>'lead_stage' = 'SNOOZED'
+                AND data->>'next_call_at' IS NOT NULL
+                AND data->>'next_call_at' != ''
+                AND data->>'next_call_at' != 'null'
+                AND (data->>'next_call_at')::timestamptz <= NOW()
+            """]
+        ).count()
+        # Check after poster filter
+        snoozed_count = unassigned.filter(data__lead_stage='SNOOZED').count()
+        expired_snoozed_count = unassigned.extra(
+            where=["""
+                data->>'lead_stage' = 'SNOOZED'
+                AND data->>'next_call_at' IS NOT NULL
+                AND data->>'next_call_at' != ''
+                AND data->>'next_call_at' != 'null'
+                AND (data->>'next_call_at')::timestamptz <= NOW()
+            """]
+        ).count()
+        logger.info(
+            "[GetNextLead] Snoozed leads: all_snoozed=%d, expired_before_filter=%d, expired_after_poster_filter=%d, now=%s",
+            all_snoozed_count, expired_snoozed_before_filter, expired_snoozed_count, now_iso
+        )
+        
+        candidate = self._order_by_score(unassigned, now_iso).first()
 
         # Step 5: Return first entry (or empty if none found)
 
