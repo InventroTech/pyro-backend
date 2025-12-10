@@ -262,14 +262,14 @@ def action_send_mixpanel_event(
     mixpanel_properties.update(resolved_properties)
 
     try:
-        # Enqueue job for async processing
+        # Enqueue job for async processing - send ALL data (complete mixpanel_properties)
         queue_service = get_queue_service()
         job = queue_service.enqueue_job(
             job_type=JobType.SEND_MIXPANEL_EVENT,
             payload={
                 "user_id": str(resolved_user_id),
                 "event_name": str(resolved_event_name),
-                "properties": resolved_properties,
+                "properties": mixpanel_properties,  # Send ALL data, not just resolved_properties
             },
             tenant_id=tenant_id,
         )
