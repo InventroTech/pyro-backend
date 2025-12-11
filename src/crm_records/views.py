@@ -893,8 +893,7 @@ class GetNextLeadView(APIView):
                                 "name": "John Doe",
                                 "data": {
                                     "lead_stage": "assigned",
-                                    "customer_full_name": "John Doe",
-                                    "user_id": "USR123456",
+                                    "praja_id": "PRAJA123456",
                                     "phone_number": "+919876543210",
                                     "lead_score": 85.5,
                                     "assigned_to": "user123",
@@ -1243,9 +1242,9 @@ class GetNextLeadView(APIView):
         # Map data fields to top-level for backward compatibility with defaults
         flattened_response = {
             "id": candidate_locked.id,
-            "name": candidate_locked.name or lead_data.get('customer_full_name') or '',
+            "name": candidate_locked.name or '',
             "phone_no": lead_data.get('phone_number', ''),
-            "user_id": lead_data.get('user_id'),
+            "praja_id": lead_data.get('praja_id'),
             "lead_status": lead_data.get('lead_stage') or '',
             "lead_score": lead_data.get('lead_score'),
             "lead_type": lead_data.get('poster'),
@@ -1340,7 +1339,6 @@ class PrajaLeadsAPIView(APIView):
             "name": "Customer Name",
             "data": {
                 "praja_id": "PRAJA123",  # Required: unique identifier for Praja system
-                "customer_full_name": "Customer Name",
                 "phone_number": "+1234567890",
                 "lead_score": 85,
                 "lead_stage": "in_queue",
@@ -1946,7 +1944,7 @@ class EntityTypeAttributesView(TenantScopedMixin, APIView):
                 "entity_type",
                 "name",
                 "data",
-                "data.user_id",
+                "data.praja_id",
                 "data.lead_score",
                 ...
             ],
