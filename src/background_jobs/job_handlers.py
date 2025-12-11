@@ -393,6 +393,138 @@ class FunctionJobHandler(JobHandler):
         return True
 
 
+class LeadScoringJobHandler(JobHandler):
+    """
+    Handler for bulk lead scoring jobs.
+    Processes all leads for a tenant and applies scoring rules.
+    """
+    
+    def process(self, job: BackgroundJob) -> bool:
+        """
+        Process a lead scoring job.
+        
+        Expected payload:
+        {
+            "entity_type": "lead",  # Optional, defaults to 'lead'
+            "batch_size": 100       # Optional, defaults to 100
+        }
+        """
+        from django.db import transaction
+        from crm_records.models import Record
+        from crm_records.scoring import calculate_and_update_lead_score
+        
+        payload = job.payload
+        entity_type = payload.get("entity_type", "lead")
+        batch_size = payload.get("batch_size", 100)
+        tenant_id = job.tenant_id
+        
+        if not tenant_id:
+            error_msg = "Lead scoring job requires tenant_id"
+            logger.error(f"Invalid lead scoring job {job.id}: {error_msg}")
+            raise ValueError(error_msg)
+        
+        logger.info(
+            f"Starting lead scoring job {job.id} for tenant {tenant_id}, "
+            f"entity_type={entity_type}, batch_size={batch_size}"
+        )
+        
+        # Get all leads for this tenant
+        leads = Record.objects.filter(
+            tenant_id=tenant_id,
+            entity_type=entity_type
+        )
+        
+        total_leads = leads.count()
+        updated_count = 0
+        total_score_added = 0.0
+        processed_count = 0
+        
+        # Update job result with initial progress
+        job.result = {
+            "total_leads": total_leads,
+            "processed_leads": 0,
+            "updated_leads": 0,
+            "total_score_added": 0.0,
+            "progress_percentage": 0,
+            "status": "processing"
+        }
+        job.save(update_fields=['result'])
+        
+        # Process leads in batches
+        for i in range(0, total_leads, batch_size):
+            batch = leads[i:i + batch_size]
+            
+            with transaction.atomic():
+                for lead in batch:
+                    try:
+                        # Use the utility function to calculate and update score
+                        score = calculate_and_update_lead_score(
+                            lead,
+                            tenant_id=tenant_id,
+                            save=True
+                        )
+                        
+                        processed_count += 1
+                        
+                        if score > 0:
+                            updated_count += 1
+                            total_score_added += score
+                        
+                        # Update job result every batch
+                        if processed_count % batch_size == 0:
+                            progress = int((processed_count / total_leads) * 100) if total_leads > 0 else 0
+                            job.result = {
+                                "total_leads": total_leads,
+                                "processed_leads": processed_count,
+                                "updated_leads": updated_count,
+                                "total_score_added": total_score_added,
+                                "progress_percentage": progress,
+                                "status": "processing"
+                            }
+                            job.save(update_fields=['result'])
+                            logger.debug(
+                                f"Lead scoring job {job.id} progress: "
+                                f"{processed_count}/{total_leads} ({progress}%)"
+                            )
+                    
+                    except Exception as e:
+                        logger.error(f"Error scoring lead {lead.id} in job {job.id}: {e}")
+                        # Continue with next lead
+                        processed_count += 1
+                        continue
+        
+        # Final update
+        job.result = {
+            "total_leads": total_leads,
+            "processed_leads": processed_count,
+            "updated_leads": updated_count,
+            "total_score_added": total_score_added,
+            "progress_percentage": 100,
+            "status": "completed"
+        }
+        job.save(update_fields=['result'])
+        
+        logger.info(
+            f"Lead scoring job {job.id} completed: {updated_count}/{total_leads} leads updated, "
+            f"total score: {total_score_added}"
+        )
+        
+        return True
+    
+    def get_retry_delay(self, attempt: int) -> int:
+        """
+        Exponential backoff: 10s, 60s, 300s (5 minutes)
+        Lead scoring is a heavy operation, so longer delays
+        """
+        delays = [10, 60, 300]
+        return delays[min(attempt - 1, len(delays) - 1)]
+    
+    def validate_payload(self, payload: Dict[str, Any]) -> bool:
+        """Validate lead scoring job payload"""
+        # entity_type and batch_size are optional with defaults
+        return True
+
+
 class JobHandlerRegistry:
     """
     Registry for job handlers.
@@ -410,6 +542,7 @@ class JobHandlerRegistry:
         self.register_handler(JobType.SEND_MIXPANEL_EVENT, MixpanelJobHandler())
         self.register_handler(JobType.SEND_WEBHOOK, WebhookJobHandler())
         self.register_handler(JobType.EXECUTE_FUNCTION, FunctionJobHandler())
+        self.register_handler(JobType.SCORE_LEADS, LeadScoringJobHandler())
     
     def register_handler(self, job_type: str, handler: JobHandler):
         """
@@ -451,4 +584,5 @@ _handler_registry = JobHandlerRegistry()
 def get_handler_registry() -> JobHandlerRegistry:
     """Get the global handler registry"""
     return _handler_registry
+
 
