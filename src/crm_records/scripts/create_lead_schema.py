@@ -84,7 +84,6 @@ def create_lead_schema(tenant_id=None):
                 "status": "Null"
             }
         ],
-        "user_id": "USR758210",
         "praja_id": "PRAJA_277BDA3C",
         "lead_score": 74.42,
         "lead_stage": "scheduled",
@@ -100,7 +99,6 @@ def create_lead_schema(tenant_id=None):
         "affiliated_party": "Channel Partner",
         "package_to_pitch": "Annual Premium - ₹9,999/year",
         "user_profile_link": "https://app.thepyro.ai/users/USR758210",
-        "customer_full_name": "Osha Patel",
         "premium_poster_count": 3,
         "last_active_date_time": "2025-11-22T15:13:30.087399"
     }
