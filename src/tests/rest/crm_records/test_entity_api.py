@@ -49,7 +49,6 @@ class EntityApiTests(TestCase):
             name="Existing Lead",
             data={
                 "praja_id": "PRAJA001",
-                "customer_full_name": "Existing Lead",
                 "phone_number": "+1234567890",
                 "lead_score": 80,
                 "lead_stage": "in_queue",
@@ -65,7 +64,6 @@ class EntityApiTests(TestCase):
             "name": "New Lead",
             "data": {
                 "praja_id": "PRAJA123",
-                "customer_full_name": "New Lead",
                 "phone_number": "+1234567890",
                 "lead_score": 85,
                 "lead_stage": "in_queue",
@@ -371,7 +369,6 @@ class EntityApiTests(TestCase):
             "name": "Updated Name",
             "data": {
                 "praja_id": "PRAJA001",
-                "customer_full_name": "Updated Name",
                 "phone_number": "+9876543210",
                 "lead_score": 100,
                 "lead_stage": "won",
@@ -617,7 +614,6 @@ class EntityApiTests(TestCase):
             "name": "CRUD Test Lead",
             "data": {
                 "praja_id": "CRUD001",
-                "customer_full_name": "CRUD Test Lead",
                 "phone_number": "+1234567890",
                 "lead_score": 50,
                 "lead_stage": "in_queue"
