@@ -2148,9 +2148,13 @@ class LeadScoringView(TenantScopedMixin, APIView):
     
     def post(self, request):
         """
-        Save scoring rules and apply them to all leads.
+        Save scoring rules and queue background job to apply them to all leads.
         Saves/updates the rules in EntityTypeSchema table for the entity_type.
+        Returns immediately with job ID - scoring happens in background.
         """
+        from background_jobs.queue_service import get_queue_service
+        from background_jobs.models import JobType
+        
         serializer = LeadScoringRequestSerializer(data=request.data)
         
         if not serializer.is_valid():
@@ -2170,48 +2174,103 @@ class LeadScoringView(TenantScopedMixin, APIView):
         
         logger.info(f"LeadScoringView: Saved {len(rules)} rules to EntityTypeSchema for entity_type '{entity_type}'")
         
-        # Get all leads for the current tenant
-        leads = Record.objects.filter(
+        # Count total leads for the job
+        total_leads = Record.objects.filter(
             tenant=request.tenant,
             entity_type='lead'
+        ).count()
+        
+        # Enqueue background job using the queue service
+        queue_service = get_queue_service()
+        job = queue_service.enqueue_job(
+            job_type=JobType.SCORE_LEADS,
+            payload={
+                'entity_type': entity_type,
+                'batch_size': 100  # Process 100 leads per batch
+            },
+            priority=0,  # Normal priority
+            tenant_id=str(request.tenant.id)
         )
         
-        updated_count = 0
-        total_score_added = 0
-        errors = []
+        logger.info(
+            f"LeadScoringView: Enqueued background job {job.id} for {total_leads} leads. "
+            f"Job will be processed by background worker."
+        )
         
-        try:
-            with transaction.atomic():
-                for lead in leads:
-                    # Use the utility function to calculate and update score
-                    score = calculate_and_update_lead_score(lead, tenant_id=request.tenant.id, save=True)
-                    
-                    if score > 0:
-                        updated_count += 1
-                        total_score_added += score
-                        
-                        logger.debug(
-                            f"Updated lead {lead.id} with score {score}"
-                        )
-            
-            logger.info(
-                f"LeadScoringView: Updated {updated_count} leads out of {leads.count()} total leads. "
-                f"Total score added: {total_score_added}"
-            )
-            
-            # Simple response format - no nested objects that could cause toast errors
-            return Response({
-                'message': f'Rules saved and applied to {updated_count} leads',
-                'total_leads': leads.count(),
-                'updated_leads': updated_count,
-                'total_score_added': total_score_added
-            }, status=status.HTTP_200_OK)
-            
-        except Exception as e:
-            logger.error(f"Error in LeadScoringView: {e}", exc_info=True)
-            return Response({
-                'error': 'Failed to save rules and score leads',
-                'message': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        # Return immediately with job info
+        return Response({
+            'message': f'Rules saved. Background job created to score {total_leads} leads',
+            'job_id': job.id,
+            'status': job.status,
+            'total_leads': total_leads,
+            'progress': 0
+        }, status=status.HTTP_202_ACCEPTED)
+    
+    def get(self, request):
+        """
+        Get status of lead scoring jobs.
+        
+        Query params:
+        - job_id: Get specific job status (optional)
+        """
+        from background_jobs.models import BackgroundJob, JobType
+        
+        job_id = request.query_params.get('job_id')
+        
+        if job_id:
+            try:
+                job = BackgroundJob.objects.get(
+                    id=job_id,
+                    tenant_id=request.tenant.id,
+                    job_type=JobType.SCORE_LEADS
+                )
+                
+                # Extract progress from result
+                result = job.result or {}
+                progress = result.get('progress_percentage', 0)
+                
+                return Response({
+                    'job_id': job.id,
+                    'status': job.status,
+                    'total_leads': result.get('total_leads', 0),
+                    'processed_leads': result.get('processed_leads', 0),
+                    'updated_leads': result.get('updated_leads', 0),
+                    'total_score_added': result.get('total_score_added', 0.0),
+                    'progress_percentage': progress,
+                    'error_message': job.last_error,
+                    'attempts': job.attempts,
+                    'max_attempts': job.max_attempts,
+                    'created_at': job.created_at.isoformat(),
+                    'completed_at': job.completed_at.isoformat() if job.completed_at else None
+                }, status=status.HTTP_200_OK)
+            except BackgroundJob.DoesNotExist:
+                return Response({
+                    'error': f'Job with id {job_id} not found'
+                }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get all lead scoring jobs for tenant
+        jobs = BackgroundJob.objects.filter(
+            tenant_id=request.tenant.id,
+            job_type=JobType.SCORE_LEADS
+        ).order_by('-created_at')[:10]  # Latest 10 jobs
+        
+        jobs_data = []
+        for job in jobs:
+            result = job.result or {}
+            jobs_data.append({
+                'job_id': job.id,
+                'status': job.status,
+                'total_leads': result.get('total_leads', 0),
+                'processed_leads': result.get('processed_leads', 0),
+                'updated_leads': result.get('updated_leads', 0),
+                'progress_percentage': result.get('progress_percentage', 0),
+                'created_at': job.created_at.isoformat(),
+                'completed_at': job.completed_at.isoformat() if job.completed_at else None
+            })
+        
+        return Response({
+            'jobs': jobs_data,
+            'count': len(jobs_data)
+        }, status=status.HTTP_200_OK)
 
 
