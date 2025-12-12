@@ -10,7 +10,6 @@ class Record(HistoryTrackedModel, BaseModel):
     All future entities (leads, tickets, job applications, etc.) will be built on top of this.
     """
     entity_type = models.CharField(max_length=100, db_index=True)
-    name = models.CharField(max_length=255, null=True, blank=True)
     data = models.JSONField(default=dict, blank=True)
 
     class Meta:
@@ -20,7 +19,8 @@ class Record(HistoryTrackedModel, BaseModel):
         ]
 
     def __str__(self):
-        return f"{self.entity_type}: {self.name or 'Unnamed'}"
+        name = (self.data or {}).get('name', '') if isinstance(self.data, dict) else ''
+        return f"{self.entity_type}: {name or 'Unnamed'}"
 
 
 class EventLog(BaseModel):
