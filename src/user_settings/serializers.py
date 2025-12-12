@@ -7,7 +7,7 @@ class UserSettingsSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = UserSettings
-        fields = ['id', 'tenant', 'user_id', 'key', 'value', 'assigned_leads_count', 'daily_target', 'created_at', 'updated_at']
+        fields = ['id', 'tenant', 'user_id', 'key', 'value', 'daily_target', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def validate_key(self, value):
@@ -28,7 +28,7 @@ class UserSettingsCreateSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = UserSettings
-        fields = ['user_id', 'key', 'value', 'assigned_leads_count', 'daily_target']
+        fields = ['user_id', 'key', 'value', 'daily_target']
 
     def validate_key(self, value):
         """Validate that key is not empty and follows naming conventions"""
@@ -50,12 +50,6 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
         child=serializers.CharField(max_length=100),
         allow_empty=True,
         help_text="List of lead types assigned to the user"
-    )
-    assigned_leads_count = serializers.IntegerField(
-        required=False,
-        allow_null=True,
-        min_value=0,
-        help_text="Number of leads assigned to the user (daily limit)"
     )
     daily_target = serializers.IntegerField(
         required=False,
