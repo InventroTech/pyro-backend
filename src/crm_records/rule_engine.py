@@ -18,6 +18,7 @@ from .models import RuleSet, RuleExecutionLog, Record
 from support_ticket.services import MixpanelService
 from background_jobs.queue_service import get_queue_service
 from background_jobs.models import JobType
+from object_history.engine import get_request_context
 
 logger = logging.getLogger(__name__)
 
@@ -497,8 +498,6 @@ def action_send_mixpanel_event(
         'record_id': record.id,
         'entity_type': record.entity_type,
         'name': record.name,
-        'tenant_id': str(record.tenant.id),
-        'tenant_slug': record.tenant.slug,
         'event_name': resolved_event_name,
     }
     
@@ -519,6 +518,18 @@ def action_send_mixpanel_event(
     
     # Merge with resolved_properties (user-provided properties take precedence)
     mixpanel_properties.update(resolved_properties)
+    
+    # Add rm_email field using the actor_label from the request context
+    # actor_label contains the email of the user who triggered this event
+    request_context = get_request_context()
+    actor_label = request_context.get('actor_label')
+    
+    if actor_label:
+        # actor_label is the email address of the user who performed the action
+        mixpanel_properties['rm_email'] = actor_label
+        logger.info(f"[rm_email] Added rm_email={actor_label} to Mixpanel event for record {record.id}")
+    else:
+        logger.info(f"[rm_email] No actor_label found in request context for record {record.id} (actor_user={request_context.get('actor_user')})")
 
     try:
         # Enqueue job for async processing - send ALL data (complete mixpanel_properties)

@@ -78,6 +78,7 @@ class MixpanelJobHandler(JobHandler):
             "properties": dict
         }
         """
+        logger.info(f"Mixpanel Job Payload: {job.payload}") 
         payload = job.payload
         user_id = payload.get("user_id")
         event_name = payload.get("event_name")
