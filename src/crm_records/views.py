@@ -38,11 +38,13 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         Query Parameters:
         - entity_type: Filter by entity type
         - resolution_status: Filter by resolution_status in data JSON
+        - affiliated_party: Filter by affiliated_party in data JSON (supports comma-separated values: ?affiliated_party=value1,value2)
         - Any other field: Will be searched in the data JSON field
         
         Examples:
         - ?entity_type=lead&resolution_status=WIP
         - ?entity_type=ticket&resolution_status=Scheduled
+        - ?affiliated_party=Channel Partner,Direct
         - ?priority=high&status=active
         """
         queryset = super().get_queryset()
@@ -814,9 +816,9 @@ class GetNextLeadView(APIView):
     QUEUEABLE_STATUSES = ('in_queue', 'assigned', 'call_later', 'scheduled')
     ASSIGNED_STATUS = 'assigned'
     
-    def _poster_aliases(self, lead_type: str):
+    def _affiliated_party_aliases(self, lead_type: str):
         """
-        Normalize known poster type typos/synonyms so filtering matches real data.
+        Normalize known affiliated party type typos/synonyms so filtering matches real data.
         Keep both canonical and legacy spellings to be safe.
         """
         aliases = {
@@ -875,7 +877,7 @@ class GetNextLeadView(APIView):
         summary="Get next lead from queue",
         description="Atomically fetches and assigns the next available lead from the queue for CRM records. "
                    "Logic: 1) Get user's info from request 2) Check RM's eligible lead types from user settings "
-                   "3) Filter leads by eligible lead types (poster field) 4) Order by lead score (100, 90, 80 descending) "
+                   "3) Filter leads by eligible lead types (affiliated_party field) 4) Order by lead score (100, 90, 80 descending) "
                    "5) Return first entry.",
         responses={
             200: OpenApiResponse(
@@ -1022,9 +1024,9 @@ class GetNextLeadView(APIView):
                          data->>'assigned_to' = 'None')
                         OR data->>'lead_stage' = 'in_queue'
                     )
-                    AND data->>'poster' IS NOT NULL
-                    AND data->>'poster' != ''
-                    AND data->>'poster' != 'null'
+                    AND data->>'affiliated_party' IS NOT NULL
+                    AND data->>'affiliated_party' != ''
+                    AND data->>'affiliated_party' != 'null'
                     AND (
                         data->>'lead_stage' IN ('in_queue', 'assigned', 'call_later', 'scheduled')
                         OR data->>'lead_stage' IS NULL
@@ -1043,7 +1045,7 @@ class GetNextLeadView(APIView):
             
             return Response({}, status=status.HTTP_200_OK)
 
-        # Step 3: Filter leads by eligible lead types (poster field) and unassigned status
+        # Step 3: Filter leads by eligible lead types (affiliated_party field) and unassigned status
         from django.db.models import Q
         
         base_qs = Record.objects.filter(
@@ -1068,9 +1070,9 @@ class GetNextLeadView(APIView):
                         AND (data->>'next_call_at')::timestamptz <= NOW()
                     )
                 )
-                AND data->>'poster' IS NOT NULL
-                AND data->>'poster' != ''
-                AND data->>'poster' != 'null'
+                AND data->>'affiliated_party' IS NOT NULL
+                AND data->>'affiliated_party' != ''
+                AND data->>'affiliated_party' != 'null'
                 AND (
                     -- Regular queueable statuses
                     data->>'lead_stage' IN ('in_queue', 'assigned', 'call_later', 'scheduled')
@@ -1087,12 +1089,12 @@ class GetNextLeadView(APIView):
                 """]
         )
 
-        # Filter by eligible lead types (poster field must match one of the eligible types)
-        poster_filter = Q()
+        # Filter by eligible lead types (affiliated_party field must match one of the eligible types)
+        affiliated_party_filter = Q()
         for lead_type in eligible_lead_types:
-            for alias in self._poster_aliases(lead_type):
-                poster_filter |= Q(data__poster=alias)
-        unassigned = base_qs.filter(poster_filter)
+            for alias in self._affiliated_party_aliases(lead_type):
+                affiliated_party_filter |= Q(data__affiliated_party=alias)
+        unassigned = base_qs.filter(affiliated_party_filter)
 
         logger.info("[GetNextLead] Filtered unassigned leads by eligible types: %s", eligible_lead_types)
 
@@ -1104,7 +1106,7 @@ class GetNextLeadView(APIView):
 
         if unassigned_cnt == 0 and total_unassigned_cnt > 0:
             # There are unassigned queueable leads, but none matching the user's eligible lead types
-            lead_types_in_queue = list(base_qs.values_list("data__poster", flat=True).distinct())
+            lead_types_in_queue = list(base_qs.values_list("data__affiliated_party", flat=True).distinct())
             logger.info(
                 "[GetNextLead] No unassigned leads matching user's eligible types. Present types in queueable/unassigned leads: %s. User eligible types: %s",
                 lead_types_in_queue, eligible_lead_types
@@ -1135,9 +1137,9 @@ class GetNextLeadView(APIView):
                             AND (data->>'next_call_at')::timestamptz <= NOW()
                         )
                     )
-                    AND data->>'poster' IS NOT NULL
-                    AND data->>'poster' != ''
-                    AND data->>'poster' != 'null'
+                    AND data->>'affiliated_party' IS NOT NULL
+                    AND data->>'affiliated_party' != ''
+                    AND data->>'affiliated_party' != 'null'
                     AND (
                         -- Regular queueable statuses
                         data->>'lead_stage' IN ('in_queue', 'assigned', 'call_later', 'scheduled')
@@ -1153,7 +1155,7 @@ class GetNextLeadView(APIView):
                     )
                 """]
             )
-            relaxed_unassigned = relaxed_qs.filter(poster_filter)
+            relaxed_unassigned = relaxed_qs.filter(affiliated_party_filter)
             relaxed_cnt = relaxed_unassigned.count()
             if relaxed_cnt > 0:
                 logger.info("[GetNextLead] Relaxed fallback found %d unassigned leads ignoring lead_stage filter", relaxed_cnt)
@@ -1161,7 +1163,7 @@ class GetNextLeadView(APIView):
                 unassigned_cnt = relaxed_cnt
 
         # Step 4: Order by priority (expired snoozed first), then lead score (descending: 100, 90, 80, etc.)
-        # Log snoozed leads count for debugging (check before poster filter)
+        # Log snoozed leads count for debugging (check before affiliated_party filter)
         all_snoozed_count = Record.objects.filter(
             tenant=tenant,
             entity_type='lead',
@@ -1179,7 +1181,7 @@ class GetNextLeadView(APIView):
                 AND (data->>'next_call_at')::timestamptz <= NOW()
             """]
         ).count()
-        # Check after poster filter
+        # Check after affiliated_party filter
         snoozed_count = unassigned.filter(data__lead_stage='SNOOZED').count()
         expired_snoozed_count = unassigned.extra(
             where=["""
@@ -1191,7 +1193,7 @@ class GetNextLeadView(APIView):
             """]
         ).count()
         logger.info(
-            "[GetNextLead] Snoozed leads: all_snoozed=%d, expired_before_filter=%d, expired_after_poster_filter=%d, now=%s",
+            "[GetNextLead] Snoozed leads: all_snoozed=%d, expired_before_filter=%d, expired_after_affiliated_party_filter=%d, now=%s",
             all_snoozed_count, expired_snoozed_before_filter, expired_snoozed_count, now_iso
         )
         
@@ -1245,7 +1247,7 @@ class GetNextLeadView(APIView):
             "praja_id": lead_data.get('praja_id'),
             "lead_status": lead_data.get('lead_stage') or '',
             "lead_score": lead_data.get('lead_score'),
-            "lead_type": lead_data.get('poster'),
+            "lead_type": lead_data.get('affiliated_party') or lead_data.get('poster'),  # Prefer affiliated_party, fallback to poster for backward compatibility
             "assigned_to": lead_data.get('assigned_to'),
             "attempt_count": lead_data.get('call_attempts', 0),
             "last_call_outcome": lead_data.get('last_call_outcome'),
@@ -1424,7 +1426,7 @@ class PrajaLeadsAPIView(APIView):
         - page: Page number for pagination
         - page_size: Items per page
         - lead_stage: Filter by lead_stage (optional)
-        - poster: Filter by poster/lead_type (optional)
+        - affiliated_party: Filter by affiliated_party/lead_type (optional)
         """
         tenant, error_response = self._get_tenant(request)
         if error_response:
@@ -1462,9 +1464,9 @@ class PrajaLeadsAPIView(APIView):
         if lead_stage:
             queryset = queryset.filter(data__lead_stage=lead_stage)
         
-        poster = request.query_params.get('poster')
-        if poster:
-            queryset = queryset.filter(data__poster=poster)
+        affiliated_party = request.query_params.get('affiliated_party')
+        if affiliated_party:
+            queryset = queryset.filter(data__affiliated_party=affiliated_party)
         
         # Order by creation date (newest first)
         queryset = queryset.order_by('-created_at')

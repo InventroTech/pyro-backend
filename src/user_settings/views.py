@@ -324,11 +324,11 @@ class UserLeadTypesView(APIView):
 
 
 class LeadTypesListView(APIView):
-    """Get all unique lead types (poster values) from records for the current tenant"""
+    """Get all unique lead types (affiliated_party values) from records for the current tenant"""
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
-        """Get all unique lead types from records' poster field"""
+        """Get all unique lead types from records' affiliated_party field"""
         tenant = request.tenant
         
         if not tenant:
@@ -336,20 +336,20 @@ class LeadTypesListView(APIView):
                 'lead_types': []
             }, status=status.HTTP_200_OK)
         
-        # Extract unique poster values using database-level query for better performance
+        # Extract unique affiliated_party values using database-level query for better performance
         # Using raw SQL for efficient JSONB querying
         from django.db import connection
         
         with connection.cursor() as cursor:
             cursor.execute("""
-                SELECT DISTINCT data->>'poster' as poster
+                SELECT DISTINCT data->>'affiliated_party' as affiliated_party
                 FROM records
                 WHERE tenant_id = %s
                   AND entity_type = 'lead'
-                  AND data->>'poster' IS NOT NULL
-                  AND data->>'poster' != ''
-                  AND data->>'poster' != 'null'
-                ORDER BY poster
+                  AND data->>'affiliated_party' IS NOT NULL
+                  AND data->>'affiliated_party' != ''
+                  AND data->>'affiliated_party' != 'null'
+                ORDER BY affiliated_party
             """, [tenant.id])
             
             lead_types_list = [row[0].strip() for row in cursor.fetchall() if row[0] and row[0].strip()]
