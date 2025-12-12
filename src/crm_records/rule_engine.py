@@ -497,7 +497,9 @@ def action_send_mixpanel_event(
     mixpanel_properties = {
         'record_id': record.id,
         'entity_type': record.entity_type,
-        'name': record.name,
+        'name': (record.data or {}).get('name', '') if isinstance(record.data, dict) else '',
+        'tenant_id': str(record.tenant.id),
+        'tenant_slug': record.tenant.slug,
         'event_name': resolved_event_name,
     }
     

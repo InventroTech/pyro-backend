@@ -55,14 +55,9 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         if entity_type:
             queryset = queryset.filter(entity_type=entity_type)
         
-        # Filter by name (direct model field)
-        name = query_params.get('name')
-        if name:
-            queryset = queryset.filter(name__icontains=name)
-        
         # Dynamic filtering on data JSON field
         # Get all query params except known model fields
-        model_fields = {'entity_type', 'name', 'search', 'search_fields', 'page', 'page_size', 'ordering', 'created_at__gte', 'created_at__lte'}
+        model_fields = {'entity_type', 'search', 'search_fields', 'page', 'page_size', 'ordering', 'created_at__gte', 'created_at__lte'}
         data_filters = {k: v for k, v in query_params.items() if k not in model_fields}
         
         # Build Q objects for JSON field filtering
@@ -113,16 +108,16 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 
                 for field in field_list:
                     # Determine if it's a normal model field or a JSONB field
-                    if field in ['name', 'entity_type', 'created_at', 'updated_at']:
+                    if field in ['entity_type', 'created_at', 'updated_at']:
                         # Normal model fields
                         q_search |= Q(**{f"{field}__icontains": search_term})
                     else:
-                        # JSONB fields in data column
+                        # JSONB fields in data column (including name)
                         q_search |= Q(**{f"data__{field}__icontains": search_term})
             else:
                 # Fallback: search across all available fields
                 # Search in normal model fields
-                q_search |= Q(name__icontains=search_term)
+                # Note: name is now in data column, so it will be searched via data__name below
                 
                 # Search in JSONB fields - we'll search in common fields and any existing data
                 # Get all unique keys from existing data to search in
@@ -132,6 +127,9 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                     record.data.keys() for record in queryset if isinstance(record.data, dict)
                 ))
                 common_json_fields = list(all_data_keys)
+                # Always include 'name' in search since it's now in data column
+                if 'name' not in common_json_fields:
+                    common_json_fields.append('name')
                 for field in common_json_fields:
                     q_search |= Q(**{f"data__{field}__icontains": search_term})
                 
@@ -338,7 +336,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         # Delete the record
         record_data = {
             'id': record.id,
-            'name': record.name,
+            'name': (record.data or {}).get('name', '') if isinstance(record.data, dict) else '',
             'entity_type': record.entity_type,
             'tenant_id': str(record.tenant_id)
         }
@@ -1242,7 +1240,7 @@ class GetNextLeadView(APIView):
         # Map data fields to top-level for backward compatibility with defaults
         flattened_response = {
             "id": candidate_locked.id,
-            "name": candidate_locked.name or '',
+            "name": (candidate_locked.data or {}).get('name', '') if isinstance(candidate_locked.data, dict) else '',
             "phone_no": lead_data.get('phone_number', ''),
             "praja_id": lead_data.get('praja_id'),
             "lead_status": lead_data.get('lead_stage') or '',
@@ -1353,19 +1351,34 @@ class PrajaLeadsAPIView(APIView):
             return error_response
         
         entity_type = self.get_entity_type(request)
-        serializer = RecordSerializer(data=request.data)
+        
+        # Move name from root level to data if provided (root level takes precedence over data.name)
+        request_data = request.data.copy()
+        if 'name' in request_data:
+            # Ensure data is a dict
+            if 'data' not in request_data:
+                request_data['data'] = {}
+            elif not isinstance(request_data['data'], dict):
+                request_data['data'] = {}
+            # Move name from root to data (overwrites if name already exists in data)
+            request_data['data']['name'] = request_data.pop('name')
+        
+        serializer = RecordSerializer(data=request_data)
         if serializer.is_valid():
             record = serializer.save(
                 tenant=tenant,
                 entity_type=entity_type
             )
             
+            # Get name from data for logging
+            record_name = (record.data or {}).get('name', '')
+            
             logger.info(
                 "[PrajaLeadsAPI] Created %s: id=%s tenant=%s name=%s",
                 entity_type,
                 record.id,
                 tenant.slug,
-                record.name
+                record_name
             )
             # Calculate and save lead score automatically
             try:
@@ -1375,7 +1388,7 @@ class PrajaLeadsAPIView(APIView):
                     "[PrajaLeadsAPI] Created lead: id=%s tenant=%s name=%s score=%s",
                     record.id,
                     tenant.slug,
-                    record.name,
+                    record_name,
                     score
                 )
             except Exception as e:
@@ -1385,7 +1398,7 @@ class PrajaLeadsAPIView(APIView):
                     "[PrajaLeadsAPI] Created lead: id=%s tenant=%s name=%s (scoring failed)",
                     record.id,
                     tenant.slug,
-                    record.name
+                    record_name
                 )
             
             # Refresh record from DB to get updated score
@@ -1507,7 +1520,7 @@ class PrajaLeadsAPIView(APIView):
             )
         
         try:
-            lead = Record.objects.get(
+            record = Record.objects.get(
                 data__praja_id=praja_id,
                 tenant=tenant,
                 entity_type='lead'
@@ -1524,7 +1537,7 @@ class PrajaLeadsAPIView(APIView):
             )
         
         # Start with existing data
-        data = lead.data.copy() if lead.data else {}
+        data = record.data.copy() if record.data else {}
         
         # If 'data' object is provided in request, merge it (takes precedence)
         if 'data' in request.data and isinstance(request.data.get('data'), dict):
@@ -1559,7 +1572,7 @@ class PrajaLeadsAPIView(APIView):
         
         # Also allow root-level fields to be merged into data
         # Common fields that should go into data JSON
-        root_fields_to_data = ['lead_score', 'lead_stage', 'latest_remarks', 'next_call_at', 
+        root_fields_to_data = ['name', 'lead_score', 'lead_stage', 'latest_remarks', 'next_call_at', 
                                'assigned_to', 'call_attempts', 'last_active_date_time',
                                'disqualification_reason', 'poster', 'phone_number', 'tasks']
         
@@ -1567,18 +1580,12 @@ class PrajaLeadsAPIView(APIView):
             if field in request.data:
                 data[field] = request.data[field]
         
-        # Update name if provided
-        if 'name' in request.data:
-            record.name = request.data['name']
-        
         # Update the data JSONB field
         record.data = data
         record.updated_at = timezone.now()
         
         # Determine which fields to update
         update_fields = ['data', 'updated_at']
-        if 'name' in request.data:
-            update_fields.append('name')
         
         record.save(update_fields=update_fields)
         
@@ -1593,28 +1600,28 @@ class PrajaLeadsAPIView(APIView):
         # Recalculate and save lead score automatically (overwrites any manually set score)
         try:
             from .scoring import calculate_and_update_lead_score
-            score = calculate_and_update_lead_score(lead, tenant_id=tenant.id, save=True)
+            score = calculate_and_update_lead_score(record, tenant_id=tenant.id, save=True)
             logger.info(
                 "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s score=%s fields=%s",
-                lead.id,
+                record.id,
                 praja_id,
                 tenant.slug,
                 score,
                 list(request.data.keys())
             )
         except Exception as e:
-            logger.error(f"[PrajaLeadsAPI] Error calculating lead score for updated lead {lead.id}: {e}")
+            logger.error(f"[PrajaLeadsAPI] Error calculating lead score for updated lead {record.id}: {e}")
             # Don't fail the request if scoring fails, just log the error
             logger.info(
                 "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s fields=%s (scoring failed)",
-                lead.id,
+                record.id,
                 praja_id,
                 tenant.slug,
                 list(request.data.keys())
             )
         
         # Refresh record from DB to get updated score
-        lead.refresh_from_db()
+        record.refresh_from_db()
         
         return Response(
             RecordSerializer(record).data,
@@ -1623,33 +1630,28 @@ class PrajaLeadsAPIView(APIView):
     
     def put(self, request):
         """
-        UPDATE - Full replacement of entity data (PUT method).
+        UPDATE - Update entity fields (PUT method).
         
-        PUT performs FULL REPLACEMENT of the data field (REST semantics).
-        All fields not provided will be removed. Use PATCH for partial updates.
+        PUT now performs partial updates with merging, same as PATCH.
         
-        Query parameters:
-        - entity: Entity type (e.g., 'lead', 'ticket') - defaults to 'lead' if not provided
-        - praja_id: (required) - uses praja_id from data field to identify record
-        
+        Query parameter or body: praja_id (required) - uses praja_id from data field to identify entity
         Body:
         {
             "praja_id": "PRAJA123",  # or use ?praja_id=PRAJA123 in URL
+            "lead_score": 95,  # Optional: update lead_score
+            "lead_stage": "assigned",  # Optional: update lead_stage
             "name": "Updated Name",  # Optional: update name
-            "data": {  # REQUIRED: Complete data object - replaces entire data field
-                "praja_id": "PRAJA123",  # Must include praja_id in data
+            "data": {  # Optional: update any fields in data JSON
                 "lead_score": 95,
                 "lead_stage": "assigned",
                 "latest_remarks": "Updated remarks",
-                "next_call_at": "2025-12-15T10:00:00Z",
-                "tasks": [...],  # Complete tasks array
-                # All other fields you want to keep
+                "next_call_at": "2025-12-15T10:00:00Z"
             }
         }
         
-        Note: PUT replaces the entire data object. Fields not included will be removed.
-        Always include praja_id in the data object to maintain consistency.
-        Use PATCH if you only want to update specific fields.
+        Note: You can update any fields in the data JSON. Fields provided in the root level
+        (like lead_score, lead_stage) will be merged into the data JSON. If both root level
+        and data object are provided, data object takes precedence.
         """
         tenant, error_response = self._get_tenant(request)
         if error_response:
@@ -1682,40 +1684,92 @@ class PrajaLeadsAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # PUT: Full replacement - require 'data' object
-        if 'data' not in request.data or not isinstance(request.data.get('data'), dict):
-            return Response(
-                {'error': 'PUT requires a complete "data" object for full replacement. Use PATCH for partial updates.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # Start with existing data
+        data = record.data.copy() if record.data else {}
         
-        # Ensure praja_id is in the data object
-        data = request.data['data'].copy()
-        if 'praja_id' not in data:
-            data['praja_id'] = praja_id
+        # If 'data' object is provided in request, merge it (takes precedence)
+        if 'data' in request.data and isinstance(request.data.get('data'), dict):
+            data.update(request.data['data'])
         
-        # Update name if provided
-        if 'name' in request.data:
-            record.name = request.data['name']
+        # Handle single task update before processing other fields
+        if 'update_task' in request.data:
+            update_task_data = request.data['update_task']
+            if isinstance(update_task_data, dict) and 'task_name' in update_task_data:
+                task_name = update_task_data['task_name']
+                new_status = update_task_data.get('status')
+                
+                # Get existing tasks or initialize empty list
+                tasks = data.get('tasks', [])
+                if not isinstance(tasks, list):
+                    tasks = []
+                
+                # Find and update the specific task
+                task_found = False
+                for i, task in enumerate(tasks):
+                    if isinstance(task, dict) and task.get('task') == task_name:
+                        if new_status is not None:
+                            tasks[i]['status'] = new_status
+                        task_found = True
+                        break
+                
+                # If task not found, add it
+                if not task_found and new_status is not None:
+                    tasks.append({'task': task_name, 'status': new_status})
+                
+                data['tasks'] = tasks
         
-        # Full replacement of data field
+        # Also allow root-level fields to be merged into data
+        # Common fields that should go into data JSON
+        root_fields_to_data = ['name', 'lead_score', 'lead_stage', 'latest_remarks', 'next_call_at', 
+                               'assigned_to', 'call_attempts', 'last_active_date_time',
+                               'disqualification_reason', 'poster', 'phone_number', 'tasks']
+        
+        for field in root_fields_to_data:
+            if field in request.data:
+                data[field] = request.data[field]
+        
+        # Update the data JSONB field
         record.data = data
         record.updated_at = timezone.now()
         
         # Determine which fields to update
         update_fields = ['data', 'updated_at']
-        if 'name' in request.data:
-            update_fields.append('name')
         
         record.save(update_fields=update_fields)
         
         logger.info(
-            "[PrajaLeadsAPI] Updated %s (PUT - full replacement): id=%s praja_id=%s tenant=%s",
+            "[PrajaLeadsAPI] Updated %s: id=%s praja_id=%s tenant=%s fields=%s",
             entity_type,
             record.id,
             praja_id,
-            tenant.slug
+            tenant.slug,
+            list(request.data.keys())
         )
+        # Recalculate and save lead score automatically (overwrites any manually set score)
+        try:
+            from .scoring import calculate_and_update_lead_score
+            score = calculate_and_update_lead_score(record, tenant_id=tenant.id, save=True)
+            logger.info(
+                "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s score=%s fields=%s",
+                record.id,
+                praja_id,
+                tenant.slug,
+                score,
+                list(request.data.keys())
+            )
+        except Exception as e:
+            logger.error(f"[PrajaLeadsAPI] Error calculating lead score for updated lead {record.id}: {e}")
+            # Don't fail the request if scoring fails, just log the error
+            logger.info(
+                "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s fields=%s (scoring failed)",
+                record.id,
+                praja_id,
+                tenant.slug,
+                list(request.data.keys())
+            )
+        
+        # Refresh record from DB to get updated score
+        record.refresh_from_db()
         
         return Response(
             RecordSerializer(record).data,
@@ -1764,7 +1818,7 @@ class PrajaLeadsAPIView(APIView):
             )
         
         record_id_for_log = record.id
-        record_name = record.name
+        record_name = (record.data or {}).get('name', '') if isinstance(record.data, dict) else ''
         record.delete()
         
         logger.info(
@@ -1942,8 +1996,8 @@ class EntityTypeAttributesView(TenantScopedMixin, APIView):
                 "id",
                 "tenant_id",
                 "entity_type",
-                "name",
                 "data",
+                "data.name",
                 "data.praja_id",
                 "data.lead_score",
                 ...

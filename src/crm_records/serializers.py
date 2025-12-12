@@ -15,7 +15,6 @@ class RecordSerializer(serializers.ModelSerializer):
             "id", 
             "tenant_id", 
             "entity_type", 
-            "name", 
             "data", 
             "created_at", 
             "updated_at"
