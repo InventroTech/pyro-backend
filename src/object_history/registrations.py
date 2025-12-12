@@ -23,8 +23,7 @@ register(
     Record,
     track_fields=[
         "entity_type",
-        "name",
-        "data",  # include JSON payload for diffs
+        "data",  # include JSON payload for diffs (name is now stored inside data)
         "tenant_id",
     ],
     redact_fields=set(),
