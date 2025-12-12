@@ -23,6 +23,11 @@ class UserSettings(models.Model):
     value = models.JSONField(
         help_text="The setting value (e.g., ['LEAD_TYPE_1', 'LEAD_TYPE_2'])"
     )
+    daily_target = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Daily target for the user"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

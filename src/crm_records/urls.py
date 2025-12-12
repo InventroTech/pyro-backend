@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView
+from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 from .public_views import PublicJobsView, PublicJobApplicationView
 
@@ -26,12 +26,17 @@ urlpatterns = [
     # Lead statistics
     path("leads/stats/", LeadStatsView.as_view(), name="lead-stats"),
     
-    # External API endpoint - Single endpoint for all CRUD operations
-    # POST: CREATE, GET: READ, PATCH: UPDATE score, DELETE: DELETE
-    path("external/leads/", PrajaLeadsAPIView.as_view(), name="external-leads"),
+    # Lead scoring endpoint
+    path("leads/score/", LeadScoringView.as_view(), name="lead-scoring"),
     
     # Public endpoints - NO authentication required
     path("public/jobs/", PublicJobsView.as_view(), name="public-jobs"),
     path("public/applications/", PublicJobApplicationView.as_view(), name="public-applications"),
+    
+    # Entity Type Schema endpoints
+    path("entity-schemas/", EntityTypeSchemaListCreateView.as_view(), name="entity-schema-list-create"),
+    path("entity-schemas/<int:pk>/", EntityTypeSchemaDetailView.as_view(), name="entity-schema-detail"),
+    path("entity-schemas/by-type/", EntityTypeSchemaByTypeView.as_view(), name="entity-schema-by-type"),
+    path("entity-attributes/", EntityTypeAttributesView.as_view(), name="entity-attributes"),
     
 ]

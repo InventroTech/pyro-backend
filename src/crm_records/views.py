@@ -14,12 +14,14 @@ from drf_spectacular.types import OpenApiTypes
 import logging
 
 logger = logging.getLogger(__name__)
-from .models import Record, EventLog, RuleSet, RuleExecutionLog
-from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer
+from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema
+from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
+from .scoring import calculate_and_update_lead_score
 from user_settings.models import UserSettings
 from .permissions import HasPrajaSecret
+from support_ticket.services import MixpanelService
 
 
 class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
@@ -36,11 +38,13 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         Query Parameters:
         - entity_type: Filter by entity type
         - resolution_status: Filter by resolution_status in data JSON
+        - affiliated_party: Filter by affiliated_party in data JSON (supports comma-separated values: ?affiliated_party=value1,value2)
         - Any other field: Will be searched in the data JSON field
         
         Examples:
         - ?entity_type=lead&resolution_status=WIP
         - ?entity_type=ticket&resolution_status=Scheduled
+        - ?affiliated_party=Channel Partner,Direct
         - ?priority=high&status=active
         """
         queryset = super().get_queryset()
@@ -53,14 +57,9 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         if entity_type:
             queryset = queryset.filter(entity_type=entity_type)
         
-        # Filter by name (direct model field)
-        name = query_params.get('name')
-        if name:
-            queryset = queryset.filter(name__icontains=name)
-        
         # Dynamic filtering on data JSON field
         # Get all query params except known model fields
-        model_fields = {'entity_type', 'name', 'search', 'search_fields', 'page', 'page_size', 'ordering', 'created_at__gte', 'created_at__lte'}
+        model_fields = {'entity_type', 'search', 'search_fields', 'page', 'page_size', 'ordering', 'created_at__gte', 'created_at__lte'}
         data_filters = {k: v for k, v in query_params.items() if k not in model_fields}
         
         # Build Q objects for JSON field filtering
@@ -111,16 +110,16 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 
                 for field in field_list:
                     # Determine if it's a normal model field or a JSONB field
-                    if field in ['name', 'entity_type', 'created_at', 'updated_at']:
+                    if field in ['entity_type', 'created_at', 'updated_at']:
                         # Normal model fields
                         q_search |= Q(**{f"{field}__icontains": search_term})
                     else:
-                        # JSONB fields in data column
+                        # JSONB fields in data column (including name)
                         q_search |= Q(**{f"data__{field}__icontains": search_term})
             else:
                 # Fallback: search across all available fields
                 # Search in normal model fields
-                q_search |= Q(name__icontains=search_term)
+                # Note: name is now in data column, so it will be searched via data__name below
                 
                 # Search in JSONB fields - we'll search in common fields and any existing data
                 # Get all unique keys from existing data to search in
@@ -130,6 +129,9 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                     record.data.keys() for record in queryset if isinstance(record.data, dict)
                 ))
                 common_json_fields = list(all_data_keys)
+                # Always include 'name' in search since it's now in data column
+                if 'name' not in common_json_fields:
+                    common_json_fields.append('name')
                 for field in common_json_fields:
                     q_search |= Q(**{f"data__{field}__icontains": search_term})
                 
@@ -145,6 +147,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         """
         Create record with tenant and entity_type assignment.
         entity_type can come from query params or request body.
+        Automatically calculates and saves lead score if entity_type is 'lead'.
         """
         # Get entity_type from query params or request data
         entity_type = self.request.query_params.get('entity_type')
@@ -156,10 +159,20 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 'entity_type': 'This field is required. Provide it in query params or request body.'
             })
         
-        serializer.save(
+        record = serializer.save(
             tenant=self.request.tenant,
             entity_type=entity_type
         )
+        
+        # Calculate and save lead score if entity_type is 'lead'
+        if entity_type == 'lead':
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(record, tenant_id=self.request.tenant.id, save=True)
+                logger.debug(f"RecordListCreateView: Calculated lead score {score} for new lead {record.id}")
+            except Exception as e:
+                logger.error(f"RecordListCreateView: Error calculating lead score for new lead {record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
     
     def put(self, request, *args, **kwargs):
         """
@@ -213,7 +226,87 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         serializer.is_valid(raise_exception=True)
         
         # Preserve tenant (don't allow changing tenant)
-        serializer.save(tenant=self.request.tenant)
+        updated_record = serializer.save(tenant=self.request.tenant)
+        
+        # Calculate and save lead score if entity_type is 'lead'
+        if updated_record.entity_type == 'lead':
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(updated_record, tenant_id=self.request.tenant.id, save=True)
+                logger.debug(f"RecordListCreateView: Calculated lead score {score} for updated lead {updated_record.id}")
+                # Refresh serializer data to include updated score
+                serializer = self.get_serializer(updated_record)
+            except Exception as e:
+                logger.error(f"RecordListCreateView: Error calculating lead score for updated lead {updated_record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
+        
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    def patch(self, request, *args, **kwargs):
+        """
+        Partially update an existing record by record_id.
+        
+        Record ID can be provided in:
+        1. URL path: /crm-records/records/123 (if URL is configured with <int:pk>)
+        2. Query parameter: /crm-records/records/?record_id=123
+        3. Request body: {"record_id": 123, ...}
+        
+        Expected payload:
+        {
+            "record_id": 123,  // optional if provided in URL/query
+            "name": "Updated Name",  // partial update - only include fields to update
+            "data": {"updated": "fields"},
+            "entity_type": "lead"  // optional
+        }
+        """
+        # Try to get record_id from multiple sources
+        record_id = None
+        
+        # 1. Try URL parameter (if configured as /records/<int:pk>/)
+        if 'pk' in kwargs:
+            record_id = kwargs['pk']
+        
+        # 2. Try query parameter
+        if not record_id:
+            record_id = request.query_params.get('record_id')
+        
+        # 3. Try request body
+        if not record_id:
+            record_id = request.data.get('record_id')
+        
+        if not record_id:
+            return Response(
+                {'error': 'record_id is required for updates. Provide it in URL, query parameter, or request body.'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Get the record within tenant scope
+            record = self.get_queryset().get(id=record_id)
+        except Record.DoesNotExist:
+            return Response(
+                {'error': f'Record with id {record_id} not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Partially update the record
+        serializer = self.get_serializer(record, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        
+        # Preserve tenant (don't allow changing tenant)
+        updated_record = serializer.save(tenant=self.request.tenant)
+        
+        # Calculate and save lead score if entity_type is 'lead'
+        if updated_record.entity_type == 'lead':
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(updated_record, tenant_id=self.request.tenant.id, save=True)
+                logger.debug(f"RecordListCreateView: Calculated lead score {score} for patched lead {updated_record.id}")
+                # Refresh serializer data to include updated score
+                serializer = self.get_serializer(updated_record)
+            except Exception as e:
+                logger.error(f"RecordListCreateView: Error calculating lead score for patched lead {updated_record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
         
         return Response(serializer.data, status=status.HTTP_200_OK)
     
@@ -245,7 +338,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         # Delete the record
         record_data = {
             'id': record.id,
-            'name': record.name,
+            'name': (record.data or {}).get('name', '') if isinstance(record.data, dict) else '',
             'entity_type': record.entity_type,
             'tenant_id': str(record.tenant_id)
         }
@@ -282,6 +375,22 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
 
         # Fallback: use default URL kwarg (pk)
         return super().get_object()
+    
+    def perform_update(self, serializer):
+        """
+        Update record and calculate lead score if entity_type is 'lead'.
+        """
+        updated_record = serializer.save()
+        
+        # Calculate and save lead score if entity_type is 'lead'
+        if updated_record.entity_type == 'lead':
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(updated_record, tenant_id=self.request.tenant.id, save=True)
+                logger.debug(f"RecordDetailView: Calculated lead score {score} for updated lead {updated_record.id}")
+            except Exception as e:
+                logger.error(f"RecordDetailView: Error calculating lead score for updated lead {updated_record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
 
 
 class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
@@ -303,11 +412,21 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
         return queryset
     
     def perform_create(self, serializer):
-        """Create record with tenant and the specific entity type."""
-        serializer.save(
+        """Create record with tenant and the specific entity type. Automatically calculates lead score if entity_type is 'lead'."""
+        record = serializer.save(
             tenant=self.request.tenant,
             entity_type=self.entity_type
         )
+        
+        # Calculate and save lead score if entity_type is 'lead'
+        if self.entity_type == 'lead':
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(record, tenant_id=self.request.tenant.id, save=True)
+                logger.debug(f"EntityProxyView: Calculated lead score {score} for new lead {record.id}")
+            except Exception as e:
+                logger.error(f"EntityProxyView: Error calculating lead score for new lead {record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
 
 
 class RecordEventView(TenantScopedMixin, APIView):
@@ -697,9 +816,9 @@ class GetNextLeadView(APIView):
     QUEUEABLE_STATUSES = ('in_queue', 'assigned', 'call_later', 'scheduled')
     ASSIGNED_STATUS = 'assigned'
     
-    def _poster_aliases(self, lead_type: str):
+    def _affiliated_party_aliases(self, lead_type: str):
         """
-        Normalize known poster type typos/synonyms so filtering matches real data.
+        Normalize known affiliated party type typos/synonyms so filtering matches real data.
         Keep both canonical and legacy spellings to be safe.
         """
         aliases = {
@@ -709,30 +828,56 @@ class GetNextLeadView(APIView):
         }
         return aliases.get(lead_type, [lead_type])
     
-    def _order_by_score(self, qs):
+    def _order_by_score(self, qs, now_iso=None):
         """
-        Order queryset by lead score (if exists in data), then creation date.
+        Order queryset with priority: expired snoozed leads first, then by lead score, then creation date.
         Higher scores first (100, 90, 80, etc. - descending), then older creation dates.
         """
+        # Priority 1: Expired snoozed leads (lead_stage='SNOOZED' AND next_call_at <= now)
+        # Priority 2: Regular leads ordered by score
         # Order by score if it exists in the data field, then by creation date
         # Using PostgreSQL JSONB operators for ordering
         # Score ordering: 100, 90, 80, 70, etc. (descending)
-        qs = qs.extra(
-            select={
-                'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
-            }
-        ).order_by(
-            F('lead_score').desc(nulls_last=True),  # Descending: 100, 90, 80, etc.
-            'created_at',
-            'id'
-        )
+        if now_iso:
+            qs = qs.extra(
+                select={
+                    'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
+                    'is_expired_snoozed': """
+                        CASE 
+                            WHEN data->>'lead_stage' = 'SNOOZED' 
+                            AND data->>'next_call_at' IS NOT NULL 
+                            AND data->>'next_call_at' != '' 
+                            AND data->>'next_call_at' != 'null'
+                            AND (data->>'next_call_at')::timestamptz <= NOW()
+                            THEN 0
+                            ELSE 1
+                        END
+                    """,
+                }
+            ).order_by(
+                'is_expired_snoozed',  # Expired snoozed leads first (0), then others (1)
+                F('lead_score').desc(nulls_last=True),  # Descending: 100, 90, 80, etc.
+                'created_at',
+                'id'
+            )
+        else:
+            # Fallback when now_iso is not provided - just order by score
+            qs = qs.extra(
+                select={
+                    'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
+                }
+            ).order_by(
+                F('lead_score').desc(nulls_last=True),  # Descending: 100, 90, 80, etc.
+                'created_at',
+                'id'
+            )
         return qs
     
     @extend_schema(
         summary="Get next lead from queue",
         description="Atomically fetches and assigns the next available lead from the queue for CRM records. "
                    "Logic: 1) Get user's info from request 2) Check RM's eligible lead types from user settings "
-                   "3) Filter leads by eligible lead types (poster field) 4) Order by lead score (100, 90, 80 descending) "
+                   "3) Filter leads by eligible lead types (affiliated_party field) 4) Order by lead score (100, 90, 80 descending) "
                    "5) Return first entry.",
         responses={
             200: OpenApiResponse(
@@ -748,8 +893,7 @@ class GetNextLeadView(APIView):
                                 "name": "John Doe",
                                 "data": {
                                     "lead_stage": "assigned",
-                                    "customer_full_name": "John Doe",
-                                    "user_id": "USR123456",
+                                    "praja_id": "PRAJA123456",
                                     "phone_number": "+919876543210",
                                     "lead_score": 85.5,
                                     "assigned_to": "user123",
@@ -804,6 +948,11 @@ class GetNextLeadView(APIView):
 
         logger.info("[GetNextLead] Getting next lead for user: %s", user_identifier)
 
+        # Get current time for checking snoozed leads expiration
+        from django.utils import timezone
+        now = timezone.now()
+        now_iso = now.isoformat()
+
         # Step 2: Check the RM is eligible for what leads - get from user settings
         eligible_lead_types = []
         user_uuid = None
@@ -845,12 +994,22 @@ class GetNextLeadView(APIView):
             
             # --- Enhanced Logging Block ---
             from django.db.models import Q
-            # Count all leads in any queueable state regardless of assignment
+            # Count all leads in any queueable state regardless of assignment (including expired snoozed)
             possible_leads_cnt = Record.objects.filter(
                 tenant=tenant,
                 entity_type='lead'
-            ).filter(
-                Q(data__lead_stage__in=self.QUEUEABLE_STATUSES) | Q(data__lead_stage__isnull=True)
+            ).extra(
+                where=["""
+                    data->>'lead_stage' IN ('in_queue', 'assigned', 'call_later', 'scheduled')
+                    OR data->>'lead_stage' IS NULL
+                    OR (
+                        data->>'lead_stage' = 'SNOOZED'
+                        AND data->>'next_call_at' IS NOT NULL
+                        AND data->>'next_call_at' != ''
+                        AND data->>'next_call_at' != 'null'
+                        AND (data->>'next_call_at')::timestamptz <= NOW()
+                    )
+                """]
             ).count()
             # Count those unassigned
             possible_unassigned_cnt = Record.objects.filter(
@@ -865,46 +1024,77 @@ class GetNextLeadView(APIView):
                          data->>'assigned_to' = 'None')
                         OR data->>'lead_stage' = 'in_queue'
                     )
-                    AND data->>'poster' IS NOT NULL
-                    AND data->>'poster' != ''
-                    AND data->>'poster' != 'null'
+                    AND data->>'affiliated_party' IS NOT NULL
+                    AND data->>'affiliated_party' != ''
+                    AND data->>'affiliated_party' != 'null'
+                    AND (
+                        data->>'lead_stage' IN ('in_queue', 'assigned', 'call_later', 'scheduled')
+                        OR data->>'lead_stage' IS NULL
+                        OR (
+                            data->>'lead_stage' = 'SNOOZED'
+                            AND data->>'next_call_at' IS NOT NULL
+                            AND data->>'next_call_at' != ''
+                            AND data->>'next_call_at' != 'null'
+                            AND (data->>'next_call_at')::timestamptz <= NOW()
+                        )
+                    )
                 """]
-            ).filter(
-                Q(data__lead_stage__in=self.QUEUEABLE_STATUSES) | Q(data__lead_stage__isnull=True)
             ).count()
             logger.info("[GetNextLead] Diagnostic: queueable leads for tenant=%s: count_in_queueable_state=%d, count_unassigned=%d, eligible_lead_types=None", tenant, possible_leads_cnt, possible_unassigned_cnt)
             # --- End Enhanced Logging Block ---
             
             return Response({}, status=status.HTTP_200_OK)
 
-        # Step 3: Filter leads by eligible lead types (poster field) and unassigned status
+        # Step 3: Filter leads by eligible lead types (affiliated_party field) and unassigned status
         from django.db.models import Q
+        
         base_qs = Record.objects.filter(
             tenant=tenant,
             entity_type='lead'
         ).extra(
             where=["""
                 (
+                    -- Unassigned leads
                     (data->>'assigned_to' IS NULL OR 
                      data->>'assigned_to' = '' OR
                      data->>'assigned_to' = 'null' OR
                      data->>'assigned_to' = 'None')
+                    -- OR in_queue status (can be assigned or unassigned)
                     OR data->>'lead_stage' = 'in_queue'
+                    -- OR expired snoozed leads (should be available regardless of assigned_to)
+                    OR (
+                        data->>'lead_stage' = 'SNOOZED'
+                        AND data->>'next_call_at' IS NOT NULL
+                        AND data->>'next_call_at' != ''
+                        AND data->>'next_call_at' != 'null'
+                        AND (data->>'next_call_at')::timestamptz <= NOW()
+                    )
                 )
-                AND data->>'poster' IS NOT NULL
-                AND data->>'poster' != ''
-                AND data->>'poster' != 'null'
-            """]
-        ).filter(
-            Q(data__lead_stage__in=self.QUEUEABLE_STATUSES) | Q(data__lead_stage__isnull=True)
+                AND data->>'affiliated_party' IS NOT NULL
+                AND data->>'affiliated_party' != ''
+                AND data->>'affiliated_party' != 'null'
+                AND (
+                    -- Regular queueable statuses
+                    data->>'lead_stage' IN ('in_queue', 'assigned', 'call_later', 'scheduled')
+                    OR data->>'lead_stage' IS NULL
+                    -- OR snoozed leads where next_call_at has passed
+                    OR (
+                        data->>'lead_stage' = 'SNOOZED'
+                        AND data->>'next_call_at' IS NOT NULL
+                        AND data->>'next_call_at' != ''
+                        AND data->>'next_call_at' != 'null'
+                        AND (data->>'next_call_at')::timestamptz <= NOW()
+                    )
+                )
+                """]
         )
 
-        # Filter by eligible lead types (poster field must match one of the eligible types)
-        poster_filter = Q()
+        # Filter by eligible lead types (affiliated_party field must match one of the eligible types)
+        affiliated_party_filter = Q()
         for lead_type in eligible_lead_types:
-            for alias in self._poster_aliases(lead_type):
-                poster_filter |= Q(data__poster=alias)
-        unassigned = base_qs.filter(poster_filter)
+            for alias in self._affiliated_party_aliases(lead_type):
+                affiliated_party_filter |= Q(data__affiliated_party=alias)
+        unassigned = base_qs.filter(affiliated_party_filter)
 
         logger.info("[GetNextLead] Filtered unassigned leads by eligible types: %s", eligible_lead_types)
 
@@ -916,7 +1106,7 @@ class GetNextLeadView(APIView):
 
         if unassigned_cnt == 0 and total_unassigned_cnt > 0:
             # There are unassigned queueable leads, but none matching the user's eligible lead types
-            lead_types_in_queue = list(base_qs.values_list("data__poster", flat=True).distinct())
+            lead_types_in_queue = list(base_qs.values_list("data__affiliated_party", flat=True).distinct())
             logger.info(
                 "[GetNextLead] No unassigned leads matching user's eligible types. Present types in queueable/unassigned leads: %s. User eligible types: %s",
                 lead_types_in_queue, eligible_lead_types
@@ -924,32 +1114,90 @@ class GetNextLeadView(APIView):
         elif total_unassigned_cnt == 0:
             logger.info("[GetNextLead] There are currently no unassigned leads in any queueable status for tenant=%s", tenant)
             # Relaxed fallback: drop lead_stage filter to recover from inconsistent/missing stages
+            # But still include snoozed leads where next_call_at has passed
             relaxed_qs = Record.objects.filter(
                 tenant=tenant,
                 entity_type='lead'
             ).extra(
                 where=["""
                     (
+                        -- Unassigned leads
                         (data->>'assigned_to' IS NULL OR 
                          data->>'assigned_to' = '' OR
                          data->>'assigned_to' = 'null' OR
                          data->>'assigned_to' = 'None')
+                        -- OR in_queue status (can be assigned or unassigned)
                         OR data->>'lead_stage' = 'in_queue'
+                        -- OR expired snoozed leads (should be available regardless of assigned_to)
+                        OR (
+                            data->>'lead_stage' = 'SNOOZED'
+                            AND data->>'next_call_at' IS NOT NULL
+                            AND data->>'next_call_at' != ''
+                            AND data->>'next_call_at' != 'null'
+                            AND (data->>'next_call_at')::timestamptz <= NOW()
+                        )
                     )
-                    AND data->>'poster' IS NOT NULL
-                    AND data->>'poster' != ''
-                    AND data->>'poster' != 'null'
+                    AND data->>'affiliated_party' IS NOT NULL
+                    AND data->>'affiliated_party' != ''
+                    AND data->>'affiliated_party' != 'null'
+                    AND (
+                        -- Regular queueable statuses
+                        data->>'lead_stage' IN ('in_queue', 'assigned', 'call_later', 'scheduled')
+                        OR data->>'lead_stage' IS NULL
+                        -- OR snoozed leads where next_call_at has passed
+                        OR (
+                            data->>'lead_stage' = 'SNOOZED'
+                            AND data->>'next_call_at' IS NOT NULL
+                            AND data->>'next_call_at' != ''
+                            AND data->>'next_call_at' != 'null'
+                            AND (data->>'next_call_at')::timestamptz <= NOW()
+                        )
+                    )
                 """]
             )
-            relaxed_unassigned = relaxed_qs.filter(poster_filter)
+            relaxed_unassigned = relaxed_qs.filter(affiliated_party_filter)
             relaxed_cnt = relaxed_unassigned.count()
             if relaxed_cnt > 0:
                 logger.info("[GetNextLead] Relaxed fallback found %d unassigned leads ignoring lead_stage filter", relaxed_cnt)
                 unassigned = relaxed_unassigned
                 unassigned_cnt = relaxed_cnt
 
-        # Step 4: Order by lead score (descending: 100, 90, 80, etc.)
-        candidate = self._order_by_score(unassigned).first()
+        # Step 4: Order by priority (expired snoozed first), then lead score (descending: 100, 90, 80, etc.)
+        # Log snoozed leads count for debugging (check before affiliated_party filter)
+        all_snoozed_count = Record.objects.filter(
+            tenant=tenant,
+            entity_type='lead',
+            data__lead_stage='SNOOZED'
+        ).count()
+        expired_snoozed_before_filter = Record.objects.filter(
+            tenant=tenant,
+            entity_type='lead'
+        ).extra(
+            where=["""
+                data->>'lead_stage' = 'SNOOZED'
+                AND data->>'next_call_at' IS NOT NULL
+                AND data->>'next_call_at' != ''
+                AND data->>'next_call_at' != 'null'
+                AND (data->>'next_call_at')::timestamptz <= NOW()
+            """]
+        ).count()
+        # Check after affiliated_party filter
+        snoozed_count = unassigned.filter(data__lead_stage='SNOOZED').count()
+        expired_snoozed_count = unassigned.extra(
+            where=["""
+                data->>'lead_stage' = 'SNOOZED'
+                AND data->>'next_call_at' IS NOT NULL
+                AND data->>'next_call_at' != ''
+                AND data->>'next_call_at' != 'null'
+                AND (data->>'next_call_at')::timestamptz <= NOW()
+            """]
+        ).count()
+        logger.info(
+            "[GetNextLead] Snoozed leads: all_snoozed=%d, expired_before_filter=%d, expired_after_affiliated_party_filter=%d, now=%s",
+            all_snoozed_count, expired_snoozed_before_filter, expired_snoozed_count, now_iso
+        )
+        
+        candidate = self._order_by_score(unassigned, now_iso).first()
 
         # Step 5: Return first entry (or empty if none found)
 
@@ -994,12 +1242,12 @@ class GetNextLeadView(APIView):
         # Map data fields to top-level for backward compatibility with defaults
         flattened_response = {
             "id": candidate_locked.id,
-            "name": candidate_locked.name or lead_data.get('customer_full_name') or '',
+            "name": (candidate_locked.data or {}).get('name', '') if isinstance(candidate_locked.data, dict) else '',
             "phone_no": lead_data.get('phone_number', ''),
-            "user_id": lead_data.get('user_id'),
+            "praja_id": lead_data.get('praja_id'),
             "lead_status": lead_data.get('lead_stage') or '',
             "lead_score": lead_data.get('lead_score'),
-            "lead_type": lead_data.get('poster'),
+            "lead_type": lead_data.get('affiliated_party') or lead_data.get('poster'),  # Prefer affiliated_party, fallback to poster for backward compatibility
             "assigned_to": lead_data.get('assigned_to'),
             "attempt_count": lead_data.get('call_attempts', 0),
             "last_call_outcome": lead_data.get('last_call_outcome'),
@@ -1038,11 +1286,14 @@ class PrajaLeadsAPIView(APIView):
     """
     Single API endpoint for all lead CRUD operations.
     
-    Supports 4 operations via different methods:
+    Supports 5 operations via different methods:
     - POST: CREATE a new lead
     - GET: READ all leads (with optional filters)
-    - PATCH: UPDATE lead score (requires lead_id in query or body)
-    - DELETE: DELETE a lead (requires lead_id in query or body)
+    - PATCH: UPDATE lead fields (partial update, requires praja_id in query or body)
+    - PUT: UPDATE lead fields (full/partial update, requires praja_id in query or body)
+    - DELETE: DELETE a lead (requires praja_id in query or body)
+    
+    Note: praja_id should be stored in the data JSON field when creating leads.
     
     Requires X-Secret-Praja header for authentication.
     Automatically uses DEFAULT_TENANT_SLUG from settings (no X-Tenant-Slug header needed).
@@ -1050,6 +1301,11 @@ class PrajaLeadsAPIView(APIView):
     """
     authentication_classes = []  # No authentication required - only secret header
     permission_classes = [HasPrajaSecret]
+    
+    def get_entity_type(self, request):
+        """Get entity_type from query params, request body, or default to 'lead'"""
+        entity_type = request.query_params.get('entity') or request.data.get('entity_type')
+        return entity_type if entity_type else 'lead'
     
     def _get_tenant(self, request):
         """Helper to get tenant - uses default tenant from settings (no header required)"""
@@ -1082,31 +1338,73 @@ class PrajaLeadsAPIView(APIView):
         {
             "name": "Customer Name",
             "data": {
-                "customer_full_name": "Customer Name",
+                "praja_id": "PRAJA123",  # Required: unique identifier for Praja system
                 "phone_number": "+1234567890",
                 "lead_score": 85,
                 "lead_stage": "in_queue",
                 "poster": "free"
             }
         }
+        
+        Note: praja_id in the data field is required for UPDATE and DELETE operations.
         """
         tenant, error_response = self._get_tenant(request)
         if error_response:
             return error_response
         
-        serializer = RecordSerializer(data=request.data)
+        entity_type = self.get_entity_type(request)
+        
+        # Move name from root level to data if provided (root level takes precedence over data.name)
+        request_data = request.data.copy()
+        if 'name' in request_data:
+            # Ensure data is a dict
+            if 'data' not in request_data:
+                request_data['data'] = {}
+            elif not isinstance(request_data['data'], dict):
+                request_data['data'] = {}
+            # Move name from root to data (overwrites if name already exists in data)
+            request_data['data']['name'] = request_data.pop('name')
+        
+        serializer = RecordSerializer(data=request_data)
         if serializer.is_valid():
             record = serializer.save(
                 tenant=tenant,
-                entity_type='lead'
+                entity_type=entity_type
             )
             
+            # Get name from data for logging
+            record_name = (record.data or {}).get('name', '')
+            
             logger.info(
-                "[PrajaLeadsAPI] Created lead: id=%s tenant=%s name=%s",
+                "[PrajaLeadsAPI] Created %s: id=%s tenant=%s name=%s",
+                entity_type,
                 record.id,
                 tenant.slug,
-                record.name
+                record_name
             )
+            # Calculate and save lead score automatically
+            try:
+                from .scoring import calculate_and_update_lead_score
+                score = calculate_and_update_lead_score(record, tenant_id=tenant.id, save=True)
+                logger.info(
+                    "[PrajaLeadsAPI] Created lead: id=%s tenant=%s name=%s score=%s",
+                    record.id,
+                    tenant.slug,
+                    record_name,
+                    score
+                )
+            except Exception as e:
+                logger.error(f"[PrajaLeadsAPI] Error calculating lead score for lead {record.id}: {e}")
+                # Don't fail the request if scoring fails, just log the error
+                logger.info(
+                    "[PrajaLeadsAPI] Created lead: id=%s tenant=%s name=%s (scoring failed)",
+                    record.id,
+                    tenant.slug,
+                    record_name
+                )
+            
+            # Refresh record from DB to get updated score
+            record.refresh_from_db()
             
             return Response(
                 RecordSerializer(record).data,
@@ -1120,42 +1418,45 @@ class PrajaLeadsAPIView(APIView):
     
     def get(self, request):
         """
-        READ - Get all leads for the specified tenant.
+        READ - Get all entity records for the specified tenant.
         
         Query parameters:
-        - lead_id: Get specific lead by ID (optional)
+        - entity: Entity type (e.g., 'lead', 'ticket') - defaults to 'lead' if not provided
+        - record_id or lead_id: Get specific record by ID (optional)
         - page: Page number for pagination
         - page_size: Items per page
         - lead_stage: Filter by lead_stage (optional)
-        - poster: Filter by poster/lead_type (optional)
+        - affiliated_party: Filter by affiliated_party/lead_type (optional)
         """
         tenant, error_response = self._get_tenant(request)
         if error_response:
             return error_response
         
-        # If lead_id is provided, return single lead
-        lead_id = request.query_params.get('lead_id')
-        if lead_id:
+        entity_type = self.get_entity_type(request)
+        
+        # If record_id or lead_id is provided, return single record
+        record_id = request.query_params.get('record_id') or request.query_params.get('lead_id')
+        if record_id:
             try:
-                lead = Record.objects.get(
-                    id=lead_id,
+                record = Record.objects.get(
+                    id=record_id,
                     tenant=tenant,
-                    entity_type='lead'
+                    entity_type=entity_type
                 )
                 return Response(
-                    RecordSerializer(lead).data,
+                    RecordSerializer(record).data,
                     status=status.HTTP_200_OK
                 )
             except Record.DoesNotExist:
                 return Response(
-                    {'error': f'Lead with id {lead_id} not found'},
+                    {'error': f'{entity_type.capitalize()} with id {record_id} not found'},
                     status=status.HTTP_404_NOT_FOUND
                 )
         
-        # Get all leads for this tenant
+        # Get all records for this tenant and entity type
         queryset = Record.objects.filter(
             tenant=tenant,
-            entity_type='lead'
+            entity_type=entity_type
         )
         
         # Optional filters
@@ -1163,9 +1464,9 @@ class PrajaLeadsAPIView(APIView):
         if lead_stage:
             queryset = queryset.filter(data__lead_stage=lead_stage)
         
-        poster = request.query_params.get('poster')
-        if poster:
-            queryset = queryset.filter(data__poster=poster)
+        affiliated_party = request.query_params.get('affiliated_party')
+        if affiliated_party:
+            queryset = queryset.filter(data__affiliated_party=affiliated_party)
         
         # Order by creation date (newest first)
         queryset = queryset.order_by('-created_at')
@@ -1187,71 +1488,293 @@ class PrajaLeadsAPIView(APIView):
     
     def patch(self, request):
         """
-        UPDATE - Update lead score.
+        UPDATE - Update lead fields.
         
-        Query parameter or body: lead_id (required)
+        Query parameter or body: praja_id (required) - uses praja_id from data field to identify lead
         Body:
         {
-            "lead_id": 123,  # or use ?lead_id=123 in URL
-            "lead_score": 95
+            "praja_id": "PRAJA123",  # or use ?praja_id=PRAJA123 in URL
+            "lead_score": 95,  # Optional: update lead_score
+            "lead_stage": "assigned",  # Optional: update lead_stage
+            "name": "Updated Name",  # Optional: update name
+            "data": {  # Optional: update any fields in data JSON
+                "lead_score": 95,
+                "lead_stage": "assigned",
+                "latest_remarks": "Updated remarks",
+                "next_call_at": "2025-12-15T10:00:00Z"
+            }
         }
+        
+        Note: You can update any fields in the data JSON. Fields provided in the root level
+        (like lead_score, lead_stage) will be merged into the data JSON. If both root level
+        and data object are provided, data object takes precedence.
         """
         tenant, error_response = self._get_tenant(request)
         if error_response:
             return error_response
         
-        # Get lead_id from query params or body
-        lead_id = request.query_params.get('lead_id') or request.data.get('lead_id')
-        if not lead_id:
+        # Get praja_id from query params or body
+        praja_id = request.query_params.get('praja_id') or request.data.get('praja_id')
+        if not praja_id:
             return Response(
-                {'error': 'lead_id is required (in query param or body)'},
+                {'error': 'praja_id is required (in query param or body)'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
         try:
-            lead = Record.objects.get(
-                id=lead_id,
+            record = Record.objects.get(
+                data__praja_id=praja_id,
                 tenant=tenant,
                 entity_type='lead'
             )
         except Record.DoesNotExist:
             return Response(
-                {'error': f'Lead with id {lead_id} not found'},
+                {'error': f'Lead with praja_id {praja_id} not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
-        
-        # Get lead_score from request
-        lead_score = request.data.get('lead_score')
-        if lead_score is None:
+        except Record.MultipleObjectsReturned:
             return Response(
-                {'error': 'lead_score field is required'},
+                {'error': f'Multiple leads found with praja_id {praja_id}. Please ensure praja_id is unique.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Start with existing data
+        data = record.data.copy() if record.data else {}
+        
+        # If 'data' object is provided in request, merge it (takes precedence)
+        if 'data' in request.data and isinstance(request.data.get('data'), dict):
+            data.update(request.data['data'])
+        
+        # Handle single task update before processing other fields
+        if 'update_task' in request.data:
+            update_task_data = request.data['update_task']
+            if isinstance(update_task_data, dict) and 'task_name' in update_task_data:
+                task_name = update_task_data['task_name']
+                new_status = update_task_data.get('status')
+                
+                # Get existing tasks or initialize empty list
+                tasks = data.get('tasks', [])
+                if not isinstance(tasks, list):
+                    tasks = []
+                
+                # Find and update the specific task
+                task_found = False
+                for i, task in enumerate(tasks):
+                    if isinstance(task, dict) and task.get('task') == task_name:
+                        if new_status is not None:
+                            tasks[i]['status'] = new_status
+                        task_found = True
+                        break
+                
+                # If task not found, add it
+                if not task_found and new_status is not None:
+                    tasks.append({'task': task_name, 'status': new_status})
+                
+                data['tasks'] = tasks
+        
+        # Also allow root-level fields to be merged into data
+        # Common fields that should go into data JSON
+        root_fields_to_data = ['name', 'lead_score', 'lead_stage', 'latest_remarks', 'next_call_at', 
+                               'assigned_to', 'call_attempts', 'last_active_date_time',
+                               'disqualification_reason', 'poster', 'phone_number', 'tasks']
+        
+        for field in root_fields_to_data:
+            if field in request.data:
+                data[field] = request.data[field]
+        
+        # Update the data JSONB field
+        record.data = data
+        record.updated_at = timezone.now()
+        
+        # Determine which fields to update
+        update_fields = ['data', 'updated_at']
+        
+        record.save(update_fields=update_fields)
+        
+        logger.info(
+            "[PrajaLeadsAPI] Updated %s: id=%s praja_id=%s tenant=%s fields=%s",
+            entity_type,
+            record.id,
+            praja_id,
+            tenant.slug,
+            list(request.data.keys())
+        )
+        # Recalculate and save lead score automatically (overwrites any manually set score)
+        try:
+            from .scoring import calculate_and_update_lead_score
+            score = calculate_and_update_lead_score(record, tenant_id=tenant.id, save=True)
+            logger.info(
+                "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s score=%s fields=%s",
+                record.id,
+                praja_id,
+                tenant.slug,
+                score,
+                list(request.data.keys())
+            )
+        except Exception as e:
+            logger.error(f"[PrajaLeadsAPI] Error calculating lead score for updated lead {record.id}: {e}")
+            # Don't fail the request if scoring fails, just log the error
+            logger.info(
+                "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s fields=%s (scoring failed)",
+                record.id,
+                praja_id,
+                tenant.slug,
+                list(request.data.keys())
+            )
+        
+        # Refresh record from DB to get updated score
+        record.refresh_from_db()
+        
+        return Response(
+            RecordSerializer(record).data,
+            status=status.HTTP_200_OK
+        )
+    
+    def put(self, request):
+        """
+        UPDATE - Update entity fields (PUT method).
+        
+        PUT now performs partial updates with merging, same as PATCH.
+        
+        Query parameter or body: praja_id (required) - uses praja_id from data field to identify entity
+        Body:
+        {
+            "praja_id": "PRAJA123",  # or use ?praja_id=PRAJA123 in URL
+            "lead_score": 95,  # Optional: update lead_score
+            "lead_stage": "assigned",  # Optional: update lead_stage
+            "name": "Updated Name",  # Optional: update name
+            "data": {  # Optional: update any fields in data JSON
+                "lead_score": 95,
+                "lead_stage": "assigned",
+                "latest_remarks": "Updated remarks",
+                "next_call_at": "2025-12-15T10:00:00Z"
+            }
+        }
+        
+        Note: You can update any fields in the data JSON. Fields provided in the root level
+        (like lead_score, lead_stage) will be merged into the data JSON. If both root level
+        and data object are provided, data object takes precedence.
+        """
+        tenant, error_response = self._get_tenant(request)
+        if error_response:
+            return error_response
+        
+        entity_type = self.get_entity_type(request)
+        
+        # Get praja_id from query params or body
+        praja_id = request.query_params.get('praja_id') or request.data.get('praja_id')
+        if not praja_id:
+            return Response(
+                {'error': 'praja_id is required (in query param or body)'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
         try:
-            lead_score = float(lead_score)
-        except (ValueError, TypeError):
+            record = Record.objects.get(
+                data__praja_id=praja_id,
+                tenant=tenant,
+                entity_type=entity_type
+            )
+        except Record.DoesNotExist:
             return Response(
-                {'error': 'lead_score must be a valid number'},
+                {'error': f'{entity_type.capitalize()} with praja_id {praja_id} not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Record.MultipleObjectsReturned:
+            return Response(
+                {'error': f'Multiple {entity_type}s found with praja_id {praja_id}. Please ensure praja_id is unique.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        # Start with existing data
+        data = record.data.copy() if record.data else {}
+        
+        # If 'data' object is provided in request, merge it (takes precedence)
+        if 'data' in request.data and isinstance(request.data.get('data'), dict):
+            data.update(request.data['data'])
+        
+        # Handle single task update before processing other fields
+        if 'update_task' in request.data:
+            update_task_data = request.data['update_task']
+            if isinstance(update_task_data, dict) and 'task_name' in update_task_data:
+                task_name = update_task_data['task_name']
+                new_status = update_task_data.get('status')
+                
+                # Get existing tasks or initialize empty list
+                tasks = data.get('tasks', [])
+                if not isinstance(tasks, list):
+                    tasks = []
+                
+                # Find and update the specific task
+                task_found = False
+                for i, task in enumerate(tasks):
+                    if isinstance(task, dict) and task.get('task') == task_name:
+                        if new_status is not None:
+                            tasks[i]['status'] = new_status
+                        task_found = True
+                        break
+                
+                # If task not found, add it
+                if not task_found and new_status is not None:
+                    tasks.append({'task': task_name, 'status': new_status})
+                
+                data['tasks'] = tasks
+        
+        # Also allow root-level fields to be merged into data
+        # Common fields that should go into data JSON
+        root_fields_to_data = ['name', 'lead_score', 'lead_stage', 'latest_remarks', 'next_call_at', 
+                               'assigned_to', 'call_attempts', 'last_active_date_time',
+                               'disqualification_reason', 'poster', 'phone_number', 'tasks']
+        
+        for field in root_fields_to_data:
+            if field in request.data:
+                data[field] = request.data[field]
+        
         # Update the data JSONB field
-        data = lead.data.copy() if lead.data else {}
-        data['lead_score'] = lead_score
-        lead.data = data
-        lead.updated_at = timezone.now()
-        lead.save(update_fields=['data', 'updated_at'])
+        record.data = data
+        record.updated_at = timezone.now()
+        
+        # Determine which fields to update
+        update_fields = ['data', 'updated_at']
+        
+        record.save(update_fields=update_fields)
         
         logger.info(
-            "[PrajaLeadsAPI] Updated lead score: id=%s tenant=%s score=%s",
-            lead.id,
+            "[PrajaLeadsAPI] Updated %s: id=%s praja_id=%s tenant=%s fields=%s",
+            entity_type,
+            record.id,
+            praja_id,
             tenant.slug,
-            lead_score
+            list(request.data.keys())
         )
+        # Recalculate and save lead score automatically (overwrites any manually set score)
+        try:
+            from .scoring import calculate_and_update_lead_score
+            score = calculate_and_update_lead_score(record, tenant_id=tenant.id, save=True)
+            logger.info(
+                "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s score=%s fields=%s",
+                record.id,
+                praja_id,
+                tenant.slug,
+                score,
+                list(request.data.keys())
+            )
+        except Exception as e:
+            logger.error(f"[PrajaLeadsAPI] Error calculating lead score for updated lead {record.id}: {e}")
+            # Don't fail the request if scoring fails, just log the error
+            logger.info(
+                "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s fields=%s (scoring failed)",
+                record.id,
+                praja_id,
+                tenant.slug,
+                list(request.data.keys())
+            )
+        
+        # Refresh record from DB to get updated score
+        record.refresh_from_db()
         
         return Response(
-            RecordSerializer(lead).data,
+            RecordSerializer(record).data,
             status=status.HTTP_200_OK
         )
     
@@ -1259,50 +1782,497 @@ class PrajaLeadsAPIView(APIView):
         """
         DELETE - Delete a lead remotely.
         
-        Query parameter or body: lead_id (required)
+        Query parameter or body: praja_id (required) - uses praja_id from data field to identify lead
         Body:
         {
-            "lead_id": 123  # or use ?lead_id=123 in URL
+            "praja_id": "PRAJA123"  # or use ?praja_id=PRAJA123 in URL
         }
         """
         tenant, error_response = self._get_tenant(request)
         if error_response:
             return error_response
         
-        # Get lead_id from query params or body
-        lead_id = request.query_params.get('lead_id') or request.data.get('lead_id')
-        if not lead_id:
+        entity_type = self.get_entity_type(request)
+        
+        # Get praja_id from query params or body
+        praja_id = request.query_params.get('praja_id') or request.data.get('praja_id')
+        if not praja_id:
             return Response(
-                {'error': 'lead_id is required (in query param or body)'},
+                {'error': 'praja_id is required (in query param or body)'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
         try:
-            lead = Record.objects.get(
-                id=lead_id,
+            record = Record.objects.get(
+                data__praja_id=praja_id,
                 tenant=tenant,
-                entity_type='lead'
+                entity_type=entity_type
             )
         except Record.DoesNotExist:
             return Response(
-                {'error': f'Lead with id {lead_id} not found'},
+                {'error': f'{entity_type.capitalize()} with praja_id {praja_id} not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
+        except Record.MultipleObjectsReturned:
+            return Response(
+                {'error': f'Multiple {entity_type}s found with praja_id {praja_id}. Please ensure praja_id is unique.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
-        lead_id_for_log = lead.id
-        lead_name = lead.name
-        lead.delete()
+        record_id_for_log = record.id
+        record_name = (record.data or {}).get('name', '') if isinstance(record.data, dict) else ''
+        record.delete()
         
         logger.info(
-            "[PrajaLeadsAPI] Deleted lead: id=%s tenant=%s name=%s",
-            lead_id_for_log,
+            "[PrajaLeadsAPI] Deleted %s: id=%s praja_id=%s tenant=%s name=%s",
+            entity_type,
+            record_id_for_log,
+            praja_id,
             tenant.slug,
-            lead_name
+            record_name
         )
         
         return Response(
-            {'message': f'Lead {lead_id} deleted successfully'},
+            {'message': f'{entity_type.capitalize()} with praja_id {praja_id} deleted successfully'},
             status=status.HTTP_200_OK
         )
+
+
+class EntityTypeSchemaListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
+    """
+    List all entity type schemas for the current tenant, or create a new one.
+    
+    GET /crm-records/entity-schemas/
+    POST /crm-records/entity-schemas/
+    """
+    permission_classes = [IsTenantAuthenticated]
+    serializer_class = EntityTypeSchemaSerializer
+    pagination_class = MetaPageNumberPagination
+    
+    def get_queryset(self):
+        """Return schemas filtered by tenant."""
+        return EntityTypeSchema.objects.filter(tenant=self.request.tenant).order_by('entity_type')
+    
+    def perform_create(self, serializer):
+        """Set tenant automatically on create."""
+        serializer.save(tenant=self.request.tenant)
+
+
+class EntityTypeSchemaDetailView(TenantScopedMixin, generics.RetrieveUpdateDestroyAPIView):
+    """
+    Retrieve, update, or delete an entity type schema.
+    
+    GET /crm-records/entity-schemas/{id}/
+    PUT /crm-records/entity-schemas/{id}/
+    PATCH /crm-records/entity-schemas/{id}/
+    DELETE /crm-records/entity-schemas/{id}/
+    """
+    permission_classes = [IsTenantAuthenticated]
+    serializer_class = EntityTypeSchemaSerializer
+    
+    def get_queryset(self):
+        """Return schemas filtered by tenant."""
+        return EntityTypeSchema.objects.filter(tenant=self.request.tenant)
+
+
+class EntityTypeSchemaByTypeView(TenantScopedMixin, APIView):
+    """
+    Get or create/update entity type schema by entity_type.
+    
+    GET /crm-records/entity-schemas/by-type/?entity_type=lead
+    POST /crm-records/entity-schemas/by-type/ - with entity_type and attributes in body
+    PUT /crm-records/entity-schemas/by-type/ - update existing schema
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    def get(self, request):
+        """Get schema by entity_type."""
+        entity_type = request.query_params.get('entity_type')
+        
+        if not entity_type:
+            return Response({
+                'error': 'entity_type query parameter is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            schema = EntityTypeSchema.objects.get(
+                tenant=request.tenant,
+                entity_type=entity_type.strip()
+            )
+            serializer = EntityTypeSchemaSerializer(schema)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except EntityTypeSchema.DoesNotExist:
+            return Response({
+                'error': f'Schema not found for entity_type "{entity_type}"'
+            }, status=status.HTTP_404_NOT_FOUND)
+    
+    def post(self, request):
+        """Create a new schema."""
+        serializer = EntityTypeSchemaSerializer(data=request.data)
+        if serializer.is_valid():
+            # Check if schema already exists
+            entity_type = serializer.validated_data.get('entity_type')
+            existing = EntityTypeSchema.objects.filter(
+                tenant=request.tenant,
+                entity_type=entity_type
+            ).first()
+            
+            if existing:
+                return Response({
+                    'error': f'Schema already exists for entity_type "{entity_type}". Use PUT to update.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            serializer.save(tenant=request.tenant)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    def put(self, request):
+        """Update existing schema or create if not exists."""
+        entity_type = request.data.get('entity_type')
+        
+        if not entity_type:
+            return Response({
+                'error': 'entity_type is required in request body'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            schema = EntityTypeSchema.objects.get(
+                tenant=request.tenant,
+                entity_type=entity_type.strip()
+            )
+            serializer = EntityTypeSchemaSerializer(schema, data=request.data, partial=False)
+        except EntityTypeSchema.DoesNotExist:
+            serializer = EntityTypeSchemaSerializer(data=request.data)
+        
+        if serializer.is_valid():
+            serializer.save(tenant=request.tenant)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    def patch(self, request):
+        """Partially update existing schema."""
+        entity_type = request.data.get('entity_type')
+        
+        if not entity_type:
+            return Response({
+                'error': 'entity_type is required in request body'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            schema = EntityTypeSchema.objects.get(
+                tenant=request.tenant,
+                entity_type=entity_type.strip()
+            )
+            serializer = EntityTypeSchemaSerializer(schema, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_200_OK)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except EntityTypeSchema.DoesNotExist:
+            return Response({
+                'error': f'Schema not found for entity_type "{entity_type}"'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+
+class EntityTypeAttributesView(TenantScopedMixin, APIView):
+    """
+    Get attributes list for an entity type.
+    
+    GET /crm-records/entity-attributes/?entity_type=lead
+    
+    Returns a simple list of attributes for the specified entity_type.
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    def get(self, request):
+        """
+        Get attributes list by entity_type.
+        
+        Query Parameters:
+        - entity_type: Required. The entity type to get attributes for (e.g., 'lead', 'ticket')
+        
+        Returns:
+        {
+            "entity_type": "lead",
+            "attributes": [
+                "id",
+                "tenant_id",
+                "entity_type",
+                "data",
+                "data.name",
+                "data.praja_id",
+                "data.lead_score",
+                ...
+            ],
+            "total_count": 29
+        }
+        """
+        entity_type = request.query_params.get('entity_type')
+        
+        if not entity_type:
+            return Response({
+                'error': 'entity_type query parameter is required. Example: ?entity_type=lead'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        entity_type = entity_type.strip()
+        
+        try:
+            schema = EntityTypeSchema.objects.get(
+                tenant=request.tenant,
+                entity_type=entity_type
+            )
+            
+            return Response({
+                'entity_type': schema.entity_type,
+                'attributes': schema.attributes,
+                'total_count': len(schema.attributes)
+            }, status=status.HTTP_200_OK)
+            
+        except EntityTypeSchema.DoesNotExist:
+            return Response({
+                'error': f'Schema not found for entity_type "{entity_type}"',
+                'entity_type': entity_type,
+                'suggestion': 'Create a schema first using POST /crm-records/entity-schemas/'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+
+class LeadScoringView(TenantScopedMixin, APIView):
+    """
+    POST endpoint to save scoring rules and apply them to leads.
+    
+    POST /crm-records/leads/score/
+    
+    Saves the rules to EntityTypeSchema table and applies them to score all leads.
+    
+    Payload:
+    {
+        "rules": [
+            {
+                "attr": "data.assigned_to",
+                "operator": "==",
+                "value": "ami",
+                "weight": 19900
+            },
+            {
+                "attr": "data.affiliated_party",
+                "operator": "==",
+                "value": "bjp",
+                "weight": 1233
+            }
+        ]
+    }
+    
+    For each lead, checks all rules and sums up weights for matching rules.
+    Updates data.lead_score with the total weight.
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    def _get_nested_value(self, data, attr_path):
+        """
+        Get nested value from data dict using dot notation path.
+        Example: data.assigned_to -> data['assigned_to']
+        Example: data.user.profile.name -> data['user']['profile']['name']
+        """
+        if not attr_path or not data:
+            return None
+        
+        # Remove 'data.' prefix if present
+        if attr_path.startswith('data.'):
+            attr_path = attr_path[5:]  # Remove 'data.' prefix
+        
+        keys = attr_path.split('.')
+        value = data
+        
+        try:
+            for key in keys:
+                if isinstance(value, dict) and key in value:
+                    value = value[key]
+                else:
+                    return None
+            return value
+        except (TypeError, KeyError, AttributeError):
+            return None
+    
+    def _evaluate_rule(self, lead_data, rule):
+        """
+        Evaluate if a rule matches the lead data.
+        
+        Args:
+            lead_data: The data dict from the lead record
+            rule: Dict with 'attr', 'operator', 'value', 'weight'
+        
+        Returns:
+            True if rule matches, False otherwise
+        """
+        attr_path = rule.get('attr', '')
+        operator = rule.get('operator', '==')
+        expected_value = rule.get('value', '')
+        
+        # Get the actual value from lead data
+        actual_value = self._get_nested_value(lead_data, attr_path)
+        
+        if actual_value is None:
+            return False
+        
+        # Convert to string for comparison (handles different types)
+        actual_str = str(actual_value).lower() if actual_value is not None else ''
+        expected_str = str(expected_value).lower() if expected_value is not None else ''
+        
+        try:
+            if operator == '==':
+                return actual_str == expected_str
+            elif operator == '!=':
+                return actual_str != expected_str
+            elif operator == '>':
+                return float(actual_value) > float(expected_value)
+            elif operator == '<':
+                return float(actual_value) < float(expected_value)
+            elif operator == '>=':
+                return float(actual_value) >= float(expected_value)
+            elif operator == '<=':
+                return float(actual_value) <= float(expected_value)
+            elif operator == 'contains':
+                return expected_str in actual_str
+            elif operator == 'in':
+                # expected_value should be a comma-separated list or list
+                if isinstance(expected_value, list):
+                    return actual_str in [str(v).lower() for v in expected_value]
+                else:
+                    values = [v.strip().lower() for v in str(expected_value).split(',')]
+                    return actual_str in values
+            else:
+                return False
+        except (ValueError, TypeError):
+            # If conversion fails, fall back to string comparison
+            if operator in ['==', '!=']:
+                return actual_str == expected_str if operator == '==' else actual_str != expected_str
+            return False
+    
+    def post(self, request):
+        """
+        Save scoring rules and queue background job to apply them to all leads.
+        Saves/updates the rules in EntityTypeSchema table for the entity_type.
+        Returns immediately with job ID - scoring happens in background.
+        """
+        from background_jobs.queue_service import get_queue_service
+        from background_jobs.models import JobType
+        
+        serializer = LeadScoringRequestSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        rules = serializer.validated_data['rules']
+        entity_type = 'lead'  # Default entity type for lead scoring
+        
+        # Save/update rules in EntityTypeSchema table (replace previous rules)
+        EntityTypeSchema.objects.update_or_create(
+            tenant=request.tenant,
+            entity_type=entity_type,
+            defaults={
+                'rules': rules
+            }
+        )
+        
+        logger.info(f"LeadScoringView: Saved {len(rules)} rules to EntityTypeSchema for entity_type '{entity_type}'")
+        
+        # Count total leads for the job
+        total_leads = Record.objects.filter(
+            tenant=request.tenant,
+            entity_type='lead'
+        ).count()
+        
+        # Enqueue background job using the queue service
+        queue_service = get_queue_service()
+        job = queue_service.enqueue_job(
+            job_type=JobType.SCORE_LEADS,
+            payload={
+                'entity_type': entity_type,
+                'batch_size': 100  # Process 100 leads per batch
+            },
+            priority=0,  # Normal priority
+            tenant_id=str(request.tenant.id)
+        )
+        
+        logger.info(
+            f"LeadScoringView: Enqueued background job {job.id} for {total_leads} leads. "
+            f"Job will be processed by background worker."
+        )
+        
+        # Return immediately with job info
+        return Response({
+            'message': f'Rules saved. Background job created to score {total_leads} leads',
+            'job_id': job.id,
+            'status': job.status,
+            'total_leads': total_leads,
+            'progress': 0
+        }, status=status.HTTP_202_ACCEPTED)
+    
+    def get(self, request):
+        """
+        Get status of lead scoring jobs.
+        
+        Query params:
+        - job_id: Get specific job status (optional)
+        """
+        from background_jobs.models import BackgroundJob, JobType
+        
+        job_id = request.query_params.get('job_id')
+        
+        if job_id:
+            try:
+                job = BackgroundJob.objects.get(
+                    id=job_id,
+                    tenant_id=request.tenant.id,
+                    job_type=JobType.SCORE_LEADS
+                )
+                
+                # Extract progress from result
+                result = job.result or {}
+                progress = result.get('progress_percentage', 0)
+                
+                return Response({
+                    'job_id': job.id,
+                    'status': job.status,
+                    'total_leads': result.get('total_leads', 0),
+                    'processed_leads': result.get('processed_leads', 0),
+                    'updated_leads': result.get('updated_leads', 0),
+                    'total_score_added': result.get('total_score_added', 0.0),
+                    'progress_percentage': progress,
+                    'error_message': job.last_error,
+                    'attempts': job.attempts,
+                    'max_attempts': job.max_attempts,
+                    'created_at': job.created_at.isoformat(),
+                    'completed_at': job.completed_at.isoformat() if job.completed_at else None
+                }, status=status.HTTP_200_OK)
+            except BackgroundJob.DoesNotExist:
+                return Response({
+                    'error': f'Job with id {job_id} not found'
+                }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get all lead scoring jobs for tenant
+        jobs = BackgroundJob.objects.filter(
+            tenant_id=request.tenant.id,
+            job_type=JobType.SCORE_LEADS
+        ).order_by('-created_at')[:10]  # Latest 10 jobs
+        
+        jobs_data = []
+        for job in jobs:
+            result = job.result or {}
+            jobs_data.append({
+                'job_id': job.id,
+                'status': job.status,
+                'total_leads': result.get('total_leads', 0),
+                'processed_leads': result.get('processed_leads', 0),
+                'updated_leads': result.get('updated_leads', 0),
+                'progress_percentage': result.get('progress_percentage', 0),
+                'created_at': job.created_at.isoformat(),
+                'completed_at': job.completed_at.isoformat() if job.completed_at else None
+            })
+        
+        return Response({
+            'jobs': jobs_data,
+            'count': len(jobs_data)
+        }, status=status.HTTP_200_OK)
 
 

@@ -44,6 +44,8 @@ class UserSettingsListView(APIView):
             if existing_setting:
                 # Update existing setting
                 existing_setting.value = serializer.validated_data['value']
+                if 'daily_target' in serializer.validated_data:
+                    existing_setting.daily_target = serializer.validated_data['daily_target']
                 existing_setting.save()
                 response_serializer = UserSettingsSerializer(existing_setting)
                 return Response(response_serializer.data, status=status.HTTP_200_OK)
@@ -78,6 +80,18 @@ class UserSettingsDetailView(APIView):
 
     def put(self, request, user_id, key):
         """Update a specific user setting"""
+        tenant = request.tenant
+        setting = self.get_object(tenant, user_id, key)
+        serializer = UserSettingsSerializer(setting, data=request.data, partial=True)
+        
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    def patch(self, request, user_id, key):
+        """Partially update a specific user setting"""
         tenant = request.tenant
         setting = self.get_object(tenant, user_id, key)
         serializer = UserSettingsSerializer(setting, data=request.data, partial=True)
@@ -130,6 +144,13 @@ class LeadTypeAssignmentView(APIView):
             except UserSettings.DoesNotExist:
                 lead_types = []
             
+            # Get daily_target from any user setting (this is a user-level field)
+            user_setting = UserSettings.objects.filter(
+                tenant=tenant,
+                user_id=user.uid or user.id
+            ).first()
+            daily_target = user_setting.daily_target if user_setting else None
+            
             # Always use uid (UUID) if available, as that's what the serializer expects
             user_id_value = str(user.uid) if user.uid else None
             if not user_id_value:
@@ -140,7 +161,8 @@ class LeadTypeAssignmentView(APIView):
                 'user_id': user_id_value,
                 'user_name': user.name,
                 'user_email': user.email,
-                'lead_types': lead_types
+                'lead_types': lead_types,
+                'daily_target': daily_target
             })
         
         return Response(assignments)
@@ -159,6 +181,7 @@ class LeadTypeAssignmentView(APIView):
         if serializer.is_valid():
             user_id = serializer.validated_data['user_id']
             lead_types = serializer.validated_data['lead_types']
+            daily_target = serializer.validated_data.get('daily_target', None)
             
             # Verify user exists and has RM role
             # user_id could be a UUID string or integer ID string
@@ -258,17 +281,30 @@ class LeadTypeAssignmentView(APIView):
                 tenant=tenant,
                 user_id=actual_user_id_for_setting,
                 key='LEAD_TYPE_ASSIGNMENT',
-                defaults={'value': lead_types}
+                defaults={
+                    'value': lead_types,
+                    'daily_target': daily_target
+                }
             )
             
             if not created:
                 setting.value = lead_types
+                if daily_target is not None:
+                    setting.daily_target = daily_target
                 setting.save()
+            
+            # Update daily_target across all user settings (since it's user-level, not key-specific)
+            if daily_target is not None:
+                UserSettings.objects.filter(
+                    tenant=tenant,
+                    user_id=actual_user_id_for_setting
+                ).exclude(id=setting.id).update(daily_target=daily_target)
             
             return Response({
                 'user_id': str(actual_user_id_for_setting),
                 'user_name': user.name,
                 'lead_types': lead_types,
+                'daily_target': setting.daily_target,
                 'created': created
             }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
         
@@ -300,11 +336,11 @@ class UserLeadTypesView(APIView):
 
 
 class LeadTypesListView(APIView):
-    """Get all unique lead types (poster values) from records for the current tenant"""
+    """Get all unique lead types (affiliated_party values) from records for the current tenant"""
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
-        """Get all unique lead types from records' poster field"""
+        """Get all unique lead types from records' affiliated_party field"""
         tenant = request.tenant
         
         if not tenant:
@@ -312,20 +348,20 @@ class LeadTypesListView(APIView):
                 'lead_types': []
             }, status=status.HTTP_200_OK)
         
-        # Extract unique poster values using database-level query for better performance
+        # Extract unique affiliated_party values using database-level query for better performance
         # Using raw SQL for efficient JSONB querying
         from django.db import connection
         
         with connection.cursor() as cursor:
             cursor.execute("""
-                SELECT DISTINCT data->>'poster' as poster
+                SELECT DISTINCT data->>'affiliated_party' as affiliated_party
                 FROM records
                 WHERE tenant_id = %s
                   AND entity_type = 'lead'
-                  AND data->>'poster' IS NOT NULL
-                  AND data->>'poster' != ''
-                  AND data->>'poster' != 'null'
-                ORDER BY poster
+                  AND data->>'affiliated_party' IS NOT NULL
+                  AND data->>'affiliated_party' != ''
+                  AND data->>'affiliated_party' != 'null'
+                ORDER BY affiliated_party
             """, [tenant.id])
             
             lead_types_list = [row[0].strip() for row in cursor.fetchall() if row[0] and row[0].strip()]
