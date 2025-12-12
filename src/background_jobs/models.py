@@ -16,6 +16,7 @@ class JobType(models.TextChoices):
     SEND_MIXPANEL_EVENT = "send_mixpanel_event", "Send Mixpanel Event"
     SEND_WEBHOOK = "send_webhook", "Send Webhook"
     EXECUTE_FUNCTION = "execute_function", "Execute Function"
+    SCORE_LEADS = "score_leads", "Score Leads"
     # Future job types can be added here:
     # SEND_EMAIL = "send_email", "Send Email"
     # GENERATE_REPORT = "generate_report", "Generate Report"
