@@ -146,6 +146,13 @@ class LeadTypeAssignmentView(APIView):
                 lead_types = []
                 assigned_leads_count = None
             
+            # Get daily_target from any user setting (this is a user-level field)
+            user_setting = UserSettings.objects.filter(
+                tenant=tenant,
+                user_id=user.uid or user.id
+            ).first()
+            daily_target = user_setting.daily_target if user_setting else None
+            
             # Always use uid (UUID) if available, as that's what the serializer expects
             user_id_value = str(user.uid) if user.uid else None
             if not user_id_value:
@@ -157,7 +164,8 @@ class LeadTypeAssignmentView(APIView):
                 'user_name': user.name,
                 'user_email': user.email,
                 'lead_types': lead_types,
-                'assigned_leads_count': assigned_leads_count
+                'assigned_leads_count': assigned_leads_count,
+                'daily_target': daily_target
             })
         
         return Response(assignments)
@@ -177,6 +185,7 @@ class LeadTypeAssignmentView(APIView):
             user_id = serializer.validated_data['user_id']
             lead_types = serializer.validated_data['lead_types']
             assigned_leads_count = serializer.validated_data.get('assigned_leads_count', None)
+            daily_target = serializer.validated_data.get('daily_target', None)
             
             # Verify user exists and has RM role
             # user_id could be a UUID string or integer ID string
@@ -278,7 +287,8 @@ class LeadTypeAssignmentView(APIView):
                 key='LEAD_TYPE_ASSIGNMENT',
                 defaults={
                     'value': lead_types,
-                    'assigned_leads_count': assigned_leads_count
+                    'assigned_leads_count': assigned_leads_count,
+                    'daily_target': daily_target
                 }
             )
             
@@ -286,13 +296,30 @@ class LeadTypeAssignmentView(APIView):
                 setting.value = lead_types
                 if assigned_leads_count is not None:
                     setting.assigned_leads_count = assigned_leads_count
+                if daily_target is not None:
+                    setting.daily_target = daily_target
                 setting.save()
+            
+            # Update daily_target across all user settings (since it's user-level, not key-specific)
+            if daily_target is not None:
+                UserSettings.objects.filter(
+                    tenant=tenant,
+                    user_id=actual_user_id_for_setting
+                ).exclude(id=setting.id).update(daily_target=daily_target)
+            
+            # Update assigned_leads_count across all user settings (since it's user-level, not key-specific)
+            if assigned_leads_count is not None:
+                UserSettings.objects.filter(
+                    tenant=tenant,
+                    user_id=actual_user_id_for_setting
+                ).exclude(id=setting.id).update(assigned_leads_count=assigned_leads_count)
             
             return Response({
                 'user_id': str(actual_user_id_for_setting),
                 'user_name': user.name,
                 'lead_types': lead_types,
                 'assigned_leads_count': setting.assigned_leads_count,
+                'daily_target': setting.daily_target,
                 'created': created
             }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
         
