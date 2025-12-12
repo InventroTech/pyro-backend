@@ -28,11 +28,6 @@ class UserSettings(models.Model):
         blank=True,
         help_text="Number of leads assigned to the user (for LEAD_TYPE_ASSIGNMENT key)"
     )
-    daily_target = models.IntegerField(
-        null=True,
-        blank=True,
-        help_text="Daily target for the user"
-    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

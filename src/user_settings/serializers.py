@@ -7,7 +7,7 @@ class UserSettingsSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = UserSettings
-        fields = ['id', 'tenant', 'user_id', 'key', 'value', 'assigned_leads_count', 'daily_target', 'created_at', 'updated_at']
+        fields = ['id', 'tenant', 'user_id', 'key', 'value', 'assigned_leads_count', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def validate_key(self, value):
@@ -28,7 +28,7 @@ class UserSettingsCreateSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = UserSettings
-        fields = ['user_id', 'key', 'value', 'assigned_leads_count', 'daily_target']
+        fields = ['user_id', 'key', 'value', 'assigned_leads_count']
 
     def validate_key(self, value):
         """Validate that key is not empty and follows naming conventions"""
@@ -55,13 +55,7 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
         required=False,
         allow_null=True,
         min_value=0,
-        help_text="Number of leads assigned to the user (daily limit)"
-    )
-    daily_target = serializers.IntegerField(
-        required=False,
-        allow_null=True,
-        min_value=0,
-        help_text="Daily target for the user"
+        help_text="Number of leads assigned to the user"
     )
     
     def validate_user_id(self, value):
@@ -84,9 +78,3 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
         if not isinstance(value, list):
             raise serializers.ValidationError("Lead types must be a list")
         return [lt.strip() for lt in value if lt.strip()]
-    
-    def validate_daily_target(self, value):
-        """Validate daily_target"""
-        if value is not None and value < 0:
-            raise serializers.ValidationError("Daily target must be a non-negative integer")
-        return value
