@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView
+from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView, TrialActivationView, TrialActivationStatsView, GetMyCurrentLeadView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 from .public_views import PublicJobsView, PublicJobApplicationView
 
@@ -23,11 +23,18 @@ urlpatterns = [
     # Get next lead endpoint
     path("leads/next/", GetNextLeadView.as_view(), name="get-next-lead"),
     
+    # Get my current assigned lead (always from DB, no cache)
+    path("leads/current/", GetMyCurrentLeadView.as_view(), name="get-my-current-lead"),
+    
     # Lead statistics
     path("leads/stats/", LeadStatsView.as_view(), name="lead-stats"),
     
     # Lead scoring endpoint
     path("leads/score/", LeadScoringView.as_view(), name="lead-scoring"),
+
+    # Trial activation endpoints
+    path("trials/activations/", TrialActivationView.as_view(), name="trial-activation"),
+    path("trials/activations/today/", TrialActivationStatsView.as_view(), name="trial-activation-today"),
     
     # Public endpoints - NO authentication required
     path("public/jobs/", PublicJobsView.as_view(), name="public-jobs"),
