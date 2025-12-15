@@ -164,6 +164,15 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
             entity_type=entity_type
         )
         
+        # Update EntityTypeSchema with new attributes from this record
+        try:
+            from .schema_utils import update_entity_type_schema_attributes
+            update_entity_type_schema_attributes(record, tenant_id=self.request.tenant.id)
+            logger.debug(f"RecordListCreateView: Updated schema attributes for entity_type '{entity_type}'")
+        except Exception as e:
+            logger.error(f"RecordListCreateView: Error updating schema attributes: {e}")
+            # Don't fail the request if schema update fails, just log the error
+        
         # Calculate and save lead score if entity_type is 'lead'
         if entity_type == 'lead':
             try:
@@ -227,6 +236,15 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         
         # Preserve tenant (don't allow changing tenant)
         updated_record = serializer.save(tenant=self.request.tenant)
+        
+        # Update EntityTypeSchema with new attributes from this record
+        try:
+            from .schema_utils import update_entity_type_schema_attributes
+            update_entity_type_schema_attributes(updated_record, tenant_id=self.request.tenant.id)
+            logger.debug(f"RecordListCreateView.put: Updated schema attributes for entity_type '{updated_record.entity_type}'")
+        except Exception as e:
+            logger.error(f"RecordListCreateView.put: Error updating schema attributes: {e}")
+            # Don't fail the request if schema update fails, just log the error
         
         # Calculate and save lead score if entity_type is 'lead'
         if updated_record.entity_type == 'lead':
@@ -295,6 +313,15 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         
         # Preserve tenant (don't allow changing tenant)
         updated_record = serializer.save(tenant=self.request.tenant)
+        
+        # Update EntityTypeSchema with new attributes from this record
+        try:
+            from .schema_utils import update_entity_type_schema_attributes
+            update_entity_type_schema_attributes(updated_record, tenant_id=self.request.tenant.id)
+            logger.debug(f"RecordListCreateView.patch: Updated schema attributes for entity_type '{updated_record.entity_type}'")
+        except Exception as e:
+            logger.error(f"RecordListCreateView.patch: Error updating schema attributes: {e}")
+            # Don't fail the request if schema update fails, just log the error
         
         # Calculate and save lead score if entity_type is 'lead'
         if updated_record.entity_type == 'lead':
@@ -382,6 +409,15 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
         """
         updated_record = serializer.save()
         
+        # Update EntityTypeSchema with new attributes from this record
+        try:
+            from .schema_utils import update_entity_type_schema_attributes
+            update_entity_type_schema_attributes(updated_record, tenant_id=self.request.tenant.id)
+            logger.debug(f"RecordDetailView: Updated schema attributes for entity_type '{updated_record.entity_type}'")
+        except Exception as e:
+            logger.error(f"RecordDetailView: Error updating schema attributes: {e}")
+            # Don't fail the request if schema update fails, just log the error
+        
         # Calculate and save lead score if entity_type is 'lead'
         if updated_record.entity_type == 'lead':
             try:
@@ -417,6 +453,15 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
             tenant=self.request.tenant,
             entity_type=self.entity_type
         )
+        
+        # Update EntityTypeSchema with new attributes from this record
+        try:
+            from .schema_utils import update_entity_type_schema_attributes
+            update_entity_type_schema_attributes(record, tenant_id=self.request.tenant.id)
+            logger.debug(f"EntityProxyView: Updated schema attributes for entity_type '{self.entity_type}'")
+        except Exception as e:
+            logger.error(f"EntityProxyView: Error updating schema attributes: {e}")
+            # Don't fail the request if schema update fails, just log the error
         
         # Calculate and save lead score if entity_type is 'lead'
         if self.entity_type == 'lead':
@@ -1382,6 +1427,16 @@ class PrajaLeadsAPIView(APIView):
                 tenant.slug,
                 record_name
             )
+            
+            # Update EntityTypeSchema with new attributes from this record
+            try:
+                from .schema_utils import update_entity_type_schema_attributes
+                update_entity_type_schema_attributes(record, tenant_id=tenant.id)
+                logger.debug(f"[PrajaLeadsAPI] Updated schema attributes for entity_type '{entity_type}'")
+            except Exception as e:
+                logger.error(f"[PrajaLeadsAPI] Error updating schema attributes: {e}")
+                # Don't fail the request if schema update fails, just log the error
+            
             # Calculate and save lead score automatically
             try:
                 from .scoring import calculate_and_update_lead_score
@@ -1599,6 +1654,16 @@ class PrajaLeadsAPIView(APIView):
             tenant.slug,
             list(request.data.keys())
         )
+        
+        # Update EntityTypeSchema with new attributes from this record
+        try:
+            from .schema_utils import update_entity_type_schema_attributes
+            update_entity_type_schema_attributes(record, tenant_id=tenant.id)
+            logger.debug(f"[PrajaLeadsAPI.patch] Updated schema attributes for entity_type '{entity_type}'")
+        except Exception as e:
+            logger.error(f"[PrajaLeadsAPI.patch] Error updating schema attributes: {e}")
+            # Don't fail the request if schema update fails, just log the error
+        
         # Recalculate and save lead score automatically (overwrites any manually set score)
         try:
             from .scoring import calculate_and_update_lead_score
@@ -1747,6 +1812,16 @@ class PrajaLeadsAPIView(APIView):
             tenant.slug,
             list(request.data.keys())
         )
+        
+        # Update EntityTypeSchema with new attributes from this record
+        try:
+            from .schema_utils import update_entity_type_schema_attributes
+            update_entity_type_schema_attributes(record, tenant_id=tenant.id)
+            logger.debug(f"[PrajaLeadsAPI.put] Updated schema attributes for entity_type '{entity_type}'")
+        except Exception as e:
+            logger.error(f"[PrajaLeadsAPI.put] Error updating schema attributes: {e}")
+            # Don't fail the request if schema update fails, just log the error
+        
         # Recalculate and save lead score automatically (overwrites any manually set score)
         try:
             from .scoring import calculate_and_update_lead_score
