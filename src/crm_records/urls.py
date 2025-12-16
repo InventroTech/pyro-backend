@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView, TrialActivationView, TrialActivationStatsView, GetMyCurrentLeadView
+from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView, GetMyCurrentLeadView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 from .public_views import PublicJobsView, PublicJobApplicationView
 
@@ -31,10 +31,6 @@ urlpatterns = [
     
     # Lead scoring endpoint
     path("leads/score/", LeadScoringView.as_view(), name="lead-scoring"),
-
-    # Trial activation endpoints
-    path("trials/activations/", TrialActivationView.as_view(), name="trial-activation"),
-    path("trials/activations/today/", TrialActivationStatsView.as_view(), name="trial-activation-today"),
     
     # Public endpoints - NO authentication required
     path("public/jobs/", PublicJobsView.as_view(), name="public-jobs"),
