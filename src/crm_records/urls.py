@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView
+from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView, GetMyCurrentLeadView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 from .public_views import PublicJobsView, PublicJobApplicationView
 
@@ -22,6 +22,9 @@ urlpatterns = [
     
     # Get next lead endpoint
     path("leads/next/", GetNextLeadView.as_view(), name="get-next-lead"),
+    
+    # Get my current assigned lead (always from DB, no cache)
+    path("leads/current/", GetMyCurrentLeadView.as_view(), name="get-my-current-lead"),
     
     # Lead statistics
     path("leads/stats/", LeadStatsView.as_view(), name="lead-stats"),
