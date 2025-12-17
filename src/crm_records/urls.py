@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView, GetMyCurrentLeadView
+from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView, GetMyCurrentLeadView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 from .public_views import PublicJobsView, PublicJobApplicationView
 
@@ -12,6 +12,7 @@ urlpatterns = [
     path("records/events/", RecordEventView.as_view(), name="record-events"),
     # Event logging endpoints (admin only)
     path("events/", EventLogListView.as_view(), name="event-log-list"),
+    path("events/count/", EventLogCountView.as_view(), name="event-log-count"),
     
     # Rule management endpoints (admin only)
     path("rules/", RuleSetListCreateView.as_view(), name="rule-list"),

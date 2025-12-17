@@ -626,7 +626,7 @@ class EventLogListView(TenantScopedMixin, generics.ListAPIView):
     @extend_schema(
         summary="List all events for tenant",
         description="Retrieves a paginated list of all events logged for the current tenant. "
-                   "Supports filtering by record ID and event name. Includes summary statistics.",
+                   "Supports filtering by record ID, event name, user_supabase_uid, and date range. Includes summary statistics.",
         parameters=[
             {
                 'name': 'record',
@@ -643,6 +643,30 @@ class EventLogListView(TenantScopedMixin, generics.ListAPIView):
                 'required': False,
                 'schema': {'type': 'string'},
                 'example': 'button_click'
+            },
+            {
+                'name': 'user_supabase_uid',
+                'in': 'query',
+                'description': 'Filter events by user_supabase_uid (from payload)',
+                'required': False,
+                'schema': {'type': 'string'},
+                'example': '22c38153-4029-4332-9849-747871332449'
+            },
+            {
+                'name': 'timestamp__gte',
+                'in': 'query',
+                'description': 'Filter events with timestamp greater than or equal to this date (ISO format)',
+                'required': False,
+                'schema': {'type': 'string', 'format': 'date-time'},
+                'example': '2025-12-16T00:00:00Z'
+            },
+            {
+                'name': 'timestamp__lte',
+                'in': 'query',
+                'description': 'Filter events with timestamp less than or equal to this date (ISO format)',
+                'required': False,
+                'schema': {'type': 'string', 'format': 'date-time'},
+                'example': '2025-12-16T23:59:59Z'
             }
         ],
         responses={
@@ -730,6 +754,12 @@ class EventLogListView(TenantScopedMixin, generics.ListAPIView):
     def get_queryset(self):
         """
         Get events for the current tenant, with optional filtering.
+        Supports filtering by:
+        - record: record ID
+        - event: event name
+        - user_supabase_uid: user ID from payload (filters payload__user_supabase_uid)
+        - timestamp__gte: timestamp greater than or equal
+        - timestamp__lte: timestamp less than or equal
         """
         queryset = EventLog.objects.filter(tenant=self.request.tenant)
         
@@ -743,8 +773,139 @@ class EventLogListView(TenantScopedMixin, generics.ListAPIView):
         if event_name:
             queryset = queryset.filter(event=event_name)
         
+        # Optional filtering by user_supabase_uid from payload
+        user_supabase_uid = self.request.query_params.get('user_supabase_uid')
+        if user_supabase_uid:
+            queryset = queryset.filter(payload__user_supabase_uid=user_supabase_uid)
+        
+        # Optional filtering by date range
+        timestamp_gte = self.request.query_params.get('timestamp__gte')
+        if timestamp_gte:
+            try:
+                from django.utils.dateparse import parse_datetime
+                dt = parse_datetime(timestamp_gte)
+                if dt:
+                    queryset = queryset.filter(timestamp__gte=dt)
+            except (ValueError, TypeError):
+                pass  # Ignore invalid date format
+        
+        timestamp_lte = self.request.query_params.get('timestamp__lte')
+        if timestamp_lte:
+            try:
+                from django.utils.dateparse import parse_datetime
+                dt = parse_datetime(timestamp_lte)
+                if dt:
+                    queryset = queryset.filter(timestamp__lte=dt)
+            except (ValueError, TypeError):
+                pass  # Ignore invalid date format
+        
         # Order by most recent first
         return queryset.order_by('-timestamp')
+
+
+class EventLogCountView(TenantScopedMixin, APIView):
+    """
+    Get count of events matching filters.
+    More efficient than fetching all events just to count them.
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    @extend_schema(
+        summary="Get event count",
+        description="Returns the count of events matching the provided filters. "
+                   "Supports filtering by event name, user_supabase_uid, and date range.",
+        parameters=[
+            {
+                'name': 'event',
+                'in': 'query',
+                'description': 'Filter events by event name',
+                'required': False,
+                'schema': {'type': 'string'},
+                'example': 'lead.trial_activated'
+            },
+            {
+                'name': 'user_supabase_uid',
+                'in': 'query',
+                'description': 'Filter events by user_supabase_uid (from payload)',
+                'required': False,
+                'schema': {'type': 'string'},
+                'example': '22c38153-4029-4332-9849-747871332449'
+            },
+            {
+                'name': 'timestamp__gte',
+                'in': 'query',
+                'description': 'Filter events with timestamp greater than or equal to this date (ISO format)',
+                'required': False,
+                'schema': {'type': 'string', 'format': 'date-time'},
+                'example': '2025-12-16T00:00:00Z'
+            },
+            {
+                'name': 'timestamp__lte',
+                'in': 'query',
+                'description': 'Filter events with timestamp less than or equal to this date (ISO format)',
+                'required': False,
+                'schema': {'type': 'string', 'format': 'date-time'},
+                'example': '2025-12-16T23:59:59Z'
+            }
+        ],
+        responses={
+            200: OpenApiResponse(
+                description="Event count",
+                examples=[
+                    OpenApiExample(
+                        name="Count Response",
+                        value={
+                            "count": 42
+                        }
+                    )
+                ]
+            )
+        },
+        tags=["Events", "Admin"]
+    )
+    def get(self, request):
+        """
+        Get count of events matching the filters.
+        Uses the same filtering logic as EventLogListView but only returns count.
+        """
+        queryset = EventLog.objects.filter(tenant=request.tenant)
+        
+        # Optional filtering by event name
+        event_name = request.query_params.get('event')
+        if event_name:
+            queryset = queryset.filter(event=event_name)
+        
+        # Optional filtering by user_supabase_uid from payload
+        user_supabase_uid = request.query_params.get('user_supabase_uid')
+        if user_supabase_uid:
+            queryset = queryset.filter(payload__user_supabase_uid=user_supabase_uid)
+        
+        # Optional filtering by date range
+        timestamp_gte = request.query_params.get('timestamp__gte')
+        if timestamp_gte:
+            try:
+                from django.utils.dateparse import parse_datetime
+                dt = parse_datetime(timestamp_gte)
+                if dt:
+                    queryset = queryset.filter(timestamp__gte=dt)
+            except (ValueError, TypeError):
+                pass  # Ignore invalid date format
+        
+        timestamp_lte = request.query_params.get('timestamp__lte')
+        if timestamp_lte:
+            try:
+                from django.utils.dateparse import parse_datetime
+                dt = parse_datetime(timestamp_lte)
+                if dt:
+                    queryset = queryset.filter(timestamp__lte=dt)
+            except (ValueError, TypeError):
+                pass  # Ignore invalid date format
+        
+        count = queryset.count()
+        
+        return Response({
+            "count": count
+        }, status=status.HTTP_200_OK)
 
 
 class LeadStatsView(APIView):
