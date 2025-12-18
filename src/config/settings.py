@@ -243,7 +243,12 @@ AUTH_USER_MODEL = 'authentication.User'
 SUPABASE_JWT_SECRET = env("SUPABASE_JWT_SECRET")
 
 # Praja secret for external API access (used in X-Secret-Praja header)
+# If this secret is used, it will route to DEFAULT_TENANT_SLUG
+# For client-specific secret keys, use the ApiSecretKey model in the database (crm_records.ApiSecretKey)
 PRAJA_SECRET = env("PRAJA_SECRET", default="")
+
+# NOTE: Client API secrets stored in DB (`crm_records.ApiSecretKey`) are bcrypt-hashed using Postgres pgcrypto
+# (salt is embedded in the hash). No pepper is required.
 
 REST_FRAMEWORK = {
     # Enable API-wide permissions

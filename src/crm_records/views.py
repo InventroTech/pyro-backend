@@ -1616,10 +1616,52 @@ class PrajaLeadsAPIView(APIView):
         return entity_type if entity_type else 'lead'
     
     def _get_tenant(self, request):
-        """Helper to get tenant - uses default tenant from settings (no header required)"""
+        """
+        Helper to get tenant based on priority:
+        1. tenant_id from request (query params or body) - highest priority
+        2. Tenant from ApiSecretKey database lookup (if secret key is in database)
+        3. Default tenant (if secret key is PRAJA_SECRET from settings)
+        4. Fallback to default tenant from settings
+        """
         from django.conf import settings
         
-        # Get default tenant slug from settings
+        # Priority 1: Check if tenant_id is provided in query params or request data
+        tenant_id = request.query_params.get('tenant_id') or request.data.get('tenant_id')
+        if tenant_id:
+            try:
+                tenant = Tenant.objects.get(id=tenant_id)
+                logger.info(f"[PrajaLeadsAPI] Using tenant from request: {tenant.slug} (id={tenant_id})")
+                return tenant, None
+            except Tenant.DoesNotExist:
+                return None, Response(
+                    {'error': f'Tenant with id {tenant_id} not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            except (ValueError, TypeError):
+                return None, Response(
+                    {'error': f'Invalid tenant_id format: {tenant_id}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Priority 2: Check if secret key maps to a tenant in database
+        api_secret_obj = getattr(request, 'api_secret_obj', None)
+        if api_secret_obj and api_secret_obj.tenant:
+            tenant = api_secret_obj.tenant
+            logger.info(f"[PrajaLeadsAPI] Using tenant from database secret key mapping: {tenant.slug} (id={tenant.id})")
+            return tenant, None
+        
+        # Priority 3: If secret key is PRAJA_SECRET, use default tenant
+        is_praja_secret = getattr(request, 'is_praja_secret', False)
+        if is_praja_secret:
+            default_slug = getattr(settings, 'DEFAULT_TENANT_SLUG', 'bibhab-thepyro-ai')
+            try:
+                tenant = Tenant.objects.get(slug=default_slug)
+                logger.info(f"[PrajaLeadsAPI] Using default tenant for PRAJA_SECRET: {default_slug}")
+                return tenant, None
+            except Tenant.DoesNotExist:
+                logger.warning(f"[PrajaLeadsAPI] Default tenant '{default_slug}' not found")
+        
+        # Priority 4: Fallback to default tenant from settings
         default_slug = getattr(settings, 'DEFAULT_TENANT_SLUG', 'bibhab-thepyro-ai')
         
         try:
@@ -1645,6 +1687,7 @@ class PrajaLeadsAPIView(APIView):
         Body:
         {
             "name": "Customer Name",
+            "tenant_id": "optional-tenant-uuid",  # Optional: if provided, uses this tenant; otherwise uses default tenant
             "data": {
                 "praja_id": "PRAJA123",  # Required: unique identifier for Praja system
                 "phone_number": "+1234567890",
@@ -1655,6 +1698,7 @@ class PrajaLeadsAPIView(APIView):
         }
         
         Note: praja_id in the data field is required for UPDATE and DELETE operations.
+        Note: tenant_id is optional. If not provided, uses DEFAULT_TENANT_SLUG from settings.
         """
         tenant, error_response = self._get_tenant(request)
         if error_response:
@@ -1663,7 +1707,9 @@ class PrajaLeadsAPIView(APIView):
         entity_type = self.get_entity_type(request)
         
         # Move name from root level to data if provided (root level takes precedence over data.name)
+        # Also remove tenant_id from request_data since it's read-only in serializer and handled separately
         request_data = request.data.copy()
+        request_data.pop('tenant_id', None)  # Remove tenant_id if present, handled separately
         if 'name' in request_data:
             # Ensure data is a dict
             if 'data' not in request_data:
