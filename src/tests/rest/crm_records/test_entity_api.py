@@ -1,6 +1,6 @@
 """
 Unit tests for entity API (PrajaLeadsAPIView).
-Tests CRUD operations via /entity/ endpoint with X-Secret-Praja authentication.
+Tests CRUD operations via /entity/ endpoint with X-Secret-Pyro authentication.
 """
 
 import uuid
@@ -14,7 +14,7 @@ User = get_user_model()
 
 
 @override_settings(
-    PRAJA_SECRET="test-praja-secret-123",
+    PYRO_SECRET="test-pyro-secret-123",
     DEFAULT_TENANT_SLUG="test-tenant"
 )
 class EntityApiTests(TestCase):
@@ -39,8 +39,8 @@ class EntityApiTests(TestCase):
         # API endpoint
         self.entity_url = "/entity/"
         
-        # Valid headers for authentication (Django test client converts to HTTP_X_SECRET_PRAJA in META)
-        self.valid_headers = {"HTTP_X_SECRET_PRAJA": "test-praja-secret-123"}
+        # Valid headers for authentication (Django test client converts to HTTP_X_SECRET_PYRO in META)
+        self.valid_headers = {"HTTP_X_SECRET_PYRO": "test-pyro-secret-123"}
         
         # Create some existing records for testing
         self.existing_record = Record.objects.create(
@@ -95,7 +95,7 @@ class EntityApiTests(TestCase):
         self.assertLess(elapsed, 0.3, f"Create operation took {elapsed:.3f}s, expected < 0.3s")
 
     def test_create_lead_without_secret_returns_403(self):
-        """Test: POST /entity/ without X-Secret-Praja → returns 403"""
+        """Test: POST /entity/ without X-Secret-Pyro → returns 403"""
         payload = {
             "name": "New Lead",
             "data": {"praja_id": "PRAJA123"}
@@ -116,7 +116,7 @@ class EntityApiTests(TestCase):
             "data": {"praja_id": "PRAJA123"}
         }
         
-        invalid_headers = {"HTTP_X_SECRET_PRAJA": "wrong-secret"}
+        invalid_headers = {"HTTP_X_SECRET_PYRO": "wrong-secret"}
         response = self.client.post(
             self.entity_url,
             payload,

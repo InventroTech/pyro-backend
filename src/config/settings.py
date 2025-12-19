@@ -242,10 +242,10 @@ CORS_ALLOW_ALL_ORIGINS = True # for dev only not to be added in prod
 AUTH_USER_MODEL = 'authentication.User'
 SUPABASE_JWT_SECRET = env("SUPABASE_JWT_SECRET")
 
-# Praja secret for external API access (used in X-Secret-Praja header)
+# Pyro secret for external API access (used in X-Secret-Pyro header)
 # If this secret is used, it will route to DEFAULT_TENANT_SLUG
 # For client-specific secret keys, use the ApiSecretKey model in the database (crm_records.ApiSecretKey)
-PRAJA_SECRET = env("PRAJA_SECRET", default="")
+PYRO_SECRET = env("PYRO_SECRET", default="")
 
 # NOTE: Client API secrets stored in DB (`crm_records.ApiSecretKey`) are bcrypt-hashed using Postgres pgcrypto
 # (salt is embedded in the hash). No pepper is required.
@@ -340,7 +340,7 @@ else:
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
     "X-Tenant-Slug",  # custom tenant header
-    "X-Secret-Praja",  # Praja API secret header
+    "X-Secret-Pyro",  # Pyro API secret header
 ]
 
 # Email configuration

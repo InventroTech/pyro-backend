@@ -21,7 +21,7 @@ from .mixins import TenantScopedMixin
 from .events import dispatch_event
 from .scoring import calculate_and_update_lead_score
 from user_settings.models import UserSettings
-from .permissions import HasPrajaSecret
+from .permissions import HasAPISecret
 from support_ticket.services import MixpanelService
 
 
@@ -566,6 +566,18 @@ class RecordEventView(TenantScopedMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # Normalize payload: allow JSON string payloads and parse them to dict
+        if isinstance(payload, str):
+            try:
+                import json
+                payload = json.loads(payload) if payload.strip() else {}
+            except Exception as e:
+                logger.error("[EventAPI] Could not parse payload JSON string for record_id=%s: %s", record_id, e)
+                return Response(
+                    {"error": "Payload must be a valid JSON object"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
         # Validate payload is a dictionary
         if not isinstance(payload, dict):
             logger.error("[EventAPI] Invalid payload type for record_id=%s: type=%s", record_id, type(payload))
@@ -576,13 +588,50 @@ class RecordEventView(TenantScopedMixin, APIView):
 
         # Create the event log entry
         try:
-            event_log = EventLog.objects.create(
-                record=record,
-                tenant=request.tenant,
-                event=event_name,
-                payload=payload,
-                timestamp=timezone.now()
-            )
+            with transaction.atomic():
+                # If this is a lead record, increment call_attempts when "Not Connected" is clicked
+                # (call_attempts is stored inside the record.data JSON).
+                payload_event = payload or {}
+                event_name_norm = (event_name or "").strip().lower()
+                call_status_norm = str(payload_event.get("call_status", "")).strip().lower()
+                last_call_outcome_norm = str(payload_event.get("last_call_outcome", "")).strip().lower()
+                button_type_norm = str(payload_event.get("button_type", "")).strip().lower()
+
+                is_not_connected_event = (
+                    ("not_connected" in event_name_norm)
+                    or event_name_norm in {
+                        "not_connected",
+                        "not_connected_clicked",
+                        "not-connected",
+                        "not connected",
+                    }
+                    or button_type_norm in {"not_connected", "not connected", "not-connected"}
+                    or call_status_norm in {"not connected", "not_connected", "notconnected"}
+                    or last_call_outcome_norm in {"not connected", "not_connected", "notconnected"}
+                )
+
+                if record.entity_type == "lead" and is_not_connected_event:
+                    record_locked = Record.objects.select_for_update().get(id=record.id, tenant=tenant)
+                    data = record_locked.data.copy() if record_locked.data else {}
+
+                    prev_attempts = data.get("call_attempts", 0)
+                    try:
+                        prev_attempts_int = int(prev_attempts) if prev_attempts is not None else 0
+                    except (TypeError, ValueError):
+                        prev_attempts_int = 0
+
+                    data["call_attempts"] = prev_attempts_int + 1
+                    record_locked.data = data
+                    record_locked.updated_at = timezone.now()
+                    record_locked.save(update_fields=["data", "updated_at"])
+
+                event_log = EventLog.objects.create(
+                    record=record,
+                    tenant=request.tenant,
+                    event=event_name,
+                    payload=payload,
+                    timestamp=timezone.now()
+                )
             
             # Log the event creation
             logger.info(
@@ -1129,6 +1178,7 @@ class GetNextLeadView(APIView):
         # Step 2: Check the RM is eligible for what leads - get from user settings
         eligible_lead_types = []
         user_uuid = None
+        daily_limit = None
         try:
             import uuid
             try:
@@ -1144,6 +1194,10 @@ class GetNextLeadView(APIView):
                 logger.debug("[GetNextLead] Resolved user_uuid from LegacyUser: %s", user_uuid)
 
             if user_uuid:
+                # Daily limit is a user-level attribute; fetch from any user_settings row for this user
+                any_setting = UserSettings.objects.filter(tenant=tenant, user_id=user_uuid).first()
+                daily_limit = getattr(any_setting, "daily_limit", None) if any_setting else None
+
                 try:
                     setting = UserSettings.objects.get(
                         tenant=tenant,
@@ -1160,6 +1214,7 @@ class GetNextLeadView(APIView):
         except Exception as e:
             logger.error("[GetNextLead] Error fetching user settings: %s", str(e))
             eligible_lead_types = []
+            daily_limit = None
 
         # If user has no eligible lead types assigned, return empty
         if not eligible_lead_types:
@@ -1217,6 +1272,116 @@ class GetNextLeadView(APIView):
             # --- End Enhanced Logging Block ---
             
             return Response({}, status=status.HTTP_200_OK)
+
+        # Step 2.5: Enforce daily lead pull limit (if configured)
+        # Count how many leads this user has been assigned today for this tenant.
+        # We use Record.updated_at (assignment updates updated_at) as the time signal.
+        if daily_limit is not None:
+            try:
+                daily_limit_int = int(daily_limit)
+            except (TypeError, ValueError):
+                daily_limit_int = None
+
+            if daily_limit_int is not None and daily_limit_int >= 0:
+                from django.utils import timezone
+                # Support both aware and naive datetimes (some deployments run with USE_TZ=False)
+                if timezone.is_aware(now):
+                    start_of_day = timezone.localtime(now).replace(hour=0, minute=0, second=0, microsecond=0)
+                else:
+                    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                assigned_today = Record.objects.filter(
+                    tenant=tenant,
+                    entity_type='lead',
+                    data__assigned_to=user_identifier,
+                    updated_at__gte=start_of_day,
+                ).count()
+
+                if assigned_today >= daily_limit_int:
+                    logger.info(
+                        "[GetNextLead] Daily limit reached for user=%s (assigned_today=%d, daily_limit=%d). Returning empty.",
+                        user_identifier,
+                        assigned_today,
+                        daily_limit_int,
+                    )
+                    # Fallback: still allow "not connected" follow-up leads, prioritized by call attempts
+                    # (attempt 1 first, then 2, then 3...), without assigning new leads.
+                    retry_candidate = Record.objects.filter(
+                        tenant=tenant,
+                        entity_type="lead",
+                        data__assigned_to=user_identifier,
+                    ).extra(
+                        select={
+                            "call_attempts_int": "COALESCE((data->>'call_attempts')::int, 0)",
+                            "lead_stage_norm": "UPPER(COALESCE(data->>'lead_stage',''))",
+                            "last_call_outcome_norm": "LOWER(COALESCE(data->>'last_call_outcome',''))",
+                        },
+                        where=[
+                            """
+                            COALESCE((data->>'call_attempts')::int, 0) >= 1
+                            AND COALESCE((data->>'call_attempts')::int, 0) <= 3
+                            AND (
+                                UPPER(COALESCE(data->>'lead_stage','')) = 'NOT_CONNECTED'
+                                OR LOWER(COALESCE(data->>'last_call_outcome','')) IN ('not connected', 'not_connected', 'notconnected')
+                            )
+                            AND (
+                                data->>'lead_stage' IN ('assigned', 'call_later', 'scheduled', 'SNOOZED', 'in_queue', 'NOT_CONNECTED')
+                                OR data->>'lead_stage' IS NULL
+                            )
+                            """
+                        ],
+                    ).order_by(
+                        "call_attempts_int",
+                        "updated_at",
+                        "id",
+                    ).first()
+
+                    if not retry_candidate:
+                        logger.info(
+                            "[GetNextLead] Daily limit reached and no retryable not-connected leads found for user=%s",
+                            user_identifier,
+                        )
+                        return Response({}, status=status.HTTP_200_OK)
+
+                    # Serialize and flatten for frontend compatibility (same format as normal GetNextLead)
+                    serialized_data = RecordSerializer(retry_candidate).data
+                    lead_data = retry_candidate.data or {}
+                    flattened_response = {
+                        "id": retry_candidate.id,
+                        "name": (retry_candidate.data or {}).get('name', '') if isinstance(retry_candidate.data, dict) else '',
+                        "phone_no": lead_data.get('phone_number', ''),
+                        "praja_id": lead_data.get('praja_id'),
+                        "lead_status": lead_data.get('lead_stage') or '',
+                        "lead_score": lead_data.get('lead_score'),
+                        "lead_type": lead_data.get('affiliated_party') or lead_data.get('poster'),
+                        "assigned_to": lead_data.get('assigned_to'),
+                        "attempt_count": lead_data.get('call_attempts', 0),
+                        "last_call_outcome": lead_data.get('last_call_outcome'),
+                        "next_call_at": lead_data.get('next_call_at'),
+                        "do_not_call": lead_data.get('do_not_call', False),
+                        "resolved_at": lead_data.get('closure_time'),
+                        "premium_poster_count": lead_data.get('premium_poster_count'),
+                        "package_to_pitch": lead_data.get('package_to_pitch'),
+                        "last_active_date_time": lead_data.get('last_active_date_time'),
+                        "latest_remarks": lead_data.get('latest_remarks'),
+                        "lead_description": lead_data.get('lead_description'),
+                        "affiliated_party": lead_data.get('affiliated_party'),
+                        "rm_dashboard": lead_data.get('rm_dashboard'),
+                        "user_profile_link": lead_data.get('user_profile_link'),
+                        "whatsapp_link": lead_data.get('whatsapp_link'),
+                        "lead_source": lead_data.get('lead_source'),
+                        "created_at": serialized_data.get('created_at'),
+                        "updated_at": serialized_data.get('updated_at'),
+                        "data": lead_data,
+                        "record": serialized_data,
+                    }
+
+                    logger.info(
+                        "[GetNextLead] Daily limit fallback returning not-connected lead: record_id=%s user=%s call_attempts=%s",
+                        retry_candidate.id,
+                        user_identifier,
+                        flattened_response.get("attempt_count"),
+                    )
+                    return Response(flattened_response, status=status.HTTP_200_OK)
 
         # Step 3: Filter leads by eligible lead types (affiliated_party field) and unassigned status
         from django.db.models import Q
@@ -1393,6 +1558,9 @@ class GetNextLeadView(APIView):
             data = candidate_locked.data.copy() if candidate_locked.data else {}
             data['assigned_to'] = user_identifier
             data['lead_stage'] = self.ASSIGNED_STATUS
+            # Ensure call_attempts is always present for downstream logic/UI
+            if 'call_attempts' not in data or data.get('call_attempts') in (None, '', 'null'):
+                data['call_attempts'] = 0
 
             candidate_locked.data = data
             candidate_locked.updated_at = timezone.now()
@@ -1603,12 +1771,12 @@ class PrajaLeadsAPIView(APIView):
     
     Note: praja_id should be stored in the data JSON field when creating leads.
     
-    Requires X-Secret-Praja header for authentication.
+    Requires X-Secret-Pyro header for authentication.
     Automatically uses DEFAULT_TENANT_SLUG from settings (no X-Tenant-Slug header needed).
-    Does NOT require IsTenantAuthenticated - uses HasPrajaSecret instead.
+    Does NOT require IsTenantAuthenticated - uses HasAPISecret instead.
     """
     authentication_classes = []  # No authentication required - only secret header
-    permission_classes = [HasPrajaSecret]
+    permission_classes = [HasAPISecret]
     
     def get_entity_type(self, request):
         """Get entity_type from query params, request body, or default to 'lead'"""
@@ -1620,8 +1788,7 @@ class PrajaLeadsAPIView(APIView):
         Helper to get tenant based on priority:
         1. tenant_id from request (query params or body) - highest priority
         2. Tenant from ApiSecretKey database lookup (if secret key is in database)
-        3. Default tenant (if secret key is PRAJA_SECRET from settings)
-        4. Fallback to default tenant from settings
+        3. Fallback to default tenant from settings
         """
         from django.conf import settings
         
@@ -1650,18 +1817,7 @@ class PrajaLeadsAPIView(APIView):
             logger.info(f"[PrajaLeadsAPI] Using tenant from database secret key mapping: {tenant.slug} (id={tenant.id})")
             return tenant, None
         
-        # Priority 3: If secret key is PRAJA_SECRET, use default tenant
-        is_praja_secret = getattr(request, 'is_praja_secret', False)
-        if is_praja_secret:
-            default_slug = getattr(settings, 'DEFAULT_TENANT_SLUG', 'bibhab-thepyro-ai')
-            try:
-                tenant = Tenant.objects.get(slug=default_slug)
-                logger.info(f"[PrajaLeadsAPI] Using default tenant for PRAJA_SECRET: {default_slug}")
-                return tenant, None
-            except Tenant.DoesNotExist:
-                logger.warning(f"[PrajaLeadsAPI] Default tenant '{default_slug}' not found")
-        
-        # Priority 4: Fallback to default tenant from settings
+        # Priority 3: Fallback to default tenant from settings
         default_slug = getattr(settings, 'DEFAULT_TENANT_SLUG', 'bibhab-thepyro-ai')
         
         try:
@@ -1718,6 +1874,14 @@ class PrajaLeadsAPIView(APIView):
                 request_data['data'] = {}
             # Move name from root to data (overwrites if name already exists in data)
             request_data['data']['name'] = request_data.pop('name')
+
+        # Normalize defaults for leads
+        # call_attempts lives inside data JSON; ensure it's present for consistency.
+        if entity_type == "lead":
+            if 'data' not in request_data or not isinstance(request_data.get('data'), dict):
+                request_data['data'] = {}
+            if 'call_attempts' not in request_data['data'] or request_data['data'].get('call_attempts') in (None, '', 'null'):
+                request_data['data']['call_attempts'] = 0
         
         serializer = RecordSerializer(data=request_data)
         if serializer.is_valid():
