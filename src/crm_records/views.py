@@ -1,4 +1,4 @@
-from rest_framework import generics, status
+from rest_framework import generics, status, serializers
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
@@ -7,6 +7,7 @@ from authz.permissions import IsTenantAuthenticated
 from core.pagination import MetaPageNumberPagination
 from core.models import Tenant
 from django.utils import timezone
+from datetime import datetime, time, timedelta
 from django.db.models import Q, F
 from django.db import transaction
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample, OpenApiParameter
@@ -369,12 +370,23 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
                 raise ValidationError({'record_id': 'Must be an integer.'})
 
             try:
-                return self.get_queryset().get(id=record_id_int)
+                # Always query database directly, bypassing any queryset cache
+                record = Record.objects.filter(
+                    id=record_id_int,
+                    tenant=self.request.tenant
+                ).first()
+                if not record:
+                    raise NotFound('Record not found or access denied')
+                # Force refresh to ensure latest data from DB
+                record.refresh_from_db()
+                return record
             except Record.DoesNotExist:
                 raise NotFound('Record not found or access denied')
 
-        # Fallback: use default URL kwarg (pk)
-        return super().get_object()
+        # Fallback: use default URL kwarg (pk) - also ensure fresh DB query
+        obj = super().get_object()
+        obj.refresh_from_db()
+        return obj
     
     def perform_update(self, serializer):
         """
@@ -614,7 +626,7 @@ class EventLogListView(TenantScopedMixin, generics.ListAPIView):
     @extend_schema(
         summary="List all events for tenant",
         description="Retrieves a paginated list of all events logged for the current tenant. "
-                   "Supports filtering by record ID and event name. Includes summary statistics.",
+                   "Supports filtering by record ID, event name, user_supabase_uid, and date range. Includes summary statistics.",
         parameters=[
             {
                 'name': 'record',
@@ -631,6 +643,30 @@ class EventLogListView(TenantScopedMixin, generics.ListAPIView):
                 'required': False,
                 'schema': {'type': 'string'},
                 'example': 'button_click'
+            },
+            {
+                'name': 'user_supabase_uid',
+                'in': 'query',
+                'description': 'Filter events by user_supabase_uid (from payload)',
+                'required': False,
+                'schema': {'type': 'string'},
+                'example': '22c38153-4029-4332-9849-747871332449'
+            },
+            {
+                'name': 'timestamp__gte',
+                'in': 'query',
+                'description': 'Filter events with timestamp greater than or equal to this date (ISO format)',
+                'required': False,
+                'schema': {'type': 'string', 'format': 'date-time'},
+                'example': '2025-12-16T00:00:00Z'
+            },
+            {
+                'name': 'timestamp__lte',
+                'in': 'query',
+                'description': 'Filter events with timestamp less than or equal to this date (ISO format)',
+                'required': False,
+                'schema': {'type': 'string', 'format': 'date-time'},
+                'example': '2025-12-16T23:59:59Z'
             }
         ],
         responses={
@@ -718,6 +754,12 @@ class EventLogListView(TenantScopedMixin, generics.ListAPIView):
     def get_queryset(self):
         """
         Get events for the current tenant, with optional filtering.
+        Supports filtering by:
+        - record: record ID
+        - event: event name
+        - user_supabase_uid: user ID from payload (filters payload__user_supabase_uid)
+        - timestamp__gte: timestamp greater than or equal
+        - timestamp__lte: timestamp less than or equal
         """
         queryset = EventLog.objects.filter(tenant=self.request.tenant)
         
@@ -731,8 +773,139 @@ class EventLogListView(TenantScopedMixin, generics.ListAPIView):
         if event_name:
             queryset = queryset.filter(event=event_name)
         
+        # Optional filtering by user_supabase_uid from payload
+        user_supabase_uid = self.request.query_params.get('user_supabase_uid')
+        if user_supabase_uid:
+            queryset = queryset.filter(payload__user_supabase_uid=user_supabase_uid)
+        
+        # Optional filtering by date range
+        timestamp_gte = self.request.query_params.get('timestamp__gte')
+        if timestamp_gte:
+            try:
+                from django.utils.dateparse import parse_datetime
+                dt = parse_datetime(timestamp_gte)
+                if dt:
+                    queryset = queryset.filter(timestamp__gte=dt)
+            except (ValueError, TypeError):
+                pass  # Ignore invalid date format
+        
+        timestamp_lte = self.request.query_params.get('timestamp__lte')
+        if timestamp_lte:
+            try:
+                from django.utils.dateparse import parse_datetime
+                dt = parse_datetime(timestamp_lte)
+                if dt:
+                    queryset = queryset.filter(timestamp__lte=dt)
+            except (ValueError, TypeError):
+                pass  # Ignore invalid date format
+        
         # Order by most recent first
         return queryset.order_by('-timestamp')
+
+
+class EventLogCountView(TenantScopedMixin, APIView):
+    """
+    Get count of events matching filters.
+    More efficient than fetching all events just to count them.
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    @extend_schema(
+        summary="Get event count",
+        description="Returns the count of events matching the provided filters. "
+                   "Supports filtering by event name, user_supabase_uid, and date range.",
+        parameters=[
+            {
+                'name': 'event',
+                'in': 'query',
+                'description': 'Filter events by event name',
+                'required': False,
+                'schema': {'type': 'string'},
+                'example': 'lead.trial_activated'
+            },
+            {
+                'name': 'user_supabase_uid',
+                'in': 'query',
+                'description': 'Filter events by user_supabase_uid (from payload)',
+                'required': False,
+                'schema': {'type': 'string'},
+                'example': '22c38153-4029-4332-9849-747871332449'
+            },
+            {
+                'name': 'timestamp__gte',
+                'in': 'query',
+                'description': 'Filter events with timestamp greater than or equal to this date (ISO format)',
+                'required': False,
+                'schema': {'type': 'string', 'format': 'date-time'},
+                'example': '2025-12-16T00:00:00Z'
+            },
+            {
+                'name': 'timestamp__lte',
+                'in': 'query',
+                'description': 'Filter events with timestamp less than or equal to this date (ISO format)',
+                'required': False,
+                'schema': {'type': 'string', 'format': 'date-time'},
+                'example': '2025-12-16T23:59:59Z'
+            }
+        ],
+        responses={
+            200: OpenApiResponse(
+                description="Event count",
+                examples=[
+                    OpenApiExample(
+                        name="Count Response",
+                        value={
+                            "count": 42
+                        }
+                    )
+                ]
+            )
+        },
+        tags=["Events", "Admin"]
+    )
+    def get(self, request):
+        """
+        Get count of events matching the filters.
+        Uses the same filtering logic as EventLogListView but only returns count.
+        """
+        queryset = EventLog.objects.filter(tenant=request.tenant)
+        
+        # Optional filtering by event name
+        event_name = request.query_params.get('event')
+        if event_name:
+            queryset = queryset.filter(event=event_name)
+        
+        # Optional filtering by user_supabase_uid from payload
+        user_supabase_uid = request.query_params.get('user_supabase_uid')
+        if user_supabase_uid:
+            queryset = queryset.filter(payload__user_supabase_uid=user_supabase_uid)
+        
+        # Optional filtering by date range
+        timestamp_gte = request.query_params.get('timestamp__gte')
+        if timestamp_gte:
+            try:
+                from django.utils.dateparse import parse_datetime
+                dt = parse_datetime(timestamp_gte)
+                if dt:
+                    queryset = queryset.filter(timestamp__gte=dt)
+            except (ValueError, TypeError):
+                pass  # Ignore invalid date format
+        
+        timestamp_lte = request.query_params.get('timestamp__lte')
+        if timestamp_lte:
+            try:
+                from django.utils.dateparse import parse_datetime
+                dt = parse_datetime(timestamp_lte)
+                if dt:
+                    queryset = queryset.filter(timestamp__lte=dt)
+            except (ValueError, TypeError):
+                pass  # Ignore invalid date format
+        
+        count = queryset.count()
+        
+        return Response({
+            "count": count
+        }, status=status.HTTP_200_OK)
 
 
 class LeadStatsView(APIView):
@@ -1231,8 +1404,12 @@ class GetNextLeadView(APIView):
                 user_identifier
             )
 
-        # Refresh from database to ensure we have latest data
+        # Force refresh from database to ensure we have absolute latest data
+        # This bypasses any queryset caching and ensures fresh DB read
         candidate_locked.refresh_from_db()
+        
+        # Additional safety: Re-query from DB to ensure no stale data
+        candidate_locked = Record.objects.select_related().get(pk=candidate_locked.pk)
 
         # Serialize and flatten for frontend compatibility
         serialized_data = RecordSerializer(candidate_locked).data
@@ -1279,6 +1456,137 @@ class GetNextLeadView(APIView):
             flattened_response.get('last_active_date_time')
         )
 
+        return Response(flattened_response, status=status.HTTP_200_OK)
+
+
+class GetMyCurrentLeadView(APIView):
+    """
+    Get the user's currently assigned lead from the database.
+    Always queries the database directly (no cache) to ensure fresh data.
+    Returns the same lead the user was working on, even after page refresh.
+    
+    GET /crm-records/leads/current/
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    QUEUEABLE_STATUSES = ('in_queue', 'assigned', 'call_later', 'scheduled')
+    
+    @extend_schema(
+        summary="Get my current assigned lead",
+        description="Returns the lead currently assigned to the user, always fetched fresh from the database. "
+                   "This ensures users see the same lead after page refresh or navigation.",
+        responses={
+            200: OpenApiResponse(
+                description="Current lead found",
+                examples=[
+                    OpenApiExample(
+                        name="Lead Found",
+                        value={
+                            "id": 123,
+                            "name": "John Doe",
+                            "phone_no": "+919876543210",
+                            "lead_status": "assigned",
+                            "assigned_to": "user-uuid-123"
+                        }
+                    )
+                ]
+            ),
+            200: OpenApiResponse(
+                description="No lead assigned",
+                examples=[
+                    OpenApiExample(
+                        name="No Lead",
+                        value={}
+                    )
+                ]
+            )
+        },
+        tags=["Leads", "Current Lead"]
+    )
+    def get(self, request):
+        """
+        Get the user's currently assigned lead from the database.
+        Always queries DB directly to ensure fresh data.
+        """
+        user = request.user
+        tenant = request.tenant
+        
+        if not tenant:
+            logger.warning("[GetMyCurrentLead] No tenant context available")
+            return Response({}, status=status.HTTP_200_OK)
+        
+        # Get user identifier (supabase_uid or email)
+        user_identifier = getattr(user, 'supabase_uid', None) or getattr(user, 'email', None)
+        
+        if not user_identifier:
+            logger.warning("[GetMyCurrentLead] No user identifier available")
+            return Response({}, status=status.HTTP_200_OK)
+        
+        logger.info("[GetMyCurrentLead] Getting current lead for user: %s", user_identifier)
+        
+        # Always query database directly - get leads assigned to this user
+        # Filter by queueable statuses (assigned, call_later, scheduled, in_queue)
+        # Order by updated_at descending to get the most recently worked on lead
+        current_lead = Record.objects.filter(
+            tenant=tenant,
+            entity_type='lead',
+            data__assigned_to=user_identifier
+        ).filter(
+            Q(data__lead_stage__in=self.QUEUEABLE_STATUSES) | 
+            Q(data__lead_stage__isnull=True)  # Include leads without explicit stage
+        ).order_by('-updated_at').first()
+        
+        # Force fresh DB query - refresh from database
+        if current_lead:
+            current_lead.refresh_from_db()
+            # Re-query to ensure absolute latest data
+            current_lead = Record.objects.filter(pk=current_lead.pk).first()
+        
+        if not current_lead:
+            logger.info("[GetMyCurrentLead] No current lead found for user: %s", user_identifier)
+            return Response({}, status=status.HTTP_200_OK)
+        
+        # Serialize and flatten for frontend compatibility (same format as GetNextLeadView)
+        serialized_data = RecordSerializer(current_lead).data
+        lead_data = current_lead.data or {}
+        
+        flattened_response = {
+            "id": current_lead.id,
+            "name": (current_lead.data or {}).get('name', '') if isinstance(current_lead.data, dict) else '',
+            "phone_no": lead_data.get('phone_number', ''),
+            "praja_id": lead_data.get('praja_id'),
+            "lead_status": lead_data.get('lead_stage') or '',
+            "lead_score": lead_data.get('lead_score'),
+            "lead_type": lead_data.get('affiliated_party') or lead_data.get('poster'),
+            "assigned_to": lead_data.get('assigned_to'),
+            "attempt_count": lead_data.get('call_attempts', 0),
+            "last_call_outcome": lead_data.get('last_call_outcome'),
+            "next_call_at": lead_data.get('next_call_at'),
+            "do_not_call": lead_data.get('do_not_call', False),
+            "resolved_at": lead_data.get('closure_time'),
+            "premium_poster_count": lead_data.get('premium_poster_count'),
+            "package_to_pitch": lead_data.get('package_to_pitch'),
+            "last_active_date_time": lead_data.get('last_active_date_time'),
+            "latest_remarks": lead_data.get('latest_remarks'),
+            "lead_description": lead_data.get('lead_description'),
+            "affiliated_party": lead_data.get('affiliated_party'),
+            "rm_dashboard": lead_data.get('rm_dashboard'),
+            "user_profile_link": lead_data.get('user_profile_link'),
+            "whatsapp_link": lead_data.get('whatsapp_link'),
+            "lead_source": lead_data.get('lead_source'),
+            "created_at": serialized_data.get('created_at'),
+            "updated_at": serialized_data.get('updated_at'),
+            "data": lead_data,
+            "record": serialized_data
+        }
+        
+        logger.info(
+            "[GetMyCurrentLead] Returning current lead: record_id=%s name=%s updated_at=%s",
+            current_lead.id,
+            flattened_response.get('name'),
+            current_lead.updated_at
+        )
+        
         return Response(flattened_response, status=status.HTTP_200_OK)
 
 
