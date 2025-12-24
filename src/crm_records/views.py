@@ -23,6 +23,7 @@ from .scoring import calculate_and_update_lead_score
 from user_settings.models import UserSettings
 from .permissions import HasPrajaSecret
 from support_ticket.services import MixpanelService
+from user_settings.routing import apply_routing_rule_to_queryset
 
 
 class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
@@ -1261,6 +1262,15 @@ class GetNextLeadView(APIView):
                 )
                 """]
         )
+
+        # Apply optional per-user routing rule for leads (e.g. by state)
+        if user_uuid:
+            base_qs = apply_routing_rule_to_queryset(
+                base_qs,
+                tenant=tenant,
+                user_id=user_uuid,
+                queue_type="lead",
+            )
 
         # Filter by eligible lead types (affiliated_party field must match one of the eligible types)
         affiliated_party_filter = Q()

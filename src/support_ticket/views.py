@@ -20,6 +20,7 @@ from .models import SupportTicketDump
 from .models import SupportTicket
 from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer,UpdateCallStatusRequestSerializer
 from .services import MixpanelService, TicketTimeService
+from user_settings.routing import apply_routing_rule_to_queryset
 from authz.permissions import IsTenantAuthenticated
 from accounts.models import LegacyUser
 from datetime import timedelta
@@ -371,7 +372,7 @@ class GetNextTicketView(APIView):
 
             # Get the next ticket
             with transaction.atomic():
-                next_ticket = self._get_and_assign_ticket(user, user_email)
+                next_ticket = self._get_and_assign_ticket(request, user, user_email)
 
 
             # If no tickets available, return empty object
@@ -396,63 +397,105 @@ class GetNextTicketView(APIView):
             response['Access-Control-Allow-Origin'] = '*'
             return response
 
-    def _get_and_assign_ticket(self, user, user_email):
+    def _get_and_assign_ticket(self, request, user, user_email):
         """
         Simplified logic to get and assign a ticket to the user.
         1. First get the newest unassigned ticket (LIFO - Last In, First Out)
         2. Then check for snoozed tickets for this user
         """
         current_time = timezone.now()
+        tenant = getattr(request, "tenant", None)
+        
+        logger.info(f"[_get_and_assign_ticket] Starting ticket assignment process")
+        logger.info(f"[_get_and_assign_ticket] User: {user.supabase_uid} ({user_email})")
+        logger.info(f"[_get_and_assign_ticket] Tenant: {tenant.id if tenant else None}")
+        logger.info(f"[_get_and_assign_ticket] Current time: {current_time}")
 
         # 1. Get the ticket with resolution_status null that is assigned to the user or is snoozed and assigned to current user only
-        logger.info(f"7 - Looking for tickets with resolution_status null and assigned to user: {user.supabase_uid}")
-        logger.info(f"7 - Current time: {current_time}")
+        logger.info(f"[_get_and_assign_ticket] Step 1: Looking for tickets with resolution_status null and assigned to user: {user.supabase_uid}")
+        
+        try:
+            user_uuid_obj = UUID(str(user.supabase_uid))
+            logger.info(f"[_get_and_assign_ticket] Successfully converted user.supabase_uid to UUID: {user_uuid_obj}")
+        except (ValueError, AttributeError, TypeError) as e:
+            logger.error(f"[_get_and_assign_ticket] Failed to convert user.supabase_uid to UUID: {e}")
+            logger.error(f"[_get_and_assign_ticket] user.supabase_uid type: {type(user.supabase_uid)}, value: {user.supabase_uid}")
+            # Return None if we can't convert to UUID
+            return None
+        
         already_assigned_ticket = SupportTicket.objects.select_for_update(
             skip_locked=True,
             of=("self",)
         ).filter(
-            assigned_to=UUID(user.supabase_uid),
+            assigned_to=user_uuid_obj,
         ).filter(
             Q(resolution_status__isnull=True) | Q(resolution_status="Snoozed")
         ).order_by('created_at').first()
+        
         if already_assigned_ticket:
-            logger.info("9 - TICKET FOUND WITH RESOLUTION_STATUS NULL AND ASSIGNED TO USER")
-            logger.info(f"Ticket ID: {already_assigned_ticket.id}")
-            logger.info(f"Created at: {already_assigned_ticket.created_at}")
-            already_assigned_ticket.assigned_to_id = (user.supabase_uid)
+            logger.info(f"[_get_and_assign_ticket] Step 1 SUCCESS: Found ticket already assigned to user")
+            logger.info(f"[_get_and_assign_ticket] Ticket ID: {already_assigned_ticket.id}")
+            logger.info(f"[_get_and_assign_ticket] Ticket created at: {already_assigned_ticket.created_at}")
+            logger.info(f"[_get_and_assign_ticket] Ticket resolution_status: {already_assigned_ticket.resolution_status}")
+            already_assigned_ticket.assigned_to_id = user_uuid_obj
             already_assigned_ticket.cse_name = user_email
+            already_assigned_ticket.save()
             return already_assigned_ticket
         else:
-            logger.info("8 - NO TICKETS FOUND WITH RESOLUTION_STATUS NULL AND ASSIGNED TO USER")
+            logger.info(f"[_get_and_assign_ticket] Step 1: No tickets found with resolution_status null and assigned to user")
 
+        # 2. LIFO logic: get the newest unassigned ticket, constrained by routing rules if present
+        logger.info(f"[_get_and_assign_ticket] Step 2: Searching for unassigned tickets with row locking")
 
-        # 2. LIFO logic: get the newest unassigned ticket
-        logger.info("1 - Searching for unassigned tickets with row locking")
-
-        unassigned_ticket = SupportTicket.objects.select_for_update(
+        base_qs = SupportTicket.objects.select_for_update(
             skip_locked=True,
             of=("self",)
         ).filter(
             assigned_to__isnull=True,
             resolution_status__isnull=True
-        ).order_by('-created_at')[:1].first()
+        )
+        
+        logger.info(f"[_get_and_assign_ticket] Step 2: Base queryset count (before routing): {base_qs.count()}")
+
+        # Apply per-user routing rule if configured for tickets
+        if tenant and user_uuid_obj:
+            logger.info(f"[_get_and_assign_ticket] Step 2: Applying routing rules for tenant={tenant.id}, user={user_uuid_obj}, queue_type=ticket")
+            try:
+                base_qs = apply_routing_rule_to_queryset(
+                    base_qs,
+                    tenant=tenant,
+                    user_id=user_uuid_obj,
+                    queue_type="ticket",
+                )
+                logger.info(f"[_get_and_assign_ticket] Step 2: After routing rules, queryset count: {base_qs.count()}")
+            except Exception as routing_error:
+                logger.error(f"[_get_and_assign_ticket] Step 2: Error applying routing rules: {routing_error}")
+                logger.exception(routing_error)
+                # Continue without routing rules if there's an error
+        else:
+            logger.info(f"[_get_and_assign_ticket] Step 2: Skipping routing rules (tenant={tenant is not None}, user_uuid={user_uuid_obj is not None})")
+
+        unassigned_ticket = base_qs.order_by("-created_at")[:1].first()
         
         if unassigned_ticket:
-            logger.info(f"UNASSIGNED TICKET FOUND: ID {unassigned_ticket.id}")
-            logger.info(f"Ticket created at: {unassigned_ticket.created_at}")
+            logger.info(f"[_get_and_assign_ticket] Step 2 SUCCESS: Found unassigned ticket")
+            logger.info(f"[_get_and_assign_ticket] Ticket ID: {unassigned_ticket.id}")
+            logger.info(f"[_get_and_assign_ticket] Ticket created at: {unassigned_ticket.created_at}")
+            logger.info(f"[_get_and_assign_ticket] Ticket poster: {unassigned_ticket.poster}")
+            logger.info(f"[_get_and_assign_ticket] Ticket source: {unassigned_ticket.source}")
 
-            # Assign the ticket to the user (assigned_to is UUIDField, so convert supabase_uid)
-            unassigned_ticket.assigned_to_id = (user.supabase_uid)
+            # Assign the ticket to the user (assigned_to is UUIDField, so use UUID object)
+            unassigned_ticket.assigned_to_id = user_uuid_obj
             unassigned_ticket.cse_name = user_email
             unassigned_ticket.save()
-            logger.info("3 - UNASSIGNED TICKET ASSIGNED SUCCESSFULLY")
+            logger.info(f"[_get_and_assign_ticket] Step 2: Successfully assigned ticket {unassigned_ticket.id} to user {user_uuid_obj}")
             return unassigned_ticket
         else:
-            logger.info("2 - NO UNASSIGNED TICKETS FOUND")
+            logger.info(f"[_get_and_assign_ticket] Step 2: No unassigned tickets found matching criteria")
 
         # 3. Look for snoozed tickets for this user as fallback
-        logger.info(f"5 - Looking for snoozed tickets for user: {user.supabase_uid}")
-        logger.info(f"5 - Current time: {current_time}")
+        logger.info(f"[_get_and_assign_ticket] Step 3: Looking for snoozed tickets")
+        logger.info(f"[_get_and_assign_ticket] Step 3: Current time: {current_time}")
 
         snoozed_ticket = SupportTicket.objects.select_for_update(
             skip_locked=True,
@@ -464,24 +507,23 @@ class GetNextTicketView(APIView):
             snooze_until__lte=current_time
         ).order_by('-snooze_until').first()
 
-        logger.info(f"6 - Found snoozed ticket")
-        
         if snoozed_ticket:
-            logger.info("7 - SNOOZED TICKET FOUND")
-            logger.info(f"Snoozed ticket ID: {snoozed_ticket.id}")
-            logger.info(f"Snooze until: {snoozed_ticket.snooze_until}")
-            logger.info(f"Created at: {snoozed_ticket.created_at}")
+            logger.info(f"[_get_and_assign_ticket] Step 3 SUCCESS: Found snoozed ticket")
+            logger.info(f"[_get_and_assign_ticket] Snoozed ticket ID: {snoozed_ticket.id}")
+            logger.info(f"[_get_and_assign_ticket] Snooze until: {snoozed_ticket.snooze_until}")
+            logger.info(f"[_get_and_assign_ticket] Created at: {snoozed_ticket.created_at}")
             
-            snoozed_ticket.assigned_to_id = (user.supabase_uid)
+            snoozed_ticket.assigned_to_id = user_uuid_obj
             snoozed_ticket.cse_name = user_email
             snoozed_ticket.save()
+            logger.info(f"[_get_and_assign_ticket] Step 3: Successfully assigned snoozed ticket {snoozed_ticket.id} to user {user_uuid_obj}")
             return snoozed_ticket
         else:
-            logger.info("6 - NO SNOOZED TICKETS FOUND")
+            logger.info(f"[_get_and_assign_ticket] Step 3: No snoozed tickets found")
 
         
         # No tickets available
-        logger.info("8 - No tickets available")
+        logger.info(f"[_get_and_assign_ticket] FINAL: No tickets available for user {user_uuid_obj}")
         return None
 
 class UpdateCallStatusView(APIView):

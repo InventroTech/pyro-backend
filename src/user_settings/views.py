@@ -6,11 +6,12 @@ from django.shortcuts import get_object_or_404
 from django.db import transaction
 
 from authz.permissions import IsTenantAuthenticated, HasTenantRole
-from .models import UserSettings
+from .models import UserSettings, RoutingRule
 from .serializers import (
-    UserSettingsSerializer, 
-    UserSettingsCreateSerializer, 
-    LeadTypeAssignmentSerializer
+    UserSettingsSerializer,
+    UserSettingsCreateSerializer,
+    LeadTypeAssignmentSerializer,
+    RoutingRuleSerializer,
 )
 from accounts.models import LegacyUser
 from crm_records.models import Record
@@ -369,3 +370,94 @@ class LeadTypesListView(APIView):
         return Response({
             'lead_types': lead_types_list
         }, status=status.HTTP_200_OK)
+
+
+class RoutingRuleListCreateView(APIView):
+    """
+    List and upsert simple per-user routing rules for tickets and leads.
+
+    v1: one active rule per (tenant, user_id, queue_type).
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        tenant = request.tenant
+        rules = RoutingRule.objects.filter(tenant=tenant).order_by("queue_type", "user_id", "id")
+        serializer = RoutingRuleSerializer(rules, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        """
+        Upsert a routing rule for a user + queue_type within the current tenant.
+
+        If a rule already exists for (tenant, user_id, queue_type), it is updated.
+        Otherwise a new rule is created.
+        """
+        tenant = request.tenant
+
+        serializer = RoutingRuleSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        validated = serializer.validated_data
+        user_id = validated.get("user_id")
+        queue_type = validated.get("queue_type")
+
+        with transaction.atomic():
+            rule, created = RoutingRule.objects.select_for_update().get_or_create(
+                tenant=tenant,
+                user_id=user_id,
+                queue_type=queue_type,
+                defaults={
+                    "is_active": validated.get("is_active", True),
+                    "conditions": validated.get("conditions", {}),
+                    "name": validated.get("name"),
+                    "description": validated.get("description"),
+                },
+            )
+
+            if not created:
+                # Update existing rule in-place
+                for field in ["is_active", "conditions", "name", "description"]:
+                    if field in validated:
+                        setattr(rule, field, validated[field])
+                rule.save()
+
+        response_serializer = RoutingRuleSerializer(rule)
+        return Response(
+            response_serializer.data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class RoutingRuleDetailView(APIView):
+    """
+    Retrieve, update, or delete a specific routing rule by ID.
+    """
+
+    permission_classes = [IsTenantAuthenticated, HasTenantRole("GM")]
+
+    def get_object(self, tenant, pk: int) -> RoutingRule:
+        return get_object_or_404(RoutingRule, tenant=tenant, pk=pk)
+
+    def get(self, request, pk: int):
+        tenant = request.tenant
+        rule = self.get_object(tenant, pk)
+        serializer = RoutingRuleSerializer(rule)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def put(self, request, pk: int):
+        tenant = request.tenant
+        rule = self.get_object(tenant, pk)
+        serializer = RoutingRuleSerializer(rule, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk: int):
+        tenant = request.tenant
+        rule = self.get_object(tenant, pk)
+        rule.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
