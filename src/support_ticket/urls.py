@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import DumpTicketWebhookView, SaveAndContinueView, GetNextTicketView, SupportTicketUpdateView, TakeBreakView, UpdateCallStatusView, GetWIPTicketsView
+from .views import DumpTicketWebhookView, SaveAndContinueView, GetNextTicketView, SupportTicketUpdateView, TakeBreakView, UpdateCallStatusView, GetWIPTicketsView, ProcessDumpedTicketsView
 
 app_name = 'support_ticket'
 
@@ -11,4 +11,5 @@ urlpatterns = [
     path("update-call-status/", UpdateCallStatusView.as_view(), name="update-call-status"),
     path('update/', SupportTicketUpdateView.as_view(), name='update-ticket'),
     path('take-break/', TakeBreakView.as_view(), name='take-break'),
+    path('process-dumped-tickets/', ProcessDumpedTicketsView.as_view(), name='process-dumped-tickets'),
 ]
