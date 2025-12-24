@@ -5,7 +5,7 @@ import threading
 from typing import Any, Dict, Optional
 
 from django.contrib.contenttypes.models import ContentType
-from django.db import transaction
+from django.db import transaction, IntegrityError
 
 from .models import ObjectHistory
 from .registry import get_config
@@ -182,12 +182,18 @@ class HistoryEngine:
         config,
         include_after: bool,
     ):
+        """
+        Write history entry with proper transaction handling to prevent race conditions.
+        
+        The entire operation (getting next version + inserting) is wrapped in a single
+        transaction with row-level locking to prevent duplicate version numbers.
+        Uses retry logic with savepoints to handle edge cases where concurrent
+        transactions might still conflict.
+        """
         tenant = getattr(instance, "tenant", None)
         content_type = ContentType.objects.get_for_model(instance.__class__)
         object_repr = str(instance)
         object_id = instance.pk
-
-        version = HistoryEngine._next_version(content_type, object_id)
 
         before_snapshot = before_state
         after_snapshot = after_state or {}
@@ -204,36 +210,59 @@ class HistoryEngine:
                 if field in after_snapshot
             }
 
-        ObjectHistory.objects.create(
-            tenant=tenant,
-            content_type=content_type,
-            object_id=str(object_id),
-            object_repr=object_repr,
-            action=action,
-            actor_user=actor_user,
-            actor_label=actor_label,
-            version=version,
-            changes=changes,
-            before_state=redact_payload(before_snapshot, config.redact_fields),
-            after_state=redact_payload(after_snapshot, config.redact_fields)
-            if include_after
-            else None,
-            metadata=metadata,
-        )
+        # Retry logic with savepoints to handle race conditions
+        max_retries = 3
+        for attempt in range(max_retries):
+            # Use savepoint for each retry attempt
+            with transaction.atomic():
+                # Get the next version within the transaction, with row locking
+                # This ensures no other concurrent request can get the same version
+                # while we're in this transaction
+                latest = (
+                    ObjectHistory.objects.select_for_update()
+                    .filter(content_type=content_type, object_id=str(object_id))
+                    .order_by("-version")
+                    .first()
+                )
+                version = 1 if not latest else latest.version + 1
 
-    @staticmethod
-    @transaction.atomic
-    def _next_version(content_type, object_id) -> int:
-        latest = (
-            ObjectHistory.objects.select_for_update()
-            .filter(content_type=content_type, object_id=str(object_id))
-            .order_by("-version")
-            .first()
-        )
-        if not latest:
-            return 1
-        return latest.version + 1
-
+                try:
+                    ObjectHistory.objects.create(
+                        tenant=tenant,
+                        content_type=content_type,
+                        object_id=str(object_id),
+                        object_repr=object_repr,
+                        action=action,
+                        actor_user=actor_user,
+                        actor_label=actor_label,
+                        version=version,
+                        changes=changes,
+                        before_state=redact_payload(before_snapshot, config.redact_fields),
+                        after_state=redact_payload(after_snapshot, config.redact_fields)
+                        if include_after
+                        else None,
+                        metadata=metadata,
+                    )
+                    # Success, break out of retry loop
+                    return
+                except IntegrityError as e:
+                    # Check if it's the unique constraint violation we're concerned about
+                    if "object_hist_unique_version" in str(e) and attempt < max_retries - 1:
+                        # Another transaction inserted this version between our select and insert
+                        # This should be extremely rare with proper locking, but can happen
+                        # in edge cases (e.g., when there are no existing rows to lock)
+                        logger.warning(
+                            f"Race condition detected in object history for "
+                            f"{content_type.model}#{object_id}, retrying (attempt {attempt + 1}/{max_retries})"
+                        )
+                        # Transaction will roll back automatically, continue to next attempt
+                        continue
+                    else:
+                        # Re-raise if it's a different error or we've exhausted retries
+                        logger.error(
+                            f"Failed to write object history after {max_retries} attempts: {e}"
+                        )
+                        raise
 
 __all__ = [
     "HistoryEngine",

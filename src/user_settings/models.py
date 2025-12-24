@@ -28,6 +28,11 @@ class UserSettings(models.Model):
         blank=True,
         help_text="Daily target for the user"
     )
+    daily_limit = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Daily lead pull limit for the user (max leads they can fetch per day)"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

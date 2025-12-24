@@ -8,10 +8,13 @@ import logging
 import time
 import threading
 from typing import Optional, Dict, Any
-from django.utils import timezone
-from django.db import transaction
-from django.db.models import Q, F
 from datetime import timedelta
+
+from django.utils import timezone
+from django.db import transaction, close_old_connections
+from django.db.models import Q, F
+from django.db.utils import InterfaceError, OperationalError
+
 from .models import BackgroundJob, JobStatus
 from .job_handlers import get_handler_registry
 
@@ -80,6 +83,15 @@ class JobProcessor:
                     logger.debug(f"[Worker {self.worker_id}] Locked job {job.id}")
                 
                 return job
+        except (InterfaceError, OperationalError) as e:
+            # Database connection issues are recoverable in long-running workers.
+            # Close old connections so Django can establish a fresh one on next use.
+            logger.error(
+                f"[Worker {self.worker_id}] Database error while locking job: {e}",
+                exc_info=True,
+            )
+            close_old_connections()
+            return None
         except Exception as e:
             logger.error(f"[Worker {self.worker_id}] Error locking job: {e}", exc_info=True)
             return None
@@ -336,6 +348,8 @@ class JobProcessor:
         
         while not self._stop_event.is_set():
             try:
+                # Ensure we don't hold on to stale/closed DB connections in a long-running worker.
+                close_old_connections()
                 jobs_processed = 0
                 
                 # Process a batch of jobs
@@ -367,6 +381,16 @@ class JobProcessor:
                     wait_time = poll_interval * min(consecutive_empty_polls, max_empty_polls)
                     self._stop_event.wait(wait_time)
                     
+            except (InterfaceError, OperationalError) as e:
+                # Database connection has likely been closed by the server (e.g. idle timeout).
+                # Reset Django's connection state so the next iteration can obtain a fresh one.
+                logger.error(
+                    f"[Worker {self.worker_id}] Database connection error in worker loop: {e}",
+                    exc_info=True,
+                )
+                close_old_connections()
+                # Wait a bit before retrying on error
+                self._stop_event.wait(poll_interval * 2)
             except Exception as e:
                 logger.error(
                     f"[Worker {self.worker_id}] Error in worker loop: {e}",
