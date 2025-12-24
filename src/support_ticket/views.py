@@ -76,6 +76,7 @@ ALLOWED_FIELDS = [
     'phone',
     'reason',
     'layout_status',
+    'state',
     'badge',
     'poster',
     'subscription_status',
@@ -414,6 +415,8 @@ class GetNextTicketView(APIView):
             assigned_to=UUID(user.supabase_uid),
         ).filter(
             Q(resolution_status__isnull=True) | Q(resolution_status="Snoozed")
+        ).exclude(
+            poster__in=["Trial Expired", "Premium Expired", "trial_expired", "premium_expired"]
         ).order_by('created_at').first()
         if already_assigned_ticket:
             logger.info("9 - TICKET FOUND WITH RESOLUTION_STATUS NULL AND ASSIGNED TO USER")
@@ -435,6 +438,8 @@ class GetNextTicketView(APIView):
         ).filter(
             assigned_to__isnull=True,
             resolution_status__isnull=True
+        ).exclude(
+            poster__in=["Trial Expired", "Premium Expired", "trial_expired", "premium_expired"]
         ).order_by('-created_at')[:1].first()
         
         if unassigned_ticket:
@@ -462,6 +467,8 @@ class GetNextTicketView(APIView):
             assigned_to__isnull=True,
             snooze_until__isnull=False,
             snooze_until__lte=current_time
+        ).exclude(
+            poster__in=["Trial Expired", "Premium Expired", "trial_expired", "premium_expired"]
         ).order_by('-snooze_until').first()
 
         logger.info(f"6 - Found snoozed ticket")
