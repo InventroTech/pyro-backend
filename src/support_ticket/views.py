@@ -733,27 +733,9 @@ class TakeBreakView(APIView):
 
 
 class ProcessDumpedTicketsView(APIView):
-    """
-    Django equivalent of the Supabase process-dumped-tickets edge function.
-    This function is designed to be run as a scheduled cron job (e.g., every 5 minutes).
-    It processes new tickets from a dump table, checks for existing open tickets,
-    deduplicates them, and inserts them into the main support ticket table.
-    
-    Endpoint: POST /support-ticket/process-dumped-tickets/
-    """
     permission_classes = [AllowAny]  # Allow cron jobs to call this endpoint
     
     def post(self, request):
-        """
-        Process unprocessed tickets from support_ticket_dump table.
-        
-        Steps:
-        1. Fetch unprocessed tickets (is_processed is False or None)
-        2. Deduplicate tickets based on user_id
-        3. Check for existing open tickets (same user_id, resolution_status is null, assigned_to is null)
-        4. Insert unique tickets into support_ticket table (skip if open ticket exists)
-        5. Mark dumped tickets as processed
-        """
         try:
             logger.info('ProcessDumpedTicketsView: Function invoked. Starting ticket processing...')
             
