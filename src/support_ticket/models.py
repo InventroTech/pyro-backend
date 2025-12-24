@@ -27,6 +27,7 @@ class SupportTicketDump(models.Model):
     poster = models.CharField(max_length=255, null=True, blank=True)
     tenant_id = models.UUIDField()  # Required field
     layout_status = models.CharField(max_length=255, null=True, blank=True)
+    state = models.CharField(max_length=255, null=True, blank=True)
     praja_dashboard_user_link = models.TextField(null=True, blank=True)
     display_pic_url = models.TextField(null=True, blank=True)
     is_processed = models.BooleanField(default=False)  # For cron job tracking
@@ -75,6 +76,7 @@ class SupportTicket(HistoryTrackedModel):
     )
 
     layout_status = models.CharField(max_length=255, null=True, blank=True)
+    state = models.CharField(max_length=255, null=True, blank=True)
     resolution_status = models.CharField(max_length=255, null=True, blank=True)
     resolution_time = models.CharField(max_length=255, null=True, blank=True)
 
