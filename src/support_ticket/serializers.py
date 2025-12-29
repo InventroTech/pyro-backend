@@ -18,6 +18,7 @@ class TicketDumpWebhookSerializer(serializers.Serializer):
     phone = serializers.CharField(max_length=50, required=False, allow_blank=True, allow_null=True)
     reason = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     layout_status = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
+    state = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
     badge = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
     poster = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
     subscription_status = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -134,7 +135,7 @@ class SupportTicketResponseSerializer(serializers.ModelSerializer):
             'id', 'created_at', 'ticket_date', 'user_id', 'name', 'phone',
             'source', 'subscription_status', 'atleast_paid_once', 'reason',
             'other_reasons', 'badge', 'poster', 'tenant_id', 'assigned_to', 'layout_status',
-            'resolution_status', 'resolution_time', 'cse_name', 'cse_remarks',
+            'state', 'resolution_status', 'resolution_time', 'cse_name', 'cse_remarks',
             'call_status', 'call_attempts', 'completed_at', 'dumped_at', 'snooze_until', 'review_requested'
         ]
         read_only_fields = ['id', 'created_at', 'dumped_at']

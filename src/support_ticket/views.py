@@ -51,9 +51,17 @@ class GetWIPTicketsView(APIView):
             
             # Query for tickets assigned to the user with 'Work in Progress' status
             # Sorted by creation date, newest first
+            # Use .only() to prevent N+1 queries by fetching only required fields
             wip_tickets = SupportTicket.objects.filter(
                 assigned_to=user_id,
                 resolution_status='WIP'
+            ).only(
+                "id", "created_at", "ticket_date", "user_id", "name", "phone", "source",
+                "subscription_status", "atleast_paid_once", "reason", "other_reasons",
+                "badge", "poster", "tenant_id", "assigned_to", "layout_status", "state",
+                "resolution_status", "resolution_time", "cse_name", "cse_remarks",
+                "call_status", "call_attempts", "rm_name", "completed_at", "snooze_until",
+                "praja_dashboard_user_link", "display_pic_url", "dumped_at", "review_requested"
             ).order_by('-created_at')
             
             # Serialize the tickets
@@ -77,6 +85,7 @@ ALLOWED_FIELDS = [
     'phone',
     'reason',
     'layout_status',
+    'state',
     'badge',
     'poster',
     'subscription_status',
@@ -430,6 +439,8 @@ class GetNextTicketView(APIView):
             assigned_to=user_uuid_obj,
         ).filter(
             Q(resolution_status__isnull=True) | Q(resolution_status="Snoozed")
+        ).exclude(
+            poster__in=["Trial Expired", "Premium Expired", "trial_expired", "premium_expired"]
         ).order_by('created_at').first()
         
         if already_assigned_ticket:
@@ -453,7 +464,9 @@ class GetNextTicketView(APIView):
         ).filter(
             assigned_to__isnull=True,
             resolution_status__isnull=True
-        )
+        ).exclude(
+            poster__in=["Trial Expired", "Premium Expired", "trial_expired", "premium_expired"]
+        ).order_by('-created_at')[:1].first()
         
         logger.info(f"[_get_and_assign_ticket] Step 2: Base queryset count (before routing): {base_qs.count()}")
 
@@ -505,6 +518,8 @@ class GetNextTicketView(APIView):
             assigned_to__isnull=True,
             snooze_until__isnull=False,
             snooze_until__lte=current_time
+        ).exclude(
+            poster__in=["Trial Expired", "Premium Expired", "trial_expired", "premium_expired"]
         ).order_by('-snooze_until').first()
 
         if snoozed_ticket:
@@ -772,3 +787,133 @@ class TakeBreakView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             response['Access-Control-Allow-Origin'] = '*'
             return response
+
+
+class ProcessDumpedTicketsView(APIView):
+    permission_classes = [AllowAny]  # Allow cron jobs to call this endpoint
+    
+    def post(self, request):
+        try:
+            logger.info('ProcessDumpedTicketsView: Function invoked. Starting ticket processing...')
+            
+            # 1. Fetch Unprocessed Tickets
+            # Fetch tickets that have not been processed yet (is_processed is False or None)
+            dumped_tickets = SupportTicketDump.objects.filter(
+                Q(is_processed__isnull=True) | Q(is_processed=False)
+            )[:5000]  # Limit to 5000 tickets per run
+            
+            if not dumped_tickets.exists():
+                logger.info('ProcessDumpedTicketsView: No new tickets in dump table to process.')
+                return Response({
+                    'message': 'No tickets to process'
+                }, status=status.HTTP_200_OK)
+            
+            dumped_tickets_list = list(dumped_tickets)
+            logger.info(f'ProcessDumpedTicketsView: Found {len(dumped_tickets_list)} unprocessed tickets to process from dump.')
+            
+            # 2. Deduplicate Tickets based on user_id
+            # Use a dictionary to keep only the first occurrence of each user_id
+            unique_tickets_map = {}
+            for ticket in dumped_tickets_list:
+                user_id = ticket.user_id
+                if user_id and user_id not in unique_tickets_map:
+                    unique_tickets_map[user_id] = ticket
+            
+            unique_tickets = list(unique_tickets_map.values())
+            logger.info(f'ProcessDumpedTicketsView: Deduplicated to {len(unique_tickets)} unique tickets based on user_id.')
+            
+            # 3. Check for existing open tickets and prepare tickets for insertion
+            # An "open ticket" is defined as: same user_id, resolution_status is null, assigned_to is null
+            # If such a ticket exists, skip inserting the ticket from dump
+            tickets_to_insert = []
+            skipped_tickets = []
+            from core.models import Tenant
+            
+            for dump_ticket in unique_tickets:
+                # Skip if user_id is missing
+                if not dump_ticket.user_id:
+                    logger.warning(f'ProcessDumpedTicketsView: Ticket {dump_ticket.id} has no user_id. Skipping.')
+                    skipped_tickets.append(dump_ticket.id)
+                    continue
+                
+                # Check if there's an existing open ticket for this user_id
+                existing_open_ticket = SupportTicket.objects.filter(
+                    user_id=dump_ticket.user_id,
+                    resolution_status__isnull=True,
+                    assigned_to__isnull=True
+                ).exists()
+                
+                if existing_open_ticket:
+                    logger.info(f'ProcessDumpedTicketsView: Open ticket already exists for user_id {dump_ticket.user_id}. Skipping ticket {dump_ticket.id}.')
+                    skipped_tickets.append(dump_ticket.id)
+                    continue
+                
+                # Get tenant object if tenant_id exists
+                tenant = None
+                if dump_ticket.tenant_id:
+                    try:
+                        tenant = Tenant.objects.get(id=dump_ticket.tenant_id)
+                    except Tenant.DoesNotExist:
+                        logger.warning(f'ProcessDumpedTicketsView: Tenant {dump_ticket.tenant_id} not found for ticket {dump_ticket.id}. Skipping.')
+                        skipped_tickets.append(dump_ticket.id)
+                        continue
+                
+                # Create SupportTicket instance with fields from dump
+                ticket_data = {
+                    'ticket_date': dump_ticket.ticket_date,
+                    'user_id': dump_ticket.user_id,
+                    'name': dump_ticket.name,
+                    'phone': dump_ticket.phone,
+                    'source': dump_ticket.source,
+                    'subscription_status': dump_ticket.subscription_status,
+                    'atleast_paid_once': dump_ticket.atleast_paid_once,
+                    'reason': dump_ticket.reason,
+                    'badge': dump_ticket.badge,
+                    'poster': dump_ticket.poster,
+                    'tenant': tenant,
+                    'layout_status': dump_ticket.layout_status,
+                    'praja_dashboard_user_link': dump_ticket.praja_dashboard_user_link,
+                    'display_pic_url': dump_ticket.display_pic_url,
+                }
+                
+                tickets_to_insert.append(SupportTicket(**ticket_data))
+            
+            if not tickets_to_insert:
+                logger.warning('ProcessDumpedTicketsView: No valid tickets to insert after processing.')
+                # Still mark dumped tickets as processed
+                dump_ids = [ticket.id for ticket in dumped_tickets_list]
+                updated_count = SupportTicketDump.objects.filter(id__in=dump_ids).update(is_processed=True)
+                return Response({
+                    'message': 'No valid tickets to process',
+                    'total_dumped_tickets': len(dumped_tickets_list),
+                    'unique_tickets': len(unique_tickets),
+                    'inserted_tickets': 0,
+                    'skipped_tickets': len(skipped_tickets),
+                    'marked_processed': updated_count
+                }, status=status.HTTP_200_OK)
+            
+            # 4. Bulk insert tickets into support_ticket table
+            inserted_tickets = SupportTicket.objects.bulk_create(tickets_to_insert, ignore_conflicts=True)
+            logger.info(f'ProcessDumpedTicketsView: Inserted {len(inserted_tickets)} tickets into support_ticket table.')
+            
+            # 5. Mark dumped tickets as processed
+            # Update all dumped tickets (not just unique ones) to mark them as processed
+            dump_ids = [ticket.id for ticket in dumped_tickets_list]
+            updated_count = SupportTicketDump.objects.filter(id__in=dump_ids).update(is_processed=True)
+            logger.info(f'ProcessDumpedTicketsView: Marked {updated_count} dumped tickets as processed.')
+            
+            return Response({
+                'message': 'Tickets processed successfully',
+                'total_dumped_tickets': len(dumped_tickets_list),
+                'unique_tickets': len(unique_tickets),
+                'inserted_tickets': len(inserted_tickets),
+                'skipped_tickets': len(skipped_tickets),
+                'marked_processed': updated_count
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as error:
+            logger.error(f'ProcessDumpedTicketsView: Critical error during ticket processing: {error}', exc_info=True)
+            return Response({
+                'error': str(error),
+                'message': 'Failed to process dumped tickets'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

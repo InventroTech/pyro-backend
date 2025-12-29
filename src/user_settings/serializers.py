@@ -7,7 +7,7 @@ class UserSettingsSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = UserSettings
-        fields = ['id', 'tenant', 'user_id', 'key', 'value', 'daily_target', 'created_at', 'updated_at']
+        fields = ['id', 'tenant', 'user_id', 'key', 'value', 'daily_target', 'daily_limit', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def validate_key(self, value):
@@ -28,7 +28,7 @@ class UserSettingsCreateSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = UserSettings
-        fields = ['user_id', 'key', 'value', 'daily_target']
+        fields = ['user_id', 'key', 'value', 'daily_target', 'daily_limit']
 
     def validate_key(self, value):
         """Validate that key is not empty and follows naming conventions"""
@@ -57,6 +57,12 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
         min_value=0,
         help_text="Daily target for the user"
     )
+    daily_limit = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        min_value=0,
+        help_text="Daily lead pull limit for the user (max leads they can fetch per day)"
+    )
     
     def validate_user_id(self, value):
         """Validate and normalize user_id - can be UUID string or integer string"""
@@ -83,6 +89,11 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
         """Validate daily_target"""
         if value is not None and value < 0:
             raise serializers.ValidationError("Daily target must be a non-negative integer")
+        return value
+    def validate_daily_limit(self, value):
+        """Validate daily_limit"""
+        if value is not None and value < 0:
+            raise serializers.ValidationError("Daily limit must be a non-negative integer")
         return value
 
 
@@ -124,4 +135,4 @@ class RoutingRuleSerializer(serializers.ModelSerializer):
         filters = value.get("filters")
         if filters is not None and not isinstance(filters, (list, tuple)):
             raise serializers.ValidationError("'filters' must be a list when provided")
-        return value
+    

@@ -47,6 +47,8 @@ class UserSettingsListView(APIView):
                 existing_setting.value = serializer.validated_data['value']
                 if 'daily_target' in serializer.validated_data:
                     existing_setting.daily_target = serializer.validated_data['daily_target']
+                if 'daily_limit' in serializer.validated_data:
+                    existing_setting.daily_limit = serializer.validated_data['daily_limit']
                 existing_setting.save()
                 response_serializer = UserSettingsSerializer(existing_setting)
                 return Response(response_serializer.data, status=status.HTTP_200_OK)
@@ -151,6 +153,7 @@ class LeadTypeAssignmentView(APIView):
                 user_id=user.uid or user.id
             ).first()
             daily_target = user_setting.daily_target if user_setting else None
+            daily_limit = user_setting.daily_limit if user_setting else None
             
             # Always use uid (UUID) if available, as that's what the serializer expects
             user_id_value = str(user.uid) if user.uid else None
@@ -163,7 +166,8 @@ class LeadTypeAssignmentView(APIView):
                 'user_name': user.name,
                 'user_email': user.email,
                 'lead_types': lead_types,
-                'daily_target': daily_target
+                'daily_target': daily_target,
+                'daily_limit': daily_limit,
             })
         
         return Response(assignments)
@@ -183,6 +187,7 @@ class LeadTypeAssignmentView(APIView):
             user_id = serializer.validated_data['user_id']
             lead_types = serializer.validated_data['lead_types']
             daily_target = serializer.validated_data.get('daily_target', None)
+            daily_limit = serializer.validated_data.get('daily_limit', None)
             
             # Verify user exists and has RM role
             # user_id could be a UUID string or integer ID string
@@ -284,7 +289,8 @@ class LeadTypeAssignmentView(APIView):
                 key='LEAD_TYPE_ASSIGNMENT',
                 defaults={
                     'value': lead_types,
-                    'daily_target': daily_target
+                    'daily_target': daily_target,
+                    'daily_limit': daily_limit,
                 }
             )
             
@@ -292,6 +298,8 @@ class LeadTypeAssignmentView(APIView):
                 setting.value = lead_types
                 if daily_target is not None:
                     setting.daily_target = daily_target
+                if daily_limit is not None:
+                    setting.daily_limit = daily_limit
                 setting.save()
             
             # Update daily_target across all user settings (since it's user-level, not key-specific)
@@ -300,12 +308,20 @@ class LeadTypeAssignmentView(APIView):
                     tenant=tenant,
                     user_id=actual_user_id_for_setting
                 ).exclude(id=setting.id).update(daily_target=daily_target)
+
+            # Update daily_limit across all user settings (since it's user-level, not key-specific)
+            if daily_limit is not None:
+                UserSettings.objects.filter(
+                    tenant=tenant,
+                    user_id=actual_user_id_for_setting
+                ).exclude(id=setting.id).update(daily_limit=daily_limit)
             
             return Response({
                 'user_id': str(actual_user_id_for_setting),
                 'user_name': user.name,
                 'lead_types': lead_types,
                 'daily_target': setting.daily_target,
+                'daily_limit': setting.daily_limit,
                 'created': created
             }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
         

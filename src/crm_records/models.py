@@ -2,6 +2,7 @@ from django.db import models
 from django.contrib.postgres.fields import ArrayField
 from core.models import BaseModel
 from object_history.models import HistoryTrackedModel
+from django.db import connection
 
 
 class Record(HistoryTrackedModel, BaseModel):
@@ -115,3 +116,68 @@ class EntityTypeSchema(BaseModel):
     
     def __str__(self):
         return f"{self.entity_type} ({len(self.attributes)} attributes, {len(self.rules)} rules)"
+
+
+class ApiSecretKey(BaseModel):
+    """
+    Model to store API secret keys and their associated tenants.
+    Allows dynamic mapping of secret keys to tenants without requiring code changes.
+    Each secret key maps to a specific tenant for external API access.
+    """
+    # We store only a one-way bcrypt hash of the secret (never plaintext) for security.
+    # Hash format: pgcrypto crypt(raw_secret, gen_salt('bf', ...)) (salt embedded in the hash).
+    secret_key_hash = models.CharField(
+        max_length=128,
+        db_index=True,
+        help_text="bcrypt hash of the raw secret (pgcrypto crypt). Do NOT store plaintext secrets."
+    )
+    secret_key_last4 = models.CharField(
+        max_length=4,
+        null=True,
+        blank=True,
+        help_text="Last 4 chars of raw secret for identification (non-sensitive)."
+    )
+    tenant = models.ForeignKey(
+        'core.Tenant',
+        on_delete=models.CASCADE,
+        related_name='api_secret_keys',
+        help_text="The tenant this secret key maps to"
+    )
+    description = models.TextField(
+        null=True,
+        blank=True,
+        help_text="Optional description for this secret key (e.g., client name, purpose)"
+    )
+    is_active = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="Whether this secret key is currently active"
+    )
+    last_used_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp of last successful API request using this secret key"
+    )
+    
+    class Meta:
+        db_table = "api_secret_keys"
+        indexes = [
+            models.Index(fields=["secret_key_hash", "is_active"]),
+            models.Index(fields=["tenant", "is_active"]),
+        ]
+        verbose_name = "API Secret Key"
+        verbose_name_plural = "API Secret Keys"
+    
+    def set_raw_secret(self, raw_secret: str) -> None:
+        raw_secret = (raw_secret or "").strip()
+        if not raw_secret:
+            raise ValueError("raw_secret cannot be empty")
+        # Compute bcrypt hash using Postgres pgcrypto (keeps format aligned with DB inserts)
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT crypt(%s, gen_salt('bf', 12))", [raw_secret])
+            self.secret_key_hash = cursor.fetchone()[0]
+        self.secret_key_last4 = raw_secret[-4:] if len(raw_secret) >= 4 else raw_secret
+
+    def __str__(self):
+        last4 = self.secret_key_last4 or "????"
+        return f"****{last4} -> {self.tenant.slug if self.tenant else 'No Tenant'}"
