@@ -75,6 +75,7 @@ ALLOWED_FIELDS = [
     'name',
     'phone',
     'reason',
+    'rm_name',
     'layout_status',
     'state',
     'badge',
@@ -92,7 +93,9 @@ class DumpTicketWebhookView(APIView):
     """
     Django equivalent of the Supabase edge function dump-ticket-webhook.
     Does exactly what the edge function does - nothing more, nothing less.
+    Authentication relies only on x-webhook-secret header, no bearer token required.
     """
+    authentication_classes = []  # No bearer token authentication required
     permission_classes = [AllowAny]
     
     def options(self, request):
