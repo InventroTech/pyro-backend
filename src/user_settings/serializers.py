@@ -90,6 +90,7 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
         if value is not None and value < 0:
             raise serializers.ValidationError("Daily target must be a non-negative integer")
         return value
+
     def validate_daily_limit(self, value):
         """Validate daily_limit"""
         if value is not None and value < 0:

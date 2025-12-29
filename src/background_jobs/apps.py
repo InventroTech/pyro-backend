@@ -1,4 +1,5 @@
 import os
+import sys
 import threading
 import logging
 from django.apps import AppConfig
@@ -14,17 +15,27 @@ class BackgroundJobsConfig(AppConfig):
     def ready(self):
         """
         Start background job worker thread when Django is ready.
-        This runs once per Django process (each Gunicorn worker will have its own thread).
+        
+        Note: With Gunicorn --preload, this runs in the master process.
+        The actual worker threads are started in gunicorn_config.py post_fork hook.
         """
-        # Only start in the main process, not in migrations or other commands
+        # Skip if running migrations or other management commands
+        if len(sys.argv) > 1 and any(cmd in sys.argv for cmd in ['migrate', 'makemigrations', 'collectstatic', 'shell', 'test']):
+            return
+        
+        # If we're running under Gunicorn with --preload, skip here
+        # The worker will be started in gunicorn_config.py post_fork hook instead
+        if 'gunicorn' in ' '.join(sys.argv) or 'gunicorn' in os.environ.get('_', ''):
+            # Worker will be started in gunicorn_config.py post_fork hook
+            logger.info("Running under Gunicorn - worker thread will be started in post_fork hook")
+            print("[BACKGROUND_JOBS] Running under Gunicorn - worker thread will be started in post_fork hook", flush=True)
+            return
+        
+        # For development server, only start in the main process (not the reloader)
         if os.environ.get('RUN_MAIN') != 'true':
             return
         
-        # Skip if running migrations or other management commands
-        import sys
-        if 'migrate' in sys.argv or 'makemigrations' in sys.argv:
-            return
-        
+        # Start worker thread for development server
         try:
             from .job_processor import JobProcessor
             import socket
@@ -45,9 +56,13 @@ class BackgroundJobsConfig(AppConfig):
             )
             worker_thread.start()
             
-            logger.info(f"Started background job worker thread: {worker_id}")
+            log_msg = f"Started background job worker thread: {worker_id}"
+            logger.info(log_msg)
+            print(f"[BACKGROUND_JOBS] {log_msg}", flush=True)
             
         except Exception as e:
-            logger.error(f"Failed to start background job worker: {e}", exc_info=True)
+            error_msg = f"Failed to start background job worker: {e}"
+            logger.error(error_msg, exc_info=True)
+            print(f"[BACKGROUND_JOBS] ERROR: {error_msg}", flush=True, file=sys.stderr)
 
 
