@@ -136,4 +136,14 @@ class RoutingRuleSerializer(serializers.ModelSerializer):
         filters = value.get("filters")
         if filters is not None and not isinstance(filters, (list, tuple)):
             raise serializers.ValidationError("'filters' must be a list when provided")
+        return value
+    
+    def validate(self, attrs):
+        """
+        Ensure conditions is always present and is a dict, never None.
+        """
+        # Ensure conditions is always a dict
+        if 'conditions' not in attrs or attrs.get('conditions') is None:
+            attrs['conditions'] = {}
+        return attrs
     
