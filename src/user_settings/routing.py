@@ -101,18 +101,27 @@ def apply_routing_rule_to_queryset(
     """
     Apply the current user's active routing rule (if any) to the given queryset.
 
-    This is intentionally light-weight and read-only:
-    - If no rule exists, or no valid filters are defined, we return the queryset unchanged.
-    - If there is a rule, we AND its filters onto the existing queryset.
+    Enforcement logic:
+    - If no rule exists, return the queryset unchanged (whole possible queryset).
+    - If a rule exists, enforce it strictly by applying its filters, even if it results in 0 matches.
+    - If a rule exists but has no valid filters (empty condition_q), return empty queryset to enforce the rule.
     """
     rule = _get_active_rule(tenant=tenant, user_id=user_id, queue_type=queue_type)
-    if not rule or not rule.conditions:
+    if not rule:
+        # No rule exists - return whole queryset
         return qs
+    
+    # Rule exists - enforce it strictly
+    if not rule.conditions:
+        # Rule exists but has no conditions - return empty queryset to enforce the rule
+        return qs.none()
 
     condition_q = _build_filters_from_conditions(queue_type, rule.conditions)
     if not condition_q:
-        return qs
+        # Rule exists but no valid filters were built - return empty queryset to enforce the rule
+        return qs.none()
 
+    # Apply the filters strictly (even if it results in 0 matches)
     return qs.filter(condition_q)
 
 

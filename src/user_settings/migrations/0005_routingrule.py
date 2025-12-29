@@ -8,7 +8,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('core', '0001_initial'),
-        ('user_settings', '0004_usersettings_daily_target'),
+        ('user_settings', '0004_add_daily_target_and_daily_limit'),
     ]
 
     operations = [

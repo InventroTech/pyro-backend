@@ -1435,7 +1435,7 @@ class GetNextLeadView(APIView):
                 tenant=tenant,
                 user_id=user_uuid,
                 queue_type="lead",
-            )
+        )
 
         # Filter by eligible lead types (affiliated_party field must match one of the eligible types)
         affiliated_party_filter = Q()

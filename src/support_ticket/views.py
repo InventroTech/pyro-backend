@@ -432,16 +432,33 @@ class GetNextTicketView(APIView):
             # Return None if we can't convert to UUID
             return None
         
-        already_assigned_ticket = SupportTicket.objects.select_for_update(
+        already_assigned_qs = SupportTicket.objects.select_for_update(
             skip_locked=True,
             of=("self",)
         ).filter(
-            assigned_to=user_uuid_obj,
+            assigned_to=request.user.supabase_uid,
         ).filter(
             Q(resolution_status__isnull=True) | Q(resolution_status="Snoozed")
         ).exclude(
             poster__in=["Trial Expired", "Premium Expired", "trial_expired", "premium_expired"]
-        ).order_by('created_at').first()
+        )
+        
+        # Apply routing rules to already assigned tickets as well
+        
+        logger.info(f"[_get_and_assign_ticket] Step 1: Applying routing rules to already assigned tickets")
+        try:
+            already_assigned_qs = apply_routing_rule_to_queryset(
+                already_assigned_qs,
+                tenant=tenant,
+                user_id=request.user.supabase_uid,
+                queue_type="ticket",
+            )
+        except Exception as routing_error:
+            logger.error(f"[_get_and_assign_ticket] Step 1: Error applying routing rules: {routing_error}")
+            logger.exception(routing_error)
+            # Continue without routing rules if there's an error
+        
+        already_assigned_ticket = already_assigned_qs.order_by('created_at').first()
         
         if already_assigned_ticket:
             logger.info(f"[_get_and_assign_ticket] Step 1 SUCCESS: Found ticket already assigned to user")
@@ -466,27 +483,26 @@ class GetNextTicketView(APIView):
             resolution_status__isnull=True
         ).exclude(
             poster__in=["Trial Expired", "Premium Expired", "trial_expired", "premium_expired"]
-        ).order_by('-created_at')[:1].first()
+        ).order_by('-created_at')
         
         logger.info(f"[_get_and_assign_ticket] Step 2: Base queryset count (before routing): {base_qs.count()}")
 
         # Apply per-user routing rule if configured for tickets
-        if tenant and user_uuid_obj:
-            logger.info(f"[_get_and_assign_ticket] Step 2: Applying routing rules for tenant={tenant.id}, user={user_uuid_obj}, queue_type=ticket")
-            try:
-                base_qs = apply_routing_rule_to_queryset(
-                    base_qs,
-                    tenant=tenant,
-                    user_id=user_uuid_obj,
-                    queue_type="ticket",
-                )
-                logger.info(f"[_get_and_assign_ticket] Step 2: After routing rules, queryset count: {base_qs.count()}")
-            except Exception as routing_error:
-                logger.error(f"[_get_and_assign_ticket] Step 2: Error applying routing rules: {routing_error}")
-                logger.exception(routing_error)
-                # Continue without routing rules if there's an error
-        else:
-            logger.info(f"[_get_and_assign_ticket] Step 2: Skipping routing rules (tenant={tenant is not None}, user_uuid={user_uuid_obj is not None})")
+        
+        logger.info(f"[_get_and_assign_ticket] Step 2: Applying routing rules for tenant={tenant.id}, user={user_uuid_obj}, queue_type=ticket")
+        try:
+            base_qs = apply_routing_rule_to_queryset(
+                base_qs,
+                tenant=tenant,
+                user_id=request.user.supabase_uid,
+                queue_type="ticket",
+            )
+            logger.info(f"[_get_and_assign_ticket] Step 2: After routing rules, queryset count: {base_qs.count()}")
+        except Exception as routing_error:
+            logger.error(f"[_get_and_assign_ticket] Step 2: Error applying routing rules: {routing_error}")
+            logger.exception(routing_error)
+            # Continue without routing rules if there's an error
+        
 
         unassigned_ticket = base_qs.order_by("-created_at")[:1].first()
         
@@ -510,7 +526,7 @@ class GetNextTicketView(APIView):
         logger.info(f"[_get_and_assign_ticket] Step 3: Looking for snoozed tickets")
         logger.info(f"[_get_and_assign_ticket] Step 3: Current time: {current_time}")
 
-        snoozed_ticket = SupportTicket.objects.select_for_update(
+        snoozed_qs = SupportTicket.objects.select_for_update(
             skip_locked=True,
             of=("self",)
         ).filter(
@@ -520,8 +536,26 @@ class GetNextTicketView(APIView):
             snooze_until__lte=current_time
         ).exclude(
             poster__in=["Trial Expired", "Premium Expired", "trial_expired", "premium_expired"]
-        ).order_by('-snooze_until').first()
-
+        )
+        
+        # Apply routing rules to snoozed tickets as well
+        if tenant and request.user:
+            logger.info(f"[_get_and_assign_ticket] Step 3: Applying routing rules to snoozed tickets")
+            try:
+                snoozed_qs = apply_routing_rule_to_queryset(
+                    snoozed_qs,
+                    tenant=tenant,
+                    user_id=request.user.supabase_uid,
+                    queue_type="ticket",
+                )
+                logger.info(f"[_get_and_assign_ticket] Step 3: After routing rules, snoozed queryset count: {snoozed_qs.count()}")
+            except Exception as routing_error:
+                logger.error(f"[_get_and_assign_ticket] Step 3: Error applying routing rules: {routing_error}")
+                logger.exception(routing_error)
+                # Continue without routing rules if there's an error
+        
+        snoozed_ticket = snoozed_qs.order_by('-snooze_until').first()
+        
         if snoozed_ticket:
             logger.info(f"[_get_and_assign_ticket] Step 3 SUCCESS: Found snoozed ticket")
             logger.info(f"[_get_and_assign_ticket] Snoozed ticket ID: {snoozed_ticket.id}")
