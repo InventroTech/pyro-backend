@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import UserSettings
+from .models import UserSettings, RoutingRule
 
 
 class UserSettingsSerializer(serializers.ModelSerializer):
@@ -90,9 +90,49 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
         if value is not None and value < 0:
             raise serializers.ValidationError("Daily target must be a non-negative integer")
         return value
-
     def validate_daily_limit(self, value):
         """Validate daily_limit"""
         if value is not None and value < 0:
             raise serializers.ValidationError("Daily limit must be a non-negative integer")
         return value
+
+
+class RoutingRuleSerializer(serializers.ModelSerializer):
+    """
+    Simple serializer for RoutingRule.
+
+    v1 keeps conditions very free-form on the backend, with light validation that
+    it's a dict and (optionally) has a 'filters' key.
+    """
+
+    class Meta:
+        model = RoutingRule
+        fields = [
+            "id",
+            "tenant",
+            "user_id",
+            "queue_type",
+            "is_active",
+            "conditions",
+            "name",
+            "description",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "tenant", "created_at", "updated_at"]
+
+    def validate_queue_type(self, value: str) -> str:
+        value = (value or "").strip().lower()
+        if value not in {RoutingRule.QUEUE_TYPE_TICKET, RoutingRule.QUEUE_TYPE_LEAD}:
+            raise serializers.ValidationError("queue_type must be 'ticket' or 'lead'")
+        return value
+
+    def validate_conditions(self, value):
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("conditions must be a JSON object")
+        filters = value.get("filters")
+        if filters is not None and not isinstance(filters, (list, tuple)):
+            raise serializers.ValidationError("'filters' must be a list when provided")
+    
