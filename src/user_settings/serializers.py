@@ -7,7 +7,7 @@ class UserSettingsSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = UserSettings
-        fields = ['id', 'tenant', 'user_id', 'key', 'value', 'daily_target', 'daily_limit', 'created_at', 'updated_at']
+        fields = ['id', 'tenant', 'tenant_membership', 'key', 'value', 'daily_target', 'daily_limit', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def validate_key(self, value):
@@ -28,7 +28,7 @@ class UserSettingsCreateSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = UserSettings
-        fields = ['user_id', 'key', 'value', 'daily_target', 'daily_limit']
+        fields = ['tenant_membership', 'key', 'value', 'daily_target', 'daily_limit']
 
     def validate_key(self, value):
         """Validate that key is not empty and follows naming conventions"""

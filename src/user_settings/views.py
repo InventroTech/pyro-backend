@@ -4,9 +4,13 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from django.shortcuts import get_object_or_404
 from django.db import transaction
+import uuid
 
 from authz.permissions import IsTenantAuthenticated, HasTenantRole
+
+from authz.models import TenantMembership
 from .models import UserSettings, RoutingRule
+
 from .serializers import (
     UserSettingsSerializer,
     UserSettingsCreateSerializer,
@@ -16,6 +20,21 @@ from .serializers import (
 from accounts.models import LegacyUser
 from crm_records.models import Record
 from django.db.models import Q
+
+
+def get_tenant_membership_by_user_id(tenant, user_id):
+    """
+    Helper function to get TenantMembership by tenant and user_id (UUID).
+    Returns None if not found.
+    """
+    try:
+        user_uuid = uuid.UUID(str(user_id))
+        return TenantMembership.objects.filter(
+            tenant=tenant,
+            user_id=user_uuid
+        ).first()
+    except (ValueError, AttributeError, TypeError):
+        return None
 
 
 class UserSettingsListView(APIView):
@@ -38,7 +57,7 @@ class UserSettingsListView(APIView):
             # Check if setting already exists
             existing_setting = UserSettings.objects.filter(
                 tenant=tenant,
-                user_id=serializer.validated_data['user_id'],
+                tenant_membership=serializer.validated_data['tenant_membership'],
                 key=serializer.validated_data['key']
             ).first()
             
@@ -67,10 +86,14 @@ class UserSettingsDetailView(APIView):
 
     def get_object(self, tenant, user_id, key):
         """Get a specific user setting"""
+        tenant_membership = get_tenant_membership_by_user_id(tenant, user_id)
+        if not tenant_membership:
+            from django.http import Http404
+            raise Http404("TenantMembership not found for this user")
         return get_object_or_404(
             UserSettings,
             tenant=tenant,
-            user_id=user_id,
+            tenant_membership=tenant_membership,
             key=key
         )
 
@@ -136,11 +159,23 @@ class LeadTypeAssignmentView(APIView):
         
         assignments = []
         for user in rm_users:
+            # Always use uid (UUID) if available, as that's what the serializer expects
+            user_id_value = str(user.uid) if user.uid else None
+            if not user_id_value:
+                # Skip users without uid - they can't be assigned lead types via API
+                continue
+            
+            # Find TenantMembership for this user
+            tenant_membership = get_tenant_membership_by_user_id(tenant, user_id_value)
+            if not tenant_membership:
+                # Skip users without TenantMembership
+                continue
+            
             # Get lead type assignment for this user
             try:
                 setting = UserSettings.objects.get(
                     tenant=tenant,
-                    user_id=user.uid or user.id,
+                    tenant_membership=tenant_membership,
                     key='LEAD_TYPE_ASSIGNMENT'
                 )
                 lead_types = setting.value if isinstance(setting.value, list) else []
@@ -150,16 +185,10 @@ class LeadTypeAssignmentView(APIView):
             # Get daily_target from any user setting (this is a user-level field)
             user_setting = UserSettings.objects.filter(
                 tenant=tenant,
-                user_id=user.uid or user.id
+                tenant_membership=tenant_membership
             ).first()
             daily_target = user_setting.daily_target if user_setting else None
             daily_limit = user_setting.daily_limit if user_setting else None
-            
-            # Always use uid (UUID) if available, as that's what the serializer expects
-            user_id_value = str(user.uid) if user.uid else None
-            if not user_id_value:
-                # Skip users without uid - they can't be assigned lead types via API
-                continue
             
             assignments.append({
                 'user_id': user_id_value,
@@ -280,12 +309,20 @@ class LeadTypeAssignmentView(APIView):
                 
                 # Use uid if available, otherwise fall back to id
                 actual_user_id_for_setting = user.uid if user.uid else user.id
+                
+                # Find TenantMembership for this user
+                tenant_membership = get_tenant_membership_by_user_id(tenant, actual_user_id_for_setting)
+                if not tenant_membership:
+                    return Response(
+                        {'error': 'TenantMembership not found for this user'},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
             
             # Create or update the setting
-            # Use the actual user identifier (uid if available, otherwise id)
+            # Use tenant_membership instead of user_id
             setting, created = UserSettings.objects.get_or_create(
                 tenant=tenant,
-                user_id=actual_user_id_for_setting,
+                tenant_membership=tenant_membership,
                 key='LEAD_TYPE_ASSIGNMENT',
                 defaults={
                     'value': lead_types,
@@ -306,14 +343,14 @@ class LeadTypeAssignmentView(APIView):
             if daily_target is not None:
                 UserSettings.objects.filter(
                     tenant=tenant,
-                    user_id=actual_user_id_for_setting
+                    tenant_membership=tenant_membership
                 ).exclude(id=setting.id).update(daily_target=daily_target)
 
             # Update daily_limit across all user settings (since it's user-level, not key-specific)
             if daily_limit is not None:
                 UserSettings.objects.filter(
                     tenant=tenant,
-                    user_id=actual_user_id_for_setting
+                    tenant_membership=tenant_membership
                 ).exclude(id=setting.id).update(daily_limit=daily_limit)
             
             return Response({
@@ -336,10 +373,18 @@ class UserLeadTypesView(APIView):
         """Get lead types assigned to a specific user"""
         tenant = request.tenant
         
+        # Find TenantMembership for this user
+        tenant_membership = get_tenant_membership_by_user_id(tenant, user_id)
+        if not tenant_membership:
+            return Response({
+                'user_id': str(user_id),
+                'lead_types': []
+            })
+        
         try:
             setting = UserSettings.objects.get(
                 tenant=tenant,
-                user_id=user_id,
+                tenant_membership=tenant_membership,
                 key='LEAD_TYPE_ASSIGNMENT'
             )
             lead_types = setting.value if isinstance(setting.value, list) else []
