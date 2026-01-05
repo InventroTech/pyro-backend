@@ -13,8 +13,11 @@ class UserSettings(models.Model):
         db_column='tenant_id',
         help_text="The tenant this setting belongs to"
     )
-    user_id = models.UUIDField(
-        help_text="The user ID this setting belongs to"
+    tenant_membership = models.ForeignKey(
+        'authz.TenantMembership',
+        on_delete=models.CASCADE,
+        db_column='tenant_membership_id',
+        help_text="The tenant membership this setting belongs to"
     )
     key = models.CharField(
         max_length=100,
@@ -38,11 +41,11 @@ class UserSettings(models.Model):
 
     class Meta:
         db_table = 'user_settings'
-        unique_together = ['tenant', 'user_id', 'key']
+        unique_together = ['tenant', 'tenant_membership', 'key']
         indexes = [
-            models.Index(fields=['tenant', 'user_id']),
+            models.Index(fields=['tenant', 'tenant_membership']),
             models.Index(fields=['tenant', 'key']),
         ]
 
     def __str__(self):
-        return f"{self.tenant.name} - {self.user_id} - {self.key}: {self.value}"
+        return f"{self.tenant.name} - {self.tenant_membership.id} - {self.key}: {self.value}"

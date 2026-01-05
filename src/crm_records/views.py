@@ -1194,21 +1194,34 @@ class GetNextLeadView(APIView):
                 logger.debug("[GetNextLead] Resolved user_uuid from LegacyUser: %s", user_uuid)
 
             if user_uuid:
-                # Daily limit is a user-level attribute; fetch from any user_settings row for this user
-                any_setting = UserSettings.objects.filter(tenant=tenant, user_id=user_uuid).first()
-                daily_limit = getattr(any_setting, "daily_limit", None) if any_setting else None
+                # Find TenantMembership for this user
+                from authz.models import TenantMembership
+                import uuid
+                tenant_membership = TenantMembership.objects.filter(
+                    tenant=tenant,
+                    user_id=uuid.UUID(str(user_uuid))
+                ).first()
+                
+                if tenant_membership:
+                    # Daily limit is a user-level attribute; fetch from any user_settings row for this user
+                    any_setting = UserSettings.objects.filter(tenant=tenant, tenant_membership=tenant_membership).first()
+                    daily_limit = getattr(any_setting, "daily_limit", None) if any_setting else None
 
-                try:
-                    setting = UserSettings.objects.get(
-                        tenant=tenant,
-                        user_id=user_uuid,
-                        key='LEAD_TYPE_ASSIGNMENT'
-                    )
-                    eligible_lead_types = setting.value if isinstance(setting.value, list) else []
-                    logger.info("[GetNextLead] Found eligible lead types for user %s: %s", user_identifier, eligible_lead_types)
-                except UserSettings.DoesNotExist:
-                    logger.info("[GetNextLead] No lead type assignment found for user %s - will return no leads", user_identifier)
+                    try:
+                        setting = UserSettings.objects.get(
+                            tenant=tenant,
+                            tenant_membership=tenant_membership,
+                            key='LEAD_TYPE_ASSIGNMENT'
+                        )
+                        eligible_lead_types = setting.value if isinstance(setting.value, list) else []
+                        logger.info("[GetNextLead] Found eligible lead types for user %s: %s", user_identifier, eligible_lead_types)
+                    except UserSettings.DoesNotExist:
+                        logger.info("[GetNextLead] No lead type assignment found for user %s - will return no leads", user_identifier)
+                        eligible_lead_types = []
+                else:
+                    logger.warning("[GetNextLead] TenantMembership not found for user UUID %s", user_uuid)
                     eligible_lead_types = []
+                    daily_limit = None
             else:
                 logger.warning("[GetNextLead] Could not resolve user UUID for %s", user_identifier)
         except Exception as e:
