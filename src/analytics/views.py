@@ -1,6 +1,6 @@
 import logging
 import numpy as np
-from django.db.models import F, ExpressionWrapper, DurationField, Avg, Count, Q, Func, IntegerField
+from django.db.models import F, ExpressionWrapper, DurationField, Avg, Count, Q, Func, IntegerField, Case, When
 from django.db.models.functions import TruncDate
 from django.db import connection
 from rest_framework.views import APIView
@@ -70,25 +70,55 @@ class StackedBarResolvedUnresolvedView(APIView):
         qs = SupportTicket.objects.filter(dumped_at__isnull=False)
         qs = filter_by_tenant(qs, request)
         start_date, end_date = extract_date_range_from_request(qs, request, created_field='dumped_at')
-        results = []
         date_range = list(get_date_range(start_date, end_date))
         if not date_range:
             today = datetime.today().date()
             return Response([{'x': today.strftime("%Y-%m-%d"), 'y1': 0, 'y2': 0}])
+        
+        # Filter by date range
+        qs = qs.filter(dumped_at__date__gte=start_date, dumped_at__date__lte=end_date)
+        
+        # Aggregate resolved and unresolved counts per day in a single query
+        aggregated_data = (
+            qs.annotate(date=TruncDate('dumped_at'))
+            .values('date')
+            .annotate(
+                resolved=Count(
+                    'id',
+                    filter=Q(
+                        completed_at__isnull=False,
+                        resolution_status__iexact='resolved'
+                    )
+                ),
+                unresolved=Count(
+                    'id',
+                    filter=~Q(
+                        completed_at__isnull=False,
+                        resolution_status__iexact='resolved'
+                    )
+                )
+            )
+        )
+        
+        # Build a map for quick lookup
+        data_map = {
+            entry['date']: {
+                'resolved': entry['resolved'],
+                'unresolved': entry['unresolved']
+            }
+            for entry in aggregated_data
+        }
+        
+        # Build results for all dates in range, filling missing dates with zeros
+        results = []
         for date in date_range:
-            day_qs = qs.filter(dumped_at__date=date)
-            resolved = day_qs.filter(
-                completed_at__isnull=False,
-                resolution_status__iexact='resolved'
-            ).count()
-            unresolved = day_qs.exclude(
-                Q(completed_at__isnull=False) & Q(resolution_status__iexact='resolved')
-            ).count()
+            day_data = data_map.get(date, {'resolved': 0, 'unresolved': 0})
             results.append({
                 'x': date.strftime("%Y-%m-%d"),
-                'y1': resolved,
-                'y2': unresolved
+                'y1': day_data['resolved'],
+                'y2': day_data['unresolved']
             })
+        
         return Response(results)
 
 class DailyPercentileResolutionTimeView(APIView):
