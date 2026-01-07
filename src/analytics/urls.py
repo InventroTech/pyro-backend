@@ -9,6 +9,7 @@ from .views import (
     StackedBarResolvedUnresolvedView,
     AnalyticsQueryView,
     CSEAverageResolutionTimeView,
+    SLATimeView,
     SupportTicketListView,
     SupportTicketFilterOptionsView,
     GetTicketStatusView,
@@ -58,6 +59,11 @@ urlpatterns = [
         'cse-average-resolution-time/',
         CSEAverageResolutionTimeView.as_view(),
         name='cse-average-resolution-time'
+    ),
+    path(
+        'sla-time/',
+        SLATimeView.as_view(),
+        name='sla-time'
     ),
 
     path("support-ticket/", SupportTicketListView.as_view(), name="support-ticket-list"),
