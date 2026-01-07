@@ -155,38 +155,63 @@ class LeadTypeAssignmentView(APIView):
         rm_users = LegacyUser.objects.filter(
             tenant=tenant,
             role_id__in=rm_role_ids
+        ).select_related()  # Optimize user queries
+        
+        # Collect all user UIDs upfront
+        user_uid_map = {}  # Maps user_id (str) to user object
+        user_uids = []
+        for user in rm_users:
+            user_id_value = str(user.uid) if user.uid else None
+            if user_id_value:
+                user_uid_map[user_id_value] = user
+                user_uids.append(user.uid)
+        
+        if not user_uids:
+            return Response([])
+        
+        # Fetch all TenantMemberships in one query
+        tenant_memberships = TenantMembership.objects.filter(
+            tenant=tenant,
+            user_id__in=user_uids
+        )
+        # Build lookup map: user_id (str) -> tenant_membership
+        membership_map = {str(tm.user_id): tm for tm in tenant_memberships}
+        
+        # Fetch all UserSettings in one query for all tenant_memberships
+        tenant_membership_ids = [tm.id for tm in tenant_memberships]
+        user_settings = UserSettings.objects.filter(
+            tenant=tenant,
+            tenant_membership_id__in=tenant_membership_ids
         )
         
-        assignments = []
-        for user in rm_users:
-            # Always use uid (UUID) if available, as that's what the serializer expects
-            user_id_value = str(user.uid) if user.uid else None
-            if not user_id_value:
-                # Skip users without uid - they can't be assigned lead types via API
-                continue
+        # Build lookup maps: tenant_membership_id -> settings
+        settings_by_membership = {}  # Maps membership_id -> list of settings
+        lead_type_settings = {}  # Maps membership_id -> LEAD_TYPE_ASSIGNMENT setting
+        for setting in user_settings:
+            membership_id = setting.tenant_membership_id
+            if membership_id not in settings_by_membership:
+                settings_by_membership[membership_id] = []
+            settings_by_membership[membership_id].append(setting)
             
-            # Find TenantMembership for this user
-            tenant_membership = get_tenant_membership_by_user_id(tenant, user_id_value)
+            # Track LEAD_TYPE_ASSIGNMENT separately
+            if setting.key == 'LEAD_TYPE_ASSIGNMENT':
+                lead_type_settings[membership_id] = setting
+        
+        # Build assignments using the pre-fetched data
+        assignments = []
+        for user_id_value, user in user_uid_map.items():
+            tenant_membership = membership_map.get(user_id_value)
             if not tenant_membership:
                 # Skip users without TenantMembership
                 continue
             
-            # Get lead type assignment for this user
-            try:
-                setting = UserSettings.objects.get(
-                    tenant=tenant,
-                    tenant_membership=tenant_membership,
-                    key='LEAD_TYPE_ASSIGNMENT'
-                )
-                lead_types = setting.value if isinstance(setting.value, list) else []
-            except UserSettings.DoesNotExist:
-                lead_types = []
+            # Get lead type assignment
+            lead_type_setting = lead_type_settings.get(tenant_membership.id)
+            lead_types = lead_type_setting.value if lead_type_setting and isinstance(lead_type_setting.value, list) else []
             
-            # Get daily_target from any user setting (this is a user-level field)
-            user_setting = UserSettings.objects.filter(
-                tenant=tenant,
-                tenant_membership=tenant_membership
-            ).first()
+            # Get daily_target and daily_limit from any user setting
+            membership_settings = settings_by_membership.get(tenant_membership.id, [])
+            user_setting = membership_settings[0] if membership_settings else None
             daily_target = user_setting.daily_target if user_setting else None
             daily_limit = user_setting.daily_limit if user_setting else None
             
