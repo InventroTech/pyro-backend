@@ -1,5 +1,6 @@
 from django.db import models
 from django.contrib.postgres.fields import ArrayField
+from django.contrib.postgres.indexes import GinIndex
 from core.models import BaseModel
 from object_history.models import HistoryTrackedModel
 from django.db import connection
@@ -17,6 +18,10 @@ class Record(HistoryTrackedModel, BaseModel):
         db_table = "records"
         indexes = [
             models.Index(fields=["tenant", "entity_type", "-created_at"]),
+            # GIN index on JSONB data for generic key lookups
+            GinIndex(fields=["data"], name="records_data_gin_idx"),
+            # Note: Expression indexes for JSON fields are created via migration
+            # See migration file for: lead_stage, assigned_to, affiliated_party, praja_id, next_call_at
         ]
 
     def __str__(self):

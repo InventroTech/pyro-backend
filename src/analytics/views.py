@@ -1,6 +1,6 @@
 import logging
 import numpy as np
-from django.db.models import F, ExpressionWrapper, DurationField, Avg, Count, Q, Func, IntegerField
+from django.db.models import F, ExpressionWrapper, DurationField, Avg, Count, Q, Func, IntegerField, Case, When
 from django.db.models.functions import TruncDate
 from django.db import connection
 from rest_framework.views import APIView
@@ -70,25 +70,55 @@ class StackedBarResolvedUnresolvedView(APIView):
         qs = SupportTicket.objects.filter(dumped_at__isnull=False)
         qs = filter_by_tenant(qs, request)
         start_date, end_date = extract_date_range_from_request(qs, request, created_field='dumped_at')
-        results = []
         date_range = list(get_date_range(start_date, end_date))
         if not date_range:
             today = datetime.today().date()
             return Response([{'x': today.strftime("%Y-%m-%d"), 'y1': 0, 'y2': 0}])
+        
+        # Filter by date range
+        qs = qs.filter(dumped_at__date__gte=start_date, dumped_at__date__lte=end_date)
+        
+        # Aggregate resolved and unresolved counts per day in a single query
+        aggregated_data = (
+            qs.annotate(date=TruncDate('dumped_at'))
+            .values('date')
+            .annotate(
+                resolved=Count(
+                    'id',
+                    filter=Q(
+                        completed_at__isnull=False,
+                        resolution_status__iexact='resolved'
+                    )
+                ),
+                unresolved=Count(
+                    'id',
+                    filter=~Q(
+                        completed_at__isnull=False,
+                        resolution_status__iexact='resolved'
+                    )
+                )
+            )
+        )
+        
+        # Build a map for quick lookup
+        data_map = {
+            entry['date']: {
+                'resolved': entry['resolved'],
+                'unresolved': entry['unresolved']
+            }
+            for entry in aggregated_data
+        }
+        
+        # Build results for all dates in range, filling missing dates with zeros
+        results = []
         for date in date_range:
-            day_qs = qs.filter(dumped_at__date=date)
-            resolved = day_qs.filter(
-                completed_at__isnull=False,
-                resolution_status__iexact='resolved'
-            ).count()
-            unresolved = day_qs.exclude(
-                Q(completed_at__isnull=False) & Q(resolution_status__iexact='resolved')
-            ).count()
+            day_data = data_map.get(date, {'resolved': 0, 'unresolved': 0})
             results.append({
                 'x': date.strftime("%Y-%m-%d"),
-                'y1': resolved,
-                'y2': unresolved
+                'y1': day_data['resolved'],
+                'y2': day_data['unresolved']
             })
+        
         return Response(results)
 
 class DailyPercentileResolutionTimeView(APIView):
@@ -556,6 +586,111 @@ class CSEAverageResolutionTimeView(APIView):
         return Response({"data": result}, status=status.HTTP_200_OK)
 
 
+class SLATimeView(APIView):
+    """
+    Returns average SLA (Service Level Agreement) time for Non-Snoozed and Snoozed tickets separately.
+    SLA time is calculated as the time from ticket creation to resolution (completed_at - created_at).
+    This helps track first contact resolution time.
+    Query params: start, end, unit, tenant_id
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # Get date parameters directly and clean them
+        start_param = request.query_params.get('start', '').strip()
+        end_param = request.query_params.get('end', '').strip()
+        
+        # Parse dates
+        start_date = None
+        end_date = None
+        
+        if start_param:
+            try:
+                start_date = datetime.strptime(start_param, "%Y-%m-%d").date()
+            except ValueError:
+                print(f"Invalid start date format: {start_param}")
+                start_date = None
+                
+        if end_param:
+            try:
+                end_date = datetime.strptime(end_param, "%Y-%m-%d").date()
+            except ValueError:
+                print(f"Invalid end date format: {end_param}")
+                end_date = None
+        
+        # Base queryset: only tickets that have been completed/resolved
+        qs = SupportTicket.objects.filter(
+            completed_at__isnull=False,
+            created_at__isnull=False
+        )
+        
+        # Apply date filters if provided (filter by completed_at date)
+        if start_date:
+            qs = qs.filter(completed_at__date__gte=start_date)
+        if end_date:
+            qs = qs.filter(completed_at__date__lte=end_date)
+        
+        # Apply tenant filter if provided
+        tenant_id = request.query_params.get('tenant_id')
+        if tenant_id:
+            qs = qs.filter(tenant_id=tenant_id)
+        
+        # Calculate SLA time as difference between completed_at and created_at
+        # Using ExpressionWrapper to calculate duration
+        qs_with_sla = qs.annotate(
+            sla_seconds=ExpressionWrapper(
+                F('completed_at') - F('created_at'),
+                output_field=DurationField()
+            )
+        )
+        
+        # Separate into Non-Snoozed and Snoozed tickets
+        # Non-Snoozed: tickets that were never snoozed (snooze_until is null)
+        non_snoozed_qs = qs_with_sla.filter(snooze_until__isnull=True)
+        
+        # Snoozed: tickets that were snoozed at some point (snooze_until is not null)
+        snoozed_qs = qs_with_sla.filter(snooze_until__isnull=False)
+        
+        # Calculate average SLA time for Non-Snoozed tickets
+        non_snoozed_avg = non_snoozed_qs.aggregate(
+            avg_sla=Avg('sla_seconds'),
+            ticket_count=Count('id')
+        )
+        
+        # Calculate average SLA time for Snoozed tickets
+        snoozed_avg = snoozed_qs.aggregate(
+            avg_sla=Avg('sla_seconds'),
+            ticket_count=Count('id')
+        )
+        
+        # Get unit parameter (default: minutes)
+        unit = request.query_params.get('unit', 'minutes').lower()
+        
+        # Convert timedelta to requested unit
+        result = {
+            'non_snoozed': {
+                'average_sla_time': None,
+                'ticket_count': non_snoozed_avg['ticket_count'] or 0,
+                'unit': unit
+            },
+            'snoozed': {
+                'average_sla_time': None,
+                'ticket_count': snoozed_avg['ticket_count'] or 0,
+                'unit': unit
+            }
+        }
+        
+        # Convert Non-Snoozed average SLA time
+        if non_snoozed_avg['avg_sla'] is not None:
+            avg_seconds = non_snoozed_avg['avg_sla'].total_seconds()
+            result['non_snoozed']['average_sla_time'] = round(convert_seconds(avg_seconds, unit), 2)
+        
+        # Convert Snoozed average SLA time
+        if snoozed_avg['avg_sla'] is not None:
+            avg_seconds = snoozed_avg['avg_sla'].total_seconds()
+            result['snoozed']['average_sla_time'] = round(convert_seconds(avg_seconds, unit), 2)
+        
+        return Response(result, status=status.HTTP_200_OK)
 
 
 class SupportTicketListView(ListAPIView):
@@ -612,14 +747,9 @@ class SupportTicketListView(ListAPIView):
         if gte: qs = qs.filter(created_at__gte=gte)
         if lte: qs = qs.filter(created_at__lte=lte)
 
-        return qs.select_related(None).only(
-            "id","created_at","ticket_date","user_id","name","phone","source",
-            "subscription_status","atleast_paid_once","reason","other_reasons",
-            "badge","poster","tenant_id","assigned_to","layout_status","state",
-            "resolution_status","resolution_time","cse_name","cse_remarks",
-            "call_status","call_attempts","rm_name","completed_at","snooze_until",
-            "praja_dashboard_user_link","display_pic_url","dumped_at","review_requested"
-        )
+        # Use select_related for foreign keys to avoid N+1 queries
+        # Note: removed .only() as it was causing N+1 queries for state and review_requested fields
+        return qs.select_related('tenant', 'assigned_to')
 
 class SupportTicketFilterOptionsView(APIView):
     permission_classes = [IsTenantAuthenticated]
