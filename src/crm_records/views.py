@@ -1896,6 +1896,35 @@ class PrajaLeadsAPIView(APIView):
             if 'call_attempts' not in request_data['data'] or request_data['data'].get('call_attempts') in (None, '', 'null'):
                 request_data['data']['call_attempts'] = 0
         
+        # Check for duplicate praja_id before creating
+        praja_id = None
+        if 'data' in request_data and isinstance(request_data.get('data'), dict):
+            praja_id = request_data['data'].get('praja_id')
+        
+        if praja_id:
+            existing_record = Record.objects.filter(
+                data__praja_id=praja_id,
+                tenant=tenant,
+                entity_type=entity_type
+            ).first()
+            
+            if existing_record:
+                logger.warning(
+                    "[PrajaLeadsAPI] Duplicate praja_id blocked: praja_id=%s tenant=%s entity_type=%s existing_record_id=%s",
+                    praja_id,
+                    tenant.slug,
+                    entity_type,
+                    existing_record.id
+                )
+                return Response(
+                    {
+                        'error': f'{entity_type.capitalize()} with praja_id "{praja_id}" already exists',
+                        'praja_id': praja_id,
+                        'existing_record_id': existing_record.id
+                    },
+                    status=status.HTTP_409_CONFLICT
+                )
+        
         serializer = RecordSerializer(data=request_data)
         if serializer.is_valid():
             record = serializer.save(
