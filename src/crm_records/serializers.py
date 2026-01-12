@@ -16,6 +16,7 @@ class RecordSerializer(serializers.ModelSerializer):
             "tenant_id", 
             "entity_type", 
             "data", 
+            "pyro_data",
             "created_at", 
             "updated_at"
         ]
@@ -32,6 +33,16 @@ class RecordSerializer(serializers.ModelSerializer):
         """
         if not isinstance(value, dict):
             raise serializers.ValidationError("Data must be a valid JSON object.")
+        return value
+    
+    def validate_pyro_data(self, value):
+        """
+        Validate that pyro_data is a dictionary/object or None.
+        """
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("Pyro data must be a valid JSON object or null.")
         return value
     
     def validate_entity_type(self, value):
