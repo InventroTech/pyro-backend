@@ -13,6 +13,7 @@ class Record(HistoryTrackedModel, BaseModel):
     """
     entity_type = models.CharField(max_length=100, db_index=True)
     data = models.JSONField(default=dict, blank=True)
+    pyro_data = models.JSONField(default=dict, blank=True, null=True, help_text="Additional JSON data for Pyro-specific fields")
 
     class Meta:
         db_table = "records"
@@ -20,6 +21,8 @@ class Record(HistoryTrackedModel, BaseModel):
             models.Index(fields=["tenant", "entity_type", "-created_at"]),
             # GIN index on JSONB data for generic key lookups
             GinIndex(fields=["data"], name="records_data_gin_idx"),
+            # GIN index on JSONB pyro_data for generic key lookups
+            GinIndex(fields=["pyro_data"], name="records_pyro_data_gin_idx"),
             # Note: Expression indexes for JSON fields are created via migration
             # See migration file for: lead_stage, assigned_to, affiliated_party, praja_id, next_call_at
         ]
