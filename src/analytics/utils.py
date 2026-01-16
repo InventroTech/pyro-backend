@@ -1,12 +1,13 @@
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, time, date
 from support_ticket.models import SupportTicket
 from uuid import UUID
 
-from typing import Optional
+from typing import Optional, Tuple
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 from django.db import connection
+import pytz
 
 
 # --- Utility Functions ---
@@ -37,6 +38,36 @@ def safe_strptime(date_str):
         return datetime.strptime(date_str, "%Y-%m-%d").date()
     except Exception:
         return None
+
+def get_utc_datetime_range_for_ist_date(local_date: date) -> Tuple[datetime, datetime]:
+    """
+    Convert an IST date to UTC datetime range for filtering.
+    Assumes all users are in India (IST = UTC+5:30).
+    
+    Args:
+        local_date: Date object (e.g., date(2026, 1, 13))
+    
+    Returns:
+        Tuple of (utc_start_datetime, utc_end_datetime) as naive UTC datetimes
+        (since USE_TZ = False)
+    
+    Example:
+        Jan 13, 2026 in IST becomes:
+        - Start: Jan 12, 2026 18:30:00 UTC
+        - End: Jan 13, 2026 18:29:59 UTC
+    """
+    ist = pytz.timezone('Asia/Kolkata')
+    
+    # Start of day in IST (00:00:00 IST)
+    ist_start = ist.localize(datetime.combine(local_date, time.min))
+    # End of day in IST (23:59:59 IST)
+    ist_end = ist.localize(datetime.combine(local_date, time.max))
+    
+    # Convert to UTC and remove timezone info (since USE_TZ=False, we need naive datetimes)
+    utc_start = ist_start.astimezone(pytz.UTC).replace(tzinfo=None)
+    utc_end = ist_end.astimezone(pytz.UTC).replace(tzinfo=None)
+    
+    return utc_start, utc_end
     
 def extract_date_range_from_request(qs, request, created_field='completed_at'):
     start = request.query_params.get('start')
