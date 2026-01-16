@@ -13,8 +13,11 @@ from .views import (
     SupportTicketListView,
     SupportTicketFilterOptionsView,
     GetTicketStatusView,
-    GetCseStatsView
-
+    GetCseStatsView,
+    TeamOverviewView,
+    TeamMembersView,
+    TeamEventsView,
+    TeamTimeSeriesView
 )
 app_name = "analytics"
 
@@ -70,4 +73,10 @@ urlpatterns = [
     path("support-tickets/filter-options/", SupportTicketFilterOptionsView.as_view(),
          name="support-ticket-filter-options"),
     path("get-ticket-status/", GetTicketStatusView.as_view(), name="get-ticket-status"),
+    
+    # Team metrics endpoints
+    path("team/overview/", TeamOverviewView.as_view(), name="team-overview"),
+    path("team/members/", TeamMembersView.as_view(), name="team-members"),
+    path("team/events/", TeamEventsView.as_view(), name="team-events"),
+    path("team/time-series/", TeamTimeSeriesView.as_view(), name="team-time-series"),
 ]

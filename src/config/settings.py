@@ -185,7 +185,7 @@ else:
             'OPTIONS': {
                 'sslmode': 'require',
             },
-            'CONN_MAX_AGE': 120,  # Keep connections alive for 5 minutes
+            'CONN_MAX_AGE': 60,  # Keep connections alive for 60 seconds (reduced to prevent pool exhaustion)
         }
     }
 

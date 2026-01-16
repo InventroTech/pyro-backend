@@ -34,7 +34,7 @@ class EventLog(BaseModel):
     Event logging model for tracking all record-related events.
     Stores events triggered by user actions or system processes.
     """
-    record = models.ForeignKey("Record", on_delete=models.CASCADE, related_name="events")
+    record = models.ForeignKey("Record", on_delete=models.SET_NULL, null=True, blank=True, related_name="events")
     event = models.CharField(max_length=100, db_index=True)
     payload = models.JSONField(default=dict, blank=True)
     timestamp = models.DateTimeField(auto_now_add=True, db_index=True)
