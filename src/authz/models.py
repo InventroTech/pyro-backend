@@ -53,11 +53,21 @@ class TenantMembership(models.Model):
             models.Index(fields=("role",), name="authz_tm_role_idx"),
             models.Index(Lower("email"), name="authz_tm_email_lower_idx"),
             models.Index(fields=("user_id",), name="authz_tm_user_id_idx"),
+            models.Index(fields=("user_parent_id",), name="authz_tm_user_parent_id_idx"),
+            models.Index(fields=("tenant", "user_parent_id"), name="authz_tm_tenant_user_parent"),
             models.Index(fields=("is_active",), name="authz_tm_is_active_idx"),
         ]
 
     tenant = models.ForeignKey("core.Tenant", on_delete=models.CASCADE)
     user_id = models.UUIDField(null=True, blank=True, db_index=True)
+    user_parent_id = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='direct_reports',
+        db_index=True
+    )
     email = models.EmailField(null=False)  # or null=True initially for backfill
     role = models.ForeignKey("Role", on_delete=models.RESTRICT)
     is_active = models.BooleanField(default=False)

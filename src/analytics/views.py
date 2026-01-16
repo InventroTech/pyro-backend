@@ -47,6 +47,14 @@ from django.db import models
 from django.contrib.auth import get_user_model
 from authz.permissions import IsTenantAuthenticated
 from .utils import _distinct_list
+from crm_records.mixins import TenantScopedMixin
+from .services import TeamResolver, TeamMetricsService
+from .serializers import (
+    TeamOverviewSerializer,
+    MemberBreakdownSerializer,
+    EventBreakdownSerializer,
+    TimeSeriesSerializer
+)
 
 
 
@@ -86,8 +94,8 @@ class StackedBarResolvedUnresolvedView(APIView):
                 resolved=Count(
                     'id',
                     filter=Q(
-                        completed_at__isnull=False,
-                        resolution_status__iexact='resolved'
+                completed_at__isnull=False,
+                resolution_status__iexact='resolved'
                     )
                 ),
                 unresolved=Count(
@@ -1049,3 +1057,250 @@ class GetCseStatsView(APIView):
             'cse_stats': cse_list,
             'total_cses': len(cse_list)
         }, status=status.HTTP_200_OK)
+
+
+# Team Analytics Views
+class TeamOverviewView(TenantScopedMixin, APIView):
+    """
+    Get team overview metrics for a specific date.
+    Query params: date (YYYY-MM-DD)
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        date_param = request.query_params.get('date', '').strip()
+        
+        if not date_param:
+            return Response(
+                {"error": "date parameter is required (YYYY-MM-DD)"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            target_date = datetime.strptime(date_param, "%Y-%m-%d").date()
+        except ValueError:
+            return Response(
+                {"error": "Invalid date format. Use YYYY-MM-DD"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get manager user_id
+        user = request.user
+        user_id = getattr(user, 'supabase_uid', None) or getattr(user, 'id', None)
+        
+        if not user_id:
+            return Response(
+                {"error": "User ID not found"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Resolve team
+        team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
+        
+        # Get metrics
+        metrics_service = TeamMetricsService(team_user_ids, request.tenant)
+        overview = metrics_service.get_overview(target_date, manager_user_id=str(user_id))
+        
+        serializer = TeamOverviewSerializer(overview)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class TeamMembersView(TenantScopedMixin, APIView):
+    """
+    Get per-member metrics breakdown for a specific date or date range.
+    Query params: date (YYYY-MM-DD) or from (YYYY-MM-DD) and to (YYYY-MM-DD)
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        logger = logging.getLogger(__name__)
+        logger.info("=" * 80)
+        logger.info("TeamMembersView.get() called")
+        logger.info(f"Request user: {request.user}")
+        logger.info(f"Request tenant: {request.tenant} (id: {getattr(request.tenant, 'id', None)})")
+        
+        date_param = request.query_params.get('date', '').strip()
+        from_param = request.query_params.get('from', '').strip()
+        to_param = request.query_params.get('to', '').strip()
+        
+        logger.info(f"Query params - date: {date_param}, from: {from_param}, to: {to_param}")
+        
+        start_date = None
+        end_date = None
+        
+        if date_param:
+            try:
+                target_date = datetime.strptime(date_param, "%Y-%m-%d").date()
+                start_date = target_date
+                end_date = target_date
+                logger.info(f"Parsed date: {start_date}")
+            except ValueError:
+                logger.error(f"Invalid date format: {date_param}")
+                return Response(
+                    {"error": "Invalid date format. Use YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        elif from_param and to_param:
+            try:
+                start_date = datetime.strptime(from_param, "%Y-%m-%d").date()
+                end_date = datetime.strptime(to_param, "%Y-%m-%d").date()
+                logger.info(f"Parsed date range: {start_date} to {end_date}")
+            except ValueError:
+                logger.error(f"Invalid date format: from={from_param}, to={to_param}")
+                return Response(
+                    {"error": "Invalid date format. Use YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            logger.error("Missing date parameters")
+            return Response(
+                {"error": "Either 'date' or both 'from' and 'to' parameters are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get manager user_id
+        user = request.user
+        user_id = getattr(user, 'supabase_uid', None) or getattr(user, 'id', None)
+        
+        logger.info(f"Manager user_id: {user_id} (supabase_uid: {getattr(user, 'supabase_uid', None)}, id: {getattr(user, 'id', None)})")
+        
+        if not user_id:
+            logger.error("User ID not found for manager")
+            return Response(
+                {"error": "User ID not found"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Resolve team
+        logger.info(f"Resolving team for manager user_id: {user_id}, tenant: {request.tenant.id}")
+        team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
+        logger.info(f"Team resolved - found {len(team_user_ids)} user_ids: {team_user_ids}")
+        
+        # Get metrics
+        logger.info(f"Creating TeamMetricsService with {len(team_user_ids)} team members")
+        metrics_service = TeamMetricsService(team_user_ids, request.tenant)
+        logger.info(f"Calling get_member_breakdown for date range: {start_date} to {end_date}, excluding manager: {user_id}")
+        member_breakdown = metrics_service.get_member_breakdown(start_date, end_date, manager_user_id=str(user_id))
+        logger.info(f"Member breakdown returned {len(member_breakdown)} members")
+        
+        serializer = MemberBreakdownSerializer(member_breakdown, many=True)
+        logger.info(f"Serialized data: {serializer.data}")
+        logger.info("=" * 80)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class TeamEventsView(TenantScopedMixin, APIView):
+    """
+    Get event type breakdown for a specific date or date range.
+    Query params: date (YYYY-MM-DD) or from (YYYY-MM-DD) and to (YYYY-MM-DD)
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        date_param = request.query_params.get('date', '').strip()
+        from_param = request.query_params.get('from', '').strip()
+        to_param = request.query_params.get('to', '').strip()
+        
+        start_date = None
+        end_date = None
+        
+        if date_param:
+            try:
+                target_date = datetime.strptime(date_param, "%Y-%m-%d").date()
+                start_date = target_date
+                end_date = target_date
+            except ValueError:
+                return Response(
+                    {"error": "Invalid date format. Use YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        elif from_param and to_param:
+            try:
+                start_date = datetime.strptime(from_param, "%Y-%m-%d").date()
+                end_date = datetime.strptime(to_param, "%Y-%m-%d").date()
+            except ValueError:
+                return Response(
+                    {"error": "Invalid date format. Use YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            return Response(
+                {"error": "Either 'date' or both 'from' and 'to' parameters are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get manager user_id
+        user = request.user
+        user_id = getattr(user, 'supabase_uid', None) or getattr(user, 'id', None)
+        
+        if not user_id:
+            return Response(
+                {"error": "User ID not found"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Resolve team
+        team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
+        
+        # Get metrics
+        metrics_service = TeamMetricsService(team_user_ids, request.tenant)
+        event_breakdown = metrics_service.get_event_breakdown(start_date, end_date)
+        
+        # Format response
+        result = [{"event_type": k, "count": v} for k, v in event_breakdown.items()]
+        
+        serializer = EventBreakdownSerializer(result, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class TeamTimeSeriesView(TenantScopedMixin, APIView):
+    """
+    Get daily time series data over a date range.
+    Query params: from (YYYY-MM-DD) and to (YYYY-MM-DD)
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from_param = request.query_params.get('from', '').strip()
+        to_param = request.query_params.get('to', '').strip()
+        
+        if not from_param or not to_param:
+            return Response(
+                {"error": "Both 'from' and 'to' parameters are required (YYYY-MM-DD)"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            start_date = datetime.strptime(from_param, "%Y-%m-%d").date()
+            end_date = datetime.strptime(to_param, "%Y-%m-%d").date()
+        except ValueError:
+            return Response(
+                {"error": "Invalid date format. Use YYYY-MM-DD"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if start_date > end_date:
+            return Response(
+                {"error": "Start date cannot be after end date"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get manager user_id
+        user = request.user
+        user_id = getattr(user, 'supabase_uid', None) or getattr(user, 'id', None)
+        
+        if not user_id:
+            return Response(
+                {"error": "User ID not found"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Resolve team
+        team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
+        
+        # Get metrics
+        metrics_service = TeamMetricsService(team_user_ids, request.tenant)
+        time_series = metrics_service.get_time_series(start_date, end_date)
+        
+        serializer = TimeSeriesSerializer(time_series, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)

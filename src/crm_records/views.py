@@ -1589,6 +1589,32 @@ class GetNextLeadView(APIView):
             candidate_locked.updated_at = timezone.now()
             candidate_locked.save(update_fields=['data', 'updated_at'])
 
+            # Log get_next_lead event for analytics
+            try:
+                EventLog.objects.create(
+                    record=candidate_locked,
+                    tenant=tenant,
+                    event='lead.get_next_lead',
+                    payload={
+                        'user_id': str(user_uuid) if user_uuid else user_identifier,
+                        'lead_id': candidate_locked.id,
+                        'record_id': candidate_locked.id,
+                    },
+                    timestamp=timezone.now()
+                )
+                logger.debug(
+                    "[GetNextLead] Logged get_next_lead event: record_id=%s user_id=%s",
+                    candidate_locked.id,
+                    str(user_uuid) if user_uuid else user_identifier
+                )
+            except Exception as e:
+                logger.warning(
+                    "[GetNextLead] Failed to log get_next_lead event: record_id=%s error=%s",
+                    candidate_locked.id,
+                    str(e)
+                )
+                # Don't fail the request if event logging fails
+
             logger.info(
                 "[GetNextLead] Assigned new lead: record_id=%s user=%s",
                 candidate_locked.id,

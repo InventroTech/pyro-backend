@@ -11,7 +11,7 @@ from typing import Optional, Dict, Any
 from datetime import timedelta
 
 from django.utils import timezone
-from django.db import transaction, close_old_connections
+from django.db import transaction, close_old_connections, connections
 from django.db.models import Q, F
 from django.db.utils import InterfaceError, OperationalError
 
@@ -34,6 +34,66 @@ class JobProcessor:
         self.worker_id = worker_id
         self._stop_event = threading.Event()
         self._handler_registry = get_handler_registry()
+        # Circuit breaker state for connection errors
+        self._connection_error_count = 0
+        self._last_connection_error_time = None
+        self._circuit_breaker_threshold = 5  # Open circuit after 5 consecutive errors
+        self._circuit_breaker_timeout = 60  # Wait 60 seconds before retry
+    
+    def _is_circuit_breaker_open(self) -> bool:
+        """
+        Check if circuit breaker is open (too many connection errors).
+        
+        Returns:
+            True if circuit breaker is open, False otherwise
+        """
+        if self._connection_error_count < self._circuit_breaker_threshold:
+            return False
+        
+        # Check if timeout has passed
+        if self._last_connection_error_time:
+            time_since_error = (timezone.now() - self._last_connection_error_time).total_seconds()
+            if time_since_error >= self._circuit_breaker_timeout:
+                # Reset circuit breaker after timeout
+                self._connection_error_count = 0
+                self._last_connection_error_time = None
+                logger.info(f"[Worker {self.worker_id}] Circuit breaker reset after timeout")
+                return False
+        
+        return True
+    
+    def _record_connection_error(self):
+        """Record a connection error for circuit breaker."""
+        self._connection_error_count += 1
+        self._last_connection_error_time = timezone.now()
+        if self._connection_error_count >= self._circuit_breaker_threshold:
+            logger.warning(
+                f"[Worker {self.worker_id}] Circuit breaker opened after {self._connection_error_count} "
+                f"consecutive connection errors. Will retry after {self._circuit_breaker_timeout}s"
+            )
+    
+    def _reset_connection_error_count(self):
+        """Reset connection error count on successful operation."""
+        if self._connection_error_count > 0:
+            logger.debug(f"[Worker {self.worker_id}] Resetting connection error count (was {self._connection_error_count})")
+            self._connection_error_count = 0
+            self._last_connection_error_time = None
+    
+    def _log_connection_pool_stats(self):
+        """Log connection pool statistics for monitoring."""
+        try:
+            db_conn = connections['default']
+            # Check if connection is open
+            conn_open = hasattr(db_conn, 'connection') and db_conn.connection is not None
+            conn_max_age = db_conn.settings_dict.get('CONN_MAX_AGE', 'N/A')
+            # Log basic connection info (without exposing sensitive data)
+            logger.debug(
+                f"[Worker {self.worker_id}] Connection pool stats: "
+                f"connection_open={conn_open}, conn_max_age={conn_max_age}"
+            )
+        except Exception as e:
+            # Don't fail on stats logging
+            logger.debug(f"[Worker {self.worker_id}] Could not log connection stats: {e}")
     
     def lock_and_fetch_job(self, tenant_id: Optional[str] = None) -> Optional[BackgroundJob]:
         """
@@ -46,6 +106,14 @@ class JobProcessor:
         Returns:
             BackgroundJob instance if found, None otherwise
         """
+        # Check circuit breaker before attempting connection
+        if self._is_circuit_breaker_open():
+            logger.debug(f"[Worker {self.worker_id}] Circuit breaker open, skipping job fetch")
+            return None
+        
+        # Close old connections before attempting new operation
+        close_old_connections()
+        
         now = timezone.now()
         
         # Build query for pending jobs
@@ -82,10 +150,16 @@ class JobProcessor:
                     job.refresh_from_db()
                     logger.debug(f"[Worker {self.worker_id}] Locked job {job.id}")
                 
+                # Reset error count on successful operation
+                self._reset_connection_error_count()
+                # Log connection stats periodically for monitoring
+                if logger.isEnabledFor(logging.DEBUG):
+                    self._log_connection_pool_stats()
                 return job
         except (InterfaceError, OperationalError) as e:
             # Database connection issues are recoverable in long-running workers.
             # Close old connections so Django can establish a fresh one on next use.
+            self._record_connection_error()
             logger.error(
                 f"[Worker {self.worker_id}] Database error while locking job: {e}",
                 exc_info=True,
@@ -345,9 +419,20 @@ class JobProcessor:
         consecutive_empty_polls = 0
         max_empty_polls = 10  # After 10 empty polls, increase wait time
         iteration_count = 0
+        consecutive_errors = 0
+        max_consecutive_errors = 3  # Exponential backoff after 3 errors
         
         while not self._stop_event.is_set():
             try:
+                # Check circuit breaker before proceeding
+                if self._is_circuit_breaker_open():
+                    wait_time = self._circuit_breaker_timeout
+                    logger.debug(
+                        f"[Worker {self.worker_id}] Circuit breaker open, waiting {wait_time}s before retry"
+                    )
+                    self._stop_event.wait(wait_time)
+                    continue
+                
                 # Ensure we don't hold on to stale/closed DB connections in a long-running worker.
                 close_old_connections()
                 jobs_processed = 0
@@ -360,6 +445,7 @@ class JobProcessor:
                     if self.process_next_job():
                         jobs_processed += 1
                         consecutive_empty_polls = 0
+                        consecutive_errors = 0  # Reset error count on success
                     else:
                         # No more jobs available, break inner loop
                         break
@@ -375,6 +461,7 @@ class JobProcessor:
                         f"[Worker {self.worker_id}] Processed {jobs_processed} job(s)"
                     )
                     consecutive_empty_polls = 0
+                    consecutive_errors = 0
                 else:
                     consecutive_empty_polls += 1
                     # Adaptive polling: wait longer if no jobs for a while
@@ -384,13 +471,28 @@ class JobProcessor:
             except (InterfaceError, OperationalError) as e:
                 # Database connection has likely been closed by the server (e.g. idle timeout).
                 # Reset Django's connection state so the next iteration can obtain a fresh one.
+                consecutive_errors += 1
+                self._record_connection_error()
+                
                 logger.error(
-                    f"[Worker {self.worker_id}] Database connection error in worker loop: {e}",
+                    f"[Worker {self.worker_id}] Database connection error in worker loop "
+                    f"(consecutive errors: {consecutive_errors}): {e}",
                     exc_info=True,
                 )
                 close_old_connections()
-                # Wait a bit before retrying on error
-                self._stop_event.wait(poll_interval * 2)
+                
+                # Exponential backoff: wait longer with each consecutive error
+                if consecutive_errors >= max_consecutive_errors:
+                    backoff_time = min(poll_interval * (2 ** (consecutive_errors - max_consecutive_errors + 1)), 60)
+                    logger.warning(
+                        f"[Worker {self.worker_id}] Exponential backoff: waiting {backoff_time}s "
+                        f"after {consecutive_errors} consecutive errors"
+                    )
+                    self._stop_event.wait(backoff_time)
+                else:
+                    # Wait a bit before retrying on error
+                    self._stop_event.wait(poll_interval * 2)
+                    
             except Exception as e:
                 logger.error(
                     f"[Worker {self.worker_id}] Error in worker loop: {e}",
