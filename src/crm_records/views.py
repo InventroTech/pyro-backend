@@ -589,42 +589,6 @@ class RecordEventView(TenantScopedMixin, APIView):
         # Create the event log entry
         try:
             with transaction.atomic():
-                # If this is a lead record, increment call_attempts when "Not Connected" is clicked
-                # (call_attempts is stored inside the record.data JSON).
-                payload_event = payload or {}
-                event_name_norm = (event_name or "").strip().lower()
-                call_status_norm = str(payload_event.get("call_status", "")).strip().lower()
-                last_call_outcome_norm = str(payload_event.get("last_call_outcome", "")).strip().lower()
-                button_type_norm = str(payload_event.get("button_type", "")).strip().lower()
-
-                is_not_connected_event = (
-                    ("not_connected" in event_name_norm)
-                    or event_name_norm in {
-                        "not_connected",
-                        "not_connected_clicked",
-                        "not-connected",
-                        "not connected",
-                    }
-                    or button_type_norm in {"not_connected", "not connected", "not-connected"}
-                    or call_status_norm in {"not connected", "not_connected", "notconnected"}
-                    or last_call_outcome_norm in {"not connected", "not_connected", "notconnected"}
-                )
-
-                if record.entity_type == "lead" and is_not_connected_event:
-                    record_locked = Record.objects.select_for_update().get(id=record.id, tenant=tenant)
-                    data = record_locked.data.copy() if record_locked.data else {}
-
-                    prev_attempts = data.get("call_attempts", 0)
-                    try:
-                        prev_attempts_int = int(prev_attempts) if prev_attempts is not None else 0
-                    except (TypeError, ValueError):
-                        prev_attempts_int = 0
-
-                    data["call_attempts"] = prev_attempts_int + 1
-                    record_locked.data = data
-                    record_locked.updated_at = timezone.now()
-                    record_locked.save(update_fields=["data", "updated_at"])
-
                 event_log = EventLog.objects.create(
                     record=record,
                     tenant=request.tenant,
@@ -642,11 +606,45 @@ class RecordEventView(TenantScopedMixin, APIView):
                 getattr(request.tenant, 'id', None)
             )
             
-            # Dispatch the event for processing
+            # Dispatch the event for processing (rules may update the record)
             dispatch_success = dispatch_event(event_name, record, payload)
             
             if not dispatch_success:
                 logger.warning("[EventAPI] Event dispatch returned False for event=%s record_id=%s", event_name, record.id)
+            
+            # After rules have run, increment call_attempts for certain events
+            # This ensures the increment happens after any rule updates
+            event_name_norm = (event_name or "").strip()
+            should_increment_attempts = event_name_norm in {
+                "lead.trial_activated",
+                "lead.not_interested",
+                "lead.call_back_later",
+            }
+
+            if record.entity_type == "lead" and should_increment_attempts:
+                # Refresh record from DB to get latest state after rules
+                with transaction.atomic():
+                    record_locked = Record.objects.select_for_update().get(id=record.id, tenant=tenant)
+                    data = record_locked.data.copy() if record_locked.data else {}
+
+                    prev_attempts = data.get("call_attempts", 0)
+                    try:
+                        prev_attempts_int = int(prev_attempts) if prev_attempts is not None else 0
+                    except (TypeError, ValueError):
+                        prev_attempts_int = 0
+
+                    data["call_attempts"] = prev_attempts_int + 1
+                    record_locked.data = data
+                    record_locked.updated_at = timezone.now()
+                    record_locked.save(update_fields=["data", "updated_at"])
+                    
+                    logger.info(
+                        "[EventAPI] Incremented call_attempts for record_id=%s event=%s (prev=%d, new=%d)",
+                        record.id,
+                        event_name,
+                        prev_attempts_int,
+                        prev_attempts_int + 1
+                    )
             
             return Response({
                 "ok": True, 
