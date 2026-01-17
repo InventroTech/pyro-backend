@@ -189,3 +189,39 @@ class ApiSecretKey(BaseModel):
     def __str__(self):
         last4 = self.secret_key_last4 or "????"
         return f"****{last4} -> {self.tenant.slug if self.tenant else 'No Tenant'}"
+
+
+class CallAttemptMatrix(BaseModel):
+    """
+    Stores call attempt configuration per lead type.
+    Defines max call attempts, SLA in days, and minimum time difference between calls.
+    """
+    lead_type = models.CharField(
+        max_length=100,
+        db_index=True,
+        help_text="Lead type (e.g., 'BJP', 'AAP', 'Congress', 'TDP', 'TMC', 'CITU', 'CPIM')"
+    )
+    max_call_attempts = models.PositiveSmallIntegerField(
+        default=5,
+        help_text="Maximum number of call attempts (m)"
+    )
+    sla_days = models.PositiveSmallIntegerField(
+        default=2,
+        help_text="SLA in days (n)"
+    )
+    min_time_between_calls_hours = models.PositiveSmallIntegerField(
+        default=3,
+        help_text="Minimum time difference between calls in hours (K)"
+    )
+
+    class Meta:
+        db_table = "call_attempt_matrix"
+        unique_together = [['tenant', 'lead_type']]  # One configuration per lead type per tenant
+        indexes = [
+            models.Index(fields=["tenant", "lead_type"]),
+        ]
+        verbose_name = "Call Attempt Matrix"
+        verbose_name_plural = "Call Attempt Matrices"
+
+    def __str__(self):
+        return f"{self.lead_type}: {self.max_call_attempts} attempts, {self.sla_days} days SLA, {self.min_time_between_calls_hours}h min interval"

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema
+from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix
 
 
 class RecordSerializer(serializers.ModelSerializer):
@@ -288,4 +288,62 @@ class LeadScoringRequestSerializer(serializers.Serializer):
         """Validate that rules list is not empty."""
         if not value or len(value) == 0:
             raise serializers.ValidationError("At least one rule is required.")
+        return value
+
+
+class CallAttemptMatrixSerializer(serializers.ModelSerializer):
+    """
+    Serializer for CallAttemptMatrix model with tenant isolation.
+    """
+    tenant_id = serializers.UUIDField(read_only=True)
+    
+    class Meta:
+        model = CallAttemptMatrix
+        fields = [
+            "id",
+            "tenant_id",
+            "lead_type",
+            "max_call_attempts",
+            "sla_days",
+            "min_time_between_calls_hours",
+            "created_at",
+            "updated_at"
+        ]
+        read_only_fields = [
+            "id",
+            "tenant_id",
+            "created_at",
+            "updated_at"
+        ]
+    
+    def validate_lead_type(self, value):
+        """Validate lead_type is not empty and has reasonable length."""
+        if not value or not value.strip():
+            raise serializers.ValidationError("Lead type cannot be empty.")
+        if len(value) > 100:
+            raise serializers.ValidationError("Lead type cannot exceed 100 characters.")
+        return value.strip()
+    
+    def validate_max_call_attempts(self, value):
+        """Validate max_call_attempts is positive."""
+        if value <= 0:
+            raise serializers.ValidationError("Max call attempts must be greater than 0.")
+        if value > 100:
+            raise serializers.ValidationError("Max call attempts cannot exceed 100.")
+        return value
+    
+    def validate_sla_days(self, value):
+        """Validate sla_days is positive."""
+        if value <= 0:
+            raise serializers.ValidationError("SLA days must be greater than 0.")
+        if value > 365:
+            raise serializers.ValidationError("SLA days cannot exceed 365.")
+        return value
+    
+    def validate_min_time_between_calls_hours(self, value):
+        """Validate min_time_between_calls_hours is positive."""
+        if value <= 0:
+            raise serializers.ValidationError("Minimum time between calls must be greater than 0.")
+        if value > 168:  # 1 week
+            raise serializers.ValidationError("Minimum time between calls cannot exceed 168 hours (1 week).")
         return value
