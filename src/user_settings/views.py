@@ -22,19 +22,43 @@ from crm_records.models import Record
 from django.db.models import Q
 
 
-def get_tenant_membership_by_user_id(tenant, user_id):
+def get_tenant_membership_by_user_id(tenant, user_id, user=None):
     """
     Helper function to get TenantMembership by tenant and user_id (UUID).
+    Falls back to email lookup if user_id lookup fails and user is provided.
     Returns None if not found.
     """
+    # First try to find by user_id (UUID)
     try:
         user_uuid = uuid.UUID(str(user_id))
-        return TenantMembership.objects.filter(
+        tenant_membership = TenantMembership.objects.filter(
             tenant=tenant,
             user_id=user_uuid
         ).first()
+        if tenant_membership:
+            return tenant_membership
     except (ValueError, AttributeError, TypeError):
-        return None
+        pass
+    
+    # If not found by user_id and user object is provided, try by email
+    if user and hasattr(user, 'email') and user.email:
+        tenant_membership = TenantMembership.objects.filter(
+            tenant=tenant,
+            email__iexact=user.email.lower().strip()
+        ).first()
+        if tenant_membership:
+            # If TenantMembership has null user_id and user has a uid, update it
+            # This helps fix data inconsistencies where TenantMembership exists but user_id is null
+            if not tenant_membership.user_id and hasattr(user, 'uid') and user.uid:
+                try:
+                    tenant_membership.user_id = user.uid
+                    tenant_membership.save(update_fields=['user_id'])
+                except Exception:
+                    # If update fails (e.g., constraint violation), continue with existing membership
+                    pass
+            return tenant_membership
+    
+    return None
 
 
 class UserSettingsListView(APIView):
@@ -335,11 +359,11 @@ class LeadTypeAssignmentView(APIView):
                 # Use uid if available, otherwise fall back to id
                 actual_user_id_for_setting = user.uid if user.uid else user.id
                 
-                # Find TenantMembership for this user
-                tenant_membership = get_tenant_membership_by_user_id(tenant, actual_user_id_for_setting)
+                # Find TenantMembership for this user (with email fallback)
+                tenant_membership = get_tenant_membership_by_user_id(tenant, actual_user_id_for_setting, user=user)
                 if not tenant_membership:
                     return Response(
-                        {'error': 'TenantMembership not found for this user'},
+                        {'error': 'TenantMembership not found for this user. Please ensure the user has a TenantMembership record with matching email or user_id.'},
                         status=status.HTTP_404_NOT_FOUND
                     )
             
