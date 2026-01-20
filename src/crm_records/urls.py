@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView, GetMyCurrentLeadView
+from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView, GetMyCurrentLeadView, CallAttemptMatrixListCreateView, CallAttemptMatrixDetailView, CallAttemptMatrixByLeadTypeView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 from .public_views import PublicJobsView, PublicJobApplicationView
 
@@ -42,5 +42,10 @@ urlpatterns = [
     path("entity-schemas/<int:pk>/", EntityTypeSchemaDetailView.as_view(), name="entity-schema-detail"),
     path("entity-schemas/by-type/", EntityTypeSchemaByTypeView.as_view(), name="entity-schema-by-type"),
     path("entity-attributes/", EntityTypeAttributesView.as_view(), name="entity-attributes"),
+    
+    # Call Attempt Matrix endpoints
+    path("call-attempt-matrix/", CallAttemptMatrixListCreateView.as_view(), name="call-attempt-matrix-list-create"),
+    path("call-attempt-matrix/<int:pk>/", CallAttemptMatrixDetailView.as_view(), name="call-attempt-matrix-detail"),
+    path("call-attempt-matrix/by-lead-type/", CallAttemptMatrixByLeadTypeView.as_view(), name="call-attempt-matrix-by-lead-type"),
     
 ]
