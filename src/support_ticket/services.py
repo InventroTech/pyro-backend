@@ -25,12 +25,18 @@ class MixpanelService:
                 logger.warning("MIXPANEL_TOKEN not configured, skipping Mixpanel event")
                 return False
             
+            # Handle user_id - convert to int if numeric, otherwise keep as string (for UUIDs)
+            # This matches the pattern used in support_ticket/utils.py
+            user_id_for_api = int(user_id) if str(user_id).isdigit() else user_id
+            
             # Custom API payload structure
             payload = {
-                'user_id': int(user_id),
+                'user_id': user_id_for_api,
                 'event_name': event_name,
                 'properties': properties
             }
+            
+            logger.info(f"[Mixpanel] User ID format: {type(user_id_for_api).__name__} = {user_id_for_api}")
             
             headers = {
                 'Content-Type': 'application/json',

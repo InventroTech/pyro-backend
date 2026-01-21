@@ -3309,6 +3309,8 @@ class LeadAssignmentWebhookProxyView(TenantScopedMixin, APIView):
                     user_data = payload.get('user', {}) if isinstance(payload, dict) else {}
                     user_id = user_data.get('id') if isinstance(user_data, dict) else None
                     
+                    logger.info(f"[Mixpanel] Preparing to send lead assignment event: user_id={user_id}, lead_id={lead_data.get('id') if isinstance(lead_data, dict) else None}")
+                    
                     if user_id and lead_data:
                         mixpanel_service = MixpanelService()
                         mixpanel_properties = {
@@ -3324,15 +3326,22 @@ class LeadAssignmentWebhookProxyView(TenantScopedMixin, APIView):
                         # Add all lead attributes to Mixpanel properties
                         mixpanel_properties.update(lead_data)
                         
-                        mixpanel_service.send_to_mixpanel_sync(
+                        logger.info(f"[Mixpanel] Calling send_to_mixpanel_sync with event='pyro_crm_rm_assigned_backend', user_id={user_id}")
+                        mixpanel_result = mixpanel_service.send_to_mixpanel_sync(
                             str(user_id),
                             'pyro_crm_rm_assigned_backend',
                             mixpanel_properties
                         )
-                        logger.info(f"Mixpanel event sent for lead assignment: lead_id={lead_data.get('id')}, user_id={user_id}")
+                        
+                        if mixpanel_result:
+                            logger.info(f"✅ [Mixpanel] Event sent successfully for lead assignment: lead_id={lead_data.get('id')}, user_id={user_id}")
+                        else:
+                            logger.warning(f"⚠️ [Mixpanel] Event sending returned False for lead assignment: lead_id={lead_data.get('id')}, user_id={user_id}")
+                    else:
+                        logger.warning(f"[Mixpanel] Skipping Mixpanel event - missing user_id or lead_data: user_id={user_id}, has_lead_data={bool(lead_data)}")
                 except Exception as mixpanel_error:
                     # Don't fail the webhook if Mixpanel fails
-                    logger.warning(f"Failed to send Mixpanel event for lead assignment: {str(mixpanel_error)}")
+                    logger.error(f"❌ [Mixpanel] Exception while sending lead assignment event: {str(mixpanel_error)}", exc_info=True)
                 
                 # Return success response
                 return Response({
