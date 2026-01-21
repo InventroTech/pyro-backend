@@ -4,6 +4,9 @@ from django.contrib.postgres.indexes import GinIndex
 from core.models import BaseModel
 from object_history.models import HistoryTrackedModel
 from django.db import connection
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class Record(HistoryTrackedModel, BaseModel):
@@ -26,6 +29,43 @@ class Record(HistoryTrackedModel, BaseModel):
             # Note: Expression indexes for JSON fields are created via migration
             # See migration file for: lead_stage, assigned_to, affiliated_party, praja_id, next_call_at
         ]
+
+    def save(self, *args, **kwargs):
+        """
+        Override save to enqueue job for sending lead records to Praja server when conditions are met.
+        """
+        # Call parent save first to ensure record is saved and has an ID
+        result = super().save(*args, **kwargs)
+        
+        # Enqueue background job to send to Praja server if entity_type is 'lead' and tenant matches PRAJA_TENANT
+        try:
+            from .services import PrajaService
+            from background_jobs.queue_service import get_queue_service
+            from background_jobs.models import JobType
+            
+            praja_service = PrajaService()
+            if praja_service.should_send_record_to_praja(self):
+                print(f"🔄 [PRAJA] Enqueueing background job for record {self.id}...")
+                queue_service = get_queue_service()
+                job = queue_service.enqueue_job(
+                    job_type=JobType.SEND_TO_PRAJA,
+                    payload={
+                        "object_type": "record",
+                        "object_id": self.id,
+                        "data": praja_service.prepare_record_data(self)
+                    },
+                    priority=0,
+                    tenant_id=str(self.tenant.id) if self.tenant else None,
+                    max_attempts=3
+                )
+                print(f"✅ [PRAJA] Background job {job.id} enqueued for record {self.id}")
+                logger.info(f"Enqueued Praja job {job.id} for record {self.id}")
+        except Exception as e:
+            # Don't fail the save if job enqueueing fails - just log it
+            print(f"❌ [PRAJA] Error enqueueing job for record {self.id}: {e}")
+            logger.error(f"Error enqueueing Praja job for record {self.id}: {e}", exc_info=True)
+        
+        return result
 
     def __str__(self):
         name = (self.data or {}).get('name', '') if isinstance(self.data, dict) else ''
