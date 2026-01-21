@@ -6,6 +6,9 @@ from django.utils import timezone
 from core.models import Tenant
 from accounts.models import SupabaseAuthUser
 from object_history.models import HistoryTrackedModel
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class SupportTicketDump(models.Model):
@@ -96,6 +99,43 @@ class SupportTicket(HistoryTrackedModel):
     class Meta:
         db_table = "support_ticket"
         managed = True  # existing prod table -> keep unmanaged
+
+    def save(self, *args, **kwargs):
+        """
+        Override save to enqueue job for sending support tickets to Praja server when tenant matches PRAJA_TENANT.
+        """
+        # Call parent save first to ensure ticket is saved and has an ID
+        result = super().save(*args, **kwargs)
+        
+        # Enqueue background job to send to Praja server if tenant matches PRAJA_TENANT
+        try:
+            from crm_records.services import PrajaService
+            from background_jobs.queue_service import get_queue_service
+            from background_jobs.models import JobType
+            
+            praja_service = PrajaService()
+            if praja_service.should_send_ticket_to_praja(self):
+                print(f"🔄 [PRAJA] Enqueueing background job for ticket {self.id}...")
+                queue_service = get_queue_service()
+                job = queue_service.enqueue_job(
+                    job_type=JobType.SEND_TO_PRAJA,
+                    payload={
+                        "object_type": "ticket",
+                        "object_id": self.id,
+                        "data": praja_service.prepare_ticket_data(self)
+                    },
+                    priority=0,
+                    tenant_id=str(self.tenant.id) if self.tenant else None,
+                    max_attempts=3
+                )
+                print(f"✅ [PRAJA] Background job {job.id} enqueued for ticket {self.id}")
+                logger.info(f"Enqueued Praja job {job.id} for ticket {self.id}")
+        except Exception as e:
+            # Don't fail the save if job enqueueing fails - just log it
+            print(f"❌ [PRAJA] Error enqueueing job for ticket {self.id}: {e}")
+            logger.error(f"Error enqueueing Praja job for ticket {self.id}: {e}", exc_info=True)
+        
+        return result
 
     def __str__(self):
         base = self.name or self.phone or self.user_id or f"#{self.id}"
