@@ -526,6 +526,123 @@ class LeadScoringJobHandler(JobHandler):
         return True
 
 
+class PrajaJobHandler(JobHandler):
+    """
+    Handler for sending data to Praja server.
+    """
+    
+    def process(self, job: BackgroundJob) -> bool:
+        """
+        Process a Praja job.
+        
+        Expected payload:
+        {
+            "object_type": "record" or "ticket",
+            "object_id": int,
+            "data": dict (full object data to send)
+        }
+        """
+        from crm_records.services import PrajaService
+        
+        payload = job.payload
+        object_type = payload.get("object_type")
+        object_id = payload.get("object_id")
+        data = payload.get("data", {})
+        
+        if not object_type or not object_id:
+            error_msg = f"Invalid Praja job payload: missing object_type or object_id"
+            logger.error(f"Invalid Praja job payload for job {job.id}: {error_msg}")
+            raise ValueError(error_msg)
+        
+        try:
+            import time
+            start_time = time.time()
+            
+            print(f"\n🚀 [PRAJA JOB] Processing job {job.id} for {object_type} {object_id}...")
+            
+            praja_service = PrajaService()
+            
+            if object_type == "record":
+                # For records, we need to reconstruct the record object
+                from crm_records.models import Record
+                try:
+                    record = Record.objects.get(id=object_id)
+                    print(f"📋 [PRAJA JOB] Found record {object_id}, sending to Praja server...")
+                    success = praja_service.send_record_to_praja(record)
+                except Record.DoesNotExist:
+                    error_msg = f"Record {object_id} not found"
+                    print(f"❌ [PRAJA JOB] {error_msg}")
+                    logger.error(f"Praja job {job.id} failed: {error_msg}")
+                    raise Exception(error_msg)
+            elif object_type == "ticket":
+                # For tickets, we need to reconstruct the ticket object
+                from support_ticket.models import SupportTicket
+                try:
+                    ticket = SupportTicket.objects.get(id=object_id)
+                    print(f"📋 [PRAJA JOB] Found ticket {object_id}, sending to Praja server...")
+                    success = praja_service.send_ticket_to_praja(ticket)
+                except SupportTicket.DoesNotExist:
+                    error_msg = f"SupportTicket {object_id} not found"
+                    print(f"❌ [PRAJA JOB] {error_msg}")
+                    logger.error(f"Praja job {job.id} failed: {error_msg}")
+                    raise Exception(error_msg)
+            else:
+                error_msg = f"Invalid object_type: {object_type}. Must be 'record' or 'ticket'"
+                print(f"❌ [PRAJA JOB] {error_msg}")
+                logger.error(f"Praja job {job.id} failed: {error_msg}")
+                raise ValueError(error_msg)
+            
+            if not success:
+                error_msg = f"Praja service returned False for {object_type} {object_id}"
+                print(f"❌ [PRAJA JOB] {error_msg}")
+                logger.error(f"Praja job {job.id} failed: {error_msg}")
+                raise Exception(error_msg)
+            
+            execution_time = time.time() - start_time
+            
+            # Store result with debugging information
+            job.result = {
+                "success": True,
+                "object_type": object_type,
+                "object_id": object_id,
+                "execution_time_seconds": round(execution_time, 3),
+                "timestamp": timezone.now().isoformat()
+            }
+            
+            print(f"✅ [PRAJA JOB] Job {job.id} completed successfully in {round(execution_time, 3)}s")
+            logger.info(
+                f"Praja data sent successfully for job {job.id}: "
+                f"object_type={object_type} object_id={object_id}"
+            )
+            return True
+            
+        except Exception as e:
+            error_msg = f"Praja request failed for {object_type} {object_id}: {str(e)}"
+            print(f"❌ [PRAJA JOB] Job {job.id} failed: {error_msg}")
+            logger.error(f"Praja job {job.id} failed: {error_msg}")
+            raise Exception(error_msg) from e
+    
+    def get_retry_delay(self, attempt: int) -> int:
+        """
+        Exponential backoff: 5s, 30s, 180s
+        """
+        delays = [5, 30, 180]
+        return delays[min(attempt - 1, len(delays) - 1)]
+    
+    def validate_payload(self, payload: Dict[str, Any]) -> bool:
+        """Validate Praja job payload"""
+        if "object_type" not in payload:
+            logger.error("Missing required field 'object_type' in Praja job payload")
+            return False
+        if "object_id" not in payload:
+            logger.error("Missing required field 'object_id' in Praja job payload")
+            return False
+        if payload.get("object_type") not in ["record", "ticket"]:
+            logger.error(f"Invalid object_type: {payload.get('object_type')}. Must be 'record' or 'ticket'")
+            return False
+        return True
+
+
 class JobHandlerRegistry:
     """
     Registry for job handlers.
@@ -544,6 +661,7 @@ class JobHandlerRegistry:
         self.register_handler(JobType.SEND_WEBHOOK, WebhookJobHandler())
         self.register_handler(JobType.EXECUTE_FUNCTION, FunctionJobHandler())
         self.register_handler(JobType.SCORE_LEADS, LeadScoringJobHandler())
+        self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
     
     def register_handler(self, job_type: str, handler: JobHandler):
         """

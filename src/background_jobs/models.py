@@ -17,6 +17,7 @@ class JobType(models.TextChoices):
     SEND_WEBHOOK = "send_webhook", "Send Webhook"
     EXECUTE_FUNCTION = "execute_function", "Execute Function"
     SCORE_LEADS = "score_leads", "Score Leads"
+    SEND_TO_PRAJA = "send_to_praja", "Send to Praja Server"
     # Future job types can be added here:
     # SEND_EMAIL = "send_email", "Send Email"
     # GENERATE_REPORT = "generate_report", "Generate Report"
