@@ -8,6 +8,10 @@ from core.pagination import MetaPageNumberPagination
 from core.models import Tenant
 from django.utils import timezone
 from datetime import datetime, time, timedelta
+try:
+    from dateutil import parser as date_parser
+except ImportError:
+    date_parser = None
 from django.db.models import Q, F
 from django.db import transaction
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample, OpenApiParameter
@@ -15,8 +19,8 @@ from drf_spectacular.types import OpenApiTypes
 import logging
 
 logger = logging.getLogger(__name__)
-from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema
-from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer
+from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix
+from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer, CallAttemptMatrixSerializer
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
 from .scoring import calculate_and_update_lead_score
@@ -24,6 +28,7 @@ from user_settings.models import UserSettings
 from .permissions import HasAPISecret
 from support_ticket.services import MixpanelService
 from user_settings.routing import apply_routing_rule_to_queryset
+import requests
 
 
 class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
@@ -614,14 +619,68 @@ class RecordEventView(TenantScopedMixin, APIView):
                 if record.entity_type == "lead" and is_not_connected_event:
                     record_locked = Record.objects.select_for_update().get(id=record.id, tenant=tenant)
                     data = record_locked.data.copy() if record_locked.data else {}
-
+                    
                     prev_attempts = data.get("call_attempts", 0)
                     try:
                         prev_attempts_int = int(prev_attempts) if prev_attempts is not None else 0
                     except (TypeError, ValueError):
                         prev_attempts_int = 0
-
-                    data["call_attempts"] = prev_attempts_int + 1
+                    
+                    # Increment call attempts
+                    new_attempts = prev_attempts_int + 1
+                    data["call_attempts"] = new_attempts
+                    data["last_call_outcome"] = "not_connected"
+                    
+                    # Get call attempt matrix for this lead type
+                    lead_type = data.get("affiliated_party")
+                    matrix = None
+                    if lead_type:
+                        try:
+                            matrix = CallAttemptMatrix.objects.get(
+                                tenant=tenant,
+                                lead_type=lead_type
+                            )
+                            logger.info(
+                                "[RecordEvent] Found call attempt matrix for lead_type=%s: max_attempts=%d, sla_days=%d, min_hours=%d",
+                                lead_type, matrix.max_call_attempts, matrix.sla_days, matrix.min_time_between_calls_hours
+                            )
+                        except CallAttemptMatrix.DoesNotExist:
+                            logger.debug(
+                                "[RecordEvent] No call attempt matrix found for lead_type=%s, using default behavior",
+                                lead_type
+                            )
+                    
+                    # Check if max attempts reached
+                    if matrix and new_attempts >= matrix.max_call_attempts:
+                        # Max attempts reached - mark as closed
+                        data["lead_stage"] = "closed"
+                        data["next_call_at"] = None
+                        logger.info(
+                            "[RecordEvent] Max call attempts (%d) reached for lead_id=%d lead_type=%s, marking as closed",
+                            matrix.max_call_attempts, record_locked.id, lead_type
+                        )
+                    else:
+                        # Calculate next_call_at based on min_time_between_calls_hours from matrix
+                        if matrix:
+                            # Use min_time_between_calls_hours from matrix
+                            hours_to_add = matrix.min_time_between_calls_hours
+                        else:
+                            # Default: 3 hours if no matrix found
+                            hours_to_add = 3
+                            logger.debug(
+                                "[RecordEvent] Using default min_time_between_calls_hours=3 for lead_id=%d (no matrix found)",
+                                record_locked.id
+                            )
+                        
+                        next_call_time = timezone.now() + timedelta(hours=hours_to_add)
+                        data["next_call_at"] = next_call_time.isoformat()
+                        data["lead_stage"] = "call_later"  # Set to call_later so it can be picked up later
+                        
+                        logger.info(
+                            "[RecordEvent] Updated lead_id=%d: call_attempts=%d, next_call_at=%s (min_hours=%d)",
+                            record_locked.id, new_attempts, data["next_call_at"], hours_to_add
+                        )
+                    
                     record_locked.data = data
                     record_locked.updated_at = timezone.now()
                     record_locked.save(update_fields=["data", "updated_at"])
@@ -1051,6 +1110,72 @@ class GetNextLeadView(APIView):
         }
         return aliases.get(lead_type, [lead_type])
     
+    def _get_call_attempt_matrix(self, tenant, lead_type: str):
+        """
+        Get call attempt matrix configuration for a lead type.
+        Returns None if not found (will use default behavior).
+        """
+        try:
+            matrix = CallAttemptMatrix.objects.get(
+                tenant=tenant,
+                lead_type=lead_type
+            )
+            return matrix
+        except CallAttemptMatrix.DoesNotExist:
+            return None
+    
+    def _should_exclude_lead_by_matrix(self, record, lead_data: dict, matrix: CallAttemptMatrix, now):
+        """
+        Check if a lead should be excluded based on call attempt matrix rules.
+        Returns (should_exclude: bool, reason: str)
+        """
+        if not matrix:
+            return False, None
+        
+        # Check max call attempts
+        call_attempts = lead_data.get('call_attempts', 0)
+        try:
+            call_attempts_int = int(call_attempts) if call_attempts is not None else 0
+        except (TypeError, ValueError):
+            call_attempts_int = 0
+        
+        if call_attempts_int >= matrix.max_call_attempts:
+            return True, f"Max call attempts ({matrix.max_call_attempts}) reached"
+        
+        # Check SLA (days since record creation)
+        if record and record.created_at:
+            days_since_creation = (now - record.created_at).days
+            if days_since_creation > matrix.sla_days:
+                return True, f"SLA ({matrix.sla_days} days) exceeded"
+        
+        # Check minimum time between calls
+        next_call_at_str = lead_data.get('next_call_at')
+        if next_call_at_str and call_attempts_int > 0:
+            try:
+                # Try parsing with dateutil first, fallback to datetime
+                if date_parser:
+                    try:
+                        next_call_at = date_parser.parse(next_call_at_str)
+                    except:
+                        next_call_at = datetime.fromisoformat(next_call_at_str.replace('Z', '+00:00'))
+                else:
+                    # Fallback to datetime.fromisoformat
+                    next_call_at = datetime.fromisoformat(next_call_at_str.replace('Z', '+00:00'))
+                
+                # Ensure both are timezone-aware or both are naive
+                if now.tzinfo is None and next_call_at.tzinfo is not None:
+                    next_call_at = next_call_at.replace(tzinfo=None)
+                elif now.tzinfo is not None and next_call_at.tzinfo is None:
+                    next_call_at = timezone.make_aware(next_call_at)
+                
+                hours_since_last_call = (now - next_call_at).total_seconds() / 3600
+                if hours_since_last_call < matrix.min_time_between_calls_hours:
+                    return True, f"Minimum time between calls ({matrix.min_time_between_calls_hours} hours) not met"
+            except Exception as e:
+                logger.debug(f"[GetNextLead] Error parsing next_call_at for min time check: {e}")
+        
+        return False, None
+    
     def _order_by_score(self, qs, now_iso=None):
         """
         Order queryset with priority: expired snoozed leads first, then by lead score, then creation date.
@@ -1458,6 +1583,94 @@ class GetNextLeadView(APIView):
         unassigned = base_qs.filter(affiliated_party_filter)
 
         logger.info("[GetNextLead] Filtered unassigned leads by eligible types: %s", eligible_lead_types)
+        
+        # Filter by call attempt matrix rules (max attempts, SLA, min time between calls)
+        # Load call attempt matrices for all eligible lead types
+        call_attempt_matrices = {}
+        for lead_type in eligible_lead_types:
+            matrix = self._get_call_attempt_matrix(tenant, lead_type)
+            if matrix:
+                call_attempt_matrices[lead_type] = matrix
+                logger.debug(
+                    "[GetNextLead] Loaded call attempt matrix for lead_type=%s: max_attempts=%d, sla_days=%d, min_hours=%d",
+                    lead_type, matrix.max_call_attempts, matrix.sla_days, matrix.min_time_between_calls_hours
+                )
+        
+        # Filter out leads that exceed matrix limits
+        if call_attempt_matrices:
+            excluded_count = 0
+            valid_lead_ids = []
+            
+            # Build Q objects for efficient filtering
+            exclusion_filters = Q()
+            
+            for lead_type, matrix in call_attempt_matrices.items():
+                # Filter by lead type (including aliases)
+                lead_type_filter = Q()
+                for alias in self._affiliated_party_aliases(lead_type):
+                    lead_type_filter |= Q(data__affiliated_party=alias)
+                
+                # Exclude leads that exceed max call attempts
+                max_attempts_exceeded = lead_type_filter & Q(
+                    data__call_attempts__gte=matrix.max_call_attempts
+                )
+                exclusion_filters |= max_attempts_exceeded
+                
+                # Exclude leads that exceed SLA (days since creation)
+                # Calculate cutoff date
+                cutoff_date = now - timedelta(days=matrix.sla_days)
+                sla_exceeded = lead_type_filter & Q(created_at__lt=cutoff_date)
+                exclusion_filters |= sla_exceeded
+                
+                logger.debug(
+                    "[GetNextLead] Added exclusion filters for lead_type=%s: max_attempts>=%d, sla_days=%d",
+                    lead_type, matrix.max_call_attempts, matrix.sla_days
+                )
+            
+            # Apply exclusions
+            if exclusion_filters:
+                before_count = unassigned.count()
+                unassigned = unassigned.exclude(exclusion_filters)
+                after_count = unassigned.count()
+                excluded_count = before_count - after_count
+                
+                if excluded_count > 0:
+                    logger.info(
+                        "[GetNextLead] Excluded %d leads based on call attempt matrix rules (max attempts or SLA)",
+                        excluded_count
+                    )
+            
+            # Additional check for minimum time between calls (requires per-record evaluation)
+            # This is more complex and requires checking next_call_at, so we do it in Python
+            if call_attempt_matrices:
+                final_valid_ids = []
+                for lead in unassigned[:1000]:  # Limit to first 1000 for performance
+                    lead_data = lead.data or {}
+                    lead_type = lead_data.get('affiliated_party')
+                    
+                    # Find matching matrix
+                    matrix = None
+                    for lt, m in call_attempt_matrices.items():
+                        if lead_type == lt or lead_type in self._affiliated_party_aliases(lt):
+                            matrix = m
+                            break
+                    
+                    if matrix:
+                        should_exclude, reason = self._should_exclude_lead_by_matrix(lead, lead_data, matrix, now)
+                        if should_exclude:
+                            excluded_count += 1
+                            logger.debug(
+                                "[GetNextLead] Excluding lead_id=%d lead_type=%s reason=%s",
+                                lead.id, lead_type, reason
+                            )
+                            continue
+                    
+                    final_valid_ids.append(lead.id)
+                
+                if final_valid_ids:
+                    unassigned = unassigned.filter(id__in=final_valid_ids)
+                else:
+                    unassigned = unassigned.none()
 
         # --- Enhanced Diagnostics: Log possible unassigned counts for debugging ---
         unassigned_cnt = unassigned.count()
@@ -2870,5 +3083,291 @@ class LeadScoringView(TenantScopedMixin, APIView):
             'jobs': jobs_data,
             'count': len(jobs_data)
         }, status=status.HTTP_200_OK)
+
+
+class CallAttemptMatrixListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
+    """
+    List and create Call Attempt Matrix configurations.
+    """
+    queryset = CallAttemptMatrix.objects.all()
+    serializer_class = CallAttemptMatrixSerializer
+    permission_classes = [IsTenantAuthenticated]
+    
+    @extend_schema(
+        summary="List or create call attempt matrix configurations",
+        description="Get all call attempt matrix configurations for the current tenant, or create a new one.",
+        tags=["Call Attempt Matrix"]
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+    
+    @extend_schema(
+        summary="Create call attempt matrix configuration",
+        description="Create a new call attempt matrix configuration for a lead type.",
+        tags=["Call Attempt Matrix"]
+    )
+    def post(self, request, *args, **kwargs):
+        return super().post(request, *args, **kwargs)
+
+
+class CallAttemptMatrixDetailView(TenantScopedMixin, generics.RetrieveUpdateDestroyAPIView):
+    """
+    Retrieve, update, or delete a specific Call Attempt Matrix configuration.
+    """
+    queryset = CallAttemptMatrix.objects.all()
+    serializer_class = CallAttemptMatrixSerializer
+    permission_classes = [IsTenantAuthenticated]
+    lookup_field = 'pk'
+    
+    @extend_schema(
+        summary="Get call attempt matrix configuration",
+        description="Retrieve a specific call attempt matrix configuration by ID.",
+        tags=["Call Attempt Matrix"]
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+    
+    @extend_schema(
+        summary="Update call attempt matrix configuration",
+        description="Update a specific call attempt matrix configuration.",
+        tags=["Call Attempt Matrix"]
+    )
+    def put(self, request, *args, **kwargs):
+        return super().put(request, *args, **kwargs)
+    
+    @extend_schema(
+        summary="Partially update call attempt matrix configuration",
+        description="Partially update a specific call attempt matrix configuration.",
+        tags=["Call Attempt Matrix"]
+    )
+    def patch(self, request, *args, **kwargs):
+        return super().patch(request, *args, **kwargs)
+    
+    @extend_schema(
+        summary="Delete call attempt matrix configuration",
+        description="Delete a specific call attempt matrix configuration.",
+        tags=["Call Attempt Matrix"]
+    )
+    def delete(self, request, *args, **kwargs):
+        return super().delete(request, *args, **kwargs)
+
+
+class CallAttemptMatrixByLeadTypeView(TenantScopedMixin, APIView):
+    """
+    Get call attempt matrix configuration by lead type.
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    @extend_schema(
+        summary="Get call attempt matrix by lead type",
+        description="Retrieve call attempt matrix configuration for a specific lead type.",
+        parameters=[
+            OpenApiParameter(
+                name="lead_type",
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=True,
+                description="Lead type (e.g., 'BJP', 'AAP', 'Congress')"
+            )
+        ],
+        tags=["Call Attempt Matrix"]
+    )
+    def get(self, request):
+        tenant = request.tenant
+        if not tenant:
+            return Response(
+                {'error': 'No tenant context available'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        lead_type = request.query_params.get('lead_type')
+        if not lead_type:
+            return Response(
+                {'error': 'lead_type parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            matrix = CallAttemptMatrix.objects.get(
+                tenant=tenant,
+                lead_type=lead_type.strip()
+            )
+            serializer = CallAttemptMatrixSerializer(matrix)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except CallAttemptMatrix.DoesNotExist:
+            return Response(
+                {'error': f'Call attempt matrix not found for lead type: {lead_type}'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+
+class LeadAssignmentWebhookProxyView(TenantScopedMixin, APIView):
+    """
+    Proxy endpoint for lead assignment webhooks.
+    Forwards webhook requests from frontend to external webhook URLs to avoid CORS issues.
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    @extend_schema(
+        summary="Forward lead assignment webhook",
+        description="Proxy endpoint that forwards lead assignment events to external webhook URLs. "
+                    "This endpoint avoids CORS issues by making the webhook request from the backend.",
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'webhook_url': {
+                        'type': 'string',
+                        'format': 'uri',
+                        'description': 'The external webhook URL to forward the payload to'
+                    },
+                    'payload': {
+                        'type': 'object',
+                        'description': 'The payload to send to the webhook URL'
+                    }
+                },
+                'required': ['webhook_url', 'payload']
+            }
+        },
+        responses={
+            200: OpenApiResponse(
+                description="Webhook forwarded successfully",
+                response={
+                    'type': 'object',
+                    'properties': {
+                        'success': {'type': 'boolean'},
+                        'status_code': {'type': 'integer'},
+                        'message': {'type': 'string'}
+                    }
+                }
+            ),
+            400: OpenApiResponse(description="Bad request - missing webhook_url or payload"),
+            500: OpenApiResponse(description="Internal server error")
+        },
+        tags=["Webhooks"]
+    )
+    def post(self, request, *args, **kwargs):
+        """
+        Forward webhook request to external URL.
+        
+        Expected request body:
+        {
+            "webhook_url": "https://webhook.site/...",
+            "payload": {
+                "event": "lead.assigned",
+                "timestamp": "...",
+                "lead": {...},
+                "user": {...},
+                "assignment_time": "..."
+            }
+        }
+        """
+        try:
+            webhook_url = request.data.get('webhook_url')
+            payload = request.data.get('payload')
+            
+            if not webhook_url:
+                return Response(
+                    {'error': 'webhook_url is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            if not payload:
+                return Response(
+                    {'error': 'payload is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Validate webhook_url is a valid URL
+            if not (webhook_url.startswith('http://') or webhook_url.startswith('https://')):
+                return Response(
+                    {'error': 'webhook_url must be a valid HTTP/HTTPS URL'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Forward the request to the external webhook URL
+            try:
+                response = requests.post(
+                    webhook_url,
+                    json=payload,
+                    headers={
+                        'Content-Type': 'application/json',
+                    },
+                    timeout=10  # 10 second timeout
+                )
+                
+                # Log the webhook attempt
+                logger.info(
+                    f"Webhook forwarded to {webhook_url}: "
+                    f"status={response.status_code}, "
+                    f"tenant={request.tenant.id if hasattr(request, 'tenant') else 'unknown'}"
+                )
+                
+                # Send Mixpanel event for lead assignment
+                try:
+                    lead_data = payload.get('lead', {}) if isinstance(payload, dict) else {}
+                    user_data = payload.get('user', {}) if isinstance(payload, dict) else {}
+                    user_id = user_data.get('id') if isinstance(user_data, dict) else None
+                    
+                    logger.info(f"[Mixpanel] Preparing to send lead assignment event: user_id={user_id}, lead_id={lead_data.get('id') if isinstance(lead_data, dict) else None}")
+                    
+                    if user_id and lead_data:
+                        mixpanel_service = MixpanelService()
+                        mixpanel_properties = {
+                            'lead_id': lead_data.get('id'),
+                            'lead_name': lead_data.get('name'),
+                            'lead_status': lead_data.get('lead_status'),
+                            'lead_score': lead_data.get('lead_score'),
+                            'lead_type': lead_data.get('lead_type'),
+                            'assigned_to': lead_data.get('assigned_to'),
+                            'assignment_time': payload.get('assignment_time'),
+                            'timestamp': payload.get('timestamp'),
+                        }
+                        # Add all lead attributes to Mixpanel properties
+                        mixpanel_properties.update(lead_data)
+                        
+                        logger.info(f"[Mixpanel] Calling send_to_mixpanel_sync with event='pyro_crm_rm_assigned_backend', user_id={user_id}")
+                        mixpanel_result = mixpanel_service.send_to_mixpanel_sync(
+                            str(user_id),
+                            'pyro_crm_rm_assigned_backend',
+                            mixpanel_properties
+                        )
+                        
+                        if mixpanel_result:
+                            logger.info(f"✅ [Mixpanel] Event sent successfully for lead assignment: lead_id={lead_data.get('id')}, user_id={user_id}")
+                        else:
+                            logger.warning(f"⚠️ [Mixpanel] Event sending returned False for lead assignment: lead_id={lead_data.get('id')}, user_id={user_id}")
+                    else:
+                        logger.warning(f"[Mixpanel] Skipping Mixpanel event - missing user_id or lead_data: user_id={user_id}, has_lead_data={bool(lead_data)}")
+                except Exception as mixpanel_error:
+                    # Don't fail the webhook if Mixpanel fails
+                    logger.error(f"❌ [Mixpanel] Exception while sending lead assignment event: {str(mixpanel_error)}", exc_info=True)
+                
+                # Return success response
+                return Response({
+                    'success': response.ok,
+                    'status_code': response.status_code,
+                    'message': 'Webhook forwarded successfully' if response.ok else 'Webhook forwarding completed with non-2xx status'
+                }, status=status.HTTP_200_OK)
+                
+            except requests.exceptions.Timeout:
+                logger.error(f"Webhook timeout for {webhook_url}")
+                return Response(
+                    {'error': 'Webhook request timed out'},
+                    status=status.HTTP_504_GATEWAY_TIMEOUT
+                )
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Webhook forwarding error for {webhook_url}: {str(e)}")
+                return Response(
+                    {'error': f'Failed to forward webhook: {str(e)}'},
+                    status=status.HTTP_502_BAD_GATEWAY
+                )
+                
+        except Exception as e:
+            logger.error(f"Unexpected error in webhook proxy: {str(e)}")
+            return Response(
+                {'error': f'Internal error: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
