@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView, GetMyCurrentLeadView, CallAttemptMatrixListCreateView, CallAttemptMatrixDetailView, CallAttemptMatrixByLeadTypeView
+from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView, GetMyCurrentLeadView, CallAttemptMatrixListCreateView, CallAttemptMatrixDetailView, CallAttemptMatrixByLeadTypeView, LeadAssignmentWebhookProxyView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 from .public_views import PublicJobsView, PublicJobApplicationView
 
@@ -47,5 +47,8 @@ urlpatterns = [
     path("call-attempt-matrix/", CallAttemptMatrixListCreateView.as_view(), name="call-attempt-matrix-list-create"),
     path("call-attempt-matrix/<int:pk>/", CallAttemptMatrixDetailView.as_view(), name="call-attempt-matrix-detail"),
     path("call-attempt-matrix/by-lead-type/", CallAttemptMatrixByLeadTypeView.as_view(), name="call-attempt-matrix-by-lead-type"),
+    
+    # Webhook proxy endpoints
+    path("webhooks/lead-assigned/", LeadAssignmentWebhookProxyView.as_view(), name="lead-assignment-webhook-proxy"),
     
 ]
