@@ -29,6 +29,8 @@ from .permissions import HasAPISecret
 from support_ticket.services import MixpanelService
 from user_settings.routing import apply_routing_rule_to_queryset
 import requests
+import uuid
+from authz.models import TenantMembership
 
 
 class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
@@ -3312,6 +3314,28 @@ class LeadAssignmentWebhookProxyView(TenantScopedMixin, APIView):
                     logger.info(f"[Mixpanel] Preparing to send lead assignment event: user_id={user_id}, lead_id={lead_data.get('id') if isinstance(lead_data, dict) else None}")
                     
                     if user_id and lead_data:
+                        # Resolve UUID to TenantMembership integer ID for Mixpanel (using new user table)
+                        mixpanel_user_id = user_id
+                        try:
+                            # If user_id is a UUID, look up TenantMembership to get integer id
+                            user_uuid = uuid.UUID(str(user_id))
+                            tenant = getattr(request, 'tenant', None)
+                            if tenant:
+                                tenant_membership = TenantMembership.objects.filter(
+                                    tenant=tenant,
+                                    user_id=user_uuid
+                                ).first()
+                                if tenant_membership:
+                                    mixpanel_user_id = str(tenant_membership.id)  # Use integer id from TenantMembership
+                                    logger.info(f"[Mixpanel] Resolved UUID {user_id} to TenantMembership.id {mixpanel_user_id}")
+                                else:
+                                    logger.warning(f"[Mixpanel] TenantMembership not found for UUID {user_id} in tenant {tenant.id}, using UUID as-is")
+                            else:
+                                logger.warning(f"[Mixpanel] No tenant found on request, using UUID as-is")
+                        except (ValueError, AttributeError, TypeError) as e:
+                            # user_id is not a UUID, use as-is (might be integer string)
+                            logger.debug(f"[Mixpanel] user_id {user_id} is not a UUID ({e}), using as-is")
+                        
                         mixpanel_service = MixpanelService()
                         mixpanel_properties = {
                             'lead_id': lead_data.get('id'),
@@ -3326,17 +3350,17 @@ class LeadAssignmentWebhookProxyView(TenantScopedMixin, APIView):
                         # Add all lead attributes to Mixpanel properties
                         mixpanel_properties.update(lead_data)
                         
-                        logger.info(f"[Mixpanel] Calling send_to_mixpanel_sync with event='pyro_crm_rm_assigned_backend', user_id={user_id}")
+                        logger.info(f"[Mixpanel] Calling send_to_mixpanel_sync with event='pyro_crm_rm_assigned_backend', user_id={mixpanel_user_id} (original={user_id})")
                         mixpanel_result = mixpanel_service.send_to_mixpanel_sync(
-                            str(user_id),
+                            str(mixpanel_user_id),
                             'pyro_crm_rm_assigned_backend',
                             mixpanel_properties
                         )
                         
                         if mixpanel_result:
-                            logger.info(f"✅ [Mixpanel] Event sent successfully for lead assignment: lead_id={lead_data.get('id')}, user_id={user_id}")
+                            logger.info(f"✅ [Mixpanel] Event sent successfully for lead assignment: lead_id={lead_data.get('id')}, user_id={mixpanel_user_id}")
                         else:
-                            logger.warning(f"⚠️ [Mixpanel] Event sending returned False for lead assignment: lead_id={lead_data.get('id')}, user_id={user_id}")
+                            logger.warning(f"⚠️ [Mixpanel] Event sending returned False for lead assignment: lead_id={lead_data.get('id')}, user_id={mixpanel_user_id}")
                     else:
                         logger.warning(f"[Mixpanel] Skipping Mixpanel event - missing user_id or lead_data: user_id={user_id}, has_lead_data={bool(lead_data)}")
                 except Exception as mixpanel_error:
