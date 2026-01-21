@@ -28,6 +28,7 @@ from user_settings.models import UserSettings
 from .permissions import HasAPISecret
 from support_ticket.services import MixpanelService
 from user_settings.routing import apply_routing_rule_to_queryset
+import requests
 
 
 class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
@@ -3197,6 +3198,167 @@ class CallAttemptMatrixByLeadTypeView(TenantScopedMixin, APIView):
             return Response(
                 {'error': f'Call attempt matrix not found for lead type: {lead_type}'},
                 status=status.HTTP_404_NOT_FOUND
+            )
+
+
+class LeadAssignmentWebhookProxyView(TenantScopedMixin, APIView):
+    """
+    Proxy endpoint for lead assignment webhooks.
+    Forwards webhook requests from frontend to external webhook URLs to avoid CORS issues.
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    @extend_schema(
+        summary="Forward lead assignment webhook",
+        description="Proxy endpoint that forwards lead assignment events to external webhook URLs. "
+                    "This endpoint avoids CORS issues by making the webhook request from the backend.",
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'webhook_url': {
+                        'type': 'string',
+                        'format': 'uri',
+                        'description': 'The external webhook URL to forward the payload to'
+                    },
+                    'payload': {
+                        'type': 'object',
+                        'description': 'The payload to send to the webhook URL'
+                    }
+                },
+                'required': ['webhook_url', 'payload']
+            }
+        },
+        responses={
+            200: OpenApiResponse(
+                description="Webhook forwarded successfully",
+                response={
+                    'type': 'object',
+                    'properties': {
+                        'success': {'type': 'boolean'},
+                        'status_code': {'type': 'integer'},
+                        'message': {'type': 'string'}
+                    }
+                }
+            ),
+            400: OpenApiResponse(description="Bad request - missing webhook_url or payload"),
+            500: OpenApiResponse(description="Internal server error")
+        },
+        tags=["Webhooks"]
+    )
+    def post(self, request, *args, **kwargs):
+        """
+        Forward webhook request to external URL.
+        
+        Expected request body:
+        {
+            "webhook_url": "https://webhook.site/...",
+            "payload": {
+                "event": "lead.assigned",
+                "timestamp": "...",
+                "lead": {...},
+                "user": {...},
+                "assignment_time": "..."
+            }
+        }
+        """
+        try:
+            webhook_url = request.data.get('webhook_url')
+            payload = request.data.get('payload')
+            
+            if not webhook_url:
+                return Response(
+                    {'error': 'webhook_url is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            if not payload:
+                return Response(
+                    {'error': 'payload is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Validate webhook_url is a valid URL
+            if not (webhook_url.startswith('http://') or webhook_url.startswith('https://')):
+                return Response(
+                    {'error': 'webhook_url must be a valid HTTP/HTTPS URL'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Forward the request to the external webhook URL
+            try:
+                response = requests.post(
+                    webhook_url,
+                    json=payload,
+                    headers={
+                        'Content-Type': 'application/json',
+                    },
+                    timeout=10  # 10 second timeout
+                )
+                
+                # Log the webhook attempt
+                logger.info(
+                    f"Webhook forwarded to {webhook_url}: "
+                    f"status={response.status_code}, "
+                    f"tenant={request.tenant.id if hasattr(request, 'tenant') else 'unknown'}"
+                )
+                
+                # Send Mixpanel event for lead assignment
+                try:
+                    lead_data = payload.get('lead', {}) if isinstance(payload, dict) else {}
+                    user_data = payload.get('user', {}) if isinstance(payload, dict) else {}
+                    user_id = user_data.get('id') if isinstance(user_data, dict) else None
+                    
+                    if user_id and lead_data:
+                        mixpanel_service = MixpanelService()
+                        mixpanel_properties = {
+                            'lead_id': lead_data.get('id'),
+                            'lead_name': lead_data.get('name'),
+                            'lead_status': lead_data.get('lead_status'),
+                            'lead_score': lead_data.get('lead_score'),
+                            'lead_type': lead_data.get('lead_type'),
+                            'assigned_to': lead_data.get('assigned_to'),
+                            'assignment_time': payload.get('assignment_time'),
+                            'timestamp': payload.get('timestamp'),
+                        }
+                        # Add all lead attributes to Mixpanel properties
+                        mixpanel_properties.update(lead_data)
+                        
+                        mixpanel_service.send_to_mixpanel_sync(
+                            str(user_id),
+                            'pyro_crm_rm_assigned_backend',
+                            mixpanel_properties
+                        )
+                        logger.info(f"Mixpanel event sent for lead assignment: lead_id={lead_data.get('id')}, user_id={user_id}")
+                except Exception as mixpanel_error:
+                    # Don't fail the webhook if Mixpanel fails
+                    logger.warning(f"Failed to send Mixpanel event for lead assignment: {str(mixpanel_error)}")
+                
+                # Return success response
+                return Response({
+                    'success': response.ok,
+                    'status_code': response.status_code,
+                    'message': 'Webhook forwarded successfully' if response.ok else 'Webhook forwarding completed with non-2xx status'
+                }, status=status.HTTP_200_OK)
+                
+            except requests.exceptions.Timeout:
+                logger.error(f"Webhook timeout for {webhook_url}")
+                return Response(
+                    {'error': 'Webhook request timed out'},
+                    status=status.HTTP_504_GATEWAY_TIMEOUT
+                )
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Webhook forwarding error for {webhook_url}: {str(e)}")
+                return Response(
+                    {'error': f'Failed to forward webhook: {str(e)}'},
+                    status=status.HTTP_502_BAD_GATEWAY
+                )
+                
+        except Exception as e:
+            logger.error(f"Unexpected error in webhook proxy: {str(e)}")
+            return Response(
+                {'error': f'Internal error: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 
