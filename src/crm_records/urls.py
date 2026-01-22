@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView, GetMyCurrentLeadView, CallAttemptMatrixListCreateView, CallAttemptMatrixDetailView, CallAttemptMatrixByLeadTypeView, LeadAssignmentWebhookProxyView
+from .views import RecordListCreateView, RecordDetailView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView, GetMyCurrentLeadView, CallAttemptMatrixListCreateView, CallAttemptMatrixDetailView, CallAttemptMatrixByLeadTypeView, LeadAssignmentWebhookProxyView, RMAssignedMixpanelView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 from .public_views import PublicJobsView, PublicJobApplicationView
 
@@ -50,5 +50,8 @@ urlpatterns = [
     
     # Webhook proxy endpoints
     path("webhooks/lead-assigned/", LeadAssignmentWebhookProxyView.as_view(), name="lead-assignment-webhook-proxy"),
+    
+    # Mixpanel endpoints
+    path("mixpanel/rm-assigned/", RMAssignedMixpanelView.as_view(), name="rm-assigned-mixpanel"),
     
 ]

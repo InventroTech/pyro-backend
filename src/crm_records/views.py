@@ -26,7 +26,7 @@ from .events import dispatch_event
 from .scoring import calculate_and_update_lead_score
 from user_settings.models import UserSettings
 from .permissions import HasAPISecret
-from support_ticket.services import MixpanelService
+from support_ticket.services import MixpanelService, RMAssignedMixpanelService
 from user_settings.routing import apply_routing_rule_to_queryset
 import requests
 import uuid
@@ -1836,6 +1836,109 @@ class GetNextLeadView(APIView):
                 user_identifier
             )
 
+            # Send both Mixpanel events when lead is assigned
+            # Get lead data first
+            lead_data_dict = candidate_locked.data or {}
+            lead_name = lead_data_dict.get('name', '') if isinstance(lead_data_dict, dict) else ''
+            
+            logger.info("=" * 80)
+            logger.info("🚀 [GetNextLead] Starting Mixpanel event calls for new lead assignment")
+            logger.info(f"   Lead ID: {candidate_locked.id}")
+            logger.info(f"   Lead Name: {lead_name}")
+            logger.info("=" * 80)
+            
+            try:
+                # Get user email for RM assigned Mixpanel
+                rm_email = getattr(user, 'email', None)
+                if not rm_email and tenant_membership:
+                    rm_email = tenant_membership.email
+                
+                # Get praja_id from lead data
+                praja_id = lead_data_dict.get('praja_id')
+                
+                logger.info(f"[GetNextLead] Extracted data - praja_id: {praja_id}, rm_email: {rm_email}")
+                
+                # Call original MixpanelService with detailed event
+                if user_uuid or user_identifier:
+                    mixpanel_user_id = str(tenant_membership.id) if tenant_membership else str(user_uuid) if user_uuid else user_identifier
+                    
+                    logger.info("-" * 80)
+                    logger.info("📊 [GetNextLead] Calling ORIGINAL MixpanelService")
+                    logger.info(f"   Service: MixpanelService")
+                    logger.info(f"   Endpoint: https://api.thecircleapp.in/pyro/send_to_mixpanel")
+                    logger.info(f"   Event Name: pyro_crm_rm_assigned_backend")
+                    logger.info(f"   User ID: {mixpanel_user_id}")
+                    logger.info("-" * 80)
+                    
+                    mixpanel_service = MixpanelService()
+                    mixpanel_properties = {
+                        'lead_id': candidate_locked.id,
+                        'lead_name': lead_name,
+                        'lead_status': lead_data_dict.get('lead_stage', 'assigned'),
+                        'lead_score': lead_data_dict.get('lead_score'),
+                        'lead_type': lead_data_dict.get('affiliated_party'),
+                        'assigned_to': user_identifier,
+                        'praja_id': praja_id,
+                        'rm_email': rm_email,
+                    }
+                    # Add all lead data attributes
+                    mixpanel_properties.update(lead_data_dict)
+                    
+                    logger.info(f"[GetNextLead] Payload properties count: {len(mixpanel_properties)}")
+                    logger.info(f"[GetNextLead] Key properties: lead_id={mixpanel_properties.get('lead_id')}, praja_id={mixpanel_properties.get('praja_id')}, rm_email={mixpanel_properties.get('rm_email')}")
+                    
+                    result = mixpanel_service.send_to_mixpanel_sync(
+                        str(mixpanel_user_id),
+                        'pyro_crm_rm_assigned_backend',
+                        mixpanel_properties
+                    )
+                    
+                    if result:
+                        logger.info("✅ [GetNextLead] Original MixpanelService call SUCCESSFUL")
+                    else:
+                        logger.warning("⚠️ [GetNextLead] Original MixpanelService call FAILED")
+                else:
+                    logger.warning("[GetNextLead] Skipping original MixpanelService - no user_uuid or user_identifier")
+                
+                # Call new RMAssignedMixpanelService with simplified payload
+                logger.info("-" * 80)
+                logger.info("📊 [GetNextLead] Calling NEW RMAssignedMixpanelService")
+                logger.info(f"   Service: RMAssignedMixpanelService")
+                logger.info(f"   Endpoint: https://api.thecircleapp.in/pyro/rm_assigned")
+                logger.info("-" * 80)
+                
+                if praja_id and rm_email:
+                    try:
+                        praja_id_int = int(praja_id)
+                        logger.info(f"[GetNextLead] Payload - praja_id: {praja_id_int} (will be sent as user_id), rm_email: {rm_email}")
+                        
+                        rm_assigned_service = RMAssignedMixpanelService()
+                        result = rm_assigned_service.send_to_mixpanel_sync(
+                            praja_id_int,
+                            rm_email
+                        )
+                        
+                        if result:
+                            logger.info("✅ [GetNextLead] RMAssignedMixpanelService call SUCCESSFUL")
+                        else:
+                            logger.warning("⚠️ [GetNextLead] RMAssignedMixpanelService call FAILED")
+                    except (ValueError, TypeError) as e:
+                        logger.error(f"❌ [GetNextLead] Could not convert praja_id to integer: {praja_id}, error: {e}")
+                else:
+                    logger.warning(f"⚠️ [GetNextLead] Missing praja_id or rm_email for RM assigned Mixpanel")
+                    logger.warning(f"   praja_id: {praja_id}, rm_email: {rm_email}")
+                    
+                logger.info("=" * 80)
+                logger.info("🏁 [GetNextLead] Completed Mixpanel event calls")
+                logger.info("=" * 80)
+                    
+            except Exception as mixpanel_error:
+                # Don't fail the request if Mixpanel fails
+                logger.error("=" * 80)
+                logger.error(f"❌ [GetNextLead] EXCEPTION while sending Mixpanel events: {str(mixpanel_error)}")
+                logger.error("=" * 80)
+                logger.error(f"[GetNextLead] Error details:", exc_info=True)
+
         # Force refresh from database to ensure we have absolute latest data
         # This bypasses any queryset caching and ensures fresh DB read
         candidate_locked.refresh_from_db()
@@ -3389,6 +3492,111 @@ class LeadAssignmentWebhookProxyView(TenantScopedMixin, APIView):
                 
         except Exception as e:
             logger.error(f"Unexpected error in webhook proxy: {str(e)}")
+            return Response(
+                {'error': f'Internal error: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class RMAssignedMixpanelView(TenantScopedMixin, APIView):
+    """
+    API endpoint to send RM assigned events to Mixpanel
+    """
+    permission_classes = [IsTenantAuthenticated]
+    
+    @extend_schema(
+        summary="Send RM assigned event to Mixpanel",
+        description="Sends an event to Mixpanel via the rm_assigned endpoint when a lead is assigned to an RM",
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'praja_id': {
+                        'type': 'integer',
+                        'description': 'Praja ID for the Mixpanel event',
+                        'example': 123
+                    },
+                    'rm_email': {
+                        'type': 'string',
+                        'description': 'RM email address',
+                        'example': 'sai.venkat@praja.buzz'
+                    }
+                },
+                'required': ['praja_id', 'rm_email']
+            }
+        },
+        responses={
+            200: OpenApiResponse(
+                description="Event sent successfully",
+                examples=[
+                    OpenApiExample(
+                        name="Success",
+                        value={"success": True, "message": "Event sent to Mixpanel"}
+                    )
+                ]
+            ),
+            400: OpenApiResponse(
+                description="Bad request",
+                examples=[
+                    OpenApiExample(
+                        name="Missing Fields",
+                        value={"error": "praja_id and rm_email are required"}
+                    )
+                ]
+            )
+        },
+        tags=["Mixpanel"]
+    )
+    def post(self, request):
+        """
+        Send RM assigned event to Mixpanel
+        """
+        try:
+            user = request.user
+            
+            # Get praja_id and rm_email from request data
+            praja_id = request.data.get('praja_id')
+            rm_email = request.data.get('rm_email')
+            
+            # If rm_email not provided, get from authenticated user
+            if not rm_email:
+                rm_email = getattr(user, 'email', None)
+            
+            if not praja_id or not rm_email:
+                return Response(
+                    {'error': 'praja_id and rm_email are required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Ensure praja_id is an integer
+            try:
+                praja_id_int = int(praja_id)
+            except (ValueError, TypeError):
+                return Response(
+                    {'error': 'praja_id must be a valid integer'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Send to Mixpanel - praja_id is sent as user_id in the payload
+            service = RMAssignedMixpanelService()
+            success = service.send_to_mixpanel_sync(
+                praja_id_int,
+                rm_email
+            )
+            
+            if success:
+                return Response(
+                    {'success': True, 'message': 'Event sent to Mixpanel'},
+                    status=status.HTTP_200_OK
+                )
+            else:
+                return Response(
+                    {'success': False, 'message': 'Failed to send event to Mixpanel'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+                
+        except Exception as e:
+            logger.error(f"Error sending RM assigned Mixpanel event: {str(e)}", exc_info=True)
             return Response(
                 {'error': f'Internal error: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
