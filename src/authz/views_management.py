@@ -59,7 +59,7 @@ class RolesView(APIView):
 
 
 class ListTenantUsersView(APIView):
-    permission_classes = [IsTenantAuthenticated, HasTenantRole("GM")]
+    permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
         from django.db.models import Q, OuterRef, Subquery
