@@ -661,7 +661,8 @@ class JobHandlerRegistry:
         self.register_handler(JobType.SEND_WEBHOOK, WebhookJobHandler())
         self.register_handler(JobType.EXECUTE_FUNCTION, FunctionJobHandler())
         self.register_handler(JobType.SCORE_LEADS, LeadScoringJobHandler())
-        self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
+        # Praja handler removed - now using MixpanelService instead
+        # self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
     
     def register_handler(self, job_type: str, handler: JobHandler):
         """
