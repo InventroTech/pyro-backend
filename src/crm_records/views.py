@@ -1859,15 +1859,36 @@ class GetNextLeadView(APIView):
                 logger.info(f"[GetNextLead] Extracted data - praja_id: {praja_id}, rm_email: {rm_email}")
                 
                 # Call original MixpanelService with detailed event
-                if user_uuid or user_identifier:
-                    mixpanel_user_id = str(tenant_membership.id) if tenant_membership else str(user_uuid) if user_uuid else user_identifier
+                # For lead events, use praja_id as user_id instead of tenant_membership.id
+                if praja_id:
+                    # Convert praja_id to appropriate format for Mixpanel
+                    # Handle different formats: integer, numeric string, or string like "PRAJA123"
+                    try:
+                        if isinstance(praja_id, int):
+                            # Already an integer, use directly
+                            mixpanel_user_id = str(praja_id)
+                        elif isinstance(praja_id, str):
+                            # Try to extract numeric part from strings like "PRAJA123", "PRAJA-123", or just "123"
+                            cleaned = praja_id.upper().replace("PRAJA", "").replace("-", "").replace("_", "").strip()
+                            if cleaned.isdigit():
+                                # Convert to integer string if it's all digits
+                                mixpanel_user_id = cleaned
+                            else:
+                                # If not all digits, use as-is
+                                mixpanel_user_id = praja_id
+                        else:
+                            # Other types, convert to string
+                            mixpanel_user_id = str(praja_id)
+                    except (ValueError, TypeError, AttributeError) as e:
+                        logger.warning(f"[GetNextLead] Failed to convert praja_id={praja_id}: {e}, using as-is")
+                        mixpanel_user_id = str(praja_id) if praja_id else praja_id
                     
                     logger.info("-" * 80)
                     logger.info("📊 [GetNextLead] Calling ORIGINAL MixpanelService")
                     logger.info(f"   Service: MixpanelService")
                     logger.info(f"   Endpoint: https://api.thecircleapp.in/pyro/send_to_mixpanel")
                     logger.info(f"   Event Name: pyro_crm_rm_assigned_backend")
-                    logger.info(f"   User ID: {mixpanel_user_id}")
+                    logger.info(f"   User ID: {mixpanel_user_id} (praja_id, not tenant_membership.id)")
                     logger.info("-" * 80)
                     
                     mixpanel_service = MixpanelService()
@@ -1888,7 +1909,7 @@ class GetNextLeadView(APIView):
                     logger.info(f"[GetNextLead] Key properties: lead_id={mixpanel_properties.get('lead_id')}, praja_id={mixpanel_properties.get('praja_id')}, rm_email={mixpanel_properties.get('rm_email')}")
                     
                     result = mixpanel_service.send_to_mixpanel_sync(
-                        str(mixpanel_user_id),
+                        mixpanel_user_id,
                         'pyro_crm_rm_assigned_backend',
                         mixpanel_properties
                     )
@@ -1926,7 +1947,7 @@ class GetNextLeadView(APIView):
                         logger.error(f"❌ [GetNextLead] Could not convert praja_id to integer: {praja_id}, error: {e}")
                 else:
                     logger.warning(f"⚠️ [GetNextLead] Missing praja_id or rm_email for RM assigned Mixpanel")
-                    logger.warning(f"   praja_id: {praja_id}, rm_email: {rm_email}")
+                    logger.warning(f"   praja_id: {praja_id} (type: {type(praja_id)}), rm_email: {rm_email}")
                     
                 logger.info("=" * 80)
                 logger.info("🏁 [GetNextLead] Completed Mixpanel event calls")
@@ -3417,27 +3438,56 @@ class LeadAssignmentWebhookProxyView(TenantScopedMixin, APIView):
                     logger.info(f"[Mixpanel] Preparing to send lead assignment event: user_id={user_id}, lead_id={lead_data.get('id') if isinstance(lead_data, dict) else None}")
                     
                     if user_id and lead_data:
-                        # Resolve UUID to TenantMembership integer ID for Mixpanel (using new user table)
-                        mixpanel_user_id = user_id
-                        try:
-                            # If user_id is a UUID, look up TenantMembership to get integer id
-                            user_uuid = uuid.UUID(str(user_id))
-                            tenant = getattr(request, 'tenant', None)
-                            if tenant:
-                                tenant_membership = TenantMembership.objects.filter(
-                                    tenant=tenant,
-                                    user_id=user_uuid
-                                ).first()
-                                if tenant_membership:
-                                    mixpanel_user_id = str(tenant_membership.id)  # Use integer id from TenantMembership
-                                    logger.info(f"[Mixpanel] Resolved UUID {user_id} to TenantMembership.id {mixpanel_user_id}")
+                        # For lead events, use praja_id from lead_data as user_id instead of tenant_membership.id
+                        praja_id = lead_data.get('praja_id') if isinstance(lead_data, dict) else None
+                        
+                        if praja_id:
+                            # Convert praja_id to appropriate format for Mixpanel
+                            # Handle different formats: integer, numeric string, or string like "PRAJA123"
+                            try:
+                                if isinstance(praja_id, int):
+                                    # Already an integer, use directly
+                                    mixpanel_user_id = str(praja_id)
+                                elif isinstance(praja_id, str):
+                                    # Try to extract numeric part from strings like "PRAJA123", "PRAJA-123", or just "123"
+                                    cleaned = praja_id.upper().replace("PRAJA", "").replace("-", "").replace("_", "").strip()
+                                    if cleaned.isdigit():
+                                        # Convert to integer string if it's all digits
+                                        mixpanel_user_id = cleaned
+                                    else:
+                                        # If not all digits, use as-is
+                                        mixpanel_user_id = praja_id
                                 else:
-                                    logger.warning(f"[Mixpanel] TenantMembership not found for UUID {user_id} in tenant {tenant.id}, using UUID as-is")
-                            else:
-                                logger.warning(f"[Mixpanel] No tenant found on request, using UUID as-is")
-                        except (ValueError, AttributeError, TypeError) as e:
-                            # user_id is not a UUID, use as-is (might be integer string)
-                            logger.debug(f"[Mixpanel] user_id {user_id} is not a UUID ({e}), using as-is")
+                                    # Other types, convert to string
+                                    mixpanel_user_id = str(praja_id)
+                            except (ValueError, TypeError, AttributeError) as e:
+                                logger.warning(f"[Mixpanel] Failed to convert praja_id={praja_id}: {e}, using as-is")
+                                mixpanel_user_id = str(praja_id) if praja_id else praja_id
+                            
+                            logger.info(f"[Mixpanel] Using praja_id={mixpanel_user_id} as user_id for lead assignment event (original user_id={user_id})")
+                        else:
+                            # Fallback to original logic if praja_id not available
+                            mixpanel_user_id = user_id
+                            try:
+                                # If user_id is a UUID, look up TenantMembership to get integer id
+                                user_uuid = uuid.UUID(str(user_id))
+                                tenant = getattr(request, 'tenant', None)
+                                if tenant:
+                                    tenant_membership = TenantMembership.objects.filter(
+                                        tenant=tenant,
+                                        user_id=user_uuid
+                                    ).first()
+                                    if tenant_membership:
+                                        mixpanel_user_id = str(tenant_membership.id)  # Use integer id from TenantMembership
+                                        logger.info(f"[Mixpanel] Resolved UUID {user_id} to TenantMembership.id {mixpanel_user_id}")
+                                    else:
+                                        logger.warning(f"[Mixpanel] TenantMembership not found for UUID {user_id} in tenant {tenant.id}, using UUID as-is")
+                                else:
+                                    logger.warning(f"[Mixpanel] No tenant found on request, using UUID as-is")
+                            except (ValueError, AttributeError, TypeError) as e:
+                                # user_id is not a UUID, use as-is (might be integer string)
+                                logger.debug(f"[Mixpanel] user_id {user_id} is not a UUID ({e}), using as-is")
+                            logger.warning(f"[Mixpanel] No praja_id found in lead_data, falling back to user_id={mixpanel_user_id}")
                         
                         mixpanel_service = MixpanelService()
                         mixpanel_properties = {
