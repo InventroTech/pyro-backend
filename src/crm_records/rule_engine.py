@@ -492,6 +492,51 @@ def action_send_mixpanel_event(
     resolved_user_id = _resolve_templates_in(user_id, ctx)
     resolved_event_name = _resolve_templates_in(event_name, ctx)
     resolved_properties = _resolve_templates_in(properties or {}, ctx)
+    
+    # For lead events, automatically use praja_id as user_id if available
+    # This ensures lead events use praja's user_id instead of pyro's record_id
+    if record.entity_type == "lead":
+        record_data = ctx.get("record_data") or (record.data if record.data else {})
+        praja_id = record_data.get("praja_id") if isinstance(record_data, dict) else None
+        
+        if praja_id:
+            # Convert praja_id to appropriate format for Mixpanel
+            # Handle different formats: integer, numeric string, or string like "PRAJA123"
+            original_resolved = resolved_user_id
+            try:
+                if isinstance(praja_id, int):
+                    # Already an integer, use directly
+                    resolved_user_id = praja_id
+                elif isinstance(praja_id, str):
+                    # Try to extract numeric part from strings like "PRAJA123", "PRAJA-123", or just "123"
+                    # Remove common prefixes and separators
+                    cleaned = praja_id.upper().replace("PRAJA", "").replace("-", "").replace("_", "").strip()
+                    if cleaned.isdigit():
+                        # Convert to integer if it's all digits
+                        resolved_user_id = int(cleaned)
+                    else:
+                        # If not all digits, use as-is (might be a different format)
+                        resolved_user_id = praja_id
+                else:
+                    # Other types (float, etc.), convert to string
+                    resolved_user_id = str(praja_id)
+            except (ValueError, TypeError, AttributeError) as e:
+                # Fallback to original value if conversion fails
+                logger.warning(
+                    f"[send_mixpanel_event] Failed to convert praja_id={praja_id} to integer: {e}, "
+                    f"using as-is for record {record.id}"
+                )
+                resolved_user_id = praja_id
+            
+            logger.info(
+                f"[send_mixpanel_event] Lead event detected - using praja_id={resolved_user_id} "
+                f"(original user_id={original_resolved}) for record {record.id}"
+            )
+        else:
+            logger.warning(
+                f"[send_mixpanel_event] Lead event detected but no praja_id found in record_data "
+                f"for record {record.id}, using resolved user_id={resolved_user_id}"
+            )
 
     # Build complete properties dict with all record data
     mixpanel_properties = {
