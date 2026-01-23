@@ -182,6 +182,60 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
             except Exception as e:
                 logger.error(f"RecordListCreateView: Error calculating lead score for new lead {record.id}: {e}")
                 # Don't fail the request if scoring fails, just log the error
+            
+            # Send to Mixpanel
+            try:
+                from support_ticket.services import MixpanelService
+                from background_jobs.queue_service import get_queue_service
+                from background_jobs.models import JobType
+                
+                lead_data = record.data or {}
+                user_id = lead_data.get('praja_id') or lead_data.get('user_id') or str(record.id)
+                event_name = 'lead_created'
+                
+                logger.info("=" * 80)
+                logger.info(f"🚀 [Mixpanel] Creating lead {record.id}, sending to Mixpanel")
+                logger.info(f"   Lead ID: {record.id}")
+                logger.info(f"   Tenant: {record.tenant.name if record.tenant else 'None'} ({record.tenant.id if record.tenant else None})")
+                logger.info(f"   User ID: {user_id} (from praja_id={lead_data.get('praja_id')} or user_id={lead_data.get('user_id')})")
+                logger.info(f"   Event: {event_name}")
+                logger.info(f"   Lead Name: {lead_data.get('name', 'N/A')}")
+                logger.info(f"   Phone: {lead_data.get('phone_number', 'N/A')}")
+                logger.info(f"   Lead Stage: {lead_data.get('lead_stage', 'N/A')}")
+                logger.info(f"   Lead Score: {lead_data.get('lead_score', 'N/A')}")
+                logger.info(f"   Properties Count: {len(lead_data) + 5}")  # +5 for base properties
+                logger.info("=" * 80)
+                
+                properties = {
+                    'lead_id': record.id,
+                    'tenant_id': str(record.tenant.id) if record.tenant else None,
+                    'entity_type': record.entity_type,
+                    'created_at': record.created_at.isoformat() if record.created_at else None,
+                    'updated_at': record.updated_at.isoformat() if record.updated_at else None,
+                }
+                properties.update(lead_data)
+                if record.pyro_data:
+                    properties.update(record.pyro_data)
+                
+                # Enqueue background job
+                queue_service = get_queue_service()
+                queue_service.enqueue_job(
+                    job_type=JobType.SEND_MIXPANEL_EVENT,
+                    payload={
+                        "user_id": str(user_id),
+                        "event_name": event_name,
+                        "properties": properties
+                    },
+                    priority=0,
+                    tenant_id=str(record.tenant.id) if record.tenant else None,
+                    max_attempts=3
+                )
+                
+                # Send sync
+                mixpanel_service = MixpanelService()
+                mixpanel_service.send_to_mixpanel_sync(str(user_id), event_name, properties)
+            except Exception as e:
+                logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
     
     def put(self, request, *args, **kwargs):
         """
@@ -447,6 +501,58 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
             except Exception as e:
                 logger.error(f"EntityProxyView: Error calculating lead score for new lead {record.id}: {e}")
                 # Don't fail the request if scoring fails, just log the error
+            
+            # Send to Mixpanel
+            try:
+                from support_ticket.services import MixpanelService
+                from background_jobs.queue_service import get_queue_service
+                from background_jobs.models import JobType
+                
+                lead_data = record.data or {}
+                user_id = lead_data.get('praja_id') or lead_data.get('user_id') or str(record.id)
+                event_name = 'lead_created'
+                
+                logger.info("=" * 80)
+                logger.info(f"🚀 [Mixpanel] Creating lead {record.id} via EntityProxyView, sending to Mixpanel")
+                logger.info(f"   Lead ID: {record.id}")
+                logger.info(f"   Tenant: {record.tenant.name if record.tenant else 'None'} ({record.tenant.id if record.tenant else None})")
+                logger.info(f"   User ID: {user_id} (from praja_id={lead_data.get('praja_id')} or user_id={lead_data.get('user_id')})")
+                logger.info(f"   Event: {event_name}")
+                logger.info(f"   Lead Name: {lead_data.get('name', 'N/A')}")
+                logger.info(f"   Phone: {lead_data.get('phone_number', 'N/A')}")
+                logger.info(f"   Lead Stage: {lead_data.get('lead_stage', 'N/A')}")
+                logger.info(f"   Lead Score: {lead_data.get('lead_score', 'N/A')}")
+                logger.info("=" * 80)
+                
+                properties = {
+                    'lead_id': record.id,
+                    'tenant_id': str(record.tenant.id) if record.tenant else None,
+                    'entity_type': record.entity_type,
+                    'created_at': record.created_at.isoformat() if record.created_at else None,
+                    'updated_at': record.updated_at.isoformat() if record.updated_at else None,
+                }
+                properties.update(lead_data)
+                if record.pyro_data:
+                    properties.update(record.pyro_data)
+                
+                # Enqueue background job
+                queue_service = get_queue_service()
+                job = queue_service.enqueue_job(
+                    job_type=JobType.SEND_MIXPANEL_EVENT,
+                    payload={
+                        "user_id": str(user_id),
+                        "event_name": event_name,
+                        "properties": properties
+                    },
+                    priority=0,
+                    tenant_id=str(record.tenant.id) if record.tenant else None,
+                    max_attempts=3
+                )
+                # Send sync
+                mixpanel_service = MixpanelService()
+                mixpanel_service.send_to_mixpanel_sync(str(user_id), event_name, properties)
+            except Exception as e:
+                logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
 
 
 class RecordEventView(TenantScopedMixin, APIView):
@@ -2316,6 +2422,59 @@ class PrajaLeadsAPIView(APIView):
                     tenant.slug,
                     record_name
                 )
+            
+            # Send to Mixpanel if entity_type is 'lead'
+            if entity_type == 'lead':
+                try:
+                    from support_ticket.services import MixpanelService
+                    from background_jobs.queue_service import get_queue_service
+                    from background_jobs.models import JobType
+                    
+                    lead_data = record.data or {}
+                    user_id = lead_data.get('praja_id') or lead_data.get('user_id') or str(record.id)
+                    event_name = 'lead_created'
+                    
+                    logger.info("=" * 80)
+                    logger.info(f"🚀 [Mixpanel] Creating lead {record.id} via PrajaLeadsAPI, sending to Mixpanel")
+                    logger.info(f"   Lead ID: {record.id}")
+                    logger.info(f"   Tenant: {tenant.slug} ({tenant.id})")
+                    logger.info(f"   User ID: {user_id} (from praja_id={lead_data.get('praja_id')} or user_id={lead_data.get('user_id')})")
+                    logger.info(f"   Event: {event_name}")
+                    logger.info(f"   Lead Name: {lead_data.get('name', 'N/A')}")
+                    logger.info(f"   Phone: {lead_data.get('phone_number', 'N/A')}")
+                    logger.info(f"   Lead Stage: {lead_data.get('lead_stage', 'N/A')}")
+                    logger.info(f"   Lead Score: {lead_data.get('lead_score', 'N/A')}")
+                    logger.info("=" * 80)
+                    
+                    properties = {
+                        'lead_id': record.id,
+                        'tenant_id': str(record.tenant.id) if record.tenant else None,
+                        'entity_type': record.entity_type,
+                        'created_at': record.created_at.isoformat() if record.created_at else None,
+                        'updated_at': record.updated_at.isoformat() if record.updated_at else None,
+                    }
+                    properties.update(lead_data)
+                    if record.pyro_data:
+                        properties.update(record.pyro_data)
+                    
+                    # Enqueue background job
+                    queue_service = get_queue_service()
+                    job = queue_service.enqueue_job(
+                        job_type=JobType.SEND_MIXPANEL_EVENT,
+                        payload={
+                            "user_id": str(user_id),
+                            "event_name": event_name,
+                            "properties": properties
+                        },
+                        priority=0,
+                        tenant_id=str(record.tenant.id) if record.tenant else None,
+                        max_attempts=3
+                    )
+                    # Send sync
+                    mixpanel_service = MixpanelService()
+                    mixpanel_service.send_to_mixpanel_sync(str(user_id), event_name, properties)
+                except Exception as e:
+                    logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
             
             # Refresh record from DB to get updated score
             record.refresh_from_db()
