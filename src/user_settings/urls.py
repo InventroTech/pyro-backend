@@ -4,6 +4,7 @@ from .views import (
     UserSettingsDetailView,
     LeadTypeAssignmentView,
     UserLeadTypesView,
+    UserLeadsCountView,
     LeadTypesListView,
     RoutingRuleListCreateView,
     RoutingRuleDetailView,
@@ -27,6 +28,11 @@ urlpatterns = [
         "users/<uuid:user_id>/lead-types/",
         UserLeadTypesView.as_view(),
         name="user-lead-types",
+    ),
+    path(
+        "users/<uuid:user_id>/leads-count/",
+        UserLeadsCountView.as_view(),
+        name="user-leads-count",
     ),
     path("lead-types/", LeadTypesListView.as_view(), name="lead-types-list"),
     # Routing rules endpoints (GM / tenant admin)
