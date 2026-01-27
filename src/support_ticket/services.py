@@ -1,4 +1,5 @@
 import os
+import json
 import requests
 import logging
 import base64
@@ -26,7 +27,6 @@ class MixpanelService:
                 return False
             
             # Handle user_id - convert to int if numeric, otherwise keep as string (for UUIDs)
-            # This matches the pattern used in support_ticket/utils.py
             user_id_for_api = int(user_id) if str(user_id).isdigit() else user_id
             
             # Custom API payload structure
@@ -36,31 +36,41 @@ class MixpanelService:
                 'properties': properties
             }
             
-            logger.info(f"[Mixpanel] User ID format: {type(user_id_for_api).__name__} = {user_id_for_api}")
-            
             headers = {
                 'Content-Type': 'application/json',
                 'Authorization': f'Bearer {self.mixpanel_token}'
             }
             
+            # Detailed logging
             logger.info("=" * 80)
-            logger.info("🎯 [MixpanelService] Sending event to custom Mixpanel API")
+            logger.info(f"🎯 [Mixpanel] Sending {event_name} for user_id={user_id_for_api}")
             logger.info(f"   URL: {self.mixpanel_api_url}")
-            logger.info(f"   Event Name: {event_name}")
-            logger.info(f"   User ID: {user_id} (formatted: {user_id_for_api})")
+            logger.info(f"   Event: {event_name}")
+            logger.info(f"   User ID: {user_id} → {user_id_for_api} ({type(user_id_for_api).__name__})")
             logger.info(f"   Properties Count: {len(properties)}")
-            logger.info(f"   Property Keys: {list(properties.keys())[:10]}{'...' if len(properties) > 10 else ''}")
-            logger.info(f"   Token: {self.mixpanel_token[:10] if self.mixpanel_token else 'None'}...{self.mixpanel_token[-5:] if self.mixpanel_token else ''}")
-            logger.info("   Payload:")
-            logger.info(f"     - user_id: {user_id_for_api}")
-            logger.info(f"     - event_name: {event_name}")
-            logger.info(f"     - properties: {len(properties)} items")
+            
+            # Log key properties
             if 'lead_id' in properties:
-                logger.info(f"     - lead_id: {properties.get('lead_id')}")
+                logger.info(f"   Lead ID: {properties.get('lead_id')}")
+            if 'ticket_id' in properties:
+                logger.info(f"   Ticket ID: {properties.get('ticket_id')}")
             if 'praja_id' in properties:
-                logger.info(f"     - praja_id: {properties.get('praja_id')}")
-            if 'rm_email' in properties:
-                logger.info(f"     - rm_email: {properties.get('rm_email')}")
+                logger.info(f"   Praja ID: {properties.get('praja_id')}")
+            if 'name' in properties:
+                logger.info(f"   Name: {properties.get('name')}")
+            if 'phone_number' in properties or 'phone' in properties:
+                phone = properties.get('phone_number') or properties.get('phone')
+                logger.info(f"   Phone: {phone}")
+            if 'tenant_id' in properties:
+                logger.info(f"   Tenant ID: {properties.get('tenant_id')}")
+            
+            logger.info(f"   Token: {self.mixpanel_token[:15]}...{self.mixpanel_token[-5:] if len(self.mixpanel_token) > 20 else ''}")
+            logger.info("=" * 80)
+            
+            # Log full payload for debugging
+            logger.info("=" * 80)
+            logger.info(f"📤 [Mixpanel] Request Payload:")
+            logger.info(f"   {json.dumps(payload, indent=2, default=str)}")
             logger.info("=" * 80)
             
             response = requests.post(
@@ -71,28 +81,57 @@ class MixpanelService:
             )
             
             logger.info("=" * 80)
-            logger.info(f"📥 [MixpanelService] API Response Received")
+            logger.info(f"📥 [Mixpanel] Response for {event_name}")
             logger.info(f"   Status Code: {response.status_code}")
-            logger.info(f"   Response Body: {response.text[:200]}{'...' if len(response.text) > 200 else ''}")
+            logger.info(f"   Response Headers: {dict(response.headers)}")
+            
+            # Try to parse JSON response
+            try:
+                response_json = response.json()
+                logger.info(f"   Response Body: {json.dumps(response_json, indent=2, default=str)}")
+            except:
+                logger.info(f"   Response Text: {response.text[:500]}{'...' if len(response.text) > 500 else ''}")
+            
             logger.info("=" * 80)
             
             if not response.ok:
                 logger.error("=" * 80)
-                logger.error(f"❌ [MixpanelService] API Error")
-                logger.error(f"   Status Code: {response.status_code}")
-                logger.error(f"   Response: {response.text}")
+                logger.error(f"❌ [Mixpanel] Failed: {event_name} status={response.status_code}")
+                
+                # Detailed error handling
+                if response.status_code == 401:
+                    logger.error(f"   Error: Unauthorized - Check MIXPANEL_TOKEN in .env file")
+                    logger.error(f"   Token Preview: {self.mixpanel_token[:20]}...")
+                elif response.status_code == 404:
+                    try:
+                        error_data = response.json()
+                        error_msg = error_data.get('message', 'Unknown error')
+                        logger.error(f"   Error: User Not Found (404)")
+                        logger.error(f"   Message: {error_msg}")
+                        logger.error(f"   User ID Sent: {user_id_for_api} ({type(user_id_for_api).__name__})")
+                        logger.error(f"   Note: This may be expected for new leads/users that don't exist in Mixpanel yet")
+                    except:
+                        logger.error(f"   Error: 404 Not Found - {response.text[:200]}")
+                elif response.status_code >= 500:
+                    logger.error(f"   Error: Server Error ({response.status_code})")
+                    logger.error(f"   This is a server-side issue with the Mixpanel API")
+                else:
+                    logger.error(f"   Error: HTTP {response.status_code}")
+                    try:
+                        error_data = response.json()
+                        logger.error(f"   Details: {json.dumps(error_data, indent=2, default=str)}")
+                    except:
+                        logger.error(f"   Response: {response.text[:200]}")
+                
                 logger.error("=" * 80)
                 return False
             
-            logger.info("=" * 80)
-            logger.info(f"✅ [MixpanelService] Event sent successfully!")
-            logger.info(f"   Event: {event_name}")
-            logger.info(f"   User ID: {user_id_for_api}")
-            logger.info("=" * 80)
+            logger.info(f"✅ [Mixpanel] Success: {event_name} for user_id={user_id_for_api}")
             return True
             
         except Exception as error:
-            logger.error(f'❌ Error sending to custom Mixpanel API: {error}')
+            logger.error(f'❌ [Mixpanel] Error: {event_name} - {error}')
+            logger.error(f"   Error Type: {type(error).__name__}")
             return False
     
 
@@ -128,25 +167,29 @@ class RMAssignedMixpanelService:
             
             # Payload structure - send praja_id as user_id
             payload = {
-                'user_id': praja_id_int,  # praja_id is sent as user_id
+                'user_id': praja_id_int,
                 'rm_email': rm_email
             }
-            
-            logger.info("=" * 80)
-            logger.info("🎯 [RMAssignedMixpanelService] Sending RM assigned event")
-            logger.info(f"   URL: {self.mixpanel_api_url}")
-            logger.info(f"   Praja ID: {praja_id_int} (sent as user_id in payload)")
-            logger.info(f"   RM Email: {rm_email}")
-            logger.info(f"   Token: {self.mixpanel_token[:10] if self.mixpanel_token else 'None'}...{self.mixpanel_token[-5:] if self.mixpanel_token else ''}")
-            logger.info("   Payload:")
-            logger.info(f"     - user_id: {praja_id_int} (this is the praja_id)")
-            logger.info(f"     - rm_email: {rm_email}")
-            logger.info("=" * 80)
             
             headers = {
                 'Content-Type': 'application/json',
                 'Authorization': f'Bearer {self.mixpanel_token}'
             }
+            
+            # Detailed logging
+            logger.info("=" * 80)
+            logger.info(f"🎯 [Mixpanel] Sending rm_assigned for praja_id={praja_id_int}")
+            logger.info(f"   URL: {self.mixpanel_api_url}")
+            logger.info(f"   Praja ID: {praja_id_int} (sent as user_id)")
+            logger.info(f"   RM Email: {rm_email}")
+            logger.info(f"   Token: {self.mixpanel_token[:15]}...{self.mixpanel_token[-5:] if len(self.mixpanel_token) > 20 else ''}")
+            logger.info("=" * 80)
+            
+            # Log full payload for debugging
+            logger.info("=" * 80)
+            logger.info(f"📤 [Mixpanel] Request Payload:")
+            logger.info(f"   {json.dumps(payload, indent=2, default=str)}")
+            logger.info("=" * 80)
             
             response = requests.post(
                 self.mixpanel_api_url,
@@ -156,28 +199,57 @@ class RMAssignedMixpanelService:
             )
             
             logger.info("=" * 80)
-            logger.info(f"📥 [RMAssignedMixpanelService] API Response Received")
+            logger.info(f"📥 [Mixpanel] Response for rm_assigned")
             logger.info(f"   Status Code: {response.status_code}")
-            logger.info(f"   Response Body: {response.text[:200]}{'...' if len(response.text) > 200 else ''}")
+            logger.info(f"   Response Headers: {dict(response.headers)}")
+            
+            # Try to parse JSON response
+            try:
+                response_json = response.json()
+                logger.info(f"   Response Body: {json.dumps(response_json, indent=2, default=str)}")
+            except:
+                logger.info(f"   Response Text: {response.text[:500]}{'...' if len(response.text) > 500 else ''}")
+            
             logger.info("=" * 80)
             
             if not response.ok:
                 logger.error("=" * 80)
-                logger.error(f"❌ [RMAssignedMixpanelService] API Error")
-                logger.error(f"   Status Code: {response.status_code}")
-                logger.error(f"   Response: {response.text}")
+                logger.error(f"❌ [Mixpanel] Failed: rm_assigned status={response.status_code}")
+                
+                # Detailed error handling
+                if response.status_code == 401:
+                    logger.error(f"   Error: Unauthorized - Check MIXPANEL_TOKEN in .env file")
+                    logger.error(f"   Token Preview: {self.mixpanel_token[:20]}...")
+                elif response.status_code == 404:
+                    try:
+                        error_data = response.json()
+                        error_msg = error_data.get('message', 'Unknown error')
+                        logger.error(f"   Error: User Not Found (404)")
+                        logger.error(f"   Message: {error_msg}")
+                        logger.error(f"   Praja ID Sent: {praja_id_int}")
+                        logger.error(f"   Note: User may not exist in Mixpanel yet")
+                    except:
+                        logger.error(f"   Error: 404 Not Found - {response.text[:200]}")
+                elif response.status_code >= 500:
+                    logger.error(f"   Error: Server Error ({response.status_code})")
+                    logger.error(f"   This is a server-side issue with the Mixpanel API")
+                else:
+                    logger.error(f"   Error: HTTP {response.status_code}")
+                    try:
+                        error_data = response.json()
+                        logger.error(f"   Details: {json.dumps(error_data, indent=2, default=str)}")
+                    except:
+                        logger.error(f"   Response: {response.text[:200]}")
+                
                 logger.error("=" * 80)
                 return False
             
-            logger.info("=" * 80)
-            logger.info(f"✅ [RMAssignedMixpanelService] Event sent successfully!")
-            logger.info(f"   Praja ID: {praja_id_int}")
-            logger.info(f"   RM Email: {rm_email}")
-            logger.info("=" * 80)
+            logger.info(f"✅ [Mixpanel] Success: rm_assigned for praja_id={praja_id_int}")
             return True
             
         except Exception as error:
-            logger.error(f'❌ Error sending to custom Mixpanel API: {error}')
+            logger.error(f'❌ [Mixpanel] Error: rm_assigned - {error}')
+            logger.error(f"   Error Type: {type(error).__name__}")
             return False
 
 

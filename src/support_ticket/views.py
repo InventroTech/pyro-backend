@@ -933,6 +933,80 @@ class ProcessDumpedTicketsView(APIView):
             inserted_tickets = SupportTicket.objects.bulk_create(tickets_to_insert, ignore_conflicts=True)
             logger.info(f'ProcessDumpedTicketsView: Inserted {len(inserted_tickets)} tickets into support_ticket table.')
             
+            # Send Mixpanel events for each inserted ticket
+            for ticket in inserted_tickets:
+                try:
+                    from background_jobs.queue_service import get_queue_service
+                    from background_jobs.models import JobType
+                    
+                    user_id = ticket.user_id or str(ticket.id)
+                    event_name = 'ticket_created'
+                    
+                    logger.info("=" * 80)
+                    logger.info(f"🎫 [Mixpanel] Creating ticket {ticket.id}, sending to Mixpanel")
+                    logger.info(f"   Ticket ID: {ticket.id}")
+                    logger.info(f"   Tenant: {ticket.tenant.name if ticket.tenant else 'None'} ({ticket.tenant.id if ticket.tenant else None})")
+                    logger.info(f"   User ID: {user_id} (from ticket.user_id={ticket.user_id})")
+                    logger.info(f"   Event: {event_name}")
+                    logger.info(f"   Name: {ticket.name or 'N/A'}")
+                    logger.info(f"   Phone: {ticket.phone or 'N/A'}")
+                    logger.info(f"   Source: {ticket.source or 'N/A'}")
+                    logger.info(f"   Reason: {ticket.reason or 'N/A'}")
+                    logger.info(f"   State: {ticket.state or 'N/A'}")
+                    logger.info("=" * 80)
+                    
+                    properties = {
+                        'ticket_id': ticket.id,
+                        'tenant_id': str(ticket.tenant.id) if ticket.tenant else None,
+                        'created_at': ticket.created_at.isoformat() if ticket.created_at else None,
+                        'ticket_date': ticket.ticket_date.isoformat() if ticket.ticket_date else None,
+                        'user_id': ticket.user_id,
+                        'name': ticket.name,
+                        'phone': ticket.phone,
+                        'source': ticket.source,
+                        'subscription_status': ticket.subscription_status,
+                        'atleast_paid_once': ticket.atleast_paid_once,
+                        'reason': ticket.reason,
+                        'other_reasons': ticket.other_reasons or [],
+                        'badge': ticket.badge,
+                        'poster': ticket.poster,
+                        'assigned_to': str(ticket.assigned_to.id) if ticket.assigned_to else None,
+                        'layout_status': ticket.layout_status,
+                        'state': ticket.state,
+                        'resolution_status': ticket.resolution_status,
+                        'resolution_time': ticket.resolution_time,
+                        'cse_name': ticket.cse_name,
+                        'cse_remarks': ticket.cse_remarks,
+                        'call_status': ticket.call_status,
+                        'call_attempts': ticket.call_attempts,
+                        'rm_name': ticket.rm_name,
+                        'completed_at': ticket.completed_at.isoformat() if ticket.completed_at else None,
+                        'snooze_until': ticket.snooze_until.isoformat() if ticket.snooze_until else None,
+                        'praja_dashboard_user_link': ticket.praja_dashboard_user_link,
+                        'display_pic_url': ticket.display_pic_url,
+                        'dumped_at': ticket.dumped_at.isoformat() if ticket.dumped_at else None,
+                        'review_requested': ticket.review_requested,
+                    }
+                    
+                    # Enqueue background job
+                    queue_service = get_queue_service()
+                    job = queue_service.enqueue_job(
+                        job_type=JobType.SEND_MIXPANEL_EVENT,
+                        payload={
+                            "user_id": str(user_id),
+                            "event_name": event_name,
+                            "properties": properties
+                        },
+                        priority=0,
+                        tenant_id=str(ticket.tenant.id) if ticket.tenant else None,
+                        max_attempts=3
+                    )
+                    # Send sync
+                    mixpanel_service = MixpanelService()
+                    mixpanel_service.send_to_mixpanel_sync(str(user_id), event_name, properties)
+                except Exception as e:
+                    logger.error(f"❌ [Mixpanel] Error sending ticket {ticket.id}: {e}")
+            
             # 5. Mark dumped tickets as processed
             # Update all dumped tickets (not just unique ones) to mark them as processed
             dump_ids = [ticket.id for ticket in dumped_tickets_list]
