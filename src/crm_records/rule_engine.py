@@ -15,7 +15,6 @@ import copy
 from django.core.cache import cache
 
 from .models import RuleSet, RuleExecutionLog, Record
-from support_ticket.services import MixpanelService
 from background_jobs.queue_service import get_queue_service
 from background_jobs.models import JobType
 from object_history.engine import get_request_context
@@ -591,19 +590,9 @@ def action_send_mixpanel_event(
             tenant_id=tenant_id,
         )
         
-        # Also send sync for immediate tracking (optional)
-        service = MixpanelService()
-        success = service.send_to_mixpanel_sync(
-            str(resolved_user_id),
-            str(resolved_event_name),
-            mixpanel_properties,
-        )
-        
         logger.info(
-
-            f"Mixpanel event sent for record {record.id}: event='{resolved_event_name}' success={success} properties_count={len(mixpanel_properties)}"
             f"Mixpanel event queued for record {record.id}: job_id={job.id}, "
-            f"event='{resolved_event_name}'"
+            f"event='{resolved_event_name}' properties_count={len(mixpanel_properties)}"
         )
         
         return {
