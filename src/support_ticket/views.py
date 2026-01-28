@@ -940,7 +940,7 @@ class ProcessDumpedTicketsView(APIView):
                     from background_jobs.models import JobType
                     
                     user_id = ticket.user_id or str(ticket.id)
-                    event_name = 'ticket_created'
+                    event_name = 'pyro_supportTicket_ticket_created'
                     
                     logger.info("=" * 80)
                     logger.info(f"🎫 [Mixpanel] Creating ticket {ticket.id}, sending to Mixpanel")
