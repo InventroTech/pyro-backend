@@ -17,7 +17,6 @@ from .serializers import (
     LeadTypeAssignmentSerializer,
     RoutingRuleSerializer,
 )
-from accounts.models import LegacyUser
 from crm_records.models import Record
 from django.db.models import Q
 
@@ -168,85 +167,104 @@ class LeadTypeAssignmentView(APIView):
         """Get all lead type assignments for the tenant"""
         tenant = request.tenant
         
-        # Get all users with RM role
-        # LegacyUser has role_id (UUID), so we need to filter via LegacyRole
-        from accounts.models import LegacyRole
-        rm_role_ids = LegacyRole.objects.filter(
+        # Get RM role from authz
+        from authz.models import Role
+        rm_role = Role.objects.filter(
             tenant=tenant,
             name__iexact='RM'
-        ).values_list('id', flat=True)
+        ).first()
         
-        rm_users = LegacyUser.objects.filter(
-            tenant=tenant,
-            role_id__in=rm_role_ids
-        ).select_related()  # Optimize user queries
-        
-        # Collect all user UIDs upfront
-        user_uid_map = {}  # Maps user_id (str) to user object
-        user_uids = []
-        for user in rm_users:
-            user_id_value = str(user.uid) if user.uid else None
-            if user_id_value:
-                user_uid_map[user_id_value] = user
-                user_uids.append(user.uid)
-        
-        if not user_uids:
+        if not rm_role:
             return Response([])
         
-        # Fetch all TenantMemberships in one query
+        # Get ALL TenantMemberships with RM role (not just those with UserSettings)
         tenant_memberships = TenantMembership.objects.filter(
             tenant=tenant,
-            user_id__in=user_uids
-        )
-        # Build lookup map: user_id (str) -> tenant_membership
-        membership_map = {str(tm.user_id): tm for tm in tenant_memberships}
+            role=rm_role
+        ).select_related('role')
         
-        # Fetch all UserSettings in one query for all tenant_memberships
+        # Fetch UserSettings for LEAD_TYPE_ASSIGNMENT key for these memberships
         tenant_membership_ids = [tm.id for tm in tenant_memberships]
-        user_settings = UserSettings.objects.filter(
-            tenant=tenant,
-            tenant_membership_id__in=tenant_membership_ids
-        )
+        user_settings_map = {}
+        if tenant_membership_ids:
+            user_settings = UserSettings.objects.filter(
+                tenant=tenant,
+                tenant_membership_id__in=tenant_membership_ids,
+                key='LEAD_TYPE_ASSIGNMENT'
+            )
+            # Build map: tenant_membership_id -> UserSettings
+            for setting in user_settings:
+                user_settings_map[setting.tenant_membership_id] = setting
         
-        # Build lookup maps: tenant_membership_id -> settings
-        settings_by_membership = {}  # Maps membership_id -> list of settings
-        lead_type_settings = {}  # Maps membership_id -> LEAD_TYPE_ASSIGNMENT setting
-        for setting in user_settings:
-            membership_id = setting.tenant_membership_id
-            if membership_id not in settings_by_membership:
-                settings_by_membership[membership_id] = []
-            settings_by_membership[membership_id].append(setting)
-            
-            # Track LEAD_TYPE_ASSIGNMENT separately
-            if setting.key == 'LEAD_TYPE_ASSIGNMENT':
-                lead_type_settings[membership_id] = setting
-        
-        # Build assignments using the pre-fetched data
         assignments = []
-        for user_id_value, user in user_uid_map.items():
-            tenant_membership = membership_map.get(user_id_value)
-            if not tenant_membership:
-                # Skip users without TenantMembership
-                continue
+        user_identifiers = []  # For counting leads
+        tm_identifier_map = {}  # Map TenantMembership ID to identifiers for counting
+        
+        # Process all RM TenantMemberships (including those without settings)
+        for tm in tenant_memberships:
+            # Collect identifiers for lead counting
+            tm_identifiers = []
+            if tm.user_id:
+                uuid_str = str(tm.user_id)
+                user_identifiers.append(uuid_str)
+                tm_identifiers.append(uuid_str)
+            if tm.email:
+                email_lower = tm.email.lower().strip()
+                user_identifiers.append(email_lower)
+                tm_identifiers.append(email_lower)
             
-            # Get lead type assignment
-            lead_type_setting = lead_type_settings.get(tenant_membership.id)
-            lead_types = lead_type_setting.value if lead_type_setting and isinstance(lead_type_setting.value, list) else []
+            # Store mapping: TenantMembership ID -> list of identifiers (UUID and/or email)
+            tm_identifier_map[tm.id] = tm_identifiers
             
-            # Get daily_target and daily_limit from any user setting
-            membership_settings = settings_by_membership.get(tenant_membership.id, [])
-            user_setting = membership_settings[0] if membership_settings else None
-            daily_target = user_setting.daily_target if user_setting else None
-            daily_limit = user_setting.daily_limit if user_setting else None
+            # Get UserSettings if exists, otherwise use defaults
+            setting = user_settings_map.get(tm.id)
+            lead_types = setting.value if setting and isinstance(setting.value, list) else []
+            daily_target = setting.daily_target if setting else None
+            daily_limit = setting.daily_limit if setting else None
+            
+            # Use TenantMembership id as the primary identifier
+            user_id_value = str(tm.id)
             
             assignments.append({
-                'user_id': user_id_value,
-                'user_name': user.name,
-                'user_email': user.email,
+                'user_id': user_id_value,  # Always use TenantMembership ID as primary identifier
+                'user_name': tm.email.split('@')[0] if tm.email else '',  # Use email prefix as name
+                'user_email': tm.email,
+                'tenant_membership_id': tm.id,  # Explicitly include TenantMembership ID
                 'lead_types': lead_types,
-                'daily_target': daily_target,
-                'daily_limit': daily_limit,
+                'daily_target': daily_target,  # Can be None, 0, or any integer
+                'daily_limit': daily_limit,  # Can be None, 0, or any integer
+                'assigned_leads_count': 0,  # Will update after counting
             })
+        
+        # Count assigned leads in one batch query
+        assigned_counts_map = {}
+        if user_identifiers:
+            from django.db import connection
+            with connection.cursor() as cursor:
+                placeholders = ','.join(['%s'] * len(user_identifiers))
+                cursor.execute(f"""
+                    SELECT data->>'assigned_to' as assigned_to, COUNT(*) as count
+                    FROM records
+                    WHERE tenant_id = %s
+                      AND entity_type = 'lead'
+                      AND data->>'assigned_to' IN ({placeholders})
+                    GROUP BY data->>'assigned_to'
+                """, [tenant.id] + user_identifiers)
+                
+                for row in cursor.fetchall():
+                    assigned_to_value = row[0]
+                    count = row[1]
+                    if assigned_to_value:
+                        assigned_counts_map[assigned_to_value] = count
+        
+        # Update assigned_leads_count in assignments
+        for assignment in assignments:
+            tm_id = assignment['tenant_membership_id']
+            # Get identifiers for this TenantMembership (UUID and/or email)
+            tm_identifiers = tm_identifier_map.get(tm_id, [])
+            # Sum up counts for all identifiers (UUID and email) for this TenantMembership
+            total_count = sum(assigned_counts_map.get(identifier, 0) for identifier in tm_identifiers)
+            assignment['assigned_leads_count'] = total_count
         
         return Response(assignments)
 
@@ -267,105 +285,37 @@ class LeadTypeAssignmentView(APIView):
             daily_target = serializer.validated_data.get('daily_target', None)
             daily_limit = serializer.validated_data.get('daily_limit', None)
             
-            # Verify user exists and has RM role
-            # user_id could be a UUID string or integer ID string
-            logger.info(f"Looking up user with tenant={tenant.id}, user_id={user_id} (type: {type(user_id)})")
+            logger.info(f"LeadTypeAssignmentView.post - daily_target={daily_target}, daily_limit={daily_limit}, daily_target in validated_data={'daily_target' in serializer.validated_data}, daily_limit in validated_data={'daily_limit' in serializer.validated_data}")
             
-            user = None
+            # user_id must be TenantMembership ID (integer, e.g., 147)
+            logger.info(f"Looking up TenantMembership with tenant={tenant.id}, user_id={user_id} (type: {type(user_id)})")
+            
+            # Find TenantMembership directly by ID
+            tenant_membership = None
             try:
-                import uuid
-                # Try to parse as UUID first
-                is_uuid_format = False
-                potential_int_id = None
-                
-                try:
-                    user_uuid = uuid.UUID(str(user_id))
-                    is_uuid_format = True
-                    
-                    # Check if this UUID looks like a converted integer (00000000-0000-0000-0000-XXXXXXXX)
-                    # where XXXX is a small integer - check the last segment
-                    uuid_parts = str(user_uuid).split('-')
-                    if uuid_parts[0] == '00000000' and uuid_parts[1] == '0000' and uuid_parts[2] == '0000' and uuid_parts[3] == '0000':
-                        # This looks like a converted integer, extract from last segment
-                        try:
-                            potential_int_id = int(uuid_parts[4], 16)  # Last segment as hex integer
-                            if potential_int_id > 0 and potential_int_id < 1000000:  # Reasonable ID range
-                                logger.info(f"UUID appears to be converted integer: {potential_int_id}")
-                        except (ValueError, TypeError):
-                            pass
-                    
-                    # First try to find by uid (UUID field)
-                    user = LegacyUser.objects.filter(
-                        tenant=tenant,
-                        uid=user_uuid
-                    ).first()
-                    if user:
-                        logger.info(f"Found user by uid: {user.name}, uid={user.uid}, id={user.id}")
-                except (ValueError, AttributeError):
-                    pass
-                
-                # If not found by uid and we have a potential integer ID from UUID conversion
-                if not user and potential_int_id:
-                    user = LegacyUser.objects.filter(
-                        tenant=tenant,
-                        id=potential_int_id
-                    ).first()
-                    if user:
-                        logger.info(f"Found user by converted integer id: {user.name}, uid={user.uid}, id={user.id}")
-                
-                # If still not found and user_id is a plain integer string, try by integer id
-                if not user and not is_uuid_format:
-                    try:
-                        user_int_id = int(user_id)
-                        user = LegacyUser.objects.filter(
-                            tenant=tenant,
-                            id=user_int_id
-                        ).first()
-                        if user:
-                            logger.info(f"Found user by integer id: {user.name}, uid={user.uid}, id={user.id}")
-                    except (ValueError, TypeError):
-                        pass
-                
-                if not user:
-                    raise LegacyUser.DoesNotExist(f"User not found with id={user_id}")
-                    
-            except LegacyUser.DoesNotExist as e:
-                logger.warning(f"User not found with tenant={tenant.id}, user_id={user_id}: {e}")
+                tm_id = int(user_id)
+                tenant_membership = TenantMembership.objects.filter(
+                    tenant=tenant,
+                    id=tm_id
+                ).first()
+                if tenant_membership:
+                    logger.info(f"Found TenantMembership by id: {tm_id}, email={tenant_membership.email}")
+            except (ValueError, TypeError):
+                pass
+            
+            if not tenant_membership:
+                logger.warning(f"TenantMembership not found for user_id={user_id}")
                 return Response(
-                    {'error': f'User not found with id: {user_id}. Please use a valid user UUID or ID.'},
+                    {'error': f'TenantMembership not found with id: {user_id}. Please use a valid TenantMembership ID.'},
                     status=status.HTTP_404_NOT_FOUND
                 )
             
-            # Continue with user found
-            if user:
-                # Check if user has RM role via role_id
-                from accounts.models import LegacyRole
-                if not user.role_id:
-                    return Response(
-                        {'error': 'User does not have a role assigned'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-                user_role = LegacyRole.objects.filter(
-                    id=user.role_id,
-                    tenant=tenant,
-                    name__iexact='RM'
-                ).first()
-                if not user_role:
-                    return Response(
-                        {'error': 'User must have RM role to assign lead types'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-                
-                # Use uid if available, otherwise fall back to id
-                actual_user_id_for_setting = user.uid if user.uid else user.id
-                
-                # Find TenantMembership for this user (with email fallback)
-                tenant_membership = get_tenant_membership_by_user_id(tenant, actual_user_id_for_setting, user=user)
-                if not tenant_membership:
-                    return Response(
-                        {'error': 'TenantMembership not found for this user. Please ensure the user has a TenantMembership record with matching email or user_id.'},
-                        status=status.HTTP_404_NOT_FOUND
-                    )
+            # Verify TenantMembership has RM role
+            if tenant_membership.role.name.upper() != 'RM':
+                return Response(
+                    {'error': 'TenantMembership must have RM role to assign lead types'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             
             # Create or update the setting
             # Use tenant_membership instead of user_id
@@ -381,33 +331,49 @@ class LeadTypeAssignmentView(APIView):
             )
             
             if not created:
+                # Update existing setting
                 setting.value = lead_types
-                if daily_target is not None:
+                # Use 'in' check to handle both None and explicit values (including 0)
+                if 'daily_target' in serializer.validated_data:
+                    old_daily_target = setting.daily_target
                     setting.daily_target = daily_target
-                if daily_limit is not None:
+                    logger.info(f"Updating daily_target from {old_daily_target} to {daily_target} for setting id={setting.id}")
+                if 'daily_limit' in serializer.validated_data:
+                    old_daily_limit = setting.daily_limit
                     setting.daily_limit = daily_limit
+                    logger.info(f"Updating daily_limit from {old_daily_limit} to {daily_limit} for setting id={setting.id}")
                 setting.save()
+                logger.info(f"Saved setting id={setting.id}, daily_target={setting.daily_target}, daily_limit={setting.daily_limit}")
             
             # Update daily_target across all user settings (since it's user-level, not key-specific)
-            if daily_target is not None:
+            # Use 'in' check to handle both None and explicit values (including 0)
+            if 'daily_target' in serializer.validated_data:
                 UserSettings.objects.filter(
                     tenant=tenant,
                     tenant_membership=tenant_membership
                 ).exclude(id=setting.id).update(daily_target=daily_target)
 
             # Update daily_limit across all user settings (since it's user-level, not key-specific)
-            if daily_limit is not None:
+            if 'daily_limit' in serializer.validated_data:
                 UserSettings.objects.filter(
                     tenant=tenant,
                     tenant_membership=tenant_membership
                 ).exclude(id=setting.id).update(daily_limit=daily_limit)
             
+            # Refresh setting from DB to ensure we have the latest values
+            setting.refresh_from_db()
+            
+            logger.info(f"LeadTypeAssignmentView.post - Returning response: daily_target={setting.daily_target}, daily_limit={setting.daily_limit}")
+            
+            # Return TenantMembership id as user_id (consistent with GET response)
             return Response({
-                'user_id': str(actual_user_id_for_setting),
-                'user_name': user.name,
+                'user_id': str(tenant_membership.id),  # TenantMembership ID
+                'user_name': tenant_membership.email.split('@')[0] if tenant_membership.email else '',
+                'user_email': tenant_membership.email,
+                'tenant_membership_id': tenant_membership.id,
                 'lead_types': lead_types,
-                'daily_target': setting.daily_target,
-                'daily_limit': setting.daily_limit,
+                'daily_target': setting.daily_target,  # Return the saved value
+                'daily_limit': setting.daily_limit,  # Return the saved value
                 'created': created
             }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
         
@@ -444,6 +410,32 @@ class UserLeadTypesView(APIView):
             'user_id': str(user_id),
             'lead_types': lead_types
         })
+
+
+class UserLeadsCountView(APIView):
+    """Get count of leads assigned to a specific user"""
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request, user_id):
+        """Get count of leads assigned to a specific user"""
+        tenant = request.tenant
+        
+        if not user_id:
+            return Response({
+                'error': 'user_id is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Count leads assigned to this user
+        count = Record.objects.filter(
+            tenant=tenant,
+            entity_type='lead',
+            data__assigned_to=str(user_id)
+        ).count()
+        
+        return Response({
+            'user_id': str(user_id),
+            'assigned_leads_count': count
+        }, status=status.HTTP_200_OK)
 
 
 class LeadTypesListView(APIView):

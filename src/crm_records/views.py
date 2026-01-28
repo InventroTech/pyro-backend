@@ -48,6 +48,10 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         - entity_type: Filter by entity type
         - resolution_status: Filter by resolution_status in data JSON
         - affiliated_party: Filter by affiliated_party in data JSON (supports comma-separated values: ?affiliated_party=value1,value2)
+        - exclude_events: Exclude records with specified events or lead_stage values (comma-separated)
+                         For leads: Uppercase values (e.g., TRIAL_ACTIVATED, NOT_INTERESTED) exclude by lead_stage field
+                         Lowercase values (e.g., trial_activated, not_interested) exclude by EventLog events
+                         Events can be specified with or without entity prefix (e.g., 'trial_activated' or 'lead.trial_activated')
         - Any other field: Will be searched in the data JSON field
         
         Examples:
@@ -55,6 +59,9 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         - ?entity_type=ticket&resolution_status=Scheduled
         - ?affiliated_party=Channel Partner,Direct
         - ?priority=high&status=active
+        - ?entity_type=lead&assigned_to=user123&exclude_events=TRIAL_ACTIVATED (excludes by lead_stage)
+        - ?entity_type=lead&assigned_to=user123&exclude_events=trial_activated (excludes by event)
+        - ?entity_type=lead&assigned_to=user123&exclude_events=TRIAL_ACTIVATED,NOT_INTERESTED (excludes by lead_stage)
         """
         queryset = super().get_queryset()
         
@@ -68,7 +75,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         
         # Dynamic filtering on data JSON field
         # Get all query params except known model fields
-        model_fields = {'entity_type', 'search', 'search_fields', 'page', 'page_size', 'ordering', 'created_at__gte', 'created_at__lte'}
+        model_fields = {'entity_type', 'search', 'search_fields', 'page', 'page_size', 'ordering', 'created_at__gte', 'created_at__lte', 'exclude_events'}
         data_filters = {k: v for k, v in query_params.items() if k not in model_fields}
         
         # Build Q objects for JSON field filtering
@@ -149,6 +156,56 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 q_search |= Q(data__icontains=search_term)
             
             queryset = queryset.filter(q_search)
+        
+        # Exclude records with specified events or lead_stage values if requested via query parameter
+        exclude_events_param = query_params.get('exclude_events', '').strip()
+        if exclude_events_param and entity_type == 'lead':
+            # Parse comma-separated event names or lead_stage values
+            exclude_values = [e.strip() for e in exclude_events_param.split(',') if e.strip()]
+            
+            if exclude_values:
+                # Build Q object to exclude records with any of the specified events or lead_stage values
+                exclude_q = Q()
+                for exclude_value in exclude_values:
+                    # For leads, check both lead_stage field and events
+                    # Uppercase values (like TRIAL_ACTIVATED) are treated as lead_stage values
+                    # Lowercase values (like trial_activated) are treated as event names
+                    
+                    # Always check lead_stage field (try both uppercase and as-is)
+                    if exclude_value.isupper():
+                        # Uppercase value - check lead_stage directly
+                        logger.debug(f"[RecordListCreateView] Excluding leads with lead_stage={exclude_value}")
+                        exclude_q |= Q(data__lead_stage=exclude_value)
+                    else:
+                        # Lowercase value - check as event name and also check uppercase version in lead_stage
+                        # Convert to event format
+                        if '.' not in exclude_value:
+                            full_event_name = f"{entity_type}.{exclude_value}"
+                        else:
+                            full_event_name = exclude_value
+                        
+                        logger.debug(f"[RecordListCreateView] Excluding leads with event={full_event_name} or lead_stage={exclude_value.upper()}")
+                        exclude_q |= Q(events__event=full_event_name)
+                        # Also check uppercase version in lead_stage (e.g., trial_activated -> TRIAL_ACTIVATED)
+                        exclude_q |= Q(data__lead_stage=exclude_value.upper())
+                
+                if exclude_q:
+                    logger.info(f"[RecordListCreateView] Applying exclude filter for {len(exclude_values)} value(s): {exclude_values}")
+                    queryset = queryset.exclude(exclude_q)
+        elif exclude_events_param:
+            # For non-lead entities, only check events
+            exclude_values = [e.strip() for e in exclude_events_param.split(',') if e.strip()]
+            if exclude_values:
+                exclude_q = Q()
+                for exclude_value in exclude_values:
+                    if entity_type and '.' not in exclude_value:
+                        full_event_name = f"{entity_type}.{exclude_value}"
+                    else:
+                        full_event_name = exclude_value
+                    exclude_q |= Q(events__event=full_event_name)
+                
+                if exclude_q:
+                    queryset = queryset.exclude(exclude_q)
             
         return queryset
     
@@ -453,6 +510,7 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
     def perform_update(self, serializer):
         """
         Update record and calculate lead score if entity_type is 'lead'.
+        "Not connected" logic is handled by the rule engine when lead_stage is set to "NOT_CONNECTED".
         """
         updated_record = serializer.save()
         
@@ -703,96 +761,9 @@ class RecordEventView(TenantScopedMixin, APIView):
         # Create the event log entry
         try:
             with transaction.atomic():
-                # If this is a lead record, increment call_attempts when "Not Connected" is clicked
-                # (call_attempts is stored inside the record.data JSON).
-                payload_event = payload or {}
-                event_name_norm = (event_name or "").strip().lower()
-                call_status_norm = str(payload_event.get("call_status", "")).strip().lower()
-                last_call_outcome_norm = str(payload_event.get("last_call_outcome", "")).strip().lower()
-                button_type_norm = str(payload_event.get("button_type", "")).strip().lower()
-
-                is_not_connected_event = (
-                    ("not_connected" in event_name_norm)
-                    or event_name_norm in {
-                        "not_connected",
-                        "not_connected_clicked",
-                        "not-connected",
-                        "not connected",
-                    }
-                    or button_type_norm in {"not_connected", "not connected", "not-connected"}
-                    or call_status_norm in {"not connected", "not_connected", "notconnected"}
-                    or last_call_outcome_norm in {"not connected", "not_connected", "notconnected"}
-                )
-
-                if record.entity_type == "lead" and is_not_connected_event:
-                    record_locked = Record.objects.select_for_update().get(id=record.id, tenant=tenant)
-                    data = record_locked.data.copy() if record_locked.data else {}
-                    
-                    prev_attempts = data.get("call_attempts", 0)
-                    try:
-                        prev_attempts_int = int(prev_attempts) if prev_attempts is not None else 0
-                    except (TypeError, ValueError):
-                        prev_attempts_int = 0
-                    
-                    # Increment call attempts
-                    new_attempts = prev_attempts_int + 1
-                    data["call_attempts"] = new_attempts
-                    data["last_call_outcome"] = "not_connected"
-                    
-                    # Get call attempt matrix for this lead type
-                    lead_type = data.get("affiliated_party")
-                    matrix = None
-                    if lead_type:
-                        try:
-                            matrix = CallAttemptMatrix.objects.get(
-                                tenant=tenant,
-                                lead_type=lead_type
-                            )
-                            logger.info(
-                                "[RecordEvent] Found call attempt matrix for lead_type=%s: max_attempts=%d, sla_days=%d, min_hours=%d",
-                                lead_type, matrix.max_call_attempts, matrix.sla_days, matrix.min_time_between_calls_hours
-                            )
-                        except CallAttemptMatrix.DoesNotExist:
-                            logger.debug(
-                                "[RecordEvent] No call attempt matrix found for lead_type=%s, using default behavior",
-                                lead_type
-                            )
-                    
-                    # Check if max attempts reached
-                    if matrix and new_attempts >= matrix.max_call_attempts:
-                        # Max attempts reached - mark as closed
-                        data["lead_stage"] = "closed"
-                        data["next_call_at"] = None
-                        logger.info(
-                            "[RecordEvent] Max call attempts (%d) reached for lead_id=%d lead_type=%s, marking as closed",
-                            matrix.max_call_attempts, record_locked.id, lead_type
-                        )
-                    else:
-                        # Calculate next_call_at based on min_time_between_calls_hours from matrix
-                        if matrix:
-                            # Use min_time_between_calls_hours from matrix
-                            hours_to_add = matrix.min_time_between_calls_hours
-                        else:
-                            # Default: 3 hours if no matrix found
-                            hours_to_add = 3
-                            logger.debug(
-                                "[RecordEvent] Using default min_time_between_calls_hours=3 for lead_id=%d (no matrix found)",
-                                record_locked.id
-                            )
-                        
-                        next_call_time = timezone.now() + timedelta(hours=hours_to_add)
-                        data["next_call_at"] = next_call_time.isoformat()
-                        data["lead_stage"] = "call_later"  # Set to call_later so it can be picked up later
-                        
-                        logger.info(
-                            "[RecordEvent] Updated lead_id=%d: call_attempts=%d, next_call_at=%s (min_hours=%d)",
-                            record_locked.id, new_attempts, data["next_call_at"], hours_to_add
-                        )
-                    
-                    record_locked.data = data
-                    record_locked.updated_at = timezone.now()
-                    record_locked.save(update_fields=["data", "updated_at"])
-
+                # Event processing is handled by the rule engine via dispatch_event
+                # No hardcoded logic here - rules handle "not connected" events
+                
                 event_log = EventLog.objects.create(
                     record=record,
                     tenant=request.tenant,
@@ -1286,18 +1257,22 @@ class GetNextLeadView(APIView):
     
     def _order_by_score(self, qs, now_iso=None):
         """
-        Order queryset with priority: expired snoozed leads first, then by lead score, then creation date.
-        Higher scores first (100, 90, 80, etc. - descending), then older creation dates.
+        Order queryset with priority:
+        1. Expired snoozed leads first
+        2. Then by call_attempts: 0 attempts > 1 attempt > 2 attempt > 3 attempt > 4 attempt > 5 attempt
+        3. Within each attempt level: LIFO (Last In First Out) - most recent updated_at first
+        4. Then by lead score (descending), then creation date
+        
+        This ensures:
+        - Fresh leads (0 attempts) come first
+        - "Not connected" leads ordered by attempts (1, 2, 3, 4, 5)
+        - Most recently updated leads within each attempt level come first (LIFO)
         """
-        # Priority 1: Expired snoozed leads (lead_stage='SNOOZED' AND next_call_at <= now)
-        # Priority 2: Regular leads ordered by score
-        # Order by score if it exists in the data field, then by creation date
-        # Using PostgreSQL JSONB operators for ordering
-        # Score ordering: 100, 90, 80, 70, etc. (descending)
         if now_iso:
             qs = qs.extra(
                 select={
                     'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
+                    'call_attempts_int': "COALESCE((data->>'call_attempts')::int, 0)",
                     'is_expired_snoozed': """
                         CASE 
                             WHEN data->>'lead_stage' = 'SNOOZED' 
@@ -1312,17 +1287,22 @@ class GetNextLeadView(APIView):
                 }
             ).order_by(
                 'is_expired_snoozed',  # Expired snoozed leads first (0), then others (1)
+                'call_attempts_int',  # Priority: 0 attempts > 1 attempt > 2 attempt > 3 attempt > 4 attempt > 5 attempt
+                '-updated_at',  # LIFO: Most recent first within each attempt level
                 F('lead_score').desc(nulls_last=True),  # Descending: 100, 90, 80, etc.
                 'created_at',
                 'id'
             )
         else:
-            # Fallback when now_iso is not provided - just order by score
+            # Fallback when now_iso is not provided
             qs = qs.extra(
                 select={
                     'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
+                    'call_attempts_int': "COALESCE((data->>'call_attempts')::int, 0)",
                 }
             ).order_by(
+                'call_attempts_int',  # Priority: 0 attempts > 1 attempt > 2 attempt > 3 attempt > 4 attempt > 5 attempt
+                '-updated_at',  # LIFO: Most recent first within each attempt level
                 F('lead_score').desc(nulls_last=True),  # Descending: 100, 90, 80, etc.
                 'created_at',
                 'id'
@@ -1536,11 +1516,44 @@ class GetNextLeadView(APIView):
                     start_of_day = timezone.localtime(now).replace(hour=0, minute=0, second=0, microsecond=0)
                 else:
                     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                # Count only fresh leads first assigned to this user today
+                # This counts leads that were first assigned to this user today, regardless of current assignment status
+                # This ensures that if an RM clicks "not connected" and unassigns a lead, it still counts toward their limit
+                # We count by first_assigned_to and first_assigned_at to track the original assignment
+                # Count leads first assigned to this user today
+                # Key: first_assigned_to tracks the ORIGINAL RM who first picked up the lead
+                # Even if call_attempts increases (e.g., RM1 clicks "not connected"), 
+                # it still counts toward RM1's daily limit because first_assigned_to = RM1
                 assigned_today = Record.objects.filter(
                     tenant=tenant,
                     entity_type='lead',
-                    data__assigned_to=user_identifier,
-                    updated_at__gte=start_of_day,
+                ).extra(
+                    where=[
+                        """
+                        -- Count leads first assigned to this user today
+                        -- Use first_assigned_to and first_assigned_at (new tracking)
+                        -- This counts ALL leads first assigned to this user today, regardless of call_attempts
+                        -- (because call_attempts increases when RM clicks buttons, but first_assigned_to stays the same)
+                        (
+                            data->>'first_assigned_to' = %s
+                            AND data->>'first_assigned_at' IS NOT NULL
+                            AND data->>'first_assigned_at' != ''
+                            AND (data->>'first_assigned_at')::timestamptz >= %s
+                        )
+                        -- For backward compatibility: if first_assigned_at doesn't exist, 
+                        -- count leads currently assigned to this user that were updated today
+                        -- AND call_attempts = 0 (to exclude retry leads that don't have first_assigned_at set)
+                        OR (
+                            (data->>'first_assigned_at' IS NULL OR data->>'first_assigned_at' = '')
+                            AND data->>'assigned_to' = %s
+                            AND updated_at >= %s
+                            -- Exclude retry leads: call_attempts > 0 indicates it's been attempted before
+                            -- (only for backward compatibility path where first_assigned_at doesn't exist)
+                            AND COALESCE((data->>'call_attempts')::int, 0) = 0
+                        )
+                        """
+                    ],
+                    params=[user_identifier, start_of_day, user_identifier, start_of_day]
                 ).count()
 
                 if assigned_today >= daily_limit_int:
@@ -1670,6 +1683,17 @@ class GetNextLeadView(APIView):
                         AND data->>'next_call_at' != 'null'
                         AND (data->>'next_call_at')::timestamptz <= NOW()
                     )
+                )
+                -- Exclude leads where next_call_at is in the future (unless fresh lead with 0 attempts)
+                AND (
+                    -- Fresh leads (0 attempts) are always available
+                    COALESCE((data->>'call_attempts')::int, 0) = 0
+                    -- OR next_call_at is null/empty (no restriction)
+                    OR data->>'next_call_at' IS NULL
+                    OR data->>'next_call_at' = ''
+                    OR data->>'next_call_at' = 'null'
+                    -- OR next_call_at has passed (snooze expired)
+                    OR (data->>'next_call_at')::timestamptz <= NOW()
                 )
                 """]
         )
@@ -1835,6 +1859,17 @@ class GetNextLeadView(APIView):
                             AND (data->>'next_call_at')::timestamptz <= NOW()
                         )
                     )
+                    -- Exclude leads where next_call_at is in the future (unless fresh lead with 0 attempts)
+                    AND (
+                        -- Fresh leads (0 attempts) are always available
+                        COALESCE((data->>'call_attempts')::int, 0) = 0
+                        -- OR next_call_at is null/empty (no restriction)
+                        OR data->>'next_call_at' IS NULL
+                        OR data->>'next_call_at' = ''
+                        OR data->>'next_call_at' = 'null'
+                        -- OR next_call_at has passed (snooze expired)
+                        OR (data->>'next_call_at')::timestamptz <= NOW()
+                    )
                 """]
             )
             relaxed_unassigned = relaxed_qs.filter(affiliated_party_filter)
@@ -1900,11 +1935,55 @@ class GetNextLeadView(APIView):
 
             # Update the candidate's data
             data = candidate_locked.data.copy() if candidate_locked.data else {}
+            previous_assigned_to = data.get('assigned_to')
+            is_fresh_assignment = (
+                previous_assigned_to is None 
+                or previous_assigned_to == '' 
+                or previous_assigned_to == 'null'
+                or previous_assigned_to == 'None'
+            )
+            
             data['assigned_to'] = user_identifier
             data['lead_stage'] = self.ASSIGNED_STATUS
             # Ensure call_attempts is always present for downstream logic/UI
             if 'call_attempts' not in data or data.get('call_attempts') in (None, '', 'null'):
                 data['call_attempts'] = 0
+            
+            # Track first_assigned_at for fresh leads (for daily limit tracking)
+            # Only set first_assigned_at if this is a fresh assignment (not a retry)
+            # EXCEPTION: Don't set first_assigned_to for "not connected" retry leads
+            # (they shouldn't count toward new RM's daily limit)
+            call_attempts = data.get('call_attempts', 0)
+            try:
+                call_attempts_int = int(call_attempts) if call_attempts is not None else 0
+            except (TypeError, ValueError):
+                call_attempts_int = 0
+            
+            last_call_outcome = data.get('last_call_outcome', '').lower()
+            lead_stage = data.get('lead_stage', '').upper()
+            # Check if this is a retry lead
+            # Only "not connected" and "call back later" can be retried
+            # These leads should NOT set first_assigned_to when reassigned to a new RM
+            is_not_connected_retry = (
+                call_attempts_int > 0 or
+                last_call_outcome in ('not connected', 'not_connected', 'notconnected') or
+                last_call_outcome == 'call_back_later' or
+                lead_stage in ('NOT_CONNECTED', 'CALL_BACK_LATER', 'IN_QUEUE')
+            )
+            
+            if is_fresh_assignment and 'first_assigned_at' not in data and not is_not_connected_retry:
+                data['first_assigned_at'] = now.isoformat()
+                data['first_assigned_to'] = user_identifier
+                logger.info(
+                    "[GetNextLead] Set first_assigned_to=%s and first_assigned_at for lead_id=%d (fresh lead assignment)",
+                    user_identifier, candidate_locked.id
+                )
+            elif is_fresh_assignment and is_not_connected_retry:
+                logger.info(
+                    "[GetNextLead] Skipping first_assigned_to for lead_id=%d (retry lead - call_attempts=%d, "
+                    "last_call_outcome=%s, lead_stage=%s, won't count toward daily limit)",
+                    candidate_locked.id, call_attempts_int, last_call_outcome, lead_stage
+                )
 
             candidate_locked.data = data
             candidate_locked.updated_at = timezone.now()
