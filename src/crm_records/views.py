@@ -191,7 +191,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 
                 lead_data = record.data or {}
                 user_id = lead_data.get('praja_id') or lead_data.get('user_id') or str(record.id)
-                event_name = 'lead_created'
+                event_name = 'pyro_crm_lead_created'
                 
                 logger.info("=" * 80)
                 logger.info(f"🚀 [Mixpanel] Creating lead {record.id}, sending to Mixpanel")
@@ -510,7 +510,7 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
                 
                 lead_data = record.data or {}
                 user_id = lead_data.get('praja_id') or lead_data.get('user_id') or str(record.id)
-                event_name = 'lead_created'
+                event_name = 'pyro_crm_lead_created'
                 
                 logger.info("=" * 80)
                 logger.info(f"🚀 [Mixpanel] Creating lead {record.id} via EntityProxyView, sending to Mixpanel")
@@ -2432,7 +2432,7 @@ class PrajaLeadsAPIView(APIView):
                     
                     lead_data = record.data or {}
                     user_id = lead_data.get('praja_id') or lead_data.get('user_id') or str(record.id)
-                    event_name = 'lead_created'
+                    event_name = 'pyro_crm_lead_created'
                     
                     logger.info("=" * 80)
                     logger.info(f"🚀 [Mixpanel] Creating lead {record.id} via PrajaLeadsAPI, sending to Mixpanel")
