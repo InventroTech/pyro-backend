@@ -48,6 +48,10 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         - entity_type: Filter by entity type
         - resolution_status: Filter by resolution_status in data JSON
         - affiliated_party: Filter by affiliated_party in data JSON (supports comma-separated values: ?affiliated_party=value1,value2)
+        - exclude_events: Exclude records with specified events or lead_stage values (comma-separated)
+                         For leads: Uppercase values (e.g., TRIAL_ACTIVATED, NOT_INTERESTED) exclude by lead_stage field
+                         Lowercase values (e.g., trial_activated, not_interested) exclude by EventLog events
+                         Events can be specified with or without entity prefix (e.g., 'trial_activated' or 'lead.trial_activated')
         - Any other field: Will be searched in the data JSON field
         
         Examples:
@@ -55,6 +59,9 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         - ?entity_type=ticket&resolution_status=Scheduled
         - ?affiliated_party=Channel Partner,Direct
         - ?priority=high&status=active
+        - ?entity_type=lead&assigned_to=user123&exclude_events=TRIAL_ACTIVATED (excludes by lead_stage)
+        - ?entity_type=lead&assigned_to=user123&exclude_events=trial_activated (excludes by event)
+        - ?entity_type=lead&assigned_to=user123&exclude_events=TRIAL_ACTIVATED,NOT_INTERESTED (excludes by lead_stage)
         """
         queryset = super().get_queryset()
         
@@ -68,7 +75,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         
         # Dynamic filtering on data JSON field
         # Get all query params except known model fields
-        model_fields = {'entity_type', 'search', 'search_fields', 'page', 'page_size', 'ordering', 'created_at__gte', 'created_at__lte'}
+        model_fields = {'entity_type', 'search', 'search_fields', 'page', 'page_size', 'ordering', 'created_at__gte', 'created_at__lte', 'exclude_events'}
         data_filters = {k: v for k, v in query_params.items() if k not in model_fields}
         
         # Build Q objects for JSON field filtering
@@ -149,6 +156,56 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 q_search |= Q(data__icontains=search_term)
             
             queryset = queryset.filter(q_search)
+        
+        # Exclude records with specified events or lead_stage values if requested via query parameter
+        exclude_events_param = query_params.get('exclude_events', '').strip()
+        if exclude_events_param and entity_type == 'lead':
+            # Parse comma-separated event names or lead_stage values
+            exclude_values = [e.strip() for e in exclude_events_param.split(',') if e.strip()]
+            
+            if exclude_values:
+                # Build Q object to exclude records with any of the specified events or lead_stage values
+                exclude_q = Q()
+                for exclude_value in exclude_values:
+                    # For leads, check both lead_stage field and events
+                    # Uppercase values (like TRIAL_ACTIVATED) are treated as lead_stage values
+                    # Lowercase values (like trial_activated) are treated as event names
+                    
+                    # Always check lead_stage field (try both uppercase and as-is)
+                    if exclude_value.isupper():
+                        # Uppercase value - check lead_stage directly
+                        logger.debug(f"[RecordListCreateView] Excluding leads with lead_stage={exclude_value}")
+                        exclude_q |= Q(data__lead_stage=exclude_value)
+                    else:
+                        # Lowercase value - check as event name and also check uppercase version in lead_stage
+                        # Convert to event format
+                        if '.' not in exclude_value:
+                            full_event_name = f"{entity_type}.{exclude_value}"
+                        else:
+                            full_event_name = exclude_value
+                        
+                        logger.debug(f"[RecordListCreateView] Excluding leads with event={full_event_name} or lead_stage={exclude_value.upper()}")
+                        exclude_q |= Q(events__event=full_event_name)
+                        # Also check uppercase version in lead_stage (e.g., trial_activated -> TRIAL_ACTIVATED)
+                        exclude_q |= Q(data__lead_stage=exclude_value.upper())
+                
+                if exclude_q:
+                    logger.info(f"[RecordListCreateView] Applying exclude filter for {len(exclude_values)} value(s): {exclude_values}")
+                    queryset = queryset.exclude(exclude_q)
+        elif exclude_events_param:
+            # For non-lead entities, only check events
+            exclude_values = [e.strip() for e in exclude_events_param.split(',') if e.strip()]
+            if exclude_values:
+                exclude_q = Q()
+                for exclude_value in exclude_values:
+                    if entity_type and '.' not in exclude_value:
+                        full_event_name = f"{entity_type}.{exclude_value}"
+                    else:
+                        full_event_name = exclude_value
+                    exclude_q |= Q(events__event=full_event_name)
+                
+                if exclude_q:
+                    queryset = queryset.exclude(exclude_q)
             
         return queryset
     
