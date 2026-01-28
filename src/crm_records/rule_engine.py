@@ -138,12 +138,24 @@ def action_update_fields(
     # Check if this is a call back later event BEFORE template resolution
     event_name = ctx.get("event", "")
     button_type = payload.get("button_type", "")
+    call_status = payload.get("call_status", "")
+    last_call_outcome = payload.get("last_call_outcome", "")
+    
     is_call_back_later_event = (
         event_name == "call_back_later" or 
         event_name.endswith(".call_back_later") or
         "call_back_later" in event_name.lower() or
         button_type == "call_later" or
         "call_later" in event_name.lower()
+    )
+    
+    # Check if this is a "not connected" event
+    is_not_connected_event = (
+        "not_connected" in event_name.lower() or
+        button_type.lower() in {"not_connected", "not connected", "not-connected"} or
+        call_status.lower() in {"not connected", "not_connected", "notconnected"} or
+        last_call_outcome.lower() in {"not connected", "not_connected", "notconnected"} or
+        (updates and updates.get("lead_stage", "").upper() == "NOT_CONNECTED")
     )
 
     # Special handling for assigned_to field in call_back_later events
@@ -361,6 +373,60 @@ def action_update_fields(
         f"assigned_to={resolved_updates.get('assigned_to')}"
     )
     
+    # Track first_assigned_to and first_assigned_at when assigned_to is being set
+    # This ensures daily limit tracking works for all assignment methods (not just GetNextLeadView)
+    # Check BEFORE applying updates to see if this is a fresh assignment
+    # EXCEPTION: Don't set first_assigned_to for "not connected" retry leads (they shouldn't count toward new RM's limit)
+    if "assigned_to" in resolved_updates and record.entity_type == "lead":
+        new_assigned_to = resolved_updates.get("assigned_to")
+        current_assigned_to = record.data.get("assigned_to")
+        
+        # Check if this is a "not connected" retry lead
+        # (has call_attempts > 0, or last_call_outcome = 'not_connected', or lead_stage was 'in_queue')
+        call_attempts = record.data.get("call_attempts", 0)
+        try:
+            call_attempts_int = int(call_attempts) if call_attempts is not None else 0
+        except (TypeError, ValueError):
+            call_attempts_int = 0
+        
+        last_call_outcome = record.data.get("last_call_outcome", "").lower()
+        lead_stage = record.data.get("lead_stage", "").upper()
+        # Check if this is a retry lead
+        # Only "not connected" and "call back later" can be retried
+        # These leads should NOT set first_assigned_to when reassigned to a new RM
+        is_not_connected_retry = (
+            call_attempts_int > 0 or
+            last_call_outcome in ("not connected", "not_connected", "notconnected") or
+            last_call_outcome == "call_back_later" or
+            lead_stage == "NOT_CONNECTED" or
+            lead_stage == "IN_QUEUE" or
+            lead_stage == "CALL_BACK_LATER"
+        )
+        
+        # Check if this is a fresh assignment (was unassigned, now being assigned)
+        is_fresh_assignment = (
+            (current_assigned_to is None or current_assigned_to == '' or current_assigned_to == 'null' or current_assigned_to == 'None')
+            and (new_assigned_to is not None and new_assigned_to != '' and new_assigned_to != 'null')
+        )
+        
+        # Set first_assigned_to and first_assigned_at if this is a fresh assignment
+        # BUT skip for retry leads (not connected, call back later)
+        # These leads shouldn't count toward new RM's daily limit when reassigned
+        if is_fresh_assignment and 'first_assigned_at' not in record.data and not is_not_connected_retry:
+            record.data['first_assigned_at'] = timezone.now().isoformat()
+            record.data['first_assigned_to'] = new_assigned_to
+            logger.info(
+                f"[action_update_fields] Set first_assigned_to={new_assigned_to} and first_assigned_at for lead_id={record.id} "
+                f"(fresh assignment via rule engine)"
+            )
+        elif is_fresh_assignment and is_not_connected_retry:
+            logger.info(
+                f"[action_update_fields] Skipping first_assigned_to for lead_id={record.id} "
+                f"(retry lead with previous attempts/outcome - call_attempts={call_attempts_int}, "
+                f"last_call_outcome={last_call_outcome}, lead_stage={lead_stage}, won't count toward new RM's daily limit)"
+            )
+    
+    # Apply all updates
     for key, value in resolved_updates.items():
         record.data[key] = value
     
@@ -420,6 +486,9 @@ def action_update_fields(
                 logger.warning(
                     f"Increment skipped for field '{key}' on record {record.id}: current='{current_value}' delta='{delta}'"
                 )
+
+    # All "not connected" logic is now handled by database rules
+    # No hardcoded logic needed - rules handle next_call_at, unassignment, lead_stage, and 6-attempt limit
 
     # Save only the data and updated_at fields for efficiency
     record.save(update_fields=["data", "updated_at"])
@@ -615,28 +684,48 @@ def action_compute_next_call_from_attempts(
     base_minutes_per_attempt: int = 30,
     attempts_field: str = "call_attempts",
     target_field: str = "next_call_at",
+    fixed_minutes: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Compute next_call_at = now + (base_minutes_per_attempt * current_attempts) minutes
     using attempts from record.data[attempts_field], then write to record.data[target_field].
+    
+    If fixed_minutes is provided, use that instead of multiplying by attempts
+    (useful for "not connected" leads that need a fixed 1-hour snooze).
+    
+    Args:
+        base_minutes_per_attempt: Minutes to multiply by attempt count (default: 30)
+        attempts_field: Field name containing attempt count (default: "call_attempts")
+        target_field: Field name to write result to (default: "next_call_at")
+        fixed_minutes: If provided, use this fixed value instead of multiplying (optional)
     """
     record = ctx["record"]
+    
     attempts_raw = record.data.get(attempts_field, 0)
     try:
         attempts = int(attempts_raw or 0)
     except Exception:
         attempts = 0
 
-    minutes = base_minutes_per_attempt * attempts
+    # If fixed_minutes is provided, use that (for "not connected" with fixed 1-hour snooze)
+    # Otherwise, multiply base_minutes_per_attempt by attempts
+    if fixed_minutes is not None:
+        minutes = fixed_minutes
+        logger.info(
+            f"Using fixed_minutes={fixed_minutes} for {target_field} computation (not multiplying by attempts)"
+        )
+    else:
+        minutes = base_minutes_per_attempt * attempts
+    
     next_time = timezone.now() + timedelta(minutes=minutes)
     iso_ts = next_time.isoformat()
 
     record.data[target_field] = iso_ts
     record.save(update_fields=["data", "updated_at"])
     logger.info(
-        f"Computed {target_field} for record {record.id} using attempts={attempts}: {iso_ts}"
+        f"Computed {target_field} for record {record.id} using attempts={attempts}, minutes={minutes}: {iso_ts}"
     )
-    return {"attempts": attempts, "target_field": target_field, "value": iso_ts}
+    return {"attempts": attempts, "target_field": target_field, "value": iso_ts, "minutes": minutes}
 
 
 def _evaluate_simple_condition(condition: Dict[str, Any], ctx: Dict[str, Any]) -> bool:
