@@ -33,6 +33,13 @@ import uuid
 from authz.models import TenantMembership
 
 
+def _parse_lead_stage_param(value):
+    """Parse lead_stage query param (comma-separated) into a set of uppercase stage names."""
+    if not value or not isinstance(value, str):
+        return set()
+    return {v.strip().upper() for v in value.split(',') if v.strip()}
+
+
 class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
     queryset = Record.objects.all()
     serializer_class = RecordSerializer
@@ -46,22 +53,21 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         
         Query Parameters:
         - entity_type: Filter by entity type
-        - resolution_status: Filter by resolution_status in data JSON
-        - affiliated_party: Filter by affiliated_party in data JSON (supports comma-separated values: ?affiliated_party=value1,value2)
-        - exclude_events: Exclude records with specified events or lead_stage values (comma-separated)
-                         For leads: Uppercase values (e.g., TRIAL_ACTIVATED, NOT_INTERESTED) exclude by lead_stage field
-                         Lowercase values (e.g., trial_activated, not_interested) exclude by EventLog events
-                         Events can be specified with or without entity prefix (e.g., 'trial_activated' or 'lead.trial_activated')
+        - lead_stage: Include only records with this lead_stage (e.g. SNOOZED for follow-up page). Comma-separated for multiple.
+        - exclude_events: Exclude records with specified events or lead_stage values (comma-separated).
+                         If lead_stage is also set, stages listed in lead_stage are never excluded (so follow-up page works).
+                         Uppercase = exclude by lead_stage (e.g. TRIAL_ACTIVATED). Lowercase = exclude by EventLog event (e.g. trial_activated).
+        - resolution_status, affiliated_party: Filter by data JSON (affiliated_party supports comma-separated values)
         - Any other field: Will be searched in the data JSON field
         
+        Common usage (both pages):
+        - My leads (exclude trial activated): ?entity_type=lead&assigned_to={{current_user}}&exclude_events=TRIAL_ACTIVATED
+        - Follow-up leads (only SNOOZED):     ?entity_type=lead&assigned_to={{current_user}}&lead_stage=SNOOZED
+        
         Examples:
-        - ?entity_type=lead&resolution_status=WIP
-        - ?entity_type=ticket&resolution_status=Scheduled
-        - ?affiliated_party=Channel Partner,Direct
-        - ?priority=high&status=active
-        - ?entity_type=lead&assigned_to=user123&exclude_events=TRIAL_ACTIVATED (excludes by lead_stage)
-        - ?entity_type=lead&assigned_to=user123&exclude_events=trial_activated (excludes by event)
-        - ?entity_type=lead&assigned_to=user123&exclude_events=TRIAL_ACTIVATED,NOT_INTERESTED (excludes by lead_stage)
+        - ?entity_type=lead&assigned_to=user123&lead_stage=SNOOZED
+        - ?entity_type=lead&assigned_to=user123&exclude_events=TRIAL_ACTIVATED
+        - ?entity_type=lead&assigned_to=user123&exclude_events=TRIAL_ACTIVATED,NOT_INTERESTED
         """
         queryset = super().get_queryset()
         
@@ -158,7 +164,14 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
             queryset = queryset.filter(q_search)
         
         # Exclude records with specified events or lead_stage values if requested via query parameter
+        # When lead_stage is explicitly set (e.g. lead_stage=SNOOZED for follow-up page), we never exclude
+        # that stage so both "my leads" and "follow-up leads" work with a common API.
         exclude_events_param = query_params.get('exclude_events', '').strip()
+        # Get lead_stage from query params (may be in data_filters too, but we need it here for exclude logic)
+        lead_stage_param = query_params.get('lead_stage', '')
+        include_lead_stages = _parse_lead_stage_param(lead_stage_param)
+        
+        # Only apply exclude logic if exclude_events is provided
         if exclude_events_param and entity_type == 'lead':
             # Parse comma-separated event names or lead_stage values
             exclude_values = [e.strip() for e in exclude_events_param.split(',') if e.strip()]
@@ -167,26 +180,26 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 # Build Q object to exclude records with any of the specified events or lead_stage values
                 exclude_q = Q()
                 for exclude_value in exclude_values:
+                    # Do not exclude a stage that the user explicitly asked to include (e.g. lead_stage=SNOOZED)
+                    if include_lead_stages:
+                        exclude_upper = exclude_value.upper() if not exclude_value.isupper() else exclude_value
+                        if exclude_upper in include_lead_stages:
+                            logger.debug(f"[RecordListCreateView] Skipping exclude {exclude_value} (requested via lead_stage)")
+                            continue
+                    
                     # For leads, check both lead_stage field and events
                     # Uppercase values (like TRIAL_ACTIVATED) are treated as lead_stage values
                     # Lowercase values (like trial_activated) are treated as event names
-                    
-                    # Always check lead_stage field (try both uppercase and as-is)
                     if exclude_value.isupper():
-                        # Uppercase value - check lead_stage directly
                         logger.debug(f"[RecordListCreateView] Excluding leads with lead_stage={exclude_value}")
                         exclude_q |= Q(data__lead_stage=exclude_value)
                     else:
-                        # Lowercase value - check as event name and also check uppercase version in lead_stage
-                        # Convert to event format
                         if '.' not in exclude_value:
                             full_event_name = f"{entity_type}.{exclude_value}"
                         else:
                             full_event_name = exclude_value
-                        
                         logger.debug(f"[RecordListCreateView] Excluding leads with event={full_event_name} or lead_stage={exclude_value.upper()}")
                         exclude_q |= Q(events__event=full_event_name)
-                        # Also check uppercase version in lead_stage (e.g., trial_activated -> TRIAL_ACTIVATED)
                         exclude_q |= Q(data__lead_stage=exclude_value.upper())
                 
                 if exclude_q:
