@@ -7,6 +7,7 @@ from django.utils.decorators import method_decorator
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework import generics
 from uuid import UUID
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
@@ -18,7 +19,8 @@ import os
 
 from .models import SupportTicketDump
 from .models import SupportTicket
-from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer,UpdateCallStatusRequestSerializer
+from .models import PyroSupport
+from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer, UpdateCallStatusRequestSerializer, PyroSupportSerializer
 from .services import MixpanelService, TicketTimeService
 from user_settings.routing import apply_routing_rule_to_queryset
 from authz.permissions import IsTenantAuthenticated
@@ -1028,3 +1030,37 @@ class ProcessDumpedTicketsView(APIView):
                 'error': str(error),
                 'message': 'Failed to process dumped tickets'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class PyroSupportListCreateView(generics.ListCreateAPIView):
+    """
+    GET: List all pyro_support tickets (optional query: ?status=Open&category=Technical).
+    POST: Create a new support ticket from the Submit Ticket form.
+    """
+    queryset = PyroSupport.objects.all()
+    serializer_class = PyroSupportSerializer
+    permission_classes = [AllowAny]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        status_filter = self.request.query_params.get("status")
+        category_filter = self.request.query_params.get("category")
+        priority_filter = self.request.query_params.get("priority")
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        if category_filter:
+            qs = qs.filter(category=category_filter)
+        if priority_filter:
+            qs = qs.filter(priority=priority_filter)
+        return qs
+
+
+class PyroSupportDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    GET: Retrieve a single pyro_support ticket by id.
+    PATCH/PUT: Update a ticket.
+    DELETE: Delete a ticket.
+    """
+    queryset = PyroSupport.objects.all()
+    serializer_class = PyroSupportSerializer
+    permission_classes = [AllowAny]
