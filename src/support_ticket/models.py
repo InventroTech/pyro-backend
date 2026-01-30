@@ -110,3 +110,33 @@ class SupportTicket(HistoryTrackedModel):
     def __str__(self):
         base = self.name or self.phone or self.user_id or f"#{self.id}"
         return f"SupportTicket {base}"
+
+
+class PyroSupport(models.Model):
+    """
+    Support ticket submissions from the Submit Ticket form.
+    Fields: full_name, email_address, subject, category, priority, description, status.
+    """
+    id = models.BigAutoField(primary_key=True)
+    full_name = models.CharField(max_length=255)
+    email_address = models.EmailField(max_length=255)
+    subject = models.CharField(max_length=500)
+    category = models.CharField(max_length=100)  # e.g. General, Technical, Billing, Feature Request, Bug Report
+    priority = models.CharField(max_length=50)  # e.g. Low, Medium, High, Urgent
+    description = models.TextField()
+    status = models.CharField(max_length=50, default="Open")  # Open, In Progress, Resolved, Closed, Awaiting User
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "pyro_support"
+        managed = True
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["status"], name="pyro_support_status"),
+            models.Index(fields=["category"], name="pyro_support_category"),
+            models.Index(fields=["-created_at"], name="pyro_support_created"),
+        ]
+
+    def __str__(self):
+        return f"PyroSupport #{self.id} - {self.subject}"

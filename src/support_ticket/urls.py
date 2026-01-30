@@ -1,5 +1,16 @@
 from django.urls import path
-from .views import DumpTicketWebhookView, SaveAndContinueView, GetNextTicketView, SupportTicketUpdateView, TakeBreakView, UpdateCallStatusView, GetWIPTicketsView, ProcessDumpedTicketsView
+from .views import (
+    DumpTicketWebhookView,
+    SaveAndContinueView,
+    GetNextTicketView,
+    SupportTicketUpdateView,
+    TakeBreakView,
+    UpdateCallStatusView,
+    GetWIPTicketsView,
+    ProcessDumpedTicketsView,
+    PyroSupportListCreateView,
+    PyroSupportDetailView,
+)
 
 app_name = 'support_ticket'
 
@@ -12,4 +23,7 @@ urlpatterns = [
     path('update/', SupportTicketUpdateView.as_view(), name='update-ticket'),
     path('take-break/', TakeBreakView.as_view(), name='take-break'),
     path('process-dumped-tickets/', ProcessDumpedTicketsView.as_view(), name='process-dumped-tickets'),
+    # Pyro Support (Submit Ticket form) - CRUD
+    path('pyro-support/', PyroSupportListCreateView.as_view(), name='pyro-support-list-create'),
+    path('pyro-support/<int:pk>/', PyroSupportDetailView.as_view(), name='pyro-support-detail'),
 ]
