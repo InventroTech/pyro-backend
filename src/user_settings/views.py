@@ -538,7 +538,7 @@ class RoutingRuleDetailView(APIView):
     Retrieve, update, or delete a specific routing rule by ID.
     """
 
-    permission_classes = [IsTenantAuthenticated, HasTenantRole("GM")]
+    permission_classes = [IsTenantAuthenticated]
 
     def get_object(self, tenant, pk: int) -> RoutingRule:
         return get_object_or_404(RoutingRule, tenant=tenant, pk=pk)
