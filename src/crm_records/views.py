@@ -1730,16 +1730,17 @@ class GetNextLeadView(APIView):
         logger.info("[GetNextLead] Filtered unassigned leads by eligible types: %s", eligible_lead_types)
         
         # Filter by call attempt matrix rules (max attempts, SLA, min time between calls)
-        # Load call attempt matrices for all eligible lead types
-        call_attempt_matrices = {}
-        for lead_type in eligible_lead_types:
-            matrix = self._get_call_attempt_matrix(tenant, lead_type)
-            if matrix:
-                call_attempt_matrices[lead_type] = matrix
-                logger.debug(
-                    "[GetNextLead] Loaded call attempt matrix for lead_type=%s: max_attempts=%d, sla_days=%d, min_hours=%d",
-                    lead_type, matrix.max_call_attempts, matrix.sla_days, matrix.min_time_between_calls_hours
-                )
+        # Bulk fetch: load all call attempt matrices for eligible lead types in a single query (avoids N+1)
+        matrices_qs = CallAttemptMatrix.objects.filter(
+            tenant=tenant,
+            lead_type__in=eligible_lead_types
+        )
+        call_attempt_matrices = {m.lead_type: m for m in matrices_qs}
+        for lead_type, matrix in call_attempt_matrices.items():
+            logger.debug(
+                "[GetNextLead] Loaded call attempt matrix for lead_type=%s: max_attempts=%d, sla_days=%d, min_hours=%d",
+                lead_type, matrix.max_call_attempts, matrix.sla_days, matrix.min_time_between_calls_hours
+            )
         
         # Filter out leads that exceed matrix limits
         if call_attempt_matrices:
