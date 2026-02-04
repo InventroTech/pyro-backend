@@ -295,9 +295,22 @@ def action_update_fields(
 
     # Apply direct field updates
     # For call_back_later events: 
+    # - Apply lead_stage from payload if present (e.g., SNOOZED) - always apply even if rule sets it
     # - If assign_to_me is True and assigned_to is in payload but not in resolved_updates, add it to resolved_updates
     # - If assign_to_me is False and assigned_to is not in resolved_updates, set it to null
     if is_call_back_later_event:
+        # Apply lead_stage from payload if present (frontend sends lead_stage: SNOOZED for Call Back Later)
+        # Always apply from payload to ensure consistency, even if a rule also sets it
+        if "lead_stage" in original_payload:
+            lead_stage_value = original_payload.get("lead_stage")
+            # Normalize to uppercase for consistency
+            if isinstance(lead_stage_value, str):
+                lead_stage_value = lead_stage_value.strip().upper()
+            logger.info(
+                f"Setting lead_stage from payload for record {record.id} "
+                f"in call_back_later event: lead_stage={lead_stage_value} (was in resolved_updates: {'lead_stage' in resolved_updates})"
+            )
+            resolved_updates["lead_stage"] = lead_stage_value
         assign_to_me = original_payload.get("assign_to_me") or original_payload.get("assignToMe")
         if assign_to_me is None and original_payload.get("assign_to_self"):
             # assign_to_self being present means checkbox is checked
