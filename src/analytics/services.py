@@ -23,6 +23,7 @@ class TeamResolver:
     def get_reports_count(manager_user_id: str, tenant) -> int:
         """
         Get count of all direct and indirect reports (excluding manager).
+        Uses get_team_user_ids (single bulk query) then subtracts 1 for manager.
         
         Args:
             manager_user_id: UUID of the manager user
@@ -32,38 +33,8 @@ class TeamResolver:
             Count of reports (direct + indirect, excluding manager)
         """
         logger = logging.getLogger(__name__)
-        logger.info(f"[TeamResolver] Getting reports count for manager_user_id: {manager_user_id}, tenant: {tenant.id}")
-        
-        # Find the manager's TenantMembership record
-        try:
-            manager_membership = TenantMembership.objects.get(
-                tenant=tenant,
-                user_id=manager_user_id,
-                is_active=True
-            )
-        except TenantMembership.DoesNotExist:
-            logger.warning(f"[TeamResolver] Manager TenantMembership NOT FOUND for user_id: {manager_user_id}, tenant: {tenant.id}")
-            return 0
-        
-        def count_reports_recursive(parent_membership: TenantMembership) -> int:
-            """Recursively count all direct and indirect reports."""
-            direct_reports = TenantMembership.objects.filter(
-                tenant=tenant,
-                user_parent_id=parent_membership,
-                is_active=True
-            )
-            count = direct_reports.count()
-            logger.info(f"[TeamResolver] Found {count} direct reports for parent {parent_membership.id}")
-            
-            # Recursively count nested reports
-            for membership in direct_reports:
-                if membership.user_id:
-                    nested_count = count_reports_recursive(membership)
-                    count += nested_count
-            
-            return count
-        
-        reports_count = count_reports_recursive(manager_membership)
+        team_ids = TeamResolver.get_team_user_ids(manager_user_id, tenant)
+        reports_count = max(0, len(team_ids) - 1)  # Exclude manager
         logger.info(f"[TeamResolver] Total reports count (excluding manager): {reports_count}")
         return reports_count
     
@@ -71,6 +42,7 @@ class TeamResolver:
     def get_team_user_ids(manager_user_id: str, tenant) -> Set[str]:
         """
         Get all user_ids in the team (manager + all direct and indirect reports).
+        Uses a single bulk query to avoid N+1 when traversing the hierarchy.
         
         Args:
             manager_user_id: UUID of the manager user
@@ -84,53 +56,42 @@ class TeamResolver:
         
         team_ids = {str(manager_user_id)}
         
-        # First, find the manager's TenantMembership record
-        try:
-            logger.info(f"[TeamResolver] Looking up manager TenantMembership - tenant: {tenant.id}, user_id: {manager_user_id}, is_active: True")
-            manager_membership = TenantMembership.objects.get(
+        # Single bulk query: fetch ALL active TenantMemberships for this tenant
+        # Avoids N+1 from recursive per-parent queries
+        all_memberships = list(
+            TenantMembership.objects.filter(
                 tenant=tenant,
-                user_id=manager_user_id,
                 is_active=True
-            )
-            logger.info(f"[TeamResolver] Found manager TenantMembership - id: {manager_membership.id}, user_id: {manager_membership.user_id}, email: {manager_membership.email}")
-        except TenantMembership.DoesNotExist:
+            ).values('id', 'user_id', 'user_parent_id_id')
+        )
+        
+        # Build parent_id -> [membership] map for in-memory traversal
+        parent_to_children: Dict[int, List[Dict]] = {}
+        for m in all_memberships:
+            parent_id = m.get('user_parent_id_id')
+            if parent_id is not None:
+                parent_to_children.setdefault(parent_id, []).append(m)
+        
+        # Find manager's membership
+        manager_membership = next(
+            (m for m in all_memberships if str(m.get('user_id')) == str(manager_user_id)),
+            None
+        )
+        if not manager_membership:
             logger.warning(f"[TeamResolver] Manager TenantMembership NOT FOUND for user_id: {manager_user_id}, tenant: {tenant.id}")
-            logger.warning(f"[TeamResolver] Available TenantMemberships for this tenant: {list(TenantMembership.objects.filter(tenant=tenant).values_list('user_id', 'email', 'is_active'))}")
-            # Manager not found in TenantMembership, return just the manager
             return team_ids
         
-        def get_direct_reports(parent_membership: TenantMembership) -> Set[str]:
-            """Recursively get all direct and indirect reports."""
-            logger.info(f"[TeamResolver] Getting direct reports for parent membership id: {parent_membership.id}, user_id: {parent_membership.user_id}")
-            
-            # Get all TenantMembership records that have this parent
-            direct_reports = TenantMembership.objects.filter(
-                tenant=tenant,
-                user_parent_id=parent_membership,
-                is_active=True
-            ).select_related('user_parent_id')
-            
-            logger.info(f"[TeamResolver] Found {direct_reports.count()} direct reports for parent {parent_membership.id}")
-            
+        def collect_reports_recursive(parent_id: int) -> Set[str]:
+            """Traverse hierarchy in memory (no DB queries)."""
             report_ids = set()
-            for membership in direct_reports:
-                logger.info(f"[TeamResolver] Processing report - membership id: {membership.id}, user_id: {membership.user_id}, email: {membership.email}, user_parent_id: {membership.user_parent_id_id if membership.user_parent_id else None}")
-                if membership.user_id:
-                    user_id_str = str(membership.user_id)
+            for m in parent_to_children.get(parent_id, []):
+                if m.get('user_id'):
+                    user_id_str = str(m['user_id'])
                     report_ids.add(user_id_str)
-                    logger.info(f"[TeamResolver] Added user_id to reports: {user_id_str}")
-                    # Recursively get their reports
-                    nested_reports = get_direct_reports(membership)
-                    if nested_reports:
-                        logger.info(f"[TeamResolver] Found {len(nested_reports)} nested reports for {user_id_str}")
-                    report_ids.update(nested_reports)
-                else:
-                    logger.warning(f"[TeamResolver] Report membership {membership.id} has no user_id")
-            
+                    report_ids.update(collect_reports_recursive(m['id']))
             return report_ids
         
-        # Get all team members recursively
-        nested_ids = get_direct_reports(manager_membership)
+        nested_ids = collect_reports_recursive(manager_membership['id'])
         team_ids.update(nested_ids)
         
         logger.info(f"[TeamResolver] Final team_ids: {team_ids} (total: {len(team_ids)})")
