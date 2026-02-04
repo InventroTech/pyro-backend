@@ -58,11 +58,13 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                          If lead_stage is also set, stages listed in lead_stage are never excluded (so follow-up page works).
                          Uppercase = exclude by lead_stage (e.g. TRIAL_ACTIVATED). Lowercase = exclude by EventLog event (e.g. trial_activated).
         - resolution_status, affiliated_party: Filter by data JSON (affiliated_party supports comma-separated values)
+        - assigned_to: Filter by assigned_to field. Note: GM users automatically bypass this filter to see all leads.
         - Any other field: Will be searched in the data JSON field
         
         Common usage (both pages):
         - My leads (exclude trial activated): ?entity_type=lead&assigned_to={{current_user}}&exclude_events=TRIAL_ACTIVATED
         - Follow-up leads (only SNOOZED):     ?entity_type=lead&assigned_to={{current_user}}&lead_stage=SNOOZED
+        - All leads (GM sees all):            ?entity_type=lead (GM users automatically see all, assigned_to filter is ignored)
         
         Examples:
         - ?entity_type=lead&assigned_to=user123&lead_stage=SNOOZED
@@ -84,11 +86,56 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         model_fields = {'entity_type', 'search', 'search_fields', 'page', 'page_size', 'ordering', 'created_at__gte', 'created_at__lte', 'exclude_events'}
         data_filters = {k: v for k, v in query_params.items() if k not in model_fields}
         
+        # GM users should see all leads regardless of assigned_to filter
+        # Remove assigned_to from data_filters if user is GM (for "all leads" page)
+        # Ensure role_key is set (it should be set by IsTenantAuthenticated, but ensure it's available)
+        user_role_key = getattr(self.request.user, 'role_key', None)
+        if not user_role_key:
+            # Try to get it explicitly if not set
+            from authz.permissions import _get_membership_info
+            info = _get_membership_info(self.request)
+            if info:
+                user_role_key = info.get('role_key')
+        
+        if user_role_key and user_role_key.upper() == 'GM':
+            if 'assigned_to' in data_filters:
+                logger.info(f"[RecordListCreateView] GM user detected (role_key={user_role_key}), removing assigned_to filter to show all leads. Original filters: {list(data_filters.keys())}")
+                data_filters.pop('assigned_to')
+                logger.info(f"[RecordListCreateView] After removing assigned_to, remaining filters: {list(data_filters.keys())}")
+            else:
+                logger.debug(f"[RecordListCreateView] GM user detected (role_key={user_role_key}), but no assigned_to filter present. Filters: {list(data_filters.keys())}")
+        elif user_role_key:
+            logger.debug(f"[RecordListCreateView] Non-GM user (role_key={user_role_key}), keeping assigned_to filter if present")
+        
         # Build Q objects for JSON field filtering
         q_objects = Q()
+        logger.info(f"[RecordListCreateView] Building filters from data_filters: {list(data_filters.keys())}")
         for field_name, field_value in data_filters.items():
+            # Special handling for lead_stage: case-insensitive matching and handle both uppercase and lowercase
+            if field_name == 'lead_stage':
+                # Support multiple values for lead_stage (comma-separated)
+                if ',' in field_value:
+                    values = [v.strip().upper() for v in field_value.split(',') if v.strip()]
+                    field_q = Q()
+                    for value in values:
+                        # Match both uppercase and case-insensitive (try multiple formats)
+                        field_q |= Q(**{f'data__{field_name}__iexact': value})
+                        field_q |= Q(**{f'data__{field_name}': value})
+                        field_q |= Q(**{f'data__{field_name}': value.upper()})
+                        field_q |= Q(**{f'data__{field_name}': value.lower()})
+                    q_objects &= field_q
+                    logger.info(f"[RecordListCreateView] Filtering by lead_stage={field_value} (normalized to uppercase: {values}), Q object: {field_q}")
+                else:
+                    # Single value - case-insensitive match with multiple format attempts
+                    value_upper = field_value.strip().upper()
+                    value_lower = field_value.strip().lower()
+                    field_q = Q(**{f'data__{field_name}__iexact': value_upper})
+                    field_q |= Q(**{f'data__{field_name}': value_upper})
+                    field_q |= Q(**{f'data__{field_name}': value_lower})
+                    q_objects &= field_q
+                    logger.info(f"[RecordListCreateView] Filtering by lead_stage={field_value} (normalized to uppercase: {value_upper}), Q object: {field_q}")
             # Support multiple values for the same field (comma-separated)
-            if ',' in field_value:
+            elif ',' in field_value:
                 values = [v.strip() for v in field_value.split(',')]
                 field_q = Q()
                 for value in values:
@@ -99,7 +146,11 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 q_objects &= Q(**{f'data__{field_name}': field_value})
         
         if q_objects:
+            logger.info(f"[RecordListCreateView] Applying data filters Q object: {q_objects}")
             queryset = queryset.filter(q_objects)
+            logger.info(f"[RecordListCreateView] After applying data filters, queryset count: {queryset.count()}")
+        else:
+            logger.debug(f"[RecordListCreateView] No data filters to apply")
         
         # Support ordering
         ordering = query_params.get('ordering')
@@ -1194,13 +1245,28 @@ class GetNextLeadView(APIView):
         """
         Normalize known affiliated party type typos/synonyms so filtering matches real data.
         Keep both canonical and legacy spellings to be safe.
+        Include case variants since DB vs settings may differ in casing (JSONField has no __iexact).
         """
         aliases = {
             # common typo observed in data/user settings
             'in_trail': ['in_trial', 'in_trail'],
             'in_trial': ['in_trial', 'in_trail'],
         }
-        return aliases.get(lead_type, [lead_type])
+        base = aliases.get(lead_type, [lead_type])
+        if isinstance(base, str):
+            base = [base]
+        # Add case variants for matching (lead_type, lower, upper, title)
+        seen = set()
+        out = []
+        for a in base:
+            if a and a not in seen:
+                seen.add(a)
+                out.append(a)
+            for v in (a.lower(), a.upper(), a.title()) if a else []:
+                if v not in seen:
+                    seen.add(v)
+                    out.append(v)
+        return out if out else [lead_type]
     
     def _get_call_attempt_matrix(self, tenant, lead_type: str):
         """
@@ -1326,8 +1392,8 @@ class GetNextLeadView(APIView):
         summary="Get next lead from queue",
         description="Atomically fetches and assigns the next available lead from the queue for CRM records. "
                    "Logic: 1) Get user's info from request 2) Check RM's eligible lead types from user settings "
-                   "3) Filter leads by eligible lead types (affiliated_party field) 4) Order by lead score (100, 90, 80 descending) "
-                   "5) Return first entry.",
+                   "3) Filter leads by eligible lead types (affiliated_party field); if no party types configured, push all leads to RM "
+                   "4) Order by lead score (100, 90, 80 descending) 5) Return first entry.",
         responses={
             200: OpenApiResponse(
                 description="Lead assigned successfully or no leads available",
@@ -1383,6 +1449,7 @@ class GetNextLeadView(APIView):
         """
         user = request.user
         tenant = request.tenant
+        debug_mode = request.query_params.get('debug') in ('1', 'true', 'yes')
 
         if not tenant:
             logger.warning("[GetNextLead] No tenant context available")
@@ -1443,7 +1510,7 @@ class GetNextLeadView(APIView):
                         eligible_lead_types = setting.value if isinstance(setting.value, list) else []
                         logger.info("[GetNextLead] Found eligible lead types for user %s: %s", user_identifier, eligible_lead_types)
                     except UserSettings.DoesNotExist:
-                        logger.info("[GetNextLead] No lead type assignment found for user %s - will return no leads", user_identifier)
+                        logger.info("[GetNextLead] No lead type assignment found for user %s - will push all leads to RM", user_identifier)
                         eligible_lead_types = []
                 else:
                     logger.warning("[GetNextLead] TenantMembership not found for user UUID %s", user_uuid)
@@ -1456,62 +1523,13 @@ class GetNextLeadView(APIView):
             eligible_lead_types = []
             daily_limit = None
 
-        # If user has no eligible lead types assigned, return empty
+        # If user has no eligible lead types assigned, push all leads to the RM
+        # (no filtering by affiliated_party / party type)
         if not eligible_lead_types:
-            logger.info("[GetNextLead] User %s has no eligible lead types assigned", user_identifier)
-            
-            # --- Enhanced Logging Block ---
-            from django.db.models import Q
-            # Count all leads in any queueable state regardless of assignment (including expired snoozed)
-            possible_leads_cnt = Record.objects.filter(
-                tenant=tenant,
-                entity_type='lead'
-            ).extra(
-                where=["""
-                    data->>'lead_stage' IN ('in_queue', 'assigned', 'call_later', 'scheduled')
-                    OR data->>'lead_stage' IS NULL
-                    OR (
-                        data->>'lead_stage' = 'SNOOZED'
-                        AND data->>'next_call_at' IS NOT NULL
-                        AND data->>'next_call_at' != ''
-                        AND data->>'next_call_at' != 'null'
-                        AND (data->>'next_call_at')::timestamptz <= NOW()
-                    )
-                """]
-            ).count()
-            # Count those unassigned
-            possible_unassigned_cnt = Record.objects.filter(
-                tenant=tenant,
-                entity_type='lead'
-            ).extra(
-                where=["""
-                    (
-                        (data->>'assigned_to' IS NULL OR 
-                         data->>'assigned_to' = '' OR
-                         data->>'assigned_to' = 'null' OR
-                         data->>'assigned_to' = 'None')
-                        OR data->>'lead_stage' = 'in_queue'
-                    )
-                    AND data->>'affiliated_party' IS NOT NULL
-                    AND data->>'affiliated_party' != ''
-                    AND data->>'affiliated_party' != 'null'
-                    AND (
-                        data->>'lead_stage' IN ('in_queue', 'assigned', 'call_later', 'scheduled')
-                        OR data->>'lead_stage' IS NULL
-                        OR (
-                            data->>'lead_stage' = 'SNOOZED'
-                            AND data->>'next_call_at' IS NOT NULL
-                            AND data->>'next_call_at' != ''
-                            AND data->>'next_call_at' != 'null'
-                            AND (data->>'next_call_at')::timestamptz <= NOW()
-                        )
-                    )
-                """]
-            ).count()
-            logger.info("[GetNextLead] Diagnostic: queueable leads for tenant=%s: count_in_queueable_state=%d, count_unassigned=%d, eligible_lead_types=None", tenant, possible_leads_cnt, possible_unassigned_cnt)
-            # --- End Enhanced Logging Block ---
-            
-            return Response({}, status=status.HTTP_200_OK)
+            logger.info(
+                "[GetNextLead] User %s has no party types configured - pushing all queueable leads to RM",
+                user_identifier,
+            )
 
         # Step 2.5: Enforce daily lead pull limit (if configured)
         # Count how many leads this user has been assigned today for this tenant.
@@ -1569,7 +1587,7 @@ class GetNextLeadView(APIView):
                     params=[user_identifier, start_of_day, user_identifier, start_of_day]
                 ).count()
 
-                if assigned_today >= daily_limit_int:
+                if assigned_today >= daily_limit_int and not debug_mode:
                     logger.info(
                         "[GetNextLead] Daily limit reached for user=%s (assigned_today=%d, daily_limit=%d). Returning empty.",
                         user_identifier,
@@ -1608,7 +1626,7 @@ class GetNextLeadView(APIView):
                         "id",
                     ).first()
 
-                    if not retry_candidate:
+                    if not retry_candidate and not debug_mode:
                         logger.info(
                             "[GetNextLead] Daily limit reached and no retryable not-connected leads found for user=%s",
                             user_identifier,
@@ -1658,39 +1676,35 @@ class GetNextLeadView(APIView):
 
         # Step 3: Filter leads by eligible lead types (affiliated_party field) and unassigned status
         from django.db.models import Q
-        
-        base_qs = Record.objects.filter(
-            tenant=tenant,
-            entity_type='lead'
-        ).extra(
-            where=["""
+
+        # Common WHERE conditions for queueable leads (assignment + status + next_call_at)
+        # Use UPPER() for lead_stage to handle case variations (In_Queue vs in_queue)
+        _queueable_where = """
                 (
                     -- Unassigned leads
-                    (data->>'assigned_to' IS NULL OR 
+                    (data->>'assigned_to' IS NULL OR
                      data->>'assigned_to' = '' OR
                      data->>'assigned_to' = 'null' OR
                      data->>'assigned_to' = 'None')
                     -- OR in_queue status (can be assigned or unassigned)
-                    OR data->>'lead_stage' = 'in_queue'
+                    OR UPPER(COALESCE(data->>'lead_stage','')) = 'IN_QUEUE'
                     -- OR expired snoozed leads (should be available regardless of assigned_to)
                     OR (
-                        data->>'lead_stage' = 'SNOOZED'
+                        UPPER(COALESCE(data->>'lead_stage','')) = 'SNOOZED'
                         AND data->>'next_call_at' IS NOT NULL
                         AND data->>'next_call_at' != ''
                         AND data->>'next_call_at' != 'null'
                         AND (data->>'next_call_at')::timestamptz <= NOW()
                     )
                 )
-                AND data->>'affiliated_party' IS NOT NULL
-                AND data->>'affiliated_party' != ''
-                AND data->>'affiliated_party' != 'null'
                 AND (
-                    -- Regular queueable statuses
-                    data->>'lead_stage' IN ('in_queue', 'assigned', 'call_later', 'scheduled')
+                    -- Regular queueable statuses (case-insensitive)
+                    UPPER(COALESCE(data->>'lead_stage','')) IN ('IN_QUEUE', 'ASSIGNED', 'CALL_LATER', 'SCHEDULED')
                     OR data->>'lead_stage' IS NULL
+                    OR data->>'lead_stage' = ''
                     -- OR snoozed leads where next_call_at has passed
                     OR (
-                        data->>'lead_stage' = 'SNOOZED'
+                        UPPER(COALESCE(data->>'lead_stage','')) = 'SNOOZED'
                         AND data->>'next_call_at' IS NOT NULL
                         AND data->>'next_call_at' != ''
                         AND data->>'next_call_at' != 'null'
@@ -1708,8 +1722,24 @@ class GetNextLeadView(APIView):
                     -- OR next_call_at has passed (snooze expired)
                     OR (data->>'next_call_at')::timestamptz <= NOW()
                 )
-                """]
-        )
+                """
+        # When party types are configured, require affiliated_party; when not, include all leads
+        _affiliated_extra = """
+                AND data->>'affiliated_party' IS NOT NULL
+                AND data->>'affiliated_party' != ''
+                AND data->>'affiliated_party' != 'null'
+                """
+
+        base_qs = Record.objects.filter(
+            tenant=tenant,
+            entity_type='lead'
+        ).extra(where=[_queueable_where + _affiliated_extra])
+
+        # Relaxed base (no affiliated_party requirement) - for when no party types configured
+        relaxed_base_qs = Record.objects.filter(
+            tenant=tenant,
+            entity_type='lead'
+        ).extra(where=[_queueable_where])
 
         # Apply optional per-user routing rule for leads (e.g. by state)
         if user_uuid:
@@ -1718,16 +1748,28 @@ class GetNextLeadView(APIView):
                 tenant=tenant,
                 user_id=user_uuid,
                 queue_type="lead",
-        )
+            )
+            relaxed_base_qs = apply_routing_rule_to_queryset(
+                relaxed_base_qs,
+                tenant=tenant,
+                user_id=user_uuid,
+                queue_type="lead",
+            )
 
         # Filter by eligible lead types (affiliated_party field must match one of the eligible types)
-        affiliated_party_filter = Q()
-        for lead_type in eligible_lead_types:
-            for alias in self._affiliated_party_aliases(lead_type):
-                affiliated_party_filter |= Q(data__affiliated_party=alias)
-        unassigned = base_qs.filter(affiliated_party_filter)
-
-        logger.info("[GetNextLead] Filtered unassigned leads by eligible types: %s", eligible_lead_types)
+        # When no party types configured: push ALL leads to RM (use relaxed_base_qs, no filter)
+        # When party types configured: filter by affiliated_party (case-insensitive match)
+        affiliated_party_filter = Q()  # Used by fallback block; empty Q matches all
+        if not eligible_lead_types:
+            unassigned = relaxed_base_qs
+            base_qs = relaxed_base_qs  # Use same for total_unassigned_cnt / diagnostics
+            logger.info("[GetNextLead] No party types configured - using all queueable leads (unfiltered by affiliated_party)")
+        else:
+            for lead_type in eligible_lead_types:
+                for alias in self._affiliated_party_aliases(lead_type):
+                    affiliated_party_filter |= Q(data__affiliated_party=alias)
+            unassigned = base_qs.filter(affiliated_party_filter)
+            logger.info("[GetNextLead] Filtered unassigned leads by eligible types: %s", eligible_lead_types)
         
         # Filter by call attempt matrix rules (max attempts, SLA, min time between calls)
         # Load call attempt matrices for all eligible lead types
@@ -1834,6 +1876,7 @@ class GetNextLeadView(APIView):
             logger.info("[GetNextLead] There are currently no unassigned leads in any queueable status for tenant=%s", tenant)
             # Relaxed fallback: drop lead_stage filter to recover from inconsistent/missing stages
             # But still include snoozed leads where next_call_at has passed
+            # Use UPPER() for lead_stage to handle case variations
             relaxed_qs = Record.objects.filter(
                 tenant=tenant,
                 entity_type='lead'
@@ -1841,15 +1884,15 @@ class GetNextLeadView(APIView):
                 where=["""
                     (
                         -- Unassigned leads
-                        (data->>'assigned_to' IS NULL OR 
+                        (data->>'assigned_to' IS NULL OR
                          data->>'assigned_to' = '' OR
                          data->>'assigned_to' = 'null' OR
                          data->>'assigned_to' = 'None')
                         -- OR in_queue status (can be assigned or unassigned)
-                        OR data->>'lead_stage' = 'in_queue'
+                        OR UPPER(COALESCE(data->>'lead_stage','')) = 'IN_QUEUE'
                         -- OR expired snoozed leads (should be available regardless of assigned_to)
                         OR (
-                            data->>'lead_stage' = 'SNOOZED'
+                            UPPER(COALESCE(data->>'lead_stage','')) = 'SNOOZED'
                             AND data->>'next_call_at' IS NOT NULL
                             AND data->>'next_call_at' != ''
                             AND data->>'next_call_at' != 'null'
@@ -1860,12 +1903,13 @@ class GetNextLeadView(APIView):
                     AND data->>'affiliated_party' != ''
                     AND data->>'affiliated_party' != 'null'
                     AND (
-                        -- Regular queueable statuses
-                        data->>'lead_stage' IN ('in_queue', 'assigned', 'call_later', 'scheduled')
+                        -- Regular queueable statuses (case-insensitive)
+                        UPPER(COALESCE(data->>'lead_stage','')) IN ('IN_QUEUE', 'ASSIGNED', 'CALL_LATER', 'SCHEDULED')
                         OR data->>'lead_stage' IS NULL
+                        OR data->>'lead_stage' = ''
                         -- OR snoozed leads where next_call_at has passed
                         OR (
-                            data->>'lead_stage' = 'SNOOZED'
+                            UPPER(COALESCE(data->>'lead_stage','')) = 'SNOOZED'
                             AND data->>'next_call_at' IS NOT NULL
                             AND data->>'next_call_at' != ''
                             AND data->>'next_call_at' != 'null'
@@ -1927,6 +1971,53 @@ class GetNextLeadView(APIView):
             all_snoozed_count, expired_snoozed_before_filter, expired_snoozed_count, now_iso
         )
         
+        # Debug mode: return pipeline counts to diagnose "no leads" issues
+        if debug_mode:
+            pre_routing_with_aff = Record.objects.filter(
+                tenant=tenant, entity_type='lead'
+            ).extra(where=[_queueable_where + _affiliated_extra]).count()
+            pre_routing_no_aff = Record.objects.filter(
+                tenant=tenant, entity_type='lead'
+            ).extra(where=[_queueable_where]).count()
+            from user_settings.routing import _get_active_rule
+            rule = _get_active_rule(tenant=tenant, user_id=user_uuid, queue_type="lead") if user_uuid else None
+            sample_leads = list(
+                Record.objects.filter(tenant=tenant, entity_type='lead')[:5]
+                .values('id', 'data')
+            )
+            unassigned_minimal = Record.objects.filter(
+                tenant=tenant,
+                entity_type='lead'
+            ).extra(where=["""
+                (data->>'assigned_to' IS NULL OR data->>'assigned_to' = '' OR data->>'assigned_to' = 'null' OR data->>'assigned_to' = 'None')
+            """])
+            return Response({
+                "debug": True,
+                "user_identifier": user_identifier,
+                "user_uuid": str(user_uuid) if user_uuid else None,
+                "tenant_id": str(tenant.id) if tenant else None,
+                "eligible_lead_types": eligible_lead_types,
+                "daily_limit": daily_limit,
+                "counts": {
+                    "total_leads_in_tenant": Record.objects.filter(tenant=tenant, entity_type='lead').count(),
+                    "unassigned_minimal": unassigned_minimal.count(),
+                    "queueable_with_affiliated_party": pre_routing_with_aff,
+                    "queueable_without_affiliated_party": pre_routing_no_aff,
+                    "after_routing_and_filter": unassigned_cnt,
+                    "base_qs_count": total_unassigned_cnt,
+                },
+                "routing_rule": {
+                    "has_rule": rule is not None,
+                    "conditions": rule.conditions if rule else None,
+                },
+                "sample_leads_data": [
+                    {"id": s["id"], "lead_stage": (s.get("data") or {}).get("lead_stage"), "affiliated_party": (s.get("data") or {}).get("affiliated_party"), "assigned_to": (s.get("data") or {}).get("assigned_to"), "call_attempts": (s.get("data") or {}).get("call_attempts"), "next_call_at": (s.get("data") or {}).get("next_call_at")}
+                    for s in sample_leads
+                ],
+                "distinct_lead_stages": list(Record.objects.filter(tenant=tenant, entity_type='lead').values_list('data__lead_stage', flat=True).distinct()[:20]),
+                "distinct_affiliated_parties": list(Record.objects.filter(tenant=tenant, entity_type='lead').values_list('data__affiliated_party', flat=True).distinct()[:20]),
+            }, status=status.HTTP_200_OK)
+
         candidate = self._order_by_score(unassigned, now_iso).first()
 
         # Step 5: Return first entry (or empty if none found)
