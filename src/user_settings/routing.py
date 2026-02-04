@@ -110,16 +110,15 @@ def apply_routing_rule_to_queryset(
     if not rule:
         # No rule exists - return whole queryset
         return qs
-    
-    # Rule exists - enforce it strictly
+
+    # Rule exists but has no conditions or no valid filters - treat as "no restrictions"
+    # (return qs unchanged; previously returned empty which blocked all leads)
     if not rule.conditions:
-        # Rule exists but has no conditions - return empty queryset to enforce the rule
-        return qs.none()
+        return qs
 
     condition_q = _build_filters_from_conditions(queue_type, rule.conditions)
     if not condition_q:
-        # Rule exists but no valid filters were built - return empty queryset to enforce the rule
-        return qs.none()
+        return qs
 
     # Apply the filters strictly (even if it results in 0 matches)
     return qs.filter(condition_q)
