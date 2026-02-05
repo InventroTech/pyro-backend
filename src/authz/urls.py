@@ -2,11 +2,13 @@ from django.urls import path
 from .views_management import (
     ListTenantUsersView,
     RolesView,
-    CurrentUserRoleView
+    CurrentUserRoleView,
+    UpdateUserHierarchyView,
 )
 
 urlpatterns = [
     path("users", ListTenantUsersView.as_view(), name="authz_list_users"),
+    path("users/hierarchy", UpdateUserHierarchyView.as_view(), name="authz_update_user_hierarchy"),
     path("roles", RolesView.as_view(), name="authz_roles"),
     path("me/role", CurrentUserRoleView.as_view(), name="authz_current_user_role"),
 ]
