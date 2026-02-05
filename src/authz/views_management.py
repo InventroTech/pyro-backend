@@ -73,7 +73,7 @@ class ListTenantUsersView(APIView):
         
         # Query TenantMembership with left join to LegacyUser
         qs = (TenantMembership.objects
-              .select_related("role")
+              .select_related("role", "user_parent_id")
               .filter(tenant=request.tenant)
               .annotate(name=Subquery(legacy_user_subquery))
               .order_by("-is_active", "email"))
@@ -129,3 +129,94 @@ class CurrentUserRoleView(APIView):
             'role_name': membership.role.name,
             'is_active': membership.is_active
         }, status=status.HTTP_200_OK)
+
+
+class UpdateUserHierarchyView(APIView):
+    """
+    PATCH /api/membership/users/hierarchy
+    Body: { "assignments": [ { "membership_id": int, "parent_membership_id": int|null }, ... ] }
+    Restricts to GM/ASM. Validates tenant and prevents cycles.
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    def _collect_subtree_ids(self, tenant, root_membership_id, exclude_membership_id=None):
+        """Return set of all membership ids in the subtree under root_membership_id (excluding exclude_membership_id)."""
+        seen = set()
+        stack = [root_membership_id]
+        while stack:
+            mid = stack.pop()
+            if mid == exclude_membership_id:
+                continue
+            if mid in seen:
+                continue
+            seen.add(mid)
+            children = TenantMembership.objects.filter(
+                tenant=tenant, user_parent_id_id=mid
+            ).values_list('id', flat=True)
+            stack.extend(children)
+        return seen
+
+    def patch(self, request):
+        tenant = request.tenant
+        assignments = request.data.get('assignments')
+        if not isinstance(assignments, list):
+            return Response(
+                {'error': 'assignments must be a list'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Resolve all membership ids that belong to this tenant
+        all_ids = set()
+        for a in assignments:
+            if not isinstance(a, dict):
+                continue
+            mid = a.get('membership_id')
+            pid = a.get('parent_membership_id')
+            if mid is not None:
+                all_ids.add(mid)
+            if pid is not None:
+                all_ids.add(pid)
+
+        if not all_ids:
+            return Response({'count': 0}, status=status.HTTP_200_OK)
+
+        valid_ids = set(
+            TenantMembership.objects.filter(
+                tenant=tenant, id__in=all_ids
+            ).values_list('id', flat=True)
+        )
+        invalid = all_ids - valid_ids
+        if invalid:
+            return Response(
+                {'error': f'membership_id or parent_membership_id not in tenant: {invalid}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Prevent cycle: for each assignment, new parent must not be in the member's subtree
+        for a in assignments:
+            if not isinstance(a, dict):
+                continue
+            mid = a.get('membership_id')
+            pid = a.get('parent_membership_id')
+            if mid is None or pid is None:
+                continue
+            subtree = self._collect_subtree_ids(tenant, mid, exclude_membership_id=mid)
+            if pid in subtree:
+                return Response(
+                    {'error': f'Cycle: parent_membership_id {pid} is in subtree of membership_id {mid}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        # Apply updates
+        for a in assignments:
+            if not isinstance(a, dict):
+                continue
+            mid = a.get('membership_id')
+            pid = a.get('parent_membership_id')
+            if mid is None:
+                continue
+            TenantMembership.objects.filter(tenant=tenant, id=mid).update(
+                user_parent_id_id=pid
+            )
+
+        return Response({'count': len(assignments)}, status=status.HTTP_200_OK)
