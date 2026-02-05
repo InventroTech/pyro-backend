@@ -58,13 +58,11 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                          If lead_stage is also set, stages listed in lead_stage are never excluded (so follow-up page works).
                          Uppercase = exclude by lead_stage (e.g. TRIAL_ACTIVATED). Lowercase = exclude by EventLog event (e.g. trial_activated).
         - resolution_status, affiliated_party: Filter by data JSON (affiliated_party supports comma-separated values)
-        - assigned_to: Filter by assigned_to field. Note: GM users automatically bypass this filter to see all leads.
         - Any other field: Will be searched in the data JSON field
         
         Common usage (both pages):
         - My leads (exclude trial activated): ?entity_type=lead&assigned_to={{current_user}}&exclude_events=TRIAL_ACTIVATED
         - Follow-up leads (only SNOOZED):     ?entity_type=lead&assigned_to={{current_user}}&lead_stage=SNOOZED
-        - All leads (GM sees all):            ?entity_type=lead (GM users automatically see all, assigned_to filter is ignored)
         
         Examples:
         - ?entity_type=lead&assigned_to=user123&lead_stage=SNOOZED
@@ -86,56 +84,11 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         model_fields = {'entity_type', 'search', 'search_fields', 'page', 'page_size', 'ordering', 'created_at__gte', 'created_at__lte', 'exclude_events'}
         data_filters = {k: v for k, v in query_params.items() if k not in model_fields}
         
-        # GM users should see all leads regardless of assigned_to filter
-        # Remove assigned_to from data_filters if user is GM (for "all leads" page)
-        # Ensure role_key is set (it should be set by IsTenantAuthenticated, but ensure it's available)
-        user_role_key = getattr(self.request.user, 'role_key', None)
-        if not user_role_key:
-            # Try to get it explicitly if not set
-            from authz.permissions import _get_membership_info
-            info = _get_membership_info(self.request)
-            if info:
-                user_role_key = info.get('role_key')
-        
-        if user_role_key and user_role_key.upper() == 'GM':
-            if 'assigned_to' in data_filters:
-                logger.info(f"[RecordListCreateView] GM user detected (role_key={user_role_key}), removing assigned_to filter to show all leads. Original filters: {list(data_filters.keys())}")
-                data_filters.pop('assigned_to')
-                logger.info(f"[RecordListCreateView] After removing assigned_to, remaining filters: {list(data_filters.keys())}")
-            else:
-                logger.debug(f"[RecordListCreateView] GM user detected (role_key={user_role_key}), but no assigned_to filter present. Filters: {list(data_filters.keys())}")
-        elif user_role_key:
-            logger.debug(f"[RecordListCreateView] Non-GM user (role_key={user_role_key}), keeping assigned_to filter if present")
-        
         # Build Q objects for JSON field filtering
         q_objects = Q()
-        logger.info(f"[RecordListCreateView] Building filters from data_filters: {list(data_filters.keys())}")
         for field_name, field_value in data_filters.items():
-            # Special handling for lead_stage: case-insensitive matching and handle both uppercase and lowercase
-            if field_name == 'lead_stage':
-                # Support multiple values for lead_stage (comma-separated)
-                if ',' in field_value:
-                    values = [v.strip().upper() for v in field_value.split(',') if v.strip()]
-                    field_q = Q()
-                    for value in values:
-                        # Match both uppercase and case-insensitive (try multiple formats)
-                        field_q |= Q(**{f'data__{field_name}__iexact': value})
-                        field_q |= Q(**{f'data__{field_name}': value})
-                        field_q |= Q(**{f'data__{field_name}': value.upper()})
-                        field_q |= Q(**{f'data__{field_name}': value.lower()})
-                    q_objects &= field_q
-                    logger.info(f"[RecordListCreateView] Filtering by lead_stage={field_value} (normalized to uppercase: {values}), Q object: {field_q}")
-                else:
-                    # Single value - case-insensitive match with multiple format attempts
-                    value_upper = field_value.strip().upper()
-                    value_lower = field_value.strip().lower()
-                    field_q = Q(**{f'data__{field_name}__iexact': value_upper})
-                    field_q |= Q(**{f'data__{field_name}': value_upper})
-                    field_q |= Q(**{f'data__{field_name}': value_lower})
-                    q_objects &= field_q
-                    logger.info(f"[RecordListCreateView] Filtering by lead_stage={field_value} (normalized to uppercase: {value_upper}), Q object: {field_q}")
             # Support multiple values for the same field (comma-separated)
-            elif ',' in field_value:
+            if ',' in field_value:
                 values = [v.strip() for v in field_value.split(',')]
                 field_q = Q()
                 for value in values:
@@ -146,11 +99,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 q_objects &= Q(**{f'data__{field_name}': field_value})
         
         if q_objects:
-            logger.info(f"[RecordListCreateView] Applying data filters Q object: {q_objects}")
             queryset = queryset.filter(q_objects)
-            logger.info(f"[RecordListCreateView] After applying data filters, queryset count: {queryset.count()}")
-        else:
-            logger.debug(f"[RecordListCreateView] No data filters to apply")
         
         # Support ordering
         ordering = query_params.get('ordering')
@@ -1772,17 +1721,16 @@ class GetNextLeadView(APIView):
             logger.info("[GetNextLead] Filtered unassigned leads by eligible types: %s", eligible_lead_types)
         
         # Filter by call attempt matrix rules (max attempts, SLA, min time between calls)
-        # Bulk fetch: load all call attempt matrices for eligible lead types in a single query (avoids N+1)
-        matrices_qs = CallAttemptMatrix.objects.filter(
-            tenant=tenant,
-            lead_type__in=eligible_lead_types
-        )
-        call_attempt_matrices = {m.lead_type: m for m in matrices_qs}
-        for lead_type, matrix in call_attempt_matrices.items():
-            logger.debug(
-                "[GetNextLead] Loaded call attempt matrix for lead_type=%s: max_attempts=%d, sla_days=%d, min_hours=%d",
-                lead_type, matrix.max_call_attempts, matrix.sla_days, matrix.min_time_between_calls_hours
-            )
+        # Load call attempt matrices for all eligible lead types
+        call_attempt_matrices = {}
+        for lead_type in eligible_lead_types:
+            matrix = self._get_call_attempt_matrix(tenant, lead_type)
+            if matrix:
+                call_attempt_matrices[lead_type] = matrix
+                logger.debug(
+                    "[GetNextLead] Loaded call attempt matrix for lead_type=%s: max_attempts=%d, sla_days=%d, min_hours=%d",
+                    lead_type, matrix.max_call_attempts, matrix.sla_days, matrix.min_time_between_calls_hours
+                )
         
         # Filter out leads that exceed matrix limits
         if call_attempt_matrices:
@@ -1900,9 +1848,8 @@ class GetNextLeadView(APIView):
                             AND (data->>'next_call_at')::timestamptz <= NOW()
                         )
                     )
-                    AND data->>'affiliated_party' IS NOT NULL
-                    AND data->>'affiliated_party' != ''
-                    AND data->>'affiliated_party' != 'null'
+                    -- Only require affiliated_party if eligible_lead_types are configured
+                    -- (This will be handled by the filter below, not in SQL WHERE clause)
                     AND (
                         -- Regular queueable statuses (case-insensitive)
                         UPPER(COALESCE(data->>'lead_stage','')) IN ('IN_QUEUE', 'ASSIGNED', 'CALL_LATER', 'SCHEDULED')
@@ -1930,7 +1877,12 @@ class GetNextLeadView(APIView):
                     )
                 """]
             )
-            relaxed_unassigned = relaxed_qs.filter(affiliated_party_filter)
+            # Only apply affiliated_party_filter if eligible_lead_types are configured
+            # If no party types configured, don't filter by affiliated_party (allow NULL)
+            if eligible_lead_types:
+                relaxed_unassigned = relaxed_qs.filter(affiliated_party_filter)
+            else:
+                relaxed_unassigned = relaxed_qs
             relaxed_cnt = relaxed_unassigned.count()
             if relaxed_cnt > 0:
                 logger.info("[GetNextLead] Relaxed fallback found %d unassigned leads ignoring lead_stage filter", relaxed_cnt)
