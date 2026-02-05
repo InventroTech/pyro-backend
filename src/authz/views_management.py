@@ -139,8 +139,16 @@ class UpdateUserHierarchyView(APIView):
     """
     permission_classes = [IsTenantAuthenticated]
 
-    def _collect_subtree_ids(self, tenant, root_membership_id, exclude_membership_id=None):
-        """Return set of all membership ids in the subtree under root_membership_id (excluding exclude_membership_id)."""
+    def _collect_subtree_ids(self, parent_to_children, root_membership_id, exclude_membership_id=None):
+        """Return set of all membership ids in the subtree under root_membership_id (excluding exclude_membership_id).
+        Uses pre-built parent_to_children map for in-memory traversal (no DB queries).
+        
+        Args:
+            parent_to_children: Dict mapping parent_id -> [child_ids] (built from bulk query)
+            root_membership_id: Root membership ID to start traversal from
+            exclude_membership_id: Optional membership ID to exclude from results
+        """
+        # Traverse subtree in memory (no DB queries)
         seen = set()
         stack = [root_membership_id]
         while stack:
@@ -150,9 +158,8 @@ class UpdateUserHierarchyView(APIView):
             if mid in seen:
                 continue
             seen.add(mid)
-            children = TenantMembership.objects.filter(
-                tenant=tenant, user_parent_id_id=mid
-            ).values_list('id', flat=True)
+            # Get children from in-memory map
+            children = parent_to_children.get(mid, [])
             stack.extend(children)
         return seen
 
@@ -192,6 +199,20 @@ class UpdateUserHierarchyView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # Fetch all memberships once for cycle detection (avoid N+1 in _collect_subtree_ids)
+        all_memberships = list(
+            TenantMembership.objects.filter(
+                tenant=tenant
+            ).values('id', 'user_parent_id_id')
+        )
+        
+        # Build parent_id -> [child_ids] map for in-memory traversal
+        parent_to_children = {}
+        for m in all_memberships:
+            parent_id = m.get('user_parent_id_id')
+            if parent_id is not None:
+                parent_to_children.setdefault(parent_id, []).append(m['id'])
+
         # Prevent cycle: for each assignment, new parent must not be in the member's subtree
         for a in assignments:
             if not isinstance(a, dict):
@@ -200,14 +221,18 @@ class UpdateUserHierarchyView(APIView):
             pid = a.get('parent_membership_id')
             if mid is None or pid is None:
                 continue
-            subtree = self._collect_subtree_ids(tenant, mid, exclude_membership_id=mid)
+            subtree = self._collect_subtree_ids(parent_to_children, mid, exclude_membership_id=mid)
             if pid in subtree:
                 return Response(
                     {'error': f'Cycle: parent_membership_id {pid} is in subtree of membership_id {mid}'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-        # Apply updates
+        # Apply updates - use bulk_update to avoid N+1 queries
+        # Collect all membership_ids that need updating
+        membership_ids_to_update = []
+        parent_id_map = {}  # membership_id -> parent_membership_id
+        
         for a in assignments:
             if not isinstance(a, dict):
                 continue
@@ -215,8 +240,28 @@ class UpdateUserHierarchyView(APIView):
             pid = a.get('parent_membership_id')
             if mid is None:
                 continue
-            TenantMembership.objects.filter(tenant=tenant, id=mid).update(
-                user_parent_id_id=pid
+            membership_ids_to_update.append(mid)
+            parent_id_map[mid] = pid
+        
+        if not membership_ids_to_update:
+            return Response({'count': 0}, status=status.HTTP_200_OK)
+        
+        # Fetch all memberships in one query
+        memberships_to_update = list(
+            TenantMembership.objects.filter(
+                tenant=tenant,
+                id__in=membership_ids_to_update
             )
+        )
+        
+        # Update user_parent_id_id in memory
+        for membership in memberships_to_update:
+            membership.user_parent_id_id = parent_id_map[membership.id]
+        
+        # Bulk update all at once (single query)
+        TenantMembership.objects.bulk_update(
+            memberships_to_update,
+            ['user_parent_id_id']
+        )
 
-        return Response({'count': len(assignments)}, status=status.HTTP_200_OK)
+        return Response({'count': len(membership_ids_to_update)}, status=status.HTTP_200_OK)
