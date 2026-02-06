@@ -509,42 +509,93 @@ class LeadSourcesListView(APIView):
 
 class RoutingRuleListCreateView(APIView):
     """
-    List and upsert simple per-user routing rules for tickets and leads.
-
-    v1: one active rule per (tenant, user_id, queue_type).
+    List and upsert routing rules for tickets and leads.
+    Rules are keyed by authz.TenantMembership id (not user UUID).
+    Accepts user_id as TenantMembership id (integer) or as user UUID for backward compat.
     """
 
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
         tenant = request.tenant
-        rules = RoutingRule.objects.filter(tenant=tenant).order_by("queue_type", "user_id", "id")
+        rules = (
+            RoutingRule.objects.filter(tenant=tenant)
+            .select_related("tenant_membership")
+            .order_by("queue_type", "tenant_membership_id", "id")
+        )
         serializer = RoutingRuleSerializer(rules, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
         """
-        Upsert a routing rule for a user + queue_type within the current tenant.
-
-        If a rule already exists for (tenant, user_id, queue_type), it is updated.
-        Otherwise a new rule is created.
+        Upsert a routing rule by tenant_membership + queue_type.
+        Request can send user_id as TenantMembership id (integer) or as user UUID;
+        we resolve to TenantMembership and store that. Works even when membership has no linked auth user.
         """
         tenant = request.tenant
+        raw_user_id = request.data.get("user_id")
+        if not raw_user_id:
+            return Response(
+                {"user_id": ["This field is required (TenantMembership id or user UUID)."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        serializer = RoutingRuleSerializer(data=request.data)
+        raw_str = str(raw_user_id).strip()
+        tenant_membership = None
+
+        # Prefer TenantMembership id (integer)
+        try:
+            tm_id = int(raw_str)
+            tenant_membership = (
+                TenantMembership.objects.filter(tenant=tenant, id=tm_id)
+                .select_related("role")
+                .first()
+            )
+        except (ValueError, TypeError):
+            pass
+
+        # Fallback: treat as user UUID and resolve to membership
+        if not tenant_membership:
+            try:
+                user_uuid = uuid.UUID(raw_str)
+                tenant_membership = (
+                    TenantMembership.objects.filter(tenant=tenant, user_id=user_uuid)
+                    .select_related("role")
+                    .first()
+                )
+            except (ValueError, AttributeError, TypeError):
+                pass
+
+        if not tenant_membership:
+            return Response(
+                {
+                    "user_id": [
+                        "TenantMembership not found for this id or user UUID in this tenant."
+                    ]
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        data = request.data.copy()
+        data["tenant_membership"] = tenant_membership.id
+        data["user_id"] = (
+            str(tenant_membership.user_id) if tenant_membership.user_id else None
+        )
+
+        serializer = RoutingRuleSerializer(data=data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         validated = serializer.validated_data
-        user_id = validated.get("user_id")
-        queue_type = validated.get("queue_type")
+        queue_type = validated["queue_type"]
 
         with transaction.atomic():
             rule, created = RoutingRule.objects.select_for_update().get_or_create(
                 tenant=tenant,
-                user_id=user_id,
+                tenant_membership=tenant_membership,
                 queue_type=queue_type,
                 defaults={
+                    "user_id": tenant_membership.user_id,
                     "is_active": validated.get("is_active", True),
                     "conditions": validated.get("conditions", {}),
                     "name": validated.get("name"),
@@ -553,7 +604,7 @@ class RoutingRuleListCreateView(APIView):
             )
 
             if not created:
-                # Update existing rule in-place
+                rule.user_id = tenant_membership.user_id
                 for field in ["is_active", "conditions", "name", "description"]:
                     if field in validated:
                         setattr(rule, field, validated[field])

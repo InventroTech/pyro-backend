@@ -113,18 +113,19 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
 
 class RoutingRuleSerializer(serializers.ModelSerializer):
     """
-    Simple serializer for RoutingRule.
-
-    v1 keeps conditions very free-form on the backend, with light validation that
-    it's a dict and (optionally) has a 'filters' key.
+    Serializer for RoutingRule. Rules are keyed by tenant_membership; user_id is denormalized and may be null.
     """
+
+    tenant_membership_id = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = RoutingRule
         fields = [
             "id",
             "tenant",
+            "tenant_membership",
             "user_id",
+            "tenant_membership_id",
             "queue_type",
             "is_active",
             "conditions",
@@ -134,6 +135,13 @@ class RoutingRuleSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "tenant", "created_at", "updated_at"]
+        extra_kwargs = {
+            "user_id": {"required": False, "allow_null": True},
+        }
+
+    def get_tenant_membership_id(self, obj):
+        """Expose TenantMembership pk for API consumers."""
+        return getattr(obj, "tenant_membership_id", None)
 
     def validate_queue_type(self, value: str) -> str:
         value = (value or "").strip().lower()
@@ -150,13 +158,9 @@ class RoutingRuleSerializer(serializers.ModelSerializer):
         if filters is not None and not isinstance(filters, (list, tuple)):
             raise serializers.ValidationError("'filters' must be a list when provided")
         return value
-    
+
     def validate(self, attrs):
-        """
-        Ensure conditions is always present and is a dict, never None.
-        """
-        # Ensure conditions is always a dict
-        if 'conditions' not in attrs or attrs.get('conditions') is None:
-            attrs['conditions'] = {}
+        if "conditions" not in attrs or attrs.get("conditions") is None:
+            attrs["conditions"] = {}
         return attrs
-    
+
