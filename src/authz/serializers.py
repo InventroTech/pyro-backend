@@ -11,9 +11,16 @@ class RoleListSerializer(serializers.ModelSerializer):
 
 class TenantMembershipUserSerializer(serializers.ModelSerializer):
     role = RoleListSerializer()
+    user_parent_id = serializers.SerializerMethodField()
+
     class Meta:
         model = TenantMembership
-        fields = ("email", "user_id", "is_active", "created_at", "role")
+        fields = ("id", "email", "user_id", "is_active", "created_at", "role", "user_parent_id")
+
+    def get_user_parent_id(self, obj):
+        if obj.user_parent_id_id is None:
+            return None
+        return obj.user_parent_id_id
 
 
 class CreateSyncedRoleSerializer(serializers.Serializer):

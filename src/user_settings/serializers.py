@@ -49,7 +49,14 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
     lead_types = serializers.ListField(
         child=serializers.CharField(max_length=100),
         allow_empty=True,
-        help_text="List of lead types assigned to the user"
+        help_text="List of lead types (affiliated_party) assigned to the user"
+    )
+    lead_sources = serializers.ListField(
+        child=serializers.CharField(max_length=200),
+        allow_empty=True,
+        required=False,
+        default=list,
+        help_text="List of lead sources assigned to the user; only these leads will be directed to the RM"
     )
     daily_target = serializers.IntegerField(
         required=False,
@@ -84,7 +91,13 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
         if not isinstance(value, list):
             raise serializers.ValidationError("Lead types must be a list")
         return [lt.strip() for lt in value if lt.strip()]
-    
+
+    def validate_lead_sources(self, value):
+        """Validate lead sources list"""
+        if not isinstance(value, list):
+            return []
+        return [ls.strip() for ls in value if ls.strip()]
+
     def validate_daily_target(self, value):
         """Validate daily_target"""
         if value is not None and value < 0:
