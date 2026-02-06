@@ -36,6 +36,11 @@ class UserSettings(models.Model):
         blank=True,
         help_text="Daily lead pull limit for the user (max leads they can fetch per day)"
     )
+    lead_sources = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="List of lead sources assigned to this user (for key=LEAD_TYPE_ASSIGNMENT); only these leads are directed to the RM"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
