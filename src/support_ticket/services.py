@@ -19,15 +19,9 @@ class MixpanelService:
     
     def send_to_mixpanel_sync(self, user_id: str, event_name: str, properties: Dict[str, Any]) -> bool:
         """
-        Send event to Mixpanel via custom API.
-        In staging, event names are prefixed with Pyro_test_ to distinguish from production.
+        Send event to Mixpanel via custom API
         """
         try:
-            # Prefix event name with Pyro_test_ when in staging (production sends as-is)
-            django_env = os.environ.get("DJANGO_ENV", "development").lower()
-            if django_env == "staging":
-                event_name = f"Pyro_test_{event_name}"
-            
             if not self.mixpanel_token:
                 logger.warning("MIXPANEL_TOKEN not configured, skipping Mixpanel event")
                 return False

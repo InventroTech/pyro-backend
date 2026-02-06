@@ -7,7 +7,6 @@ from django.utils.decorators import method_decorator
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework import generics
 from uuid import UUID
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
@@ -19,8 +18,7 @@ import os
 
 from .models import SupportTicketDump
 from .models import SupportTicket
-from .models import PyroSupport
-from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer, UpdateCallStatusRequestSerializer, PyroSupportSerializer
+from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer,UpdateCallStatusRequestSerializer
 from .services import MixpanelService, TicketTimeService
 from user_settings.routing import apply_routing_rule_to_queryset
 from authz.permissions import IsTenantAuthenticated
@@ -1030,94 +1028,3 @@ class ProcessDumpedTicketsView(APIView):
                 'error': str(error),
                 'message': 'Failed to process dumped tickets'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-class PyroSupportListCreateView(generics.ListCreateAPIView):
-    """
-    GET: List all pyro_support tickets (optional query: ?status=Open&category=Technical).
-    POST: Create a new support ticket from the Submit Ticket form.
-    On create: sends notification email to PYRO_SUPPORT_NOTIFICATION_EMAIL (if set).
-    """
-    queryset = PyroSupport.objects.all()
-    serializer_class = PyroSupportSerializer
-    permission_classes = [AllowAny]
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-        status_filter = self.request.query_params.get("status")
-        category_filter = self.request.query_params.get("category")
-        priority_filter = self.request.query_params.get("priority")
-        if status_filter:
-            qs = qs.filter(status=status_filter)
-        if category_filter:
-            qs = qs.filter(category=category_filter)
-        if priority_filter:
-            qs = qs.filter(priority=priority_filter)
-        return qs
-
-    def perform_create(self, serializer):
-        ticket = serializer.save()
-        # Send notification email when a new pyro_support entry is created
-        self._send_ticket_notification_email(ticket)
-
-    def _send_ticket_notification_email(self, ticket):
-        """Send email notification to configured recipient when a new support ticket is created."""
-        notification_email_raw = os.environ.get("PYRO_SUPPORT_NOTIFICATION_EMAIL", "").strip()
-        if not notification_email_raw:
-            logger.debug("PYRO_SUPPORT_NOTIFICATION_EMAIL not set, skipping ticket notification email")
-            return
-        # Support comma-separated emails
-        to_emails = [e.strip() for e in notification_email_raw.split(",") if e.strip()]
-        if not to_emails:
-            return
-        try:
-            from email_protocol.services import send_email
-            subject = f"[Pyro Support] New ticket #{ticket.id}: {ticket.subject}"
-            message = (
-                f"A new support ticket has been submitted.\n\n"
-                f"Ticket ID: {ticket.id}\n"
-                f"Name: {ticket.full_name}\n"
-                f"Email: {ticket.email_address}\n"
-                f"Subject: {ticket.subject}\n"
-                f"Category: {ticket.category}\n"
-                f"Priority: {ticket.priority}\n"
-                f"Status: {ticket.status}\n"
-                f"Created: {ticket.created_at}\n\n"
-                f"Description:\n{ticket.description}"
-            )
-            html_message = (
-                f"<h2>New Support Ticket #{ticket.id}</h2>"
-                f"<p><strong>Name:</strong> {ticket.full_name}<br>"
-                f"<strong>Email:</strong> {ticket.email_address}<br>"
-                f"<strong>Subject:</strong> {ticket.subject}<br>"
-                f"<strong>Category:</strong> {ticket.category}<br>"
-                f"<strong>Priority:</strong> {ticket.priority}<br>"
-                f"<strong>Status:</strong> {ticket.status}<br>"
-                f"<strong>Created:</strong> {ticket.created_at}</p>"
-                f"<h3>Description</h3><p>{ticket.description}</p>"
-            )
-            success, msg = send_email(
-                to_emails=to_emails,
-                subject=subject,
-                message=message,
-                html_message=html_message,
-                client_name="PyroSupport",
-                fail_silently=True,
-            )
-            if success:
-                logger.info(f"[PyroSupport] Notification email sent for ticket #{ticket.id} to {to_emails}")
-            else:
-                logger.warning(f"[PyroSupport] Failed to send notification email for ticket #{ticket.id}: {msg}")
-        except Exception as e:
-            logger.error(f"[PyroSupport] Error sending ticket notification email: {e}", exc_info=True)
-
-
-class PyroSupportDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """
-    GET: Retrieve a single pyro_support ticket by id.
-    PATCH/PUT: Update a ticket.
-    DELETE: Delete a ticket.
-    """
-    queryset = PyroSupport.objects.all()
-    serializer_class = PyroSupportSerializer
-    permission_classes = [AllowAny]
