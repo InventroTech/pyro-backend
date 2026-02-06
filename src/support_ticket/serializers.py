@@ -1,7 +1,6 @@
 from rest_framework import serializers
 from .models import SupportTicket
 from .models import SupportTicketDump
-from .models import PyroSupport
 from analytics.serializers import SupportTicketSerializer
 
 
@@ -211,27 +210,3 @@ class TakeBreakSerializer(serializers.Serializer):
         if not SupportTicket.objects.filter(id=value).exists():
             raise serializers.ValidationError("Ticket not found")
         return value
-
-
-class PyroSupportSerializer(serializers.ModelSerializer):
-    """Serializer for PyroSupport (Submit Ticket form)."""
-
-    class Meta:
-        model = PyroSupport
-        fields = [
-            "id",
-            "full_name",
-            "email_address",
-            "subject",
-            "category",
-            "priority",
-            "description",
-            "status",
-            "created_at",
-            "updated_at",
-        ]
-        read_only_fields = ["id", "created_at", "updated_at"]
-
-    def create(self, validated_data):
-        validated_data.setdefault("status", "Open")
-        return super().create(validated_data)
