@@ -59,9 +59,10 @@ class UserSettings(models.Model):
 
 class RoutingRule(models.Model):
     """
-    Simple per-user routing rule for queueable objects (tickets, leads, etc.).
-    v1: one active rule per (tenant, user_id, queue_type) with a small set of
-    allowed conditions (e.g. state, poster) stored as JSON.
+    Routing rule for queueable objects (tickets, leads), keyed by authz.TenantMembership.
+    One active rule per (tenant, tenant_membership, queue_type). Works even when the
+    membership has no linked auth user yet (user_id null). user_id is denormalized
+    from the membership for backward compatibility.
     """
 
     QUEUE_TYPE_TICKET = "ticket"
@@ -73,8 +74,16 @@ class RoutingRule(models.Model):
         db_column="tenant_id",
         help_text="The tenant this routing rule belongs to",
     )
+    tenant_membership = models.ForeignKey(
+        "authz.TenantMembership",
+        on_delete=models.CASCADE,
+        db_column="tenant_membership_id",
+        help_text="The tenant membership this rule applies to (primary key for the rule).",
+    )
     user_id = models.UUIDField(
-        help_text="The user ID this routing rule applies to (Supabase user UUID)"
+        null=True,
+        blank=True,
+        help_text="Denormalized from TenantMembership.user_id when set; may be null if membership has no linked auth user yet.",
     )
     queue_type = models.CharField(
         max_length=50,
@@ -108,14 +117,14 @@ class RoutingRule(models.Model):
 
     class Meta:
         db_table = "routing_rules"
-        unique_together = [["tenant", "user_id", "queue_type"]]
+        unique_together = [["tenant", "tenant_membership", "queue_type"]]
         indexes = [
-            models.Index(fields=["tenant", "queue_type", "user_id"]),
+            models.Index(fields=["tenant", "queue_type", "tenant_membership"]),
             models.Index(fields=["tenant", "queue_type", "is_active"]),
         ]
 
     def __str__(self) -> str:
         return (
-            f"RoutingRule(tenant={self.tenant_id}, user={self.user_id}, "
+            f"RoutingRule(tenant={self.tenant_id}, tenant_membership={self.tenant_membership_id}, "
             f"queue_type={self.queue_type}, active={self.is_active})"
         )
