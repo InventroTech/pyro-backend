@@ -1418,8 +1418,9 @@ class GetNextLeadView(APIView):
         now = timezone.now()
         now_iso = now.isoformat()
 
-        # Step 2: Check the RM is eligible for what leads - get from user settings
+        # Step 2: Check the RM is eligible for what leads - get from user settings (lead types + lead sources)
         eligible_lead_types = []
+        eligible_lead_sources = []
         user_uuid = None
         daily_limit = None
         try:
@@ -1457,19 +1458,25 @@ class GetNextLeadView(APIView):
                             key='LEAD_TYPE_ASSIGNMENT'
                         )
                         eligible_lead_types = setting.value if isinstance(setting.value, list) else []
+                        eligible_lead_sources = setting.lead_sources if isinstance(getattr(setting, 'lead_sources', None), list) else []
                         logger.info("[GetNextLead] Found eligible lead types for user %s: %s", user_identifier, eligible_lead_types)
+                        if eligible_lead_sources:
+                            logger.info("[GetNextLead] Found eligible lead sources for user %s: %s", user_identifier, eligible_lead_sources)
                     except UserSettings.DoesNotExist:
                         logger.info("[GetNextLead] No lead type assignment found for user %s - will push all leads to RM", user_identifier)
                         eligible_lead_types = []
+                        eligible_lead_sources = []
                 else:
                     logger.warning("[GetNextLead] TenantMembership not found for user UUID %s", user_uuid)
                     eligible_lead_types = []
+                    eligible_lead_sources = []
                     daily_limit = None
             else:
                 logger.warning("[GetNextLead] Could not resolve user UUID for %s", user_identifier)
         except Exception as e:
             logger.error("[GetNextLead] Error fetching user settings: %s", str(e))
             eligible_lead_types = []
+            eligible_lead_sources = []
             daily_limit = None
 
         # If user has no eligible lead types assigned, push all leads to the RM
@@ -1719,7 +1726,12 @@ class GetNextLeadView(APIView):
                     affiliated_party_filter |= Q(data__affiliated_party=alias)
             unassigned = base_qs.filter(affiliated_party_filter)
             logger.info("[GetNextLead] Filtered unassigned leads by eligible types: %s", eligible_lead_types)
-        
+
+        # Filter by eligible lead sources (if configured): only direct leads whose lead_source is in the RM's list
+        if eligible_lead_sources:
+            unassigned = unassigned.filter(data__lead_source__in=eligible_lead_sources)
+            logger.info("[GetNextLead] Filtered unassigned leads by eligible lead sources: %s", eligible_lead_sources)
+
         # Filter by call attempt matrix rules (max attempts, SLA, min time between calls)
         # Load call attempt matrices for all eligible lead types
         call_attempt_matrices = {}

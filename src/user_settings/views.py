@@ -183,7 +183,7 @@ class LeadTypeAssignmentView(APIView):
             role=rm_role
         ).select_related('role')
         
-        # Fetch UserSettings for LEAD_TYPE_ASSIGNMENT key for these memberships
+        # Fetch UserSettings for LEAD_TYPE_ASSIGNMENT (lead_sources stored in same row's lead_sources column)
         tenant_membership_ids = [tm.id for tm in tenant_memberships]
         user_settings_map = {}
         if tenant_membership_ids:
@@ -192,7 +192,6 @@ class LeadTypeAssignmentView(APIView):
                 tenant_membership_id__in=tenant_membership_ids,
                 key='LEAD_TYPE_ASSIGNMENT'
             )
-            # Build map: tenant_membership_id -> UserSettings
             for setting in user_settings:
                 user_settings_map[setting.tenant_membership_id] = setting
         
@@ -216,21 +215,23 @@ class LeadTypeAssignmentView(APIView):
             # Store mapping: TenantMembership ID -> list of identifiers (UUID and/or email)
             tm_identifier_map[tm.id] = tm_identifiers
             
-            # Get UserSettings if exists, otherwise use defaults
+            # Get UserSettings if exists, otherwise use defaults (lead_sources from same row's column)
             setting = user_settings_map.get(tm.id)
             lead_types = setting.value if setting and isinstance(setting.value, list) else []
             daily_target = setting.daily_target if setting else None
             daily_limit = setting.daily_limit if setting else None
-            
+            lead_sources = setting.lead_sources if setting and isinstance(getattr(setting, 'lead_sources', None), list) else []
+
             # Use TenantMembership id as the primary identifier
             user_id_value = str(tm.id)
-            
+
             assignments.append({
                 'user_id': user_id_value,  # Always use TenantMembership ID as primary identifier
                 'user_name': tm.email.split('@')[0] if tm.email else '',  # Use email prefix as name
                 'user_email': tm.email,
                 'tenant_membership_id': tm.id,  # Explicitly include TenantMembership ID
                 'lead_types': lead_types,
+                'lead_sources': lead_sources,
                 'daily_target': daily_target,  # Can be None, 0, or any integer
                 'daily_limit': daily_limit,  # Can be None, 0, or any integer
                 'assigned_leads_count': 0,  # Will update after counting
@@ -282,10 +283,11 @@ class LeadTypeAssignmentView(APIView):
         if serializer.is_valid():
             user_id = serializer.validated_data['user_id']
             lead_types = serializer.validated_data['lead_types']
+            lead_sources = serializer.validated_data.get('lead_sources') or []
             daily_target = serializer.validated_data.get('daily_target', None)
             daily_limit = serializer.validated_data.get('daily_limit', None)
-            
-            logger.info(f"LeadTypeAssignmentView.post - daily_target={daily_target}, daily_limit={daily_limit}, daily_target in validated_data={'daily_target' in serializer.validated_data}, daily_limit in validated_data={'daily_limit' in serializer.validated_data}")
+
+            logger.info(f"LeadTypeAssignmentView.post - daily_target={daily_target}, daily_limit={daily_limit}, lead_sources={lead_sources}")
             
             # user_id must be TenantMembership ID (integer, e.g., 147)
             logger.info(f"Looking up TenantMembership with tenant={tenant.id}, user_id={user_id} (type: {type(user_id)})")
@@ -317,8 +319,7 @@ class LeadTypeAssignmentView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            # Create or update the setting
-            # Use tenant_membership instead of user_id
+            # Create or update the setting (lead_types in value, lead_sources in lead_sources column)
             setting, created = UserSettings.objects.get_or_create(
                 tenant=tenant,
                 tenant_membership=tenant_membership,
@@ -327,23 +328,20 @@ class LeadTypeAssignmentView(APIView):
                     'value': lead_types,
                     'daily_target': daily_target,
                     'daily_limit': daily_limit,
+                    'lead_sources': lead_sources,
                 }
             )
-            
             if not created:
-                # Update existing setting
                 setting.value = lead_types
-                # Use 'in' check to handle both None and explicit values (including 0)
+                setting.lead_sources = lead_sources
                 if 'daily_target' in serializer.validated_data:
-                    old_daily_target = setting.daily_target
                     setting.daily_target = daily_target
-                    logger.info(f"Updating daily_target from {old_daily_target} to {daily_target} for setting id={setting.id}")
+                    logger.info(f"Updating daily_target to {daily_target} for setting id={setting.id}")
                 if 'daily_limit' in serializer.validated_data:
-                    old_daily_limit = setting.daily_limit
                     setting.daily_limit = daily_limit
-                    logger.info(f"Updating daily_limit from {old_daily_limit} to {daily_limit} for setting id={setting.id}")
+                    logger.info(f"Updating daily_limit to {daily_limit} for setting id={setting.id}")
                 setting.save()
-                logger.info(f"Saved setting id={setting.id}, daily_target={setting.daily_target}, daily_limit={setting.daily_limit}")
+                logger.info(f"Saved setting id={setting.id}, daily_target={setting.daily_target}, daily_limit={setting.daily_limit}, lead_sources={setting.lead_sources}")
             
             # Update daily_target across all user settings (since it's user-level, not key-specific)
             # Use 'in' check to handle both None and explicit values (including 0)
@@ -372,6 +370,7 @@ class LeadTypeAssignmentView(APIView):
                 'user_email': tenant_membership.email,
                 'tenant_membership_id': tenant_membership.id,
                 'lead_types': lead_types,
+                'lead_sources': lead_sources,
                 'daily_target': setting.daily_target,  # Return the saved value
                 'daily_limit': setting.daily_limit,  # Return the saved value
                 'created': created
@@ -471,6 +470,40 @@ class LeadTypesListView(APIView):
         
         return Response({
             'lead_types': lead_types_list
+        }, status=status.HTTP_200_OK)
+
+
+class LeadSourcesListView(APIView):
+    """Get all unique lead sources (data.lead_source values) from records for the current tenant"""
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        """Get all unique lead sources from records' lead_source field"""
+        tenant = request.tenant
+
+        if not tenant:
+            return Response({
+                'lead_sources': []
+            }, status=status.HTTP_200_OK)
+
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT DISTINCT data->>'lead_source' as lead_source
+                FROM records
+                WHERE tenant_id = %s
+                  AND entity_type = 'lead'
+                  AND data->>'lead_source' IS NOT NULL
+                  AND data->>'lead_source' != ''
+                  AND data->>'lead_source' != 'null'
+                ORDER BY lead_source
+            """, [tenant.id])
+
+            lead_sources_list = [row[0].strip() for row in cursor.fetchall() if row[0] and row[0].strip()]
+
+        return Response({
+            'lead_sources': lead_sources_list
         }, status=status.HTTP_200_OK)
 
 
