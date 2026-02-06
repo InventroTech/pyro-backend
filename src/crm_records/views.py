@@ -1733,15 +1733,20 @@ class GetNextLeadView(APIView):
             logger.info("[GetNextLead] Filtered unassigned leads by eligible lead sources: %s", eligible_lead_sources)
 
         # Filter by call attempt matrix rules (max attempts, SLA, min time between calls)
-        # Load call attempt matrices for all eligible lead types
+        # Load call attempt matrices for all eligible lead types - BULK FETCH to avoid N+1 queries
         call_attempt_matrices = {}
-        for lead_type in eligible_lead_types:
-            matrix = self._get_call_attempt_matrix(tenant, lead_type)
-            if matrix:
-                call_attempt_matrices[lead_type] = matrix
+        if eligible_lead_types:
+            # Single bulk query instead of one query per lead_type
+            matrices = CallAttemptMatrix.objects.filter(
+                tenant=tenant,
+                lead_type__in=eligible_lead_types
+            )
+            # Build dictionary mapping lead_type -> matrix
+            for matrix in matrices:
+                call_attempt_matrices[matrix.lead_type] = matrix
                 logger.debug(
                     "[GetNextLead] Loaded call attempt matrix for lead_type=%s: max_attempts=%d, sla_days=%d, min_hours=%d",
-                    lead_type, matrix.max_call_attempts, matrix.sla_days, matrix.min_time_between_calls_hours
+                    matrix.lead_type, matrix.max_call_attempts, matrix.sla_days, matrix.min_time_between_calls_hours
                 )
         
         # Filter out leads that exceed matrix limits
