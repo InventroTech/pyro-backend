@@ -7,7 +7,7 @@ class UserSettingsSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = UserSettings
-        fields = ['id', 'tenant', 'tenant_membership', 'key', 'value', 'daily_target', 'daily_limit', 'created_at', 'updated_at']
+        fields = ['id', 'tenant', 'tenant_membership', 'key', 'value', 'daily_target', 'daily_limit', 'lead_sources', 'lead_statuses', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def validate_key(self, value):
@@ -58,6 +58,13 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
         default=list,
         help_text="List of lead sources assigned to the user; only these leads will be directed to the RM"
     )
+    lead_statuses = serializers.ListField(
+        child=serializers.CharField(max_length=200),
+        allow_empty=True,
+        required=False,
+        default=list,
+        help_text="List of lead statuses assigned to the user; only these leads will be directed to the RM"
+    )
     daily_target = serializers.IntegerField(
         required=False,
         allow_null=True,
@@ -97,6 +104,12 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
         if not isinstance(value, list):
             return []
         return [ls.strip() for ls in value if ls.strip()]
+
+    def validate_lead_statuses(self, value):
+        """Validate lead statuses list"""
+        if not isinstance(value, list):
+            return []
+        return [lstatus.strip() for lstatus in value if lstatus.strip()]
 
     def validate_daily_target(self, value):
         """Validate daily_target"""
