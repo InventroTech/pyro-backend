@@ -12,7 +12,7 @@ try:
     from dateutil import parser as date_parser
 except ImportError:
     date_parser = None
-from django.db.models import Q, F
+from django.db.models import Q, F, Count, Case, When, Value, IntegerField
 from django.db import transaction
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
@@ -1156,26 +1156,35 @@ class LeadStatsView(APIView):
                 "closed": 0
             }, status=status.HTTP_200_OK)
         
-        # Get all leads for this tenant
-        leads = Record.objects.filter(tenant=tenant, entity_type='lead')
+        # Get all leads for this tenant - use tenant_id for better index usage
+        leads_qs = Record.objects.filter(tenant_id=tenant.id, entity_type='lead')
         
-        # Count by stage
+        # Use database aggregation instead of Python loops for performance
+        # Count total leads
+        total_leads = leads_qs.count()
+        
+        # Count by lead_stage using JSONB field aggregation (much faster than Python loop)
+        # Check both uppercase and lowercase variations to handle different data formats
+        stage_counts = leads_qs.aggregate(
+            in_queue=Count('id', filter=Q(data__lead_stage__in=['IN_QUEUE', 'in_queue', 'In_Queue'])),
+            assigned=Count('id', filter=Q(data__lead_stage__in=['ASSIGNED', 'assigned', 'Assigned'])),
+            call_later=Count('id', filter=Q(data__lead_stage__in=['CALL_LATER', 'call_later', 'Call_Later'])),
+            scheduled=Count('id', filter=Q(data__lead_stage__in=['SCHEDULED', 'scheduled', 'Scheduled'])),
+            won=Count('id', filter=Q(data__lead_stage__in=['WON', 'won', 'Won'])),
+            lost=Count('id', filter=Q(data__lead_stage__in=['LOST', 'lost', 'Lost'])),
+            closed=Count('id', filter=Q(data__lead_stage__in=['CLOSED', 'closed', 'Closed'])),
+        )
+        
         stats = {
-            "total_leads": leads.count(),
-            "in_queue": 0,
-            "assigned": 0,
-            "call_later": 0,
-            "scheduled": 0,
-            "won": 0,
-            "lost": 0,
-            "closed": 0
+            "total_leads": total_leads,
+            "in_queue": stage_counts.get('in_queue', 0) or 0,
+            "assigned": stage_counts.get('assigned', 0) or 0,
+            "call_later": stage_counts.get('call_later', 0) or 0,
+            "scheduled": stage_counts.get('scheduled', 0) or 0,
+            "won": stage_counts.get('won', 0) or 0,
+            "lost": stage_counts.get('lost', 0) or 0,
+            "closed": stage_counts.get('closed', 0) or 0,
         }
-        
-        # Count by stage
-        for lead in leads:
-            stage = lead.data.get('lead_stage') if lead.data else None
-            if stage in stats:
-                stats[stage] += 1
         
         return Response(stats, status=status.HTTP_200_OK)
 
@@ -1418,9 +1427,10 @@ class GetNextLeadView(APIView):
         now = timezone.now()
         now_iso = now.isoformat()
 
-        # Step 2: Check the RM is eligible for what leads - get from user settings (lead types + lead sources)
+        # Step 2: Check the RM is eligible for what leads - get from user settings (lead types + lead sources + lead statuses)
         eligible_lead_types = []
         eligible_lead_sources = []
+        eligible_lead_statuses = []
         user_uuid = None
         daily_limit = None
         try:
@@ -1459,13 +1469,21 @@ class GetNextLeadView(APIView):
                         )
                         eligible_lead_types = setting.value if isinstance(setting.value, list) else []
                         eligible_lead_sources = setting.lead_sources if isinstance(getattr(setting, 'lead_sources', None), list) else []
+                        # Safely access lead_statuses in case migration hasn't been run yet
+                        try:
+                            eligible_lead_statuses = setting.lead_statuses if isinstance(getattr(setting, 'lead_statuses', None), list) else []
+                        except (AttributeError, Exception):
+                            eligible_lead_statuses = []
                         logger.info("[GetNextLead] Found eligible lead types for user %s: %s", user_identifier, eligible_lead_types)
                         if eligible_lead_sources:
                             logger.info("[GetNextLead] Found eligible lead sources for user %s: %s", user_identifier, eligible_lead_sources)
+                        if eligible_lead_statuses:
+                            logger.info("[GetNextLead] Found eligible lead statuses for user %s: %s", user_identifier, eligible_lead_statuses)
                     except UserSettings.DoesNotExist:
                         logger.info("[GetNextLead] No lead type assignment found for user %s - will push all leads to RM", user_identifier)
                         eligible_lead_types = []
                         eligible_lead_sources = []
+                        eligible_lead_statuses = []
                 else:
                     logger.warning("[GetNextLead] TenantMembership not found for user UUID %s", user_uuid)
                     eligible_lead_types = []
@@ -1477,6 +1495,7 @@ class GetNextLeadView(APIView):
             logger.error("[GetNextLead] Error fetching user settings: %s", str(e))
             eligible_lead_types = []
             eligible_lead_sources = []
+            eligible_lead_statuses = []
             daily_limit = None
 
         # If user has no eligible lead types assigned, push all leads to the RM
@@ -1731,6 +1750,12 @@ class GetNextLeadView(APIView):
         if eligible_lead_sources:
             unassigned = unassigned.filter(data__lead_source__in=eligible_lead_sources)
             logger.info("[GetNextLead] Filtered unassigned leads by eligible lead sources: %s", eligible_lead_sources)
+        
+        # Filter by eligible lead statuses (if configured): only direct leads whose lead_status is in the RM's list
+        # If nothing selected, query all (no filtering)
+        if eligible_lead_statuses:
+            unassigned = unassigned.filter(data__lead_status__in=eligible_lead_statuses)
+            logger.info("[GetNextLead] Filtered unassigned leads by eligible lead statuses: %s", eligible_lead_statuses)
 
         # Filter by call attempt matrix rules (max attempts, SLA, min time between calls)
         # Load call attempt matrices for all eligible lead types - BULK FETCH to avoid N+1 queries
