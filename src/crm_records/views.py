@@ -12,7 +12,7 @@ try:
     from dateutil import parser as date_parser
 except ImportError:
     date_parser = None
-from django.db.models import Q, F
+from django.db.models import Q, F, Count, Case, When, Value, IntegerField
 from django.db import transaction
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
@@ -1156,26 +1156,35 @@ class LeadStatsView(APIView):
                 "closed": 0
             }, status=status.HTTP_200_OK)
         
-        # Get all leads for this tenant
-        leads = Record.objects.filter(tenant=tenant, entity_type='lead')
+        # Get all leads for this tenant - use tenant_id for better index usage
+        leads_qs = Record.objects.filter(tenant_id=tenant.id, entity_type='lead')
         
-        # Count by stage
+        # Use database aggregation instead of Python loops for performance
+        # Count total leads
+        total_leads = leads_qs.count()
+        
+        # Count by lead_stage using JSONB field aggregation (much faster than Python loop)
+        # Check both uppercase and lowercase variations to handle different data formats
+        stage_counts = leads_qs.aggregate(
+            in_queue=Count('id', filter=Q(data__lead_stage__in=['IN_QUEUE', 'in_queue', 'In_Queue'])),
+            assigned=Count('id', filter=Q(data__lead_stage__in=['ASSIGNED', 'assigned', 'Assigned'])),
+            call_later=Count('id', filter=Q(data__lead_stage__in=['CALL_LATER', 'call_later', 'Call_Later'])),
+            scheduled=Count('id', filter=Q(data__lead_stage__in=['SCHEDULED', 'scheduled', 'Scheduled'])),
+            won=Count('id', filter=Q(data__lead_stage__in=['WON', 'won', 'Won'])),
+            lost=Count('id', filter=Q(data__lead_stage__in=['LOST', 'lost', 'Lost'])),
+            closed=Count('id', filter=Q(data__lead_stage__in=['CLOSED', 'closed', 'Closed'])),
+        )
+        
         stats = {
-            "total_leads": leads.count(),
-            "in_queue": 0,
-            "assigned": 0,
-            "call_later": 0,
-            "scheduled": 0,
-            "won": 0,
-            "lost": 0,
-            "closed": 0
+            "total_leads": total_leads,
+            "in_queue": stage_counts.get('in_queue', 0) or 0,
+            "assigned": stage_counts.get('assigned', 0) or 0,
+            "call_later": stage_counts.get('call_later', 0) or 0,
+            "scheduled": stage_counts.get('scheduled', 0) or 0,
+            "won": stage_counts.get('won', 0) or 0,
+            "lost": stage_counts.get('lost', 0) or 0,
+            "closed": stage_counts.get('closed', 0) or 0,
         }
-        
-        # Count by stage
-        for lead in leads:
-            stage = lead.data.get('lead_stage') if lead.data else None
-            if stage in stats:
-                stats[stage] += 1
         
         return Response(stats, status=status.HTTP_200_OK)
 
