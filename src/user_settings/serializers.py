@@ -7,7 +7,7 @@ class UserSettingsSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = UserSettings
-        fields = ['id', 'tenant', 'tenant_membership', 'key', 'value', 'daily_target', 'daily_limit', 'created_at', 'updated_at']
+        fields = ['id', 'tenant', 'tenant_membership', 'key', 'value', 'daily_target', 'daily_limit', 'lead_sources', 'lead_statuses', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def validate_key(self, value):
@@ -58,6 +58,13 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
         default=list,
         help_text="List of lead sources assigned to the user; only these leads will be directed to the RM"
     )
+    lead_statuses = serializers.ListField(
+        child=serializers.CharField(max_length=200),
+        allow_empty=True,
+        required=False,
+        default=list,
+        help_text="List of lead statuses assigned to the user; only these leads will be directed to the RM"
+    )
     daily_target = serializers.IntegerField(
         required=False,
         allow_null=True,
@@ -98,6 +105,12 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
             return []
         return [ls.strip() for ls in value if ls.strip()]
 
+    def validate_lead_statuses(self, value):
+        """Validate lead statuses list"""
+        if not isinstance(value, list):
+            return []
+        return [lstatus.strip() for lstatus in value if lstatus.strip()]
+
     def validate_daily_target(self, value):
         """Validate daily_target"""
         if value is not None and value < 0:
@@ -113,18 +126,19 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
 
 class RoutingRuleSerializer(serializers.ModelSerializer):
     """
-    Simple serializer for RoutingRule.
-
-    v1 keeps conditions very free-form on the backend, with light validation that
-    it's a dict and (optionally) has a 'filters' key.
+    Serializer for RoutingRule. Rules are keyed by tenant_membership; user_id is denormalized and may be null.
     """
+
+    tenant_membership_id = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = RoutingRule
         fields = [
             "id",
             "tenant",
+            "tenant_membership",
             "user_id",
+            "tenant_membership_id",
             "queue_type",
             "is_active",
             "conditions",
@@ -134,6 +148,13 @@ class RoutingRuleSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "tenant", "created_at", "updated_at"]
+        extra_kwargs = {
+            "user_id": {"required": False, "allow_null": True},
+        }
+
+    def get_tenant_membership_id(self, obj):
+        """Expose TenantMembership pk for API consumers."""
+        return getattr(obj, "tenant_membership_id", None)
 
     def validate_queue_type(self, value: str) -> str:
         value = (value or "").strip().lower()
@@ -150,13 +171,9 @@ class RoutingRuleSerializer(serializers.ModelSerializer):
         if filters is not None and not isinstance(filters, (list, tuple)):
             raise serializers.ValidationError("'filters' must be a list when provided")
         return value
-    
+
     def validate(self, attrs):
-        """
-        Ensure conditions is always present and is a dict, never None.
-        """
-        # Ensure conditions is always a dict
-        if 'conditions' not in attrs or attrs.get('conditions') is None:
-            attrs['conditions'] = {}
+        if "conditions" not in attrs or attrs.get("conditions") is None:
+            attrs["conditions"] = {}
         return attrs
-    
+

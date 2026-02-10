@@ -187,11 +187,39 @@ class LeadTypeAssignmentView(APIView):
         tenant_membership_ids = [tm.id for tm in tenant_memberships]
         user_settings_map = {}
         if tenant_membership_ids:
-            user_settings = UserSettings.objects.filter(
-                tenant=tenant,
-                tenant_membership_id__in=tenant_membership_ids,
-                key='LEAD_TYPE_ASSIGNMENT'
-            )
+            # Check if lead_statuses column exists in database schema
+            from django.db import connection
+            column_exists = False
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT column_name 
+                        FROM information_schema.columns 
+                        WHERE table_name='user_settings' AND column_name='lead_statuses'
+                    """)
+                    column_exists = cursor.fetchone() is not None
+            except Exception:
+                column_exists = False
+            
+            # Query based on whether column exists
+            if column_exists:
+                # Column exists, query normally
+                user_settings = UserSettings.objects.filter(
+                    tenant=tenant,
+                    tenant_membership_id__in=tenant_membership_ids,
+                    key='LEAD_TYPE_ASSIGNMENT'
+                )
+            else:
+                # Column doesn't exist, use only() to select only existing fields
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning("lead_statuses column doesn't exist in database yet, querying without it")
+                user_settings = UserSettings.objects.filter(
+                    tenant=tenant,
+                    tenant_membership_id__in=tenant_membership_ids,
+                    key='LEAD_TYPE_ASSIGNMENT'
+                ).only('id', 'tenant_id', 'tenant_membership_id', 'key', 'value', 'daily_target', 'daily_limit', 'lead_sources', 'created_at', 'updated_at')
+            
             for setting in user_settings:
                 user_settings_map[setting.tenant_membership_id] = setting
         
@@ -215,12 +243,22 @@ class LeadTypeAssignmentView(APIView):
             # Store mapping: TenantMembership ID -> list of identifiers (UUID and/or email)
             tm_identifier_map[tm.id] = tm_identifiers
             
-            # Get UserSettings if exists, otherwise use defaults (lead_sources from same row's column)
+            # Get UserSettings if exists, otherwise use defaults (lead_sources and lead_statuses from same row's column)
             setting = user_settings_map.get(tm.id)
             lead_types = setting.value if setting and isinstance(setting.value, list) else []
             daily_target = setting.daily_target if setting else None
             daily_limit = setting.daily_limit if setting else None
             lead_sources = setting.lead_sources if setting and isinstance(getattr(setting, 'lead_sources', None), list) else []
+            # Safely access lead_statuses - wrap in try-except in case migration hasn't been run yet
+            lead_statuses = []
+            if setting:
+                try:
+                    lead_statuses_value = setting.lead_statuses
+                    if isinstance(lead_statuses_value, list):
+                        lead_statuses = lead_statuses_value
+                except (AttributeError, Exception):
+                    # Field doesn't exist in database yet (migration not run)
+                    lead_statuses = []
 
             # Use TenantMembership id as the primary identifier
             user_id_value = str(tm.id)
@@ -232,6 +270,7 @@ class LeadTypeAssignmentView(APIView):
                 'tenant_membership_id': tm.id,  # Explicitly include TenantMembership ID
                 'lead_types': lead_types,
                 'lead_sources': lead_sources,
+                'lead_statuses': lead_statuses,
                 'daily_target': daily_target,  # Can be None, 0, or any integer
                 'daily_limit': daily_limit,  # Can be None, 0, or any integer
                 'assigned_leads_count': 0,  # Will update after counting
@@ -284,10 +323,11 @@ class LeadTypeAssignmentView(APIView):
             user_id = serializer.validated_data['user_id']
             lead_types = serializer.validated_data['lead_types']
             lead_sources = serializer.validated_data.get('lead_sources') or []
+            lead_statuses = serializer.validated_data.get('lead_statuses') or []
             daily_target = serializer.validated_data.get('daily_target', None)
             daily_limit = serializer.validated_data.get('daily_limit', None)
 
-            logger.info(f"LeadTypeAssignmentView.post - daily_target={daily_target}, daily_limit={daily_limit}, lead_sources={lead_sources}")
+            logger.info(f"LeadTypeAssignmentView.post - daily_target={daily_target}, daily_limit={daily_limit}, lead_sources={lead_sources}, lead_statuses={lead_statuses}")
             
             # user_id must be TenantMembership ID (integer, e.g., 147)
             logger.info(f"Looking up TenantMembership with tenant={tenant.id}, user_id={user_id} (type: {type(user_id)})")
@@ -319,7 +359,7 @@ class LeadTypeAssignmentView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            # Create or update the setting (lead_types in value, lead_sources in lead_sources column)
+            # Create or update the setting (lead_types in value, lead_sources and lead_statuses in their columns)
             setting, created = UserSettings.objects.get_or_create(
                 tenant=tenant,
                 tenant_membership=tenant_membership,
@@ -329,11 +369,15 @@ class LeadTypeAssignmentView(APIView):
                     'daily_target': daily_target,
                     'daily_limit': daily_limit,
                     'lead_sources': lead_sources,
+                    **({'lead_statuses': lead_statuses} if hasattr(UserSettings, 'lead_statuses') else {}),
                 }
             )
             if not created:
                 setting.value = lead_types
                 setting.lead_sources = lead_sources
+                # Only set lead_statuses if the field exists (migration has been run)
+                if hasattr(setting, 'lead_statuses'):
+                    setting.lead_statuses = lead_statuses
                 if 'daily_target' in serializer.validated_data:
                     setting.daily_target = daily_target
                     logger.info(f"Updating daily_target to {daily_target} for setting id={setting.id}")
@@ -341,7 +385,8 @@ class LeadTypeAssignmentView(APIView):
                     setting.daily_limit = daily_limit
                     logger.info(f"Updating daily_limit to {daily_limit} for setting id={setting.id}")
                 setting.save()
-                logger.info(f"Saved setting id={setting.id}, daily_target={setting.daily_target}, daily_limit={setting.daily_limit}, lead_sources={setting.lead_sources}")
+                lead_statuses_log = getattr(setting, 'lead_statuses', 'N/A (migration not run)')
+                logger.info(f"Saved setting id={setting.id}, daily_target={setting.daily_target}, daily_limit={setting.daily_limit}, lead_sources={setting.lead_sources}, lead_statuses={lead_statuses_log}")
             
             # Update daily_target across all user settings (since it's user-level, not key-specific)
             # Use 'in' check to handle both None and explicit values (including 0)
@@ -371,6 +416,7 @@ class LeadTypeAssignmentView(APIView):
                 'tenant_membership_id': tenant_membership.id,
                 'lead_types': lead_types,
                 'lead_sources': lead_sources,
+                'lead_statuses': lead_statuses,
                 'daily_target': setting.daily_target,  # Return the saved value
                 'daily_limit': setting.daily_limit,  # Return the saved value
                 'created': created
@@ -507,44 +553,129 @@ class LeadSourcesListView(APIView):
         }, status=status.HTTP_200_OK)
 
 
+class LeadStatusesListView(APIView):
+    """Get all unique lead statuses (data.lead_status values) from records for the current tenant"""
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        """Get all unique lead statuses from records' lead_status field"""
+        tenant = request.tenant
+
+        if not tenant:
+            return Response({
+                'lead_statuses': []
+            }, status=status.HTTP_200_OK)
+
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT DISTINCT data->>'lead_status' as lead_status
+                FROM records
+                WHERE tenant_id = %s
+                  AND entity_type = 'lead'
+                  AND data->>'lead_status' IS NOT NULL
+                  AND data->>'lead_status' != ''
+                  AND data->>'lead_status' != 'null'
+                ORDER BY lead_status
+            """, [tenant.id])
+
+            lead_statuses_list = [row[0].strip() for row in cursor.fetchall() if row[0] and row[0].strip()]
+
+        return Response({
+            'lead_statuses': lead_statuses_list
+        }, status=status.HTTP_200_OK)
+
+
 class RoutingRuleListCreateView(APIView):
     """
-    List and upsert simple per-user routing rules for tickets and leads.
-
-    v1: one active rule per (tenant, user_id, queue_type).
+    List and upsert routing rules for tickets and leads.
+    Rules are keyed by authz.TenantMembership id (not user UUID).
+    Accepts user_id as TenantMembership id (integer) or as user UUID for backward compat.
     """
 
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
         tenant = request.tenant
-        rules = RoutingRule.objects.filter(tenant=tenant).order_by("queue_type", "user_id", "id")
+        rules = (
+            RoutingRule.objects.filter(tenant=tenant)
+            .select_related("tenant_membership")
+            .order_by("queue_type", "tenant_membership_id", "id")
+        )
         serializer = RoutingRuleSerializer(rules, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
         """
-        Upsert a routing rule for a user + queue_type within the current tenant.
-
-        If a rule already exists for (tenant, user_id, queue_type), it is updated.
-        Otherwise a new rule is created.
+        Upsert a routing rule by tenant_membership + queue_type.
+        Request can send user_id as TenantMembership id (integer) or as user UUID;
+        we resolve to TenantMembership and store that. Works even when membership has no linked auth user.
         """
         tenant = request.tenant
+        raw_user_id = request.data.get("user_id")
+        if not raw_user_id:
+            return Response(
+                {"user_id": ["This field is required (TenantMembership id or user UUID)."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        serializer = RoutingRuleSerializer(data=request.data)
+        raw_str = str(raw_user_id).strip()
+        tenant_membership = None
+
+        # Prefer TenantMembership id (integer)
+        try:
+            tm_id = int(raw_str)
+            tenant_membership = (
+                TenantMembership.objects.filter(tenant=tenant, id=tm_id)
+                .select_related("role")
+                .first()
+            )
+        except (ValueError, TypeError):
+            pass
+
+        # Fallback: treat as user UUID and resolve to membership
+        if not tenant_membership:
+            try:
+                user_uuid = uuid.UUID(raw_str)
+                tenant_membership = (
+                    TenantMembership.objects.filter(tenant=tenant, user_id=user_uuid)
+                    .select_related("role")
+                    .first()
+                )
+            except (ValueError, AttributeError, TypeError):
+                pass
+
+        if not tenant_membership:
+            return Response(
+                {
+                    "user_id": [
+                        "TenantMembership not found for this id or user UUID in this tenant."
+                    ]
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        data = request.data.copy()
+        data["tenant_membership"] = tenant_membership.id
+        data["user_id"] = (
+            str(tenant_membership.user_id) if tenant_membership.user_id else None
+        )
+
+        serializer = RoutingRuleSerializer(data=data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         validated = serializer.validated_data
-        user_id = validated.get("user_id")
-        queue_type = validated.get("queue_type")
+        queue_type = validated["queue_type"]
 
         with transaction.atomic():
             rule, created = RoutingRule.objects.select_for_update().get_or_create(
                 tenant=tenant,
-                user_id=user_id,
+                tenant_membership=tenant_membership,
                 queue_type=queue_type,
                 defaults={
+                    "user_id": tenant_membership.user_id,
                     "is_active": validated.get("is_active", True),
                     "conditions": validated.get("conditions", {}),
                     "name": validated.get("name"),
@@ -553,7 +684,7 @@ class RoutingRuleListCreateView(APIView):
             )
 
             if not created:
-                # Update existing rule in-place
+                rule.user_id = tenant_membership.user_id
                 for field in ["is_active", "conditions", "name", "description"]:
                     if field in validated:
                         setattr(rule, field, validated[field])

@@ -701,29 +701,64 @@ class SLATimeView(APIView):
         return Response(result, status=status.HTTP_200_OK)
 
 
+# Default fields to search when no search_fields param is provided
+SUPPORT_TICKET_SEARCH_FIELDS = [
+    "name", "phone", "user_id", "reason", "poster", "resolution_status",
+    "cse_name", "cse_remarks", "badge", "source", "subscription_status"
+]
+
+
 class SupportTicketListView(ListAPIView):
     serializer_class = SupportTicketSerializer
     permission_classes = [IsTenantAuthenticated]
     pagination_class = MetaPageNumberPagination
-    filter_backends = [SafeOrderingFilter] 
+    filter_backends = [SafeOrderingFilter]
     ordering = "-created_at"
-   
-    search_fields = ["name", "phone", "user_id"]
 
     def get_queryset(self):
         qs = SupportTicket.objects.filter(tenant_id=self.request.tenant.id)
         qp = self.request.query_params
-        raw_term = (qp.get("search_fields")or "").strip()
-        if raw_term:
-            digits = "".join(ch for ch in raw_term if ch.isdigit())
-            if digits:
-                q = (
-                    Q(phone__icontains=digits) | 
-                    Q(user_id__icontains=digits)
-                )    
-                qs = qs.filter(q)
+
+        # Use "search" param for the search term (search_fields = which fields to search in)
+        search_term = (qp.get("search") or "").strip()
+        if search_term:
+            # Optional: comma-separated list of fields to search (e.g. name,phone,reason)
+            raw_fields = (qp.get("search_fields") or "").strip()
+            if raw_fields:
+                field_list = [f.strip() for f in raw_fields.split(",") if f.strip()]
             else:
-                qs = qs.filter(Q(name__icontains=raw_term))
+                field_list = SUPPORT_TICKET_SEARCH_FIELDS
+
+            ALLOWED_SEARCH_FIELDS = frozenset(SUPPORT_TICKET_SEARCH_FIELDS + [
+                "layout_status", "state", "call_status", "rm_name"
+            ])
+            q_search = Q()
+            for field in field_list:
+                if field not in ALLOWED_SEARCH_FIELDS:
+                    continue
+                if field == "phone":
+                    # For phone: also match digits-only to handle "+91 98765" -> "98765"
+                    digits = "".join(ch for ch in search_term if ch.isdigit())
+                    if digits:
+                        q_search |= Q(phone__icontains=digits) | Q(phone__icontains=search_term)
+                    else:
+                        q_search |= Q(phone__icontains=search_term)
+                else:
+                    q_search |= Q(**{f"{field}__icontains": search_term})
+            # Fallback to default fields if none were valid
+            if not q_search.children:
+                field_list = SUPPORT_TICKET_SEARCH_FIELDS
+                q_search = Q()
+                for field in field_list:
+                    if field == "phone":
+                        digits = "".join(ch for ch in search_term if ch.isdigit())
+                        if digits:
+                            q_search |= Q(phone__icontains=digits) | Q(phone__icontains=search_term)
+                        else:
+                            q_search |= Q(phone__icontains=search_term)
+                    else:
+                        q_search |= Q(**{f"{field}__icontains": search_term})
+            qs = qs.filter(q_search)
 
         res_vals = get_multi_values(qp, "resolution_status", "resolution_status__in")
         if res_vals:

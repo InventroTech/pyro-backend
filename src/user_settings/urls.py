@@ -7,6 +7,7 @@ from .views import (
     UserLeadsCountView,
     LeadTypesListView,
     LeadSourcesListView,
+    LeadStatusesListView,
     RoutingRuleListCreateView,
     RoutingRuleDetailView,
 )
@@ -37,6 +38,7 @@ urlpatterns = [
     ),
     path("lead-types/", LeadTypesListView.as_view(), name="lead-types-list"),
     path("lead-sources/", LeadSourcesListView.as_view(), name="lead-sources-list"),
+    path("lead-statuses/", LeadStatusesListView.as_view(), name="lead-statuses-list"),
     # Routing rules endpoints (GM / tenant admin)
     path(
         "routing-rules/",

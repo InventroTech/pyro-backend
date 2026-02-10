@@ -9,15 +9,24 @@ from .models import RoutingRule
 
 def _get_active_rule(tenant, user_id, queue_type: str) -> Optional[RoutingRule]:
     """
-    Return the single active routing rule for this (tenant, user_id, queue_type), if any.
+    Return the active routing rule for this user and queue type.
+    Rules are keyed by TenantMembership; we resolve user_id (UUID) to the membership, then look up the rule.
     """
     if not tenant or not user_id or not queue_type:
+        return None
+
+    from authz.models import TenantMembership
+
+    membership = TenantMembership.objects.filter(
+        tenant=tenant, user_id=user_id
+    ).first()
+    if not membership:
         return None
 
     return (
         RoutingRule.objects.filter(
             tenant=tenant,
-            user_id=user_id,
+            tenant_membership=membership,
             queue_type=queue_type,
             is_active=True,
         )

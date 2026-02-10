@@ -201,6 +201,85 @@ class TeamMetricsService:
         
         return trials / calls_connected if calls_connected > 0 else None
     
+    def _get_average_time_spent_bulk(
+        self,
+        user_ids: List[str],
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+    ) -> Dict[str, float]:
+        """
+        Calculate average time spent per lead for multiple users in bulk (avoids N+1).
+        Returns dict mapping user_id -> average_seconds.
+        """
+        logger = logging.getLogger(__name__)
+        if not user_ids:
+            return {}
+        
+        # Single bulk query: fetch ALL relevant events for all users at once
+        queryset = EventLog.objects.filter(
+            tenant=self.tenant,
+            event__in=TRACKED_EVENTS,
+            payload__user_id__in=user_ids,
+        )
+        if start_date:
+            utc_start, _ = get_utc_datetime_range_for_ist_date(start_date)
+            queryset = queryset.filter(timestamp__gte=utc_start)
+        if end_date:
+            _, utc_end = get_utc_datetime_range_for_ist_date(end_date)
+            queryset = queryset.filter(timestamp__lte=utc_end)
+        
+        events = list(queryset.values('event', 'timestamp', 'record_id', 'payload'))
+        
+        # Group by user_id in memory
+        CALLS_MADE_EVENTS = [
+            'lead.call_not_connected',
+            'lead.call_back_later',
+            'lead.trial_activated',
+            'lead.not_interested',
+        ]
+        
+        result = {}
+        for user_id in user_ids:
+            user_id_str = str(user_id)
+            get_next_by_record = {}
+            calls_made_by_record = {}
+            take_break_count = 0
+            
+            for e in events:
+                payload_user = e.get('payload') or {}
+                if str(payload_user.get('user_id')) != user_id_str:
+                    continue
+                record_id = e.get('record_id')
+                event_type = e.get('event')
+                ts = e.get('timestamp')
+                
+                if event_type == 'lead.get_next_lead':
+                    get_next_by_record.setdefault(record_id, []).append(ts)
+                elif event_type in CALLS_MADE_EVENTS:
+                    calls_made_by_record.setdefault(record_id, []).append(ts)
+                elif event_type == 'agent.take_break':
+                    take_break_count += 1
+            
+            get_next_count = sum(len(v) for v in get_next_by_record.values())
+            denominator = get_next_count - take_break_count
+            if denominator <= 0:
+                result[user_id_str] = 0.0
+                continue
+            
+            time_sum = 0.0
+            for record_id, get_next_list in get_next_by_record.items():
+                calls_list = calls_made_by_record.get(record_id, [])
+                sorted_calls = sorted(calls_list)
+                for get_next_ts in sorted(get_next_list):
+                    for call_ts in sorted_calls:
+                        if call_ts > get_next_ts:
+                            time_sum += (call_ts - get_next_ts).total_seconds()
+                            break
+            
+            result[user_id_str] = time_sum / denominator if time_sum > 0 else 0.0
+        
+        return result
+
     def get_average_time_spent_per_user(self, user_id: str, start_date: Optional[date] = None, end_date: Optional[date] = None) -> Optional[float]:
         """
         Calculate average time spent per lead for a specific user.
@@ -297,18 +376,23 @@ class TeamMetricsService:
     def get_average_time_spent(self, start_date: Optional[date] = None, end_date: Optional[date] = None, manager_user_id: Optional[str] = None) -> Optional[float]:
         """
         Calculate team-wide average time spent per lead (excluding manager).
-        Averages the per-user averages.
+        Averages the per-user averages. Uses bulk fetch to avoid N+1.
         """
         logger = logging.getLogger(__name__)
         logger.info(f"[TeamMetricsService] Calculating team average time spent for {start_date} to {end_date} (excluding manager)")
         
-        team_user_ids_to_use = self._get_team_user_ids_excluding_manager(manager_user_id) if manager_user_id else self.team_user_ids
+        team_user_ids_to_use = list(
+            self._get_team_user_ids_excluding_manager(manager_user_id) if manager_user_id else self.team_user_ids
+        )
+        if not team_user_ids_to_use:
+            return None
         
-        user_averages = []
-        for user_id in team_user_ids_to_use:
-            avg = self.get_average_time_spent_per_user(str(user_id), start_date, end_date)
-            if avg is not None:
-                user_averages.append(avg)
+        avg_by_user = self._get_average_time_spent_bulk(
+            [str(uid) for uid in team_user_ids_to_use],
+            start_date,
+            end_date,
+        )
+        user_averages = [v for v in avg_by_user.values() if v is not None]
         
         if not user_averages:
             logger.warning(f"[TeamMetricsService] No user averages found for team average calculation")
@@ -566,6 +650,15 @@ class TeamMetricsService:
         
         # Calculate per-user metrics: attendance, connected_to_trial_ratio, and average_time_spent
         # Add email, daily_target, and calculated metrics to each member's data
+        # Bulk fetch average time spent for all users (avoids N+1)
+        user_ids_for_avg = [
+            uid for uid in user_metrics.keys()
+            if not manager_user_id or str(uid) != str(manager_user_id)
+        ]
+        avg_time_by_user = self._get_average_time_spent_bulk(
+            user_ids_for_avg, start_date, end_date
+        ) if user_ids_for_avg else {}
+        
         result = []
         manager_user_id_str = str(manager_user_id) if manager_user_id else None
         
@@ -590,9 +683,8 @@ class TeamMetricsService:
             else:
                 member_data['connected_to_trial_ratio'] = None
             
-            # Calculate per-user average time spent (returns 0.0 if no data)
-            avg_time = self.get_average_time_spent_per_user(user_id_str, start_date, end_date)
-            member_data['average_time_spent_seconds'] = avg_time if avg_time is not None else 0.0
+            # Per-user average time spent (from bulk fetch)
+            member_data['average_time_spent_seconds'] = avg_time_by_user.get(user_id_str, 0.0)
             
             result.append(member_data)
         
