@@ -377,28 +377,36 @@ class GetNextTicketView(APIView):
             user_id = user.supabase_uid
             user_email = user.email
 
+            logger.info("=" * 80)
+            logger.info("🎫 [GetNextTicketView] GET TICKETS BUTTON CLICKED")
+            logger.info("=" * 80)
             logger.info(f"=== TICKET ORDERING VALIDATION ===")
             logger.info(f"Current time: {timezone.now()}")
             logger.info(f"User ID: {user_id}")
             logger.info(f"User Email: {user_email}")
 
             # Get the next ticket
+            logger.info(f"[GetNextTicketView] Calling _get_and_assign_ticket to find and assign ticket...")
             with transaction.atomic():
                 next_ticket = self._get_and_assign_ticket(request, user, user_email)
 
-
             # If no tickets available, return empty object
             if not next_ticket:
+                logger.info("[GetNextTicketView] ⚠️ No tickets available - returning empty response")
                 response = Response({}, status=status.HTTP_200_OK)
                 response['Access-Control-Allow-Origin'] = '*'
                 return response
             
             # Return the ticket
+            logger.info(f"[GetNextTicketView] ✅ Ticket found and assigned - Ticket ID: {next_ticket.id}")
+            logger.info(f"[GetNextTicketView] Ticket user_id (customer): {next_ticket.user_id}")
+            logger.info(f"[GetNextTicketView] Assigned to CSE: {user_email} ({user_id})")
             response_data = {'ticket': next_ticket}
             serializer = GetNextTicketResponseSerializer(response_data)
             
             response = Response(serializer.data, status=status.HTTP_200_OK)
             response['Access-Control-Allow-Origin'] = '*'
+            logger.info("=" * 80)
             return response
             
         except Exception as error:
@@ -471,6 +479,45 @@ class GetNextTicketView(APIView):
             already_assigned_ticket.assigned_to_id = user_uuid_obj
             already_assigned_ticket.cse_name = user_email
             already_assigned_ticket.save()
+            
+            # Send Mixpanel event for ticket assignment
+            logger.info(f"[_get_and_assign_ticket] Step 1: Preparing to send Mixpanel event 'support_ticket_assignment'")
+            logger.info(f"[_get_and_assign_ticket] Step 1: Ticket user_id: {already_assigned_ticket.user_id}")
+            
+            if already_assigned_ticket.user_id:
+                try:
+                    logger.info(f"[_get_and_assign_ticket] Step 1: ✅ Ticket has user_id, sending Mixpanel event")
+                    logger.info(f"[_get_and_assign_ticket] Step 1: Event: support_ticket_assignment")
+                    logger.info(f"[_get_and_assign_ticket] Step 1: User ID (customer): {already_assigned_ticket.user_id}")
+                    logger.info(f"[_get_and_assign_ticket] Step 1: CSE assigned: {user_email} ({user_uuid_obj})")
+                    logger.info(f"[_get_and_assign_ticket] Step 1: Ticket ID: {already_assigned_ticket.id}")
+                    
+                    mixpanel_service = MixpanelService()
+                    mixpanel_properties = {
+                        "ticket_id": already_assigned_ticket.id,
+                        "tenant_id": str(already_assigned_ticket.tenant.id) if already_assigned_ticket.tenant else None,
+                        "assigned_to": str(user_uuid_obj),
+                        "cse_name": user_email,
+                        "cse_email": user_email,
+                        "poster": already_assigned_ticket.poster,
+                        "source": already_assigned_ticket.source,
+                        "resolution_status": already_assigned_ticket.resolution_status,
+                        "created_at": already_assigned_ticket.created_at.isoformat() if already_assigned_ticket.created_at else None,
+                    }
+                    logger.info(f"[_get_and_assign_ticket] Step 1: Mixpanel properties: {json.dumps(mixpanel_properties, indent=2, default=str)}")
+                    
+                    mixpanel_service.send_to_mixpanel_sync(
+                        already_assigned_ticket.user_id,
+                        "support_ticket_assignment",
+                        mixpanel_properties,
+                    )
+                    logger.info(f"[_get_and_assign_ticket] Step 1: ✅ Mixpanel event 'support_ticket_assignment' sent successfully")
+                except Exception as mixpanel_error:
+                    logger.error(f"[_get_and_assign_ticket] Step 1: ❌ Error sending Mixpanel event: {mixpanel_error}")
+                    logger.exception(mixpanel_error)
+            else:
+                logger.warning(f"[_get_and_assign_ticket] Step 1: ⚠️ Skipping Mixpanel event - ticket.user_id is None or empty")
+            
             return already_assigned_ticket
         else:
             logger.info(f"[_get_and_assign_ticket] Step 1: No tickets found with resolution_status null and assigned to user")
@@ -521,6 +568,45 @@ class GetNextTicketView(APIView):
             unassigned_ticket.cse_name = user_email
             unassigned_ticket.save()
             logger.info(f"[_get_and_assign_ticket] Step 2: Successfully assigned ticket {unassigned_ticket.id} to user {user_uuid_obj}")
+            
+            # Send Mixpanel event for ticket assignment
+            logger.info(f"[_get_and_assign_ticket] Step 2: Preparing to send Mixpanel event 'support_ticket_assignment'")
+            logger.info(f"[_get_and_assign_ticket] Step 2: Ticket user_id: {unassigned_ticket.user_id}")
+            
+            if unassigned_ticket.user_id:
+                try:
+                    logger.info(f"[_get_and_assign_ticket] Step 2: ✅ Ticket has user_id, sending Mixpanel event")
+                    logger.info(f"[_get_and_assign_ticket] Step 2: Event: support_ticket_assignment")
+                    logger.info(f"[_get_and_assign_ticket] Step 2: User ID (customer): {unassigned_ticket.user_id}")
+                    logger.info(f"[_get_and_assign_ticket] Step 2: CSE assigned: {user_email} ({user_uuid_obj})")
+                    logger.info(f"[_get_and_assign_ticket] Step 2: Ticket ID: {unassigned_ticket.id}")
+                    
+                    mixpanel_service = MixpanelService()
+                    mixpanel_properties = {
+                        "ticket_id": unassigned_ticket.id,
+                        "tenant_id": str(unassigned_ticket.tenant.id) if unassigned_ticket.tenant else None,
+                        "assigned_to": str(user_uuid_obj),
+                        "cse_name": user_email,
+                        "cse_email": user_email,
+                        "poster": unassigned_ticket.poster,
+                        "source": unassigned_ticket.source,
+                        "resolution_status": unassigned_ticket.resolution_status,
+                        "created_at": unassigned_ticket.created_at.isoformat() if unassigned_ticket.created_at else None,
+                    }
+                    logger.info(f"[_get_and_assign_ticket] Step 2: Mixpanel properties: {json.dumps(mixpanel_properties, indent=2, default=str)}")
+                    
+                    mixpanel_service.send_to_mixpanel_sync(
+                        unassigned_ticket.user_id,
+                        "pyro_support_ticket_assignment",
+                        mixpanel_properties,
+                    )
+                    logger.info(f"[_get_and_assign_ticket] Step 2: ✅ Mixpanel event 'support_ticket_assignment' sent successfully")
+                except Exception as mixpanel_error:
+                    logger.error(f"[_get_and_assign_ticket] Step 2: ❌ Error sending Mixpanel event: {mixpanel_error}")
+                    logger.exception(mixpanel_error)
+            else:
+                logger.warning(f"[_get_and_assign_ticket] Step 2: ⚠️ Skipping Mixpanel event - ticket.user_id is None or empty")
+            
             return unassigned_ticket
         else:
             logger.info(f"[_get_and_assign_ticket] Step 2: No unassigned tickets found matching criteria")
@@ -569,6 +655,47 @@ class GetNextTicketView(APIView):
             snoozed_ticket.cse_name = user_email
             snoozed_ticket.save()
             logger.info(f"[_get_and_assign_ticket] Step 3: Successfully assigned snoozed ticket {snoozed_ticket.id} to user {user_uuid_obj}")
+            
+            # Send Mixpanel event for ticket assignment
+            logger.info(f"[_get_and_assign_ticket] Step 3: Preparing to send Mixpanel event 'support_ticket_assignment'")
+            logger.info(f"[_get_and_assign_ticket] Step 3: Ticket user_id: {snoozed_ticket.user_id}")
+            
+            if snoozed_ticket.user_id:
+                try:
+                    logger.info(f"[_get_and_assign_ticket] Step 3: ✅ Ticket has user_id, sending Mixpanel event")
+                    logger.info(f"[_get_and_assign_ticket] Step 3: Event: support_ticket_assignment")
+                    logger.info(f"[_get_and_assign_ticket] Step 3: User ID (customer): {snoozed_ticket.user_id}")
+                    logger.info(f"[_get_and_assign_ticket] Step 3: CSE assigned: {user_email} ({user_uuid_obj})")
+                    logger.info(f"[_get_and_assign_ticket] Step 3: Ticket ID: {snoozed_ticket.id}")
+                    logger.info(f"[_get_and_assign_ticket] Step 3: Snooze until: {snoozed_ticket.snooze_until}")
+                    
+                    mixpanel_service = MixpanelService()
+                    mixpanel_properties = {
+                        "ticket_id": snoozed_ticket.id,
+                        "tenant_id": str(snoozed_ticket.tenant.id) if snoozed_ticket.tenant else None,
+                        "assigned_to": str(user_uuid_obj),
+                        "cse_name": user_email,
+                        "cse_email": user_email,
+                        "poster": snoozed_ticket.poster,
+                        "source": snoozed_ticket.source,
+                        "resolution_status": snoozed_ticket.resolution_status,
+                        "created_at": snoozed_ticket.created_at.isoformat() if snoozed_ticket.created_at else None,
+                        "snooze_until": snoozed_ticket.snooze_until.isoformat() if snoozed_ticket.snooze_until else None,
+                    }
+                    logger.info(f"[_get_and_assign_ticket] Step 3: Mixpanel properties: {json.dumps(mixpanel_properties, indent=2, default=str)}")
+                    
+                    mixpanel_service.send_to_mixpanel_sync(
+                        snoozed_ticket.user_id,
+                        "pyro_support_ticket_assignment",
+                        mixpanel_properties,
+                    )
+                    logger.info(f"[_get_and_assign_ticket] Step 3: ✅ Mixpanel event 'support_ticket_assignment' sent successfully")
+                except Exception as mixpanel_error:
+                    logger.error(f"[_get_and_assign_ticket] Step 3: ❌ Error sending Mixpanel event: {mixpanel_error}")
+                    logger.exception(mixpanel_error)
+            else:
+                logger.warning(f"[_get_and_assign_ticket] Step 3: ⚠️ Skipping Mixpanel event - ticket.user_id is None or empty")
+            
             return snoozed_ticket
         else:
             logger.info(f"[_get_and_assign_ticket] Step 3: No snoozed tickets found")
@@ -859,32 +986,33 @@ class ProcessDumpedTicketsView(APIView):
             unique_tickets = list(unique_tickets_map.values())
             logger.info(f'ProcessDumpedTicketsView: Deduplicated to {len(unique_tickets)} unique tickets based on user_id.')
             
-            # 3. Check for existing open tickets and prepare tickets for insertion
-            # An "open ticket" is defined as: same user_id, resolution_status is null, assigned_to is null
-            # If such a ticket exists, skip inserting the ticket from dump
+            # 3. For each dump ticket: replace any existing open/snoozed ticket for same user, then insert the new one
+            # "Open or snoozed" = same user_id and (resolution_status is null OR resolution_status = 'Snoozed')
             tickets_to_insert = []
             skipped_tickets = []
             from core.models import Tenant
-            
+
             for dump_ticket in unique_tickets:
                 # Skip if user_id is missing
                 if not dump_ticket.user_id:
                     logger.warning(f'ProcessDumpedTicketsView: Ticket {dump_ticket.id} has no user_id. Skipping.')
                     skipped_tickets.append(dump_ticket.id)
                     continue
-                
-                # Check if there's an existing open ticket for this user_id
-                existing_open_ticket = SupportTicket.objects.filter(
+
+                # Delete any existing open or snoozed tickets for this user (replace old with new)
+                existing_active = SupportTicket.objects.filter(
                     user_id=dump_ticket.user_id,
-                    resolution_status__isnull=True,
-                    assigned_to__isnull=True
-                ).exists()
-                
-                if existing_open_ticket:
-                    logger.info(f'ProcessDumpedTicketsView: Open ticket already exists for user_id {dump_ticket.user_id}. Skipping ticket {dump_ticket.id}.')
-                    skipped_tickets.append(dump_ticket.id)
-                    continue
-                
+                ).filter(
+                    Q(resolution_status__isnull=True) | Q(resolution_status='Snoozed')
+                )
+                deleted_count = existing_active.count()
+                if deleted_count:
+                    existing_active.delete()
+                    logger.info(
+                        f'ProcessDumpedTicketsView: Replaced {deleted_count} existing open/snoozed ticket(s) '
+                        f'for user_id {dump_ticket.user_id} with new ticket from dump {dump_ticket.id}.'
+                    )
+
                 # Get tenant object if tenant_id exists
                 tenant = None
                 if dump_ticket.tenant_id:
