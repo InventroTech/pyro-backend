@@ -859,32 +859,33 @@ class ProcessDumpedTicketsView(APIView):
             unique_tickets = list(unique_tickets_map.values())
             logger.info(f'ProcessDumpedTicketsView: Deduplicated to {len(unique_tickets)} unique tickets based on user_id.')
             
-            # 3. Check for existing open tickets and prepare tickets for insertion
-            # An "open ticket" is defined as: same user_id, resolution_status is null, assigned_to is null
-            # If such a ticket exists, skip inserting the ticket from dump
+            # 3. For each dump ticket: replace any existing open/snoozed ticket for same user, then insert the new one
+            # "Open or snoozed" = same user_id and (resolution_status is null OR resolution_status = 'Snoozed')
             tickets_to_insert = []
             skipped_tickets = []
             from core.models import Tenant
-            
+
             for dump_ticket in unique_tickets:
                 # Skip if user_id is missing
                 if not dump_ticket.user_id:
                     logger.warning(f'ProcessDumpedTicketsView: Ticket {dump_ticket.id} has no user_id. Skipping.')
                     skipped_tickets.append(dump_ticket.id)
                     continue
-                
-                # Check if there's an existing open ticket for this user_id
-                existing_open_ticket = SupportTicket.objects.filter(
+
+                # Delete any existing open or snoozed tickets for this user (replace old with new)
+                existing_active = SupportTicket.objects.filter(
                     user_id=dump_ticket.user_id,
-                    resolution_status__isnull=True,
-                    assigned_to__isnull=True
-                ).exists()
-                
-                if existing_open_ticket:
-                    logger.info(f'ProcessDumpedTicketsView: Open ticket already exists for user_id {dump_ticket.user_id}. Skipping ticket {dump_ticket.id}.')
-                    skipped_tickets.append(dump_ticket.id)
-                    continue
-                
+                ).filter(
+                    Q(resolution_status__isnull=True) | Q(resolution_status='Snoozed')
+                )
+                deleted_count = existing_active.count()
+                if deleted_count:
+                    existing_active.delete()
+                    logger.info(
+                        f'ProcessDumpedTicketsView: Replaced {deleted_count} existing open/snoozed ticket(s) '
+                        f'for user_id {dump_ticket.user_id} with new ticket from dump {dump_ticket.id}.'
+                    )
+
                 # Get tenant object if tenant_id exists
                 tenant = None
                 if dump_ticket.tenant_id:
