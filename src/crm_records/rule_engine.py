@@ -14,6 +14,8 @@ import re
 import copy
 from django.core.cache import cache
 
+from django.db.models import Q
+
 from .models import RuleSet, RuleExecutionLog, Record
 from background_jobs.queue_service import get_queue_service
 from background_jobs.models import JobType
@@ -739,6 +741,78 @@ def action_compute_next_call_from_attempts(
         f"Computed {target_field} for record {record.id} using attempts={attempts}, minutes={minutes}: {iso_ts}"
     )
     return {"attempts": attempts, "target_field": target_field, "value": iso_ts, "minutes": minutes}
+
+
+@register_action("bulk_update_requests_in_cart")
+def action_bulk_update_requests_in_cart(
+    ctx: Dict[str, Any],
+    target_status: Optional[str] = None,
+    copy_invoice_and_terms: bool = True,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """
+    Find all inventory_request records whose data.cart_id matches the cart record's id,
+    and update their status (and optionally invoice_number, payment_terms from cart).
+    Used when PM "applies" or "approves" a cart so all requests in the cart get the same
+    status and shared invoice/terms.
+
+    Args:
+        ctx: Context containing 'record' (the inventory_cart) and 'payload'
+        target_status: Status to set on all requests (e.g. PAYMENT_PENDING, IN_SHIPPING).
+                       If None, taken from payload.target_status.
+        copy_invoice_and_terms: If True, copy cart.data.invoice_number and
+                               cart.data.payment_terms to each request's data.
+
+    Returns:
+        Dict with updated_count and list of updated record ids.
+    """
+    record = ctx["record"]
+    payload = ctx.get("payload") or {}
+
+    if record.entity_type != "inventory_cart":
+        logger.warning(
+            f"[bulk_update_requests_in_cart] Record {record.id} is not inventory_cart (entity_type={record.entity_type}), skipping"
+        )
+        return {"updated_count": 0, "updated_ids": [], "skipped_reason": "not_inventory_cart"}
+
+    status_to_apply = target_status or payload.get("target_status")
+    if not status_to_apply:
+        logger.warning(
+            "[bulk_update_requests_in_cart] No target_status in args or payload, skipping bulk update"
+        )
+        return {"updated_count": 0, "updated_ids": [], "skipped_reason": "no_target_status"}
+
+    copy_invoice = copy_invoice_and_terms if "copy_invoice_and_terms" not in payload else payload.get("copy_invoice_and_terms", copy_invoice_and_terms)
+    cart_data = record.data or {}
+    invoice_number = cart_data.get("invoice_number") if copy_invoice else None
+    payment_terms = cart_data.get("payment_terms") if copy_invoice else None
+    comments = cart_data.get("comments") if copy_invoice else None
+
+    # Match cart_id as string or int for backward compatibility
+    cart_id_str = str(record.id)
+    requests_qs = Record.objects.filter(
+        tenant_id=record.tenant_id,
+        entity_type="inventory_request",
+    ).filter(Q(data__cart_id=cart_id_str) | Q(data__cart_id=record.id))
+
+    updated_ids = []
+    for req in requests_qs:
+        if not isinstance(req.data, dict):
+            req.data = {}
+        req.data["status"] = status_to_apply
+        if invoice_number is not None:
+            req.data["invoice_number"] = invoice_number
+        if payment_terms is not None:
+            req.data["payment_terms"] = payment_terms
+        if comments is not None:
+            req.data["comments"] = comments
+        req.save(update_fields=["data", "updated_at"])
+        updated_ids.append(req.id)
+
+    logger.info(
+        f"[bulk_update_requests_in_cart] Cart {record.id}: updated {len(updated_ids)} request(s) to status={status_to_apply}"
+    )
+    return {"updated_count": len(updated_ids), "updated_ids": updated_ids}
 
 
 def _evaluate_simple_condition(condition: Dict[str, Any], ctx: Dict[str, Any]) -> bool:
