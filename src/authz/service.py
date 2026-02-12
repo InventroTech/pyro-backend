@@ -160,23 +160,41 @@ def link_user_uid_and_activate(email: str, uid: str) -> dict:
             )
             
             if not memberships.exists():
-                # Check if TenantMembership exists but already has user_id set
+                # Check if TenantMembership exists but already has user_id set (idempotent operation)
                 existing_with_uid = TenantMembership.objects.filter(
                     email=email_normalized,
-                    user_id__isnull=False
-                ).exists()
+                    user_id=uid  # Check if it's the SAME UID
+                )
                 
-                if existing_with_uid:
+                if existing_with_uid.exists():
+                    # User already linked with the same UID - this is success (idempotent)
+                    activated_count = existing_with_uid.filter(is_active=True).count()
+                    membership_ids = [str(m.id) for m in existing_with_uid]
+                    return {
+                        'success': True,
+                        'message': f'User already linked. {activated_count} tenant membership(s) active.',
+                        'uid': uid,
+                        'activated_memberships': activated_count,
+                        'membership_ids': membership_ids,
+                        'already_linked': True  # Flag to indicate this was already linked
+                    }
+                elif TenantMembership.objects.filter(
+                    email=email_normalized,
+                    user_id__isnull=False
+                ).exists():
+                    # User has a different UID linked - this is an error
                     return {
                         'success': False,
-                        'error': f'User with email {email} already has a linked UID',
-                        'message': f'User with email {email} is already linked to a Supabase account'
+                        'error': f'User with email {email} already has a different UID linked',
+                        'message': f'User with email {email} is already linked to a different Supabase account'
                     }
                 else:
+                    # No TenantMembership found - user needs to be added to tenant first
                     return {
                         'success': False,
                         'error': f'No TenantMembership found for email {email}',
-                        'message': f'User with email {email} not found in TenantMembership table. Please ensure the user is added to a tenant first.'
+                        'message': f'User with email {email} not found in TenantMembership table. Please ensure the user is added to a tenant first.',
+                        'code': 'NO_TENANT_MEMBERSHIP'  # Code for frontend to handle gracefully
                     }
             
             activated_count = 0
