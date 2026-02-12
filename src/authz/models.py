@@ -56,6 +56,9 @@ class TenantMembership(models.Model):
             models.Index(fields=("user_parent_id",), name="authz_tm_user_parent_id_idx"),
             models.Index(fields=("tenant", "user_parent_id"), name="authz_tm_tenant_user_parent"),
             models.Index(fields=("is_active",), name="authz_tm_is_active_idx"),
+            # Indexes for migrated fields (for performance when filtering by name/company_name)
+            models.Index(fields=("name",), name="authz_tm_name_idx"),
+            models.Index(fields=("company_name",), name="authz_tm_company_name_idx"),
         ]
 
     tenant = models.ForeignKey("core.Tenant", on_delete=models.CASCADE)
@@ -72,6 +75,9 @@ class TenantMembership(models.Model):
     role = models.ForeignKey("Role", on_delete=models.RESTRICT)
     is_active = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
+    # Fields migrated from LegacyUser (public.users)
+    name = models.CharField(max_length=255, null=True, blank=True, help_text="User's display name")
+    company_name = models.CharField(max_length=255, null=True, blank=True, help_text="Optional company name")
 
     def save(self, *args, **kwargs):
         if self.email:

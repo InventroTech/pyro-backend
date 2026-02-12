@@ -25,7 +25,14 @@ class SupabaseAuthUser(models.Model):
     def __str__(self):
         return self.email or f"{self.id}"
     
+# DEPRECATED: This model is being phased out in favor of TenantMembership (authz_tenantmembership)
+# Migration plan: https://github.com/.../migration_plan_deprecate_legacy_tables.md
+# TODO: Remove after migration complete
 class LegacyUser(models.Model):
+    """
+    DEPRECATED: Use TenantMembership (authz_tenantmembership) instead.
+    This model will be removed after migration to TenantMembership is complete.
+    """
     id=models.BigAutoField(primary_key=True)
     name = models.TextField()
     email = models.EmailField(null=True, blank=True)
@@ -51,7 +58,14 @@ class LegacyUser(models.Model):
 
 
 
+# DEPRECATED: This model is being phased out in favor of Role (authz_role)
+# Migration plan: https://github.com/.../migration_plan_deprecate_legacy_tables.md
+# TODO: Remove after migration complete
 class LegacyRole(models.Model):
+    """
+    DEPRECATED: Use Role (authz_role) instead.
+    This model will be removed after migration to Role is complete.
+    """
     id = models.UUIDField(primary_key=True)
     name = models.TextField()
     description = models.TextField(null=True, blank=True)

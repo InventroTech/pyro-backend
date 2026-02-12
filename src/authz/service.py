@@ -76,32 +76,35 @@ def get_effective_permissions(user_uuid: str, tenant) -> dict:
 
 def get_authz_role_from_legacy_role(legacy_role_id: str, tenant):
     """
-    Map a legacy role ID to the corresponding authz Role.
+    DEPRECATED: Map a legacy role ID to the corresponding authz Role.
+    This function is kept for backward compatibility during transition.
+    
+    NEW: Assumes role_id is already an AuthZ role ID (since LegacyRole is being phased out).
+    Falls back to LegacyRole lookup only if AuthZ role not found.
     
     Args:
-        legacy_role_id: UUID of the legacy role
+        legacy_role_id: UUID of the role (assumed to be AuthZ role ID)
         tenant: Tenant instance
     
     Returns:
         Role: The corresponding authz Role instance
         
     Raises:
-        Exception: If legacy role not found or no corresponding authz role exists
+        Exception: If role not found
     """
-    # Get the legacy role
-    try:
-        legacy_role = LegacyRole.objects.get(id=legacy_role_id, tenant=tenant)
-    except LegacyRole.DoesNotExist:
-        raise Exception(f"Legacy role with ID {legacy_role_id} not found")
-    
-    # Since legacy roles and authz roles share the same UUID (per create_or_sync_role),
-    # try to get the authz role by the same ID first
+    # NEW: Try AuthZ role first (assume role_id is AuthZ role ID)
     try:
         return AuthzRole.objects.get(id=legacy_role_id, tenant=tenant)
     except AuthzRole.DoesNotExist:
         pass
     
-    # If not found by ID, fall back to name/key mapping
+    # DEPRECATED: Fallback to LegacyRole lookup (for backward compatibility)
+    # This will be removed after migration complete
+    try:
+        legacy_role = LegacyRole.objects.get(id=legacy_role_id, tenant=tenant)
+    except LegacyRole.DoesNotExist:
+        raise Exception(f"Role with ID {legacy_role_id} not found in AuthZ or Legacy roles")
+    
     # Map legacy role name to authz role key
     role_name_mapping = {
         'General Manager': 'GM',
@@ -116,16 +119,14 @@ def get_authz_role_from_legacy_role(legacy_role_id: str, tenant):
         'ADMIN': 'ADMIN',
     }
     
-    # Try to find authz role by key first, then by name
     authz_role_key = role_name_mapping.get(legacy_role.name)
-    
     if authz_role_key:
         try:
             return AuthzRole.objects.get(tenant=tenant, key__iexact=authz_role_key)
         except AuthzRole.DoesNotExist:
             pass
     
-    # If no direct mapping, try to find by name match
+    # Try by name match
     try:
         return AuthzRole.objects.get(tenant=tenant, name__iexact=legacy_role.name)
     except AuthzRole.DoesNotExist:
@@ -134,12 +135,12 @@ def get_authz_role_from_legacy_role(legacy_role_id: str, tenant):
 
 def link_user_uid_and_activate(email: str, uid: str) -> dict:
     """
-    Link a Supabase UID to a user in the legacy users table and activate 
-    their tenant membership. This replaces the functionality of the edge function.
+    NEW: Link a Supabase UID to TenantMembership and activate user.
+    No longer updates LegacyUser (public.users) - only TenantMembership.
     
     This function:
-    1. Links the UID to the users table (public.users)
-    2. Links the UID to the authz_tenantmembership table and activates the user
+    1. Finds TenantMembership records by email
+    2. Links the UID and activates the user
     
     Args:
         email: User's email address
@@ -147,49 +148,44 @@ def link_user_uid_and_activate(email: str, uid: str) -> dict:
     
     Returns:
         dict: Result containing success status and message
-        
-    Raises:
-        Exception: If user not found or linking fails
     """
     try:
         with transaction.atomic():
             email_normalized = email.lower().strip()
             
-            # Step 1: Update the users table with the UID
-            # Check if the email exists in public.users
-            user = LegacyUser.objects.filter(email=email_normalized).first()
-            if not user:
-                raise Exception(f"User with email {email} not found in users table")
-            
-            # Link the UID to public.users (like the edge function does)
-            user.uid = uid
-            user.save()
-            
-            # Step 2: Find and activate tenant memberships for this user
-            # Find all tenant memberships for this email that don't have a user_id yet
+            # NEW: Find TenantMembership records (no LegacyUser lookup)
             memberships = TenantMembership.objects.filter(
                 email=email_normalized,
                 user_id__isnull=True  # Only update memberships that don't have user_id set
             )
             
+            if not memberships.exists():
+                return {
+                    'success': False,
+                    'error': f'No TenantMembership found for email {email}',
+                    'message': f'User with email {email} not found in TenantMembership table'
+                }
+            
             activated_count = 0
+            membership_ids = []
             for membership in memberships:
                 # Link the UID to authz_tenantmembership and activate the user
                 membership.user_id = uid
                 membership.is_active = True
                 membership.save()
                 activated_count += 1
+                membership_ids.append(str(membership.id))
                 
                 # Clear permissions cache for this user-tenant combination
                 drop_permissions_cache(uid, membership.tenant)
             
             return {
                 'success': True,
-                'message': f'User linked successfully. Updated users table and activated {activated_count} tenant memberships.',
-                'user_id': str(user.id),
+                'message': f'User linked successfully. Activated {activated_count} tenant membership(s).',
                 'uid': uid,
                 'activated_memberships': activated_count,
-                'tables_updated': ['users', 'authz_tenantmembership']
+                'membership_ids': membership_ids,
+                'tables_updated': ['authz_tenantmembership']
             }
             
     except Exception as e:
@@ -203,28 +199,21 @@ def link_user_uid_and_activate(email: str, uid: str) -> dict:
 
 def create_or_sync_role(tenant, key: str, name: str, description: str = ""):
     """
-    Idempotent, tenant-scoped role creation.
+    NEW: Idempotent, tenant-scoped role creation.
     - Case-insensitive uniqueness on key.
-    - Creates in authz_role and legacy roles with the SAME UUID.
-    - If already exists, returns the existing record and ensures legacy mirror exists.
+    - Creates ONLY in authz_role (no longer creates LegacyRole).
+    - If already exists, returns the existing record.
     Returns: { created: bool, role: {...} }
+    
+    DEPRECATED: LegacyRole creation removed.
     """
     norm_key = (key or "").strip()
     norm_name = (name or "").strip()
     norm_desc = (description or "").strip() or None
 
-    # quick path: if exists (any case), return existing and sync legacy
+    # Quick path: if exists (any case), return existing (no LegacyRole sync)
     existing = AuthzRole.objects.filter(tenant=tenant, key__iexact=norm_key).first()
     if existing:
-        with transaction.atomic():
-            LegacyRole.objects.get_or_create(
-                id=existing.id,
-                defaults={
-                    "name": norm_name or existing.name,
-                    "description": norm_desc,
-                    "tenant": tenant,
-                },
-            )
         return {
             "created": False,
             "role": {
@@ -233,12 +222,10 @@ def create_or_sync_role(tenant, key: str, name: str, description: str = ""):
                 "key": existing.key,
                 "name": existing.name,
                 "description": existing.description,
-                "legacy_created": True,   # or “ensured”
-                "authz_created": False,
             },
         }
 
-    # create new in a race-safe way
+    # Create new authz role (no LegacyRole)
     new_id = uuid.uuid4()
     try:
         with transaction.atomic():
@@ -249,12 +236,6 @@ def create_or_sync_role(tenant, key: str, name: str, description: str = ""):
                 name=norm_name,
                 description=norm_desc,
             )
-            LegacyRole.objects.create(
-                id=new_id,
-                name=norm_name,
-                description=norm_desc,
-                tenant=tenant,
-            )
         return {
             "created": True,
             "role": {
@@ -263,22 +244,11 @@ def create_or_sync_role(tenant, key: str, name: str, description: str = ""):
                 "key": authz_role.key,
                 "name": authz_role.name,
                 "description": authz_role.description,
-                "legacy_created": True,
-                "authz_created": True,
             },
         }
     except IntegrityError:
-        # Another request created it concurrently. Re-fetch and sync legacy.
-        with transaction.atomic():
-            winner = AuthzRole.objects.get(tenant=tenant, key__iexact=norm_key)
-            LegacyRole.objects.get_or_create(
-                id=winner.id,
-                defaults={
-                    "name": norm_name or winner.name,
-                    "description": norm_desc,
-                    "tenant": tenant,
-                },
-            )
+        # Another request created it concurrently. Re-fetch.
+        winner = AuthzRole.objects.get(tenant=tenant, key__iexact=norm_key)
         return {
             "created": False,
             "role": {
@@ -287,7 +257,5 @@ def create_or_sync_role(tenant, key: str, name: str, description: str = ""):
                 "key": winner.key,
                 "name": winner.name,
                 "description": winner.description,
-                "legacy_created": True,
-                "authz_created": False,
             },
         }

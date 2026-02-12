@@ -1,7 +1,7 @@
 from rest_framework import generics, status, serializers
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError, NotFound
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny
 from authz.permissions import IsTenantAuthenticated
 from core.pagination import MetaPageNumberPagination
@@ -485,7 +485,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         }, status=status.HTTP_200_OK)
 
 
-class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateDestroyAPIView):
+class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
     queryset = Record.objects.all()
     serializer_class = RecordSerializer
     permission_classes = [IsTenantAuthenticated]
