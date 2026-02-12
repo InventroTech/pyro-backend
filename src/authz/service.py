@@ -153,50 +153,63 @@ def link_user_uid_and_activate(email: str, uid: str) -> dict:
         with transaction.atomic():
             email_normalized = email.lower().strip()
             
-            # NEW: Find TenantMembership records (no LegacyUser lookup)
+            # IDEMPOTENT: Check if user is already linked with the SAME UID first
+            existing_with_same_uid = TenantMembership.objects.filter(
+                email=email_normalized,
+                user_id=uid
+            )
+            
+            if existing_with_same_uid.exists():
+                # User is already linked with this UID - return success (idempotent)
+                activated_count = existing_with_same_uid.filter(is_active=True).count()
+                membership_ids = [str(m.id) for m in existing_with_same_uid]
+                return {
+                    'success': True,
+                    'message': f'User already linked. {activated_count} tenant membership(s) active.',
+                    'uid': uid,
+                    'activated_memberships': activated_count,
+                    'membership_ids': membership_ids,
+                    'already_linked': True
+                }
+            
+            # Check if user is linked with a DIFFERENT UID
+            existing_with_different_uid = TenantMembership.objects.filter(
+                email=email_normalized,
+                user_id__isnull=False
+            ).exclude(user_id=uid).exists()
+            
+            if existing_with_different_uid:
+                # User is linked with different UID - return success but with warning (idempotent)
+                # This allows the frontend to handle gracefully without 400 errors
+                return {
+                    'success': True,
+                    'message': f'User with email {email} is already linked to a different Supabase account',
+                    'uid': uid,
+                    'activated_memberships': 0,
+                    'membership_ids': [],
+                    'already_linked_different_uid': True
+                }
+            
+            # Find TenantMembership records that need linking (no user_id set)
             memberships = TenantMembership.objects.filter(
                 email=email_normalized,
-                user_id__isnull=True  # Only update memberships that don't have user_id set
+                user_id__isnull=True
             )
             
             if not memberships.exists():
-                # Check if TenantMembership exists but already has user_id set (idempotent operation)
-                existing_with_uid = TenantMembership.objects.filter(
-                    email=email_normalized,
-                    user_id=uid  # Check if it's the SAME UID
-                )
-                
-                if existing_with_uid.exists():
-                    # User already linked with the same UID - this is success (idempotent)
-                    activated_count = existing_with_uid.filter(is_active=True).count()
-                    membership_ids = [str(m.id) for m in existing_with_uid]
-                    return {
-                        'success': True,
-                        'message': f'User already linked. {activated_count} tenant membership(s) active.',
-                        'uid': uid,
-                        'activated_memberships': activated_count,
-                        'membership_ids': membership_ids,
-                        'already_linked': True  # Flag to indicate this was already linked
-                    }
-                elif TenantMembership.objects.filter(
-                    email=email_normalized,
-                    user_id__isnull=False
-                ).exists():
-                    # User has a different UID linked - this is an error
-                    return {
-                        'success': False,
-                        'error': f'User with email {email} already has a different UID linked',
-                        'message': f'User with email {email} is already linked to a different Supabase account'
-                    }
-                else:
-                    # No TenantMembership found - user needs to be added to tenant first
-                    return {
-                        'success': False,
-                        'error': f'No TenantMembership found for email {email}',
-                        'message': f'User with email {email} not found in TenantMembership table. Please ensure the user is added to a tenant first.',
-                        'code': 'NO_TENANT_MEMBERSHIP'  # Code for frontend to handle gracefully
-                    }
+                # No TenantMembership found - return success with info (idempotent)
+                # This prevents 400 errors for users not yet added to tenants
+                return {
+                    'success': True,
+                    'message': f'User with email {email} not found in TenantMembership table. Please ensure the user is added to a tenant first.',
+                    'uid': uid,
+                    'activated_memberships': 0,
+                    'membership_ids': [],
+                    'no_tenant_membership': True,
+                    'code': 'NO_TENANT_MEMBERSHIP'
+                }
             
+            # Link the UID and activate memberships
             activated_count = 0
             membership_ids = []
             for membership in memberships:
