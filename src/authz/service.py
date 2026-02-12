@@ -160,11 +160,24 @@ def link_user_uid_and_activate(email: str, uid: str) -> dict:
             )
             
             if not memberships.exists():
-                return {
-                    'success': False,
-                    'error': f'No TenantMembership found for email {email}',
-                    'message': f'User with email {email} not found in TenantMembership table'
-                }
+                # Check if TenantMembership exists but already has user_id set
+                existing_with_uid = TenantMembership.objects.filter(
+                    email=email_normalized,
+                    user_id__isnull=False
+                ).exists()
+                
+                if existing_with_uid:
+                    return {
+                        'success': False,
+                        'error': f'User with email {email} already has a linked UID',
+                        'message': f'User with email {email} is already linked to a Supabase account'
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': f'No TenantMembership found for email {email}',
+                        'message': f'User with email {email} not found in TenantMembership table. Please ensure the user is added to a tenant first.'
+                    }
             
             activated_count = 0
             membership_ids = []
