@@ -1,7 +1,6 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.permissions import AllowAny
 from django.db.models import Q
 from authz.permissions import IsTenantAuthenticated, HasTenantRole
 from authz.models import Role, TenantMembership
@@ -15,30 +14,15 @@ class RolesView(APIView):
     """
     GET  /api/authz/roles      -> list roles from authz_role (tenant-scoped)
     POST /api/authz/roles      -> create role in BOTH authz_role & legacy roles (same UUID)
-    
-    Permission handling:
-    - GET with ?key=public: AllowAny (public role lookup, no auth needed)
-    - GET without key: IsTenantAuthenticated (list all roles, requires auth)
-    - POST: IsTenantAuthenticated (create role, requires auth)
     """
-    
-    def get_permissions(self):
-        """
-        Allow public role lookup without authentication.
-        Require authentication for listing all roles or creating roles.
-        """
-        role_key = self.request.query_params.get('key', '').strip().lower()
-        if role_key == 'public':
-            # Public role lookup should be accessible without authentication
-            return [AllowAny]
-        # For listing all roles, require authentication
-        return [IsTenantAuthenticated]
+    permission_classes = [IsTenantAuthenticated]  # POST will add GM requirement inline
+
 
     def get(self, request, *args, **kwargs):
         """
         NEW: Added support for 'key' query parameter to filter by role key
-        GET /api/authz/roles?key=public -> returns role with key='public' (no auth required)
-        GET /api/authz/roles -> returns all roles for tenant (auth required)
+        GET /api/authz/roles?key=public -> returns role with key='public'
+        GET /api/authz/roles -> returns all roles for tenant
         """
         tenant = getattr(request, 'tenant', None)
         if not tenant:
