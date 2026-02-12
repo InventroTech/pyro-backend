@@ -33,7 +33,6 @@ urlpatterns = [
     path('analytics/', include('analytics.urls')),
     path('auth/', include('authentication.urls')),
     path('membership/', include('authz.urls')),
-    path('api/authz/', include('authz.urls')),  # Alias for frontend compatibility
     path('cron-jobs/',include('cron_jobs.urls')),
     path('crm/', include('crm.urls')),
     path('crm-records/', include('crm_records.urls')),
