@@ -24,13 +24,7 @@ class RolesView(APIView):
         GET /api/authz/roles?key=public -> returns role with key='public'
         GET /api/authz/roles -> returns all roles for tenant
         """
-        tenant = getattr(request, 'tenant', None)
-        if not tenant:
-            return Response({
-                "error": "Tenant not found",
-                "message": "Unable to determine tenant from request. Please ensure X-Tenant-Slug header is set."
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
+        tenant = request.tenant
         role_key = request.query_params.get('key', '').strip()
         
         # NEW: Filter by key if provided (for public role lookup)
