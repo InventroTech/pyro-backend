@@ -19,8 +19,8 @@ from drf_spectacular.types import OpenApiTypes
 import logging
 
 logger = logging.getLogger(__name__)
-from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule
-from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer, CallAttemptMatrixSerializer, ScoringRuleModelSerializer
+from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix
+from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer, CallAttemptMatrixSerializer
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
 from .scoring import calculate_and_update_lead_score
@@ -3437,33 +3437,7 @@ class LeadScoringView(TenantScopedMixin, APIView):
         rules = serializer.validated_data['rules']
         entity_type = 'lead'  # Default entity type for lead scoring
         
-        # Save rules to ScoringRule table (replace previous rules for this tenant/entity_type)
-        # First, delete existing rules for this tenant/entity_type
-        ScoringRule.objects.filter(
-            tenant=request.tenant,
-            entity_type=entity_type
-        ).delete()
-        
-        # Then create new rules
-        created_rules = []
-        for idx, rule in enumerate(rules):
-            scoring_rule = ScoringRule.objects.create(
-                tenant=request.tenant,
-                entity_type=entity_type,
-                attribute=rule.get('attr', ''),
-                data={
-                    'operator': rule.get('operator', '=='),
-                    'value': rule.get('value', ''),
-                },
-                weight=rule.get('weight', 0),
-                order=idx,
-                is_active=True
-            )
-            created_rules.append(scoring_rule)
-        
-        logger.info(f"LeadScoringView: Saved {len(created_rules)} rules to ScoringRule table for entity_type '{entity_type}'")
-        
-        # Also save to EntityTypeSchema for backward compatibility
+        # Save/update rules in EntityTypeSchema table (replace previous rules)
         EntityTypeSchema.objects.update_or_create(
             tenant=request.tenant,
             entity_type=entity_type,
@@ -3471,6 +3445,8 @@ class LeadScoringView(TenantScopedMixin, APIView):
                 'rules': rules
             }
         )
+        
+        logger.info(f"LeadScoringView: Saved {len(rules)} rules to EntityTypeSchema for entity_type '{entity_type}'")
         
         # Count total leads for the job
         total_leads = Record.objects.filter(
@@ -4012,55 +3988,5 @@ class RMAssignedMixpanelView(TenantScopedMixin, APIView):
                 {'error': f'Internal error: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
-
-class ScoringRuleListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
-    """
-    List all scoring rules for the current tenant, or create a new one.
-    
-    GET /crm-records/scoring-rules/?entity_type=lead
-    POST /crm-records/scoring-rules/
-    """
-    permission_classes = [IsTenantAuthenticated]
-    serializer_class = ScoringRuleModelSerializer
-    pagination_class = MetaPageNumberPagination
-    
-    def get_queryset(self):
-        """Return rules filtered by tenant and optionally by entity_type."""
-        queryset = ScoringRule.objects.filter(tenant=self.request.tenant)
-        
-        # Filter by entity_type if provided in query params
-        entity_type = self.request.query_params.get('entity_type')
-        if entity_type:
-            queryset = queryset.filter(entity_type=entity_type)
-        
-        # Filter by is_active if provided
-        is_active = self.request.query_params.get('is_active')
-        if is_active is not None:
-            is_active_bool = is_active.lower() in ('true', '1', 'yes')
-            queryset = queryset.filter(is_active=is_active_bool)
-        
-        return queryset.order_by('order', 'created_at')
-    
-    def perform_create(self, serializer):
-        """Set tenant automatically on create."""
-        serializer.save(tenant=self.request.tenant)
-
-
-class ScoringRuleDetailView(TenantScopedMixin, generics.RetrieveUpdateDestroyAPIView):
-    """
-    Retrieve, update, or delete a scoring rule.
-    
-    GET /crm-records/scoring-rules/<id>/
-    PUT /crm-records/scoring-rules/<id>/
-    PATCH /crm-records/scoring-rules/<id>/
-    DELETE /crm-records/scoring-rules/<id>/
-    """
-    permission_classes = [IsTenantAuthenticated]
-    serializer_class = ScoringRuleModelSerializer
-    
-    def get_queryset(self):
-        """Return rules filtered by tenant."""
-        return ScoringRule.objects.filter(tenant=self.request.tenant)
 
 
