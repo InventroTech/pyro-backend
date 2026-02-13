@@ -14,7 +14,7 @@ from django.db.models import Subquery
 from .serializers import LegacyUserLiteSerializer  # DEPRECATED: Will be replaced
 from authz.serializers import TenantMembershipUserSerializer
 
-from authz.service import link_user_uid_and_activate
+from authz.service import link_user_uid_and_activate, drop_permissions_cache
 import logging
 from .serializers import LinkUserUidSerializer, DeleteUserEverywhereSerializer
 from accounts.services.delete_user_everywhere import delete_user_everywhere
@@ -84,6 +84,11 @@ class LegacyUserCreateView(APIView):
                         membership.user_id = uid
                         membership.is_active = True
                     membership.save()
+                
+                # Invalidate permissions cache so newly updated role (e.g. GM) is seen immediately
+                # without user having to re-login (permission checks use cached role with 10min TTL)
+                if membership.user_id:
+                    drop_permissions_cache(str(membership.user_id), membership.tenant)
                 
                 return Response({
                     'id': str(membership.id),
