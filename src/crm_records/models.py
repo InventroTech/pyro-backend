@@ -136,6 +136,60 @@ class EntityTypeSchema(BaseModel):
         return f"{self.entity_type} ({len(self.attributes)} attributes, {len(self.rules)} rules)"
 
 
+class ScoringRule(BaseModel):
+    """
+    Individual scoring rule model for managing lead scoring rules.
+    Each rule can be created, edited, and deleted independently.
+    
+    Flexible structure: Stores rule configuration in JSON 'data' field.
+    This allows any rule structure without migration changes.
+    """
+    entity_type = models.CharField(
+        max_length=100,
+        db_index=True,
+        default='lead',
+        help_text="The entity type this rule applies to (e.g., 'lead', 'ticket')"
+    )
+    attribute = models.CharField(
+        max_length=255,
+        help_text="Attribute path in dot notation (e.g., 'data.assigned_to', 'data.affiliated_party')"
+    )
+    data = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Rule configuration data (operator, value, and any other fields). Structure can be anything."
+    )
+    weight = models.FloatField(
+        help_text="Score weight/points added when this rule matches"
+    )
+    order = models.IntegerField(
+        default=0,
+        help_text="Display order for rules (lower numbers appear first)"
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Whether this rule is active and should be evaluated"
+    )
+    description = models.TextField(
+        null=True,
+        blank=True,
+        help_text="Optional description of what this rule does"
+    )
+    
+    class Meta:
+        db_table = "scoring_rules"
+        indexes = [
+            models.Index(fields=["tenant", "entity_type", "is_active"]),
+            models.Index(fields=["tenant", "entity_type", "order"]),
+        ]
+        ordering = ['order', 'created_at']
+    
+    def __str__(self):
+        operator = self.data.get('operator', 'N/A') if isinstance(self.data, dict) else 'N/A'
+        value = self.data.get('value', 'N/A') if isinstance(self.data, dict) else 'N/A'
+        return f"{self.entity_type}: {self.attribute} {operator} {value} (weight: {self.weight})"
+
+
 class ApiSecretKey(BaseModel):
     """
     Model to store API secret keys and their associated tenants.
