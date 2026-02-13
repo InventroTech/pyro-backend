@@ -3437,7 +3437,44 @@ class LeadScoringView(TenantScopedMixin, APIView):
         rules = serializer.validated_data['rules']
         entity_type = 'lead'  # Default entity type for lead scoring
         
-        # Save/update rules in EntityTypeSchema table (replace previous rules)
+        # Save rules to ScoringRule table (replace previous rules for this tenant/entity_type)
+        created_rules = []
+        try:
+            # First, delete existing rules for this tenant/entity_type
+            deleted_count = ScoringRule.objects.filter(
+                tenant=request.tenant,
+                entity_type=entity_type
+            ).delete()[0]
+            logger.info(f"LeadScoringView: Deleted {deleted_count} existing rules from ScoringRule table")
+            
+            # Then create new rules
+            for idx, rule in enumerate(rules):
+                try:
+                    scoring_rule = ScoringRule.objects.create(
+                        tenant=request.tenant,
+                        entity_type=entity_type,
+                        attribute=rule.get('attr', ''),
+                        data={
+                            'operator': rule.get('operator', '=='),
+                            'value': rule.get('value', ''),
+                        },
+                        weight=rule.get('weight', 0),
+                        order=idx,
+                        is_active=True
+                    )
+                    created_rules.append(scoring_rule)
+                    logger.debug(f"LeadScoringView: Created ScoringRule {scoring_rule.id}: {scoring_rule.attribute}")
+                except Exception as e:
+                    logger.error(f"LeadScoringView: Error creating ScoringRule for rule {idx}: {e}", exc_info=True)
+                    # Continue with other rules even if one fails
+                    continue
+            
+            logger.info(f"LeadScoringView: Successfully saved {len(created_rules)}/{len(rules)} rules to ScoringRule table for entity_type '{entity_type}'")
+        except Exception as e:
+            logger.error(f"LeadScoringView: Error saving rules to ScoringRule table: {e}", exc_info=True)
+            # Don't fail the request, continue to save to EntityTypeSchema
+        
+        # Also save to EntityTypeSchema for backward compatibility
         EntityTypeSchema.objects.update_or_create(
             tenant=request.tenant,
             entity_type=entity_type,
