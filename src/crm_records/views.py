@@ -4102,5 +4102,50 @@ class ScoringRuleDetailView(TenantScopedMixin, generics.RetrieveUpdateDestroyAPI
     def get_queryset(self):
         """Return rules filtered by tenant."""
         return ScoringRule.objects.filter(tenant=self.request.tenant)
+    
+    def update(self, request, *args, **kwargs):
+        """Handle PUT/PATCH requests with better error handling."""
+        try:
+            partial = kwargs.pop('partial', False)
+            instance = self.get_object()
+            serializer = self.get_serializer(instance, data=request.data, partial=partial)
+            serializer.is_valid(raise_exception=True)
+            self.perform_update(serializer)
+            
+            if getattr(instance, '_prefetched_objects_cache', None):
+                instance._prefetched_objects_cache = {}
+            
+            return Response(serializer.data)
+        except Exception as e:
+            logger.error(f"ScoringRuleDetailView.update: Error updating rule: {e}", exc_info=True)
+            return Response(
+                {'error': f'Failed to update rule: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    def destroy(self, request, *args, **kwargs):
+        """Handle DELETE requests with better error handling."""
+        try:
+            instance = self.get_object()
+            self.perform_destroy(instance)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except Exception as e:
+            logger.error(f"ScoringRuleDetailView.destroy: Error deleting rule: {e}", exc_info=True)
+            return Response(
+                {'error': f'Failed to delete rule: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    def perform_update(self, serializer):
+        """Update rule and ensure tenant is preserved."""
+        serializer.save(tenant=self.request.tenant)
+        logger.info(f"ScoringRuleDetailView: Updated rule {serializer.instance.id} for tenant {self.request.tenant.id}")
+    
+    def perform_destroy(self, instance):
+        """Delete rule and log the action."""
+        rule_id = instance.id
+        rule_attribute = instance.attribute
+        instance.delete()
+        logger.info(f"ScoringRuleDetailView: Deleted rule {rule_id} ({rule_attribute}) for tenant {self.request.tenant.id}")
 
 
