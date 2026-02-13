@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix
+from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule
 
 
 class RecordSerializer(serializers.ModelSerializer):
@@ -276,6 +276,45 @@ class ScoringRuleSerializer(serializers.Serializer):
     )
     value = serializers.CharField(help_text="Value to compare against")
     weight = serializers.FloatField(help_text="Weight/score to add if rule matches")
+
+
+class ScoringRuleModelSerializer(serializers.ModelSerializer):
+    """
+    ModelSerializer for ScoringRule model - supports CRUD operations.
+    
+    Flexible structure: 'data' field can contain any structure (operator, value, etc.)
+    """
+    class Meta:
+        model = ScoringRule
+        fields = [
+            'id',
+            'entity_type',
+            'attribute',
+            'data',
+            'weight',
+            'order',
+            'is_active',
+            'description',
+            'created_at',
+            'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+    
+    def validate_data(self, value):
+        """Validate data is a dictionary."""
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("Data must be a valid JSON object.")
+        return value
+    
+    def validate_weight(self, value):
+        """Validate weight is a valid number."""
+        if value is None:
+            raise serializers.ValidationError("Weight is required")
+        try:
+            float(value)
+        except (ValueError, TypeError):
+            raise serializers.ValidationError("Weight must be a valid number")
+        return value
 
 
 class LeadScoringRequestSerializer(serializers.Serializer):

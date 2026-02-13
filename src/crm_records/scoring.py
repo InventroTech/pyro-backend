@@ -219,7 +219,7 @@ def calculate_and_update_lead_score(lead: Record, tenant_id: Optional[str] = Non
     if not lead.data:
         lead.data = {}
     
-    #lead.data['lead_score'] = score
+    lead.data['lead_score'] = score
     logger.info(f"calculate_and_update_lead_score: Lead {lead.id} score: {score}")
     
     # Save if requested
