@@ -145,19 +145,8 @@ def calculate_lead_score(lead: Record, tenant_id: Optional[str] = None) -> float
     # Get entity_type from lead
     entity_type = lead.entity_type if hasattr(lead, 'entity_type') else 'lead'
     
-    # Fetch rules from EntityTypeSchema
-    try:
-        schema = EntityTypeSchema.objects.get(
-            tenant_id=tenant_id,
-            entity_type=entity_type
-        )
-        rules = schema.rules if schema.rules else []
-    except EntityTypeSchema.DoesNotExist:
-        logger.debug(f"calculate_lead_score: No schema found for entity_type '{entity_type}' and tenant {tenant_id}")
-        return 0.0
-    except Exception as e:
-        logger.error(f"calculate_lead_score: Error fetching schema: {e}")
-        return 0.0
+    # Fetch rules using get_scoring_rules (which prioritizes ScoringRule table)
+    rules = get_scoring_rules(entity_type, tenant_id)
     
     if not rules or len(rules) == 0:
         logger.debug(f"calculate_lead_score: No rules found for entity_type '{entity_type}'")
@@ -236,6 +225,8 @@ def get_scoring_rules(entity_type: str, tenant_id: str) -> List[Dict[str, Any]]:
     """
     Get scoring rules for a specific entity type and tenant.
     
+    Prioritizes ScoringRule table, falls back to EntityTypeSchema for backward compatibility.
+    
     Args:
         entity_type: The entity type (e.g., 'lead', 'ticket')
         tenant_id: The tenant ID
@@ -249,14 +240,45 @@ def get_scoring_rules(entity_type: str, tenant_id: str) -> List[Dict[str, Any]]:
         >>> rules = get_scoring_rules('lead', tenant_id='123e4567-...')
         >>> print(f"Found {len(rules)} rules")
     """
+    from .models import ScoringRule
+    
+    # First, try to fetch from ScoringRule table
+    try:
+        scoring_rules = ScoringRule.objects.filter(
+            tenant_id=tenant_id,
+            entity_type=entity_type,
+            is_active=True
+        ).order_by('order', 'created_at')
+        
+        if scoring_rules.exists():
+            # Convert ScoringRule instances to rule dictionaries
+            rules = []
+            for rule in scoring_rules:
+                rule_dict = {
+                    'attr': rule.attribute,
+                    'operator': rule.data.get('operator', '==') if isinstance(rule.data, dict) else '==',
+                    'value': rule.data.get('value', '') if isinstance(rule.data, dict) else '',
+                    'weight': rule.weight,
+                }
+                rules.append(rule_dict)
+            
+            logger.debug(f"get_scoring_rules: Found {len(rules)} active rules from ScoringRule table for entity_type '{entity_type}' and tenant {tenant_id}")
+            return rules
+    except Exception as e:
+        logger.error(f"get_scoring_rules: Error fetching ScoringRule: {e}")
+    
+    # Fallback to EntityTypeSchema for backward compatibility
     try:
         schema = EntityTypeSchema.objects.get(
             tenant_id=tenant_id,
             entity_type=entity_type
         )
-        return schema.rules if schema.rules else []
+        rules = schema.rules if schema.rules else []
+        if rules:
+            logger.debug(f"get_scoring_rules: Found {len(rules)} rules from EntityTypeSchema (fallback) for entity_type '{entity_type}' and tenant {tenant_id}")
+        return rules
     except EntityTypeSchema.DoesNotExist:
-        logger.debug(f"get_scoring_rules: No schema found for entity_type '{entity_type}' and tenant {tenant_id}")
+        logger.debug(f"get_scoring_rules: No rules found for entity_type '{entity_type}' and tenant {tenant_id}")
         return []
     except Exception as e:
         logger.error(f"get_scoring_rules: Error fetching schema: {e}")
