@@ -3429,61 +3429,79 @@ class LeadScoringView(TenantScopedMixin, APIView):
         from background_jobs.queue_service import get_queue_service
         from background_jobs.models import JobType
         
-        serializer = LeadScoringRequestSerializer(data=request.data)
-        
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
-        rules = serializer.validated_data['rules']
         entity_type = 'lead'  # Default entity type for lead scoring
         
-        # Save rules to ScoringRule table (replace previous rules for this tenant/entity_type)
-        created_rules = []
-        try:
-            # First, delete existing rules for this tenant/entity_type
-            deleted_count = ScoringRule.objects.filter(
-                tenant=request.tenant,
-                entity_type=entity_type
-            ).delete()[0]
-            logger.info(f"LeadScoringView: Deleted {deleted_count} existing rules from ScoringRule table")
-            
-            # Then create new rules
-            for idx, rule in enumerate(rules):
-                try:
-                    scoring_rule = ScoringRule.objects.create(
-                        tenant=request.tenant,
-                        entity_type=entity_type,
-                        attribute=rule.get('attr', ''),
-                        data={
-                            'operator': rule.get('operator', '=='),
-                            'value': rule.get('value', ''),
-                        },
-                        weight=rule.get('weight', 0),
-                        order=idx,
-                        is_active=True
-                    )
-                    created_rules.append(scoring_rule)
-                    logger.debug(f"LeadScoringView: Created ScoringRule {scoring_rule.id}: {scoring_rule.attribute}")
-                except Exception as e:
-                    logger.error(f"LeadScoringView: Error creating ScoringRule for rule {idx}: {e}", exc_info=True)
-                    # Continue with other rules even if one fails
-                    continue
-            
-            logger.info(f"LeadScoringView: Successfully saved {len(created_rules)}/{len(rules)} rules to ScoringRule table for entity_type '{entity_type}'")
-        except Exception as e:
-            logger.error(f"LeadScoringView: Error saving rules to ScoringRule table: {e}", exc_info=True)
-            # Don't fail the request, continue to save to EntityTypeSchema
-        
-        # Also save to EntityTypeSchema for backward compatibility
-        EntityTypeSchema.objects.update_or_create(
+        # Check if rules exist in ScoringRule table first
+        scoring_rules_count = ScoringRule.objects.filter(
             tenant=request.tenant,
             entity_type=entity_type,
-            defaults={
-                'rules': rules
-            }
-        )
+            is_active=True
+        ).count()
         
-        logger.info(f"LeadScoringView: Saved {len(rules)} rules to EntityTypeSchema for entity_type '{entity_type}'")
+        if scoring_rules_count > 0:
+            # Rules are already saved individually in ScoringRule table, use them
+            logger.info(f"LeadScoringView: Found {scoring_rules_count} active rules in ScoringRule table, using them for scoring")
+            rules = []  # Empty rules array - will be read from ScoringRule table by scoring logic
+        else:
+            # No rules in ScoringRule table, check if rules provided in request (backward compatibility)
+            serializer = LeadScoringRequestSerializer(data=request.data)
+            
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            
+            rules = serializer.validated_data['rules']
+            
+            if not rules or len(rules) == 0:
+                return Response(
+                    {'error': 'No scoring rules found. Please create rules first.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Save rules to ScoringRule table (for backward compatibility when rules sent in request)
+            created_rules = []
+            try:
+                # Delete existing rules for this tenant/entity_type
+                deleted_count = ScoringRule.objects.filter(
+                    tenant=request.tenant,
+                    entity_type=entity_type
+                ).delete()[0]
+                logger.info(f"LeadScoringView: Deleted {deleted_count} existing rules from ScoringRule table")
+                
+                # Create new rules from request
+                for idx, rule in enumerate(rules):
+                    try:
+                        scoring_rule = ScoringRule.objects.create(
+                            tenant=request.tenant,
+                            entity_type=entity_type,
+                            attribute=rule.get('attr', ''),
+                            data={
+                                'operator': rule.get('operator', '=='),
+                                'value': rule.get('value', ''),
+                            },
+                            weight=rule.get('weight', 0),
+                            order=idx,
+                            is_active=True
+                        )
+                        created_rules.append(scoring_rule)
+                        logger.debug(f"LeadScoringView: Created ScoringRule {scoring_rule.id}: {scoring_rule.attribute}")
+                    except Exception as e:
+                        logger.error(f"LeadScoringView: Error creating ScoringRule for rule {idx}: {e}", exc_info=True)
+                        continue
+                
+                logger.info(f"LeadScoringView: Saved {len(created_rules)}/{len(rules)} rules to ScoringRule table from request")
+            except Exception as e:
+                logger.error(f"LeadScoringView: Error saving rules to ScoringRule table: {e}", exc_info=True)
+            
+            # Also save to EntityTypeSchema for backward compatibility
+            EntityTypeSchema.objects.update_or_create(
+                tenant=request.tenant,
+                entity_type=entity_type,
+                defaults={
+                    'rules': rules
+                }
+            )
+            
+            logger.info(f"LeadScoringView: Saved {len(rules)} rules to EntityTypeSchema for entity_type '{entity_type}'")
         
         # Count total leads for the job
         total_leads = Record.objects.filter(

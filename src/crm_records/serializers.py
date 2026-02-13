@@ -329,14 +329,15 @@ class ScoringRuleModelSerializer(serializers.ModelSerializer):
 class LeadScoringRequestSerializer(serializers.Serializer):
     """
     Serializer for lead scoring request payload.
+    
+    Rules can be empty if rules already exist in ScoringRule table (for individual rule management).
     """
-    rules = ScoringRuleSerializer(many=True, help_text="List of scoring rules")
+    rules = ScoringRuleSerializer(many=True, required=False, help_text="List of scoring rules (optional if rules exist in ScoringRule table)")
     
     def validate_rules(self, value):
-        """Validate that rules list is not empty."""
-        if not value or len(value) == 0:
-            raise serializers.ValidationError("At least one rule is required.")
-        return value
+        """Validate rules - allow empty list if rules exist in database."""
+        # Empty rules are allowed - backend will check ScoringRule table first
+        return value or []
 
 
 class CallAttemptMatrixSerializer(serializers.ModelSerializer):
