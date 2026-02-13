@@ -19,8 +19,8 @@ from drf_spectacular.types import OpenApiTypes
 import logging
 
 logger = logging.getLogger(__name__)
-from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix
-from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer, CallAttemptMatrixSerializer
+from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule
+from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer, CallAttemptMatrixSerializer, ScoringRuleModelSerializer
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
 from .scoring import calculate_and_update_lead_score
@@ -3429,24 +3429,79 @@ class LeadScoringView(TenantScopedMixin, APIView):
         from background_jobs.queue_service import get_queue_service
         from background_jobs.models import JobType
         
-        serializer = LeadScoringRequestSerializer(data=request.data)
-        
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
-        rules = serializer.validated_data['rules']
         entity_type = 'lead'  # Default entity type for lead scoring
         
-        # Save/update rules in EntityTypeSchema table (replace previous rules)
-        EntityTypeSchema.objects.update_or_create(
+        # Check if rules exist in ScoringRule table first
+        scoring_rules_count = ScoringRule.objects.filter(
             tenant=request.tenant,
             entity_type=entity_type,
-            defaults={
-                'rules': rules
-            }
-        )
+            is_active=True
+        ).count()
         
-        logger.info(f"LeadScoringView: Saved {len(rules)} rules to EntityTypeSchema for entity_type '{entity_type}'")
+        if scoring_rules_count > 0:
+            # Rules are already saved individually in ScoringRule table, use them
+            logger.info(f"LeadScoringView: Found {scoring_rules_count} active rules in ScoringRule table, using them for scoring")
+            rules = []  # Empty rules array - will be read from ScoringRule table by scoring logic
+        else:
+            # No rules in ScoringRule table, check if rules provided in request (backward compatibility)
+            serializer = LeadScoringRequestSerializer(data=request.data)
+            
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            
+            rules = serializer.validated_data['rules']
+            
+            if not rules or len(rules) == 0:
+                return Response(
+                    {'error': 'No scoring rules found. Please create rules first.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Save rules to ScoringRule table (for backward compatibility when rules sent in request)
+            created_rules = []
+            try:
+                # Delete existing rules for this tenant/entity_type
+                deleted_count = ScoringRule.objects.filter(
+                    tenant=request.tenant,
+                    entity_type=entity_type
+                ).delete()[0]
+                logger.info(f"LeadScoringView: Deleted {deleted_count} existing rules from ScoringRule table")
+                
+                # Create new rules from request
+                for idx, rule in enumerate(rules):
+                    try:
+                        scoring_rule = ScoringRule.objects.create(
+                            tenant=request.tenant,
+                            entity_type=entity_type,
+                            attribute=rule.get('attr', ''),
+                            data={
+                                'operator': rule.get('operator', '=='),
+                                'value': rule.get('value', ''),
+                            },
+                            weight=rule.get('weight', 0),
+                            order=idx,
+                            is_active=True
+                        )
+                        created_rules.append(scoring_rule)
+                        logger.debug(f"LeadScoringView: Created ScoringRule {scoring_rule.id}: {scoring_rule.attribute}")
+                    except Exception as e:
+                        logger.error(f"LeadScoringView: Error creating ScoringRule for rule {idx}: {e}", exc_info=True)
+                        continue
+                
+                logger.info(f"LeadScoringView: Saved {len(created_rules)}/{len(rules)} rules to ScoringRule table from request")
+            except Exception as e:
+                logger.error(f"LeadScoringView: Error saving rules to ScoringRule table: {e}", exc_info=True)
+            
+            # Also save to EntityTypeSchema for backward compatibility
+            EntityTypeSchema.objects.update_or_create(
+                tenant=request.tenant,
+                entity_type=entity_type,
+                defaults={
+                    'rules': rules
+                }
+            )
+            
+            logger.info(f"LeadScoringView: Saved {len(rules)} rules to EntityTypeSchema for entity_type '{entity_type}'")
         
         # Count total leads for the job
         total_leads = Record.objects.filter(
@@ -3988,5 +4043,219 @@ class RMAssignedMixpanelView(TenantScopedMixin, APIView):
                 {'error': f'Internal error: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class ScoringRuleListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
+    """
+    List all scoring rules for the current tenant, or create a new one.
+    
+    GET /crm-records/scoring-rules/?entity_type=lead
+    POST /crm-records/scoring-rules/
+    """
+    permission_classes = [IsTenantAuthenticated]
+    serializer_class = ScoringRuleModelSerializer
+    pagination_class = MetaPageNumberPagination
+    
+    def get_queryset(self):
+        """Return rules filtered by tenant and optionally by entity_type."""
+        queryset = ScoringRule.objects.filter(tenant=self.request.tenant)
+        
+        # Filter by entity_type if provided in query params
+        entity_type = self.request.query_params.get('entity_type')
+        if entity_type:
+            queryset = queryset.filter(entity_type=entity_type)
+        
+        # Filter by is_active if provided
+        is_active = self.request.query_params.get('is_active')
+        if is_active is not None:
+            is_active_bool = is_active.lower() in ('true', '1', 'yes')
+            queryset = queryset.filter(is_active=is_active_bool)
+        
+        return queryset.order_by('order', 'created_at')
+    
+    def perform_create(self, serializer):
+        """Set tenant automatically on create and trigger background job to re-score leads."""
+        rule = serializer.save(tenant=self.request.tenant)
+        logger.info(f"ScoringRuleListCreateView: Created rule {rule.id} ({rule.attribute}) for tenant {self.request.tenant.id}")
+        
+        # Trigger background job to re-score all existing leads with the new rule
+        self._trigger_scoring_job(rule.entity_type)
+    
+    def _trigger_scoring_job(self, entity_type: str):
+        """Helper method to trigger background job for re-scoring leads."""
+        try:
+            from background_jobs.queue_service import get_queue_service
+            from background_jobs.models import JobType
+            
+            # Count total leads for the job
+            total_leads = Record.objects.filter(
+                tenant=self.request.tenant,
+                entity_type=entity_type
+            ).count()
+            
+            if total_leads == 0:
+                logger.debug(f"ScoringRuleListCreateView: No leads to score for entity_type '{entity_type}'")
+                return
+            
+            # Enqueue background job using the queue service
+            queue_service = get_queue_service()
+            job = queue_service.enqueue_job(
+                job_type=JobType.SCORE_LEADS,
+                payload={
+                    'entity_type': entity_type,
+                    'batch_size': 100  # Process 100 leads per batch
+                },
+                priority=0,  # Normal priority
+                tenant_id=str(self.request.tenant.id)
+            )
+            
+            logger.info(
+                f"ScoringRuleListCreateView: Triggered background job {job.id} to re-score "
+                f"{total_leads} existing leads for entity_type '{entity_type}'"
+            )
+        except Exception as e:
+            logger.error(f"ScoringRuleListCreateView: Error triggering scoring job: {e}", exc_info=True)
+            # Don't fail the request if job enqueueing fails
+
+
+class ScoringRuleDetailView(TenantScopedMixin, generics.RetrieveUpdateDestroyAPIView):
+    """
+    Retrieve, update, or delete a scoring rule.
+    
+    GET /crm-records/scoring-rules/<id>/
+    PUT /crm-records/scoring-rules/<id>/
+    PATCH /crm-records/scoring-rules/<id>/
+    DELETE /crm-records/scoring-rules/<id>/
+    """
+    permission_classes = [IsTenantAuthenticated]
+    serializer_class = ScoringRuleModelSerializer
+    
+    def get_queryset(self):
+        """Return rules filtered by tenant."""
+        return ScoringRule.objects.filter(tenant=self.request.tenant)
+    
+    def update(self, request, *args, **kwargs):
+        """Handle PUT/PATCH requests with better error handling."""
+        try:
+            partial = kwargs.pop('partial', False)
+            instance = self.get_object()
+            serializer = self.get_serializer(instance, data=request.data, partial=partial)
+            serializer.is_valid(raise_exception=True)
+            self.perform_update(serializer)
+            
+            if getattr(instance, '_prefetched_objects_cache', None):
+                instance._prefetched_objects_cache = {}
+            
+            return Response(serializer.data)
+        except Exception as e:
+            logger.error(f"ScoringRuleDetailView.update: Error updating rule: {e}", exc_info=True)
+            return Response(
+                {'error': f'Failed to update rule: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    def destroy(self, request, *args, **kwargs):
+        """Handle DELETE requests with better error handling."""
+        try:
+            instance = self.get_object()
+            self.perform_destroy(instance)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except Exception as e:
+            logger.error(f"ScoringRuleDetailView.destroy: Error deleting rule: {e}", exc_info=True)
+            return Response(
+                {'error': f'Failed to delete rule: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    def perform_update(self, serializer):
+        """Update rule and ensure tenant is preserved. Triggers background job to re-score leads."""
+        rule = serializer.save(tenant=self.request.tenant)
+        logger.info(f"ScoringRuleDetailView: Updated rule {rule.id} ({rule.attribute}) for tenant {self.request.tenant.id}")
+        
+        # Trigger background job to re-score all existing leads with the updated rule
+        self._trigger_scoring_job(rule.entity_type)
+    
+    def _trigger_scoring_job(self, entity_type: str):
+        """Helper method to trigger background job for re-scoring leads."""
+        try:
+            from background_jobs.queue_service import get_queue_service
+            from background_jobs.models import JobType
+            
+            # Count total leads for the job
+            total_leads = Record.objects.filter(
+                tenant=self.request.tenant,
+                entity_type=entity_type
+            ).count()
+            
+            if total_leads == 0:
+                logger.debug(f"ScoringRuleDetailView: No leads to score for entity_type '{entity_type}'")
+                return
+            
+            # Enqueue background job using the queue service
+            queue_service = get_queue_service()
+            job = queue_service.enqueue_job(
+                job_type=JobType.SCORE_LEADS,
+                payload={
+                    'entity_type': entity_type,
+                    'batch_size': 100  # Process 100 leads per batch
+                },
+                priority=0,  # Normal priority
+                tenant_id=str(self.request.tenant.id)
+            )
+            
+            logger.info(
+                f"ScoringRuleDetailView: Triggered background job {job.id} to re-score "
+                f"{total_leads} existing leads for entity_type '{entity_type}'"
+            )
+        except Exception as e:
+            logger.error(f"ScoringRuleDetailView: Error triggering scoring job: {e}", exc_info=True)
+            # Don't fail the request if job enqueueing fails
+    
+    def perform_destroy(self, instance):
+        """Delete rule and log the action. Triggers background job to re-score leads."""
+        rule_id = instance.id
+        rule_attribute = instance.attribute
+        entity_type = instance.entity_type  # Save entity_type before deletion
+        instance.delete()
+        logger.info(f"ScoringRuleDetailView: Deleted rule {rule_id} ({rule_attribute}) for tenant {self.request.tenant.id}")
+        
+        # Trigger background job to re-score all existing leads after rule deletion
+        self._trigger_scoring_job(entity_type)
+    
+    def _trigger_scoring_job(self, entity_type: str):
+        """Helper method to trigger background job for re-scoring leads."""
+        try:
+            from background_jobs.queue_service import get_queue_service
+            from background_jobs.models import JobType
+            
+            # Count total leads for the job
+            total_leads = Record.objects.filter(
+                tenant=self.request.tenant,
+                entity_type=entity_type
+            ).count()
+            
+            if total_leads == 0:
+                logger.debug(f"ScoringRuleDetailView: No leads to score for entity_type '{entity_type}'")
+                return
+            
+            # Enqueue background job using the queue service
+            queue_service = get_queue_service()
+            job = queue_service.enqueue_job(
+                job_type=JobType.SCORE_LEADS,
+                payload={
+                    'entity_type': entity_type,
+                    'batch_size': 100  # Process 100 leads per batch
+                },
+                priority=0,  # Normal priority
+                tenant_id=str(self.request.tenant.id)
+            )
+            
+            logger.info(
+                f"ScoringRuleDetailView: Triggered background job {job.id} to re-score "
+                f"{total_leads} existing leads for entity_type '{entity_type}'"
+            )
+        except Exception as e:
+            logger.error(f"ScoringRuleDetailView: Error triggering scoring job: {e}", exc_info=True)
+            # Don't fail the request if job enqueueing fails
 
 

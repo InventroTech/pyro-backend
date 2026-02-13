@@ -8,6 +8,8 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Dict, Any
 from django.utils import timezone
+from django.db import transaction
+from django.db.utils import OperationalError
 from .models import BackgroundJob
 from support_ticket.services import MixpanelService
 
@@ -410,7 +412,6 @@ class LeadScoringJobHandler(JobHandler):
             "batch_size": 100       # Optional, defaults to 100
         }
         """
-        from django.db import transaction
         from crm_records.models import Record
         from crm_records.scoring import calculate_and_update_lead_score
         
@@ -455,12 +456,23 @@ class LeadScoringJobHandler(JobHandler):
         for i in range(0, total_leads, batch_size):
             batch = leads[i:i + batch_size]
             
-            with transaction.atomic():
-                for lead in batch:
-                    try:
+            # Process each lead individually to prevent deadlocks
+            # If one lead fails, others can still be processed
+            for lead in batch:
+                try:
+                    # Use individual transaction per lead to prevent deadlocks
+                    # This ensures that if one lead update fails, others can still proceed
+                    with transaction.atomic():
+                        # Use select_for_update to lock the lead row and prevent concurrent updates
+                        locked_lead = Record.objects.select_for_update(nowait=True).get(
+                            pk=lead.pk,
+                            tenant_id=tenant_id,
+                            entity_type=entity_type
+                        )
+                        
                         # Use the utility function to calculate and update score
                         score = calculate_and_update_lead_score(
-                            lead,
+                            locked_lead,
                             tenant_id=tenant_id,
                             save=True
                         )
@@ -470,29 +482,57 @@ class LeadScoringJobHandler(JobHandler):
                         if score > 0:
                             updated_count += 1
                             total_score_added += score
-                        
-                        # Update job result every batch
-                        if processed_count % batch_size == 0:
-                            progress = int((processed_count / total_leads) * 100) if total_leads > 0 else 0
-                            job.result = {
-                                "total_leads": total_leads,
-                                "processed_leads": processed_count,
-                                "updated_leads": updated_count,
-                                "total_score_added": total_score_added,
-                                "progress_percentage": progress,
-                                "status": "processing"
-                            }
-                            job.save(update_fields=['result'])
-                            logger.debug(
-                                f"Lead scoring job {job.id} progress: "
-                                f"{processed_count}/{total_leads} ({progress}%)"
-                            )
                     
-                    except Exception as e:
-                        logger.error(f"Error scoring lead {lead.id} in job {job.id}: {e}")
-                        # Continue with next lead
+                except Record.DoesNotExist:
+                    # Lead was deleted, skip it
+                    logger.warning(f"Lead {lead.id} not found, skipping")
+                    processed_count += 1
+                    continue
+                except OperationalError as e:
+                    # Handle deadlocks and lock timeouts gracefully
+                    if 'deadlock' in str(e).lower() or 'lock' in str(e).lower():
+                        logger.warning(
+                            f"Deadlock detected while processing lead {lead.id} in job {job.id}. "
+                            f"Skipping this lead. Error: {e}"
+                        )
                         processed_count += 1
                         continue
+                    else:
+                        raise
+                except Exception as e:
+                    logger.error(f"Error scoring lead {lead.id} in job {job.id}: {e}", exc_info=True)
+                    # Continue with next lead
+                    processed_count += 1
+                    continue
+            
+            # Update job result after each batch (outside the per-lead transaction)
+            try:
+                # Use select_for_update to prevent concurrent job updates
+                with transaction.atomic():
+                    locked_job = BackgroundJob.objects.select_for_update(nowait=True).get(pk=job.pk)
+                    progress = int((processed_count / total_leads) * 100) if total_leads > 0 else 0
+                    locked_job.result = {
+                        "total_leads": total_leads,
+                        "processed_leads": processed_count,
+                        "updated_leads": updated_count,
+                        "total_score_added": total_score_added,
+                        "progress_percentage": progress,
+                        "status": "processing"
+                    }
+                    locked_job.save(update_fields=['result'])
+                    logger.debug(
+                        f"Lead scoring job {job.id} progress: "
+                        f"{processed_count}/{total_leads} ({progress}%)"
+                    )
+            except OperationalError as e:
+                # If we can't update job progress due to deadlock, log and continue
+                if 'deadlock' in str(e).lower() or 'lock' in str(e).lower():
+                    logger.warning(f"Could not update job {job.id} progress due to deadlock. Continuing...")
+                else:
+                    logger.error(f"Error updating job {job.id} progress: {e}")
+            except Exception as e:
+                logger.error(f"Error updating job {job.id} progress: {e}")
+                # Don't fail the entire job if progress update fails
         
         # Final update
         job.result = {

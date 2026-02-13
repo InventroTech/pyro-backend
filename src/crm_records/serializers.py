@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix
+from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule
 
 
 class RecordSerializer(serializers.ModelSerializer):
@@ -278,17 +278,66 @@ class ScoringRuleSerializer(serializers.Serializer):
     weight = serializers.FloatField(help_text="Weight/score to add if rule matches")
 
 
+class ScoringRuleModelSerializer(serializers.ModelSerializer):
+    """
+    ModelSerializer for ScoringRule model - supports CRUD operations.
+    
+    Flexible structure: 'data' field can contain any structure (operator, value, etc.)
+    """
+    class Meta:
+        model = ScoringRule
+        fields = [
+            'id',
+            'entity_type',
+            'attribute',
+            'data',
+            'weight',
+            'order',
+            'is_active',
+            'description',
+            'created_at',
+            'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+    
+    def validate_data(self, value):
+        """Validate data is a dictionary."""
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("Data must be a valid JSON object.")
+        return value
+    
+    def validate_weight(self, value):
+        """Validate weight is a valid number."""
+        # Allow None for partial updates (PATCH)
+        if value is None:
+            return value
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            raise serializers.ValidationError("Weight must be a valid number")
+    
+    def validate_data(self, value):
+        """Validate data is a dictionary."""
+        # Allow None for partial updates (PATCH)
+        if value is None:
+            return value
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("Data must be a valid JSON object.")
+        return value
+
+
 class LeadScoringRequestSerializer(serializers.Serializer):
     """
     Serializer for lead scoring request payload.
+    
+    Rules can be empty if rules already exist in ScoringRule table (for individual rule management).
     """
-    rules = ScoringRuleSerializer(many=True, help_text="List of scoring rules")
+    rules = ScoringRuleSerializer(many=True, required=False, help_text="List of scoring rules (optional if rules exist in ScoringRule table)")
     
     def validate_rules(self, value):
-        """Validate that rules list is not empty."""
-        if not value or len(value) == 0:
-            raise serializers.ValidationError("At least one rule is required.")
-        return value
+        """Validate rules - allow empty list if rules exist in database."""
+        # Empty rules are allowed - backend will check ScoringRule table first
+        return value or []
 
 
 class CallAttemptMatrixSerializer(serializers.ModelSerializer):

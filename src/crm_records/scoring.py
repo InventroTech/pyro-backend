@@ -11,27 +11,64 @@ from .models import Record, EntityTypeSchema
 logger = logging.getLogger(__name__)
 
 
-def _get_nested_value(data: Dict[str, Any], attr_path: str) -> Any:
+def _get_attribute_value(record: Record, attr_path: str) -> Any:
     """
-    Get nested value from data dict using dot notation path.
+    Get attribute value from Record, checking both direct Record fields and nested data fields.
     
-    Example: data.assigned_to -> data['assigned_to']
-    Example: data.user.profile.name -> data['user']['profile']['name']
+    Handles:
+    - Direct Record fields: id, entity_type, created_at, updated_at, tenant_id
+    - Nested data fields: data.assigned_to, data.user.profile.name
     
     Args:
-        data: Dictionary to extract value from
-        attr_path: Dot-separated path to the value
+        record: Record instance
+        attr_path: Attribute path (e.g., 'id', 'entity_type', 'data.assigned_to', 'data.user.name')
         
     Returns:
         The value at the path, or None if not found
+        
+    Examples:
+        >>> _get_attribute_value(lead, 'id')  # Returns lead.id
+        >>> _get_attribute_value(lead, 'entity_type')  # Returns lead.entity_type
+        >>> _get_attribute_value(lead, 'data.assigned_to')  # Returns lead.data['assigned_to']
+        >>> _get_attribute_value(lead, 'assigned_to')  # Returns lead.data['assigned_to'] (if data. prefix missing)
     """
-    if not attr_path or not data:
+    if not attr_path or not record:
         return None
     
+    # List of direct Record model fields (not in data JSONB)
+    direct_fields = {
+        'id', 'entity_type', 'created_at', 'updated_at', 
+        'tenant', 'tenant_id', 'pyro_data'
+    }
+    
+    # Check if it's a direct Record field (no 'data.' prefix and matches direct fields)
+    if not attr_path.startswith('data.') and attr_path in direct_fields:
+        try:
+            # Handle tenant specially (it's a ForeignKey object)
+            if attr_path == 'tenant_id' and hasattr(record, 'tenant'):
+                return str(record.tenant.id) if record.tenant else None
+            elif attr_path == 'tenant' and hasattr(record, 'tenant'):
+                return record.tenant.id if record.tenant else None
+            else:
+                value = getattr(record, attr_path, None)
+                # Convert datetime to string for comparison
+                if hasattr(value, 'isoformat'):
+                    return value.isoformat()
+                return value
+        except (AttributeError, TypeError):
+            return None
+    
+    # Handle nested data fields (with or without 'data.' prefix)
     # Remove 'data.' prefix if present
     if attr_path.startswith('data.'):
         attr_path = attr_path[5:]  # Remove 'data.' prefix
     
+    # Get data dict
+    data = record.data if record.data else {}
+    if not data:
+        return None
+    
+    # Navigate nested path
     keys = attr_path.split('.')
     value = data
     
@@ -46,12 +83,12 @@ def _get_nested_value(data: Dict[str, Any], attr_path: str) -> Any:
         return None
 
 
-def _evaluate_rule(lead_data: Dict[str, Any], rule: Dict[str, Any]) -> bool:
+def _evaluate_rule(record: Record, rule: Dict[str, Any]) -> bool:
     """
-    Evaluate if a rule matches the lead data.
+    Evaluate if a rule matches the record.
     
     Args:
-        lead_data: The data dict from the lead record
+        record: Record instance (lead, ticket, etc.)
         rule: Dict with 'attr', 'operator', 'value', 'weight'
     
     Returns:
@@ -61,8 +98,8 @@ def _evaluate_rule(lead_data: Dict[str, Any], rule: Dict[str, Any]) -> bool:
     operator = rule.get('operator', '==')
     expected_value = rule.get('value', '')
     
-    # Get the actual value from lead data
-    actual_value = _get_nested_value(lead_data, attr_path)
+    # Get the actual value from record (checks both direct fields and data JSONB)
+    actual_value = _get_attribute_value(record, attr_path)
     
     if actual_value is None:
         return False
@@ -145,33 +182,19 @@ def calculate_lead_score(lead: Record, tenant_id: Optional[str] = None) -> float
     # Get entity_type from lead
     entity_type = lead.entity_type if hasattr(lead, 'entity_type') else 'lead'
     
-    # Fetch rules from EntityTypeSchema
-    try:
-        schema = EntityTypeSchema.objects.get(
-            tenant_id=tenant_id,
-            entity_type=entity_type
-        )
-        rules = schema.rules if schema.rules else []
-    except EntityTypeSchema.DoesNotExist:
-        logger.debug(f"calculate_lead_score: No schema found for entity_type '{entity_type}' and tenant {tenant_id}")
-        return 0.0
-    except Exception as e:
-        logger.error(f"calculate_lead_score: Error fetching schema: {e}")
-        return 0.0
+    # Fetch rules using get_scoring_rules (which prioritizes ScoringRule table)
+    rules = get_scoring_rules(entity_type, tenant_id)
     
     if not rules or len(rules) == 0:
         logger.debug(f"calculate_lead_score: No rules found for entity_type '{entity_type}'")
         return 0.0
-    
-    # Get lead data
-    lead_data = lead.data if lead.data else {}
     
     # Calculate total score
     total_score = 0.0
     matched_rules_count = 0
     
     for rule in rules:
-        if _evaluate_rule(lead_data, rule):
+        if _evaluate_rule(lead, rule):
             weight = rule.get('weight', 0)
             try:
                 total_score += float(weight)
@@ -219,7 +242,7 @@ def calculate_and_update_lead_score(lead: Record, tenant_id: Optional[str] = Non
     if not lead.data:
         lead.data = {}
     
-    #lead.data['lead_score'] = score
+    lead.data['lead_score'] = score
     logger.info(f"calculate_and_update_lead_score: Lead {lead.id} score: {score}")
     
     # Save if requested
@@ -236,6 +259,8 @@ def get_scoring_rules(entity_type: str, tenant_id: str) -> List[Dict[str, Any]]:
     """
     Get scoring rules for a specific entity type and tenant.
     
+    Prioritizes ScoringRule table, falls back to EntityTypeSchema for backward compatibility.
+    
     Args:
         entity_type: The entity type (e.g., 'lead', 'ticket')
         tenant_id: The tenant ID
@@ -249,14 +274,45 @@ def get_scoring_rules(entity_type: str, tenant_id: str) -> List[Dict[str, Any]]:
         >>> rules = get_scoring_rules('lead', tenant_id='123e4567-...')
         >>> print(f"Found {len(rules)} rules")
     """
+    from .models import ScoringRule
+    
+    # First, try to fetch from ScoringRule table
+    try:
+        scoring_rules = ScoringRule.objects.filter(
+            tenant_id=tenant_id,
+            entity_type=entity_type,
+            is_active=True
+        ).order_by('order', 'created_at')
+        
+        if scoring_rules.exists():
+            # Convert ScoringRule instances to rule dictionaries
+            rules = []
+            for rule in scoring_rules:
+                rule_dict = {
+                    'attr': rule.attribute,
+                    'operator': rule.data.get('operator', '==') if isinstance(rule.data, dict) else '==',
+                    'value': rule.data.get('value', '') if isinstance(rule.data, dict) else '',
+                    'weight': rule.weight,
+                }
+                rules.append(rule_dict)
+            
+            logger.debug(f"get_scoring_rules: Found {len(rules)} active rules from ScoringRule table for entity_type '{entity_type}' and tenant {tenant_id}")
+            return rules
+    except Exception as e:
+        logger.error(f"get_scoring_rules: Error fetching ScoringRule: {e}")
+    
+    # Fallback to EntityTypeSchema for backward compatibility
     try:
         schema = EntityTypeSchema.objects.get(
             tenant_id=tenant_id,
             entity_type=entity_type
         )
-        return schema.rules if schema.rules else []
+        rules = schema.rules if schema.rules else []
+        if rules:
+            logger.debug(f"get_scoring_rules: Found {len(rules)} rules from EntityTypeSchema (fallback) for entity_type '{entity_type}' and tenant {tenant_id}")
+        return rules
     except EntityTypeSchema.DoesNotExist:
-        logger.debug(f"get_scoring_rules: No schema found for entity_type '{entity_type}' and tenant {tenant_id}")
+        logger.debug(f"get_scoring_rules: No rules found for entity_type '{entity_type}' and tenant {tenant_id}")
         return []
     except Exception as e:
         logger.error(f"get_scoring_rules: Error fetching schema: {e}")
