@@ -308,12 +308,21 @@ class ScoringRuleModelSerializer(serializers.ModelSerializer):
     
     def validate_weight(self, value):
         """Validate weight is a valid number."""
+        # Allow None for partial updates (PATCH)
         if value is None:
-            raise serializers.ValidationError("Weight is required")
+            return value
         try:
-            float(value)
+            return float(value)
         except (ValueError, TypeError):
             raise serializers.ValidationError("Weight must be a valid number")
+    
+    def validate_data(self, value):
+        """Validate data is a dictionary."""
+        # Allow None for partial updates (PATCH)
+        if value is None:
+            return value
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("Data must be a valid JSON object.")
         return value
 
 
