@@ -19,8 +19,8 @@ from drf_spectacular.types import OpenApiTypes
 import logging
 
 logger = logging.getLogger(__name__)
-from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix
-from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer, CallAttemptMatrixSerializer
+from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule
+from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer, CallAttemptMatrixSerializer, ScoringRuleModelSerializer
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
 from .scoring import calculate_and_update_lead_score
@@ -1498,6 +1498,28 @@ class GetNextLeadView(APIView):
             eligible_lead_statuses = []
             daily_limit = None
 
+        # Optional: allow request to pass current lead-assignment page selection (intersection of all is used)
+        # When provided, these override saved settings for this request so Get Next Lead returns leads
+        # matching ALL selected: party AND lead_source AND lead_status.
+        party_param = request.query_params.get('party') or request.query_params.get('lead_types')
+        lead_sources_param = request.query_params.get('lead_sources')
+        lead_statuses_param = request.query_params.get('lead_statuses')
+        if party_param is not None:
+            party_list = [s.strip() for s in str(party_param).split(',') if s.strip()]
+            if party_list:
+                eligible_lead_types = party_list
+                logger.info("[GetNextLead] Using party/lead_types from request (intersection): %s", eligible_lead_types)
+        if lead_sources_param is not None:
+            sources_list = [s.strip() for s in str(lead_sources_param).split(',') if s.strip()]
+            eligible_lead_sources = sources_list
+            if eligible_lead_sources:
+                logger.info("[GetNextLead] Using lead_sources from request (intersection): %s", eligible_lead_sources)
+        if lead_statuses_param is not None:
+            statuses_list = [s.strip() for s in str(lead_statuses_param).split(',') if s.strip()]
+            eligible_lead_statuses = statuses_list
+            if eligible_lead_statuses:
+                logger.info("[GetNextLead] Using lead_statuses from request (intersection): %s", eligible_lead_statuses)
+
         # If user has no eligible lead types assigned, push all leads to the RM
         # (no filtering by affiliated_party / party type)
         if not eligible_lead_types:
@@ -1746,16 +1768,16 @@ class GetNextLeadView(APIView):
             unassigned = base_qs.filter(affiliated_party_filter)
             logger.info("[GetNextLead] Filtered unassigned leads by eligible types: %s", eligible_lead_types)
 
-        # Filter by eligible lead sources (if configured): only direct leads whose lead_source is in the RM's list
+        # Intersection of all selected: only leads matching party AND lead_source AND lead_status (when each is configured).
+        # Filter by eligible lead sources (if configured): only leads whose lead_source is in the RM's list
         if eligible_lead_sources:
             unassigned = unassigned.filter(data__lead_source__in=eligible_lead_sources)
-            logger.info("[GetNextLead] Filtered unassigned leads by eligible lead sources: %s", eligible_lead_sources)
+            logger.info("[GetNextLead] Filtered unassigned leads by eligible lead sources (intersection): %s", eligible_lead_sources)
         
-        # Filter by eligible lead statuses (if configured): only direct leads whose lead_status is in the RM's list
-        # If nothing selected, query all (no filtering)
+        # Filter by eligible lead statuses (if configured): only leads whose lead_status is in the RM's list
         if eligible_lead_statuses:
             unassigned = unassigned.filter(data__lead_status__in=eligible_lead_statuses)
-            logger.info("[GetNextLead] Filtered unassigned leads by eligible lead statuses: %s", eligible_lead_statuses)
+            logger.info("[GetNextLead] Filtered unassigned leads by eligible lead statuses (intersection): %s", eligible_lead_statuses)
 
         # Filter by call attempt matrix rules (max attempts, SLA, min time between calls)
         # Load call attempt matrices for all eligible lead types - BULK FETCH to avoid N+1 queries
@@ -1925,9 +1947,14 @@ class GetNextLeadView(APIView):
                 relaxed_unassigned = relaxed_qs.filter(affiliated_party_filter)
             else:
                 relaxed_unassigned = relaxed_qs
+            # Apply same intersection: lead_sources and lead_statuses so relaxed fallback respects all selected columns
+            if eligible_lead_sources:
+                relaxed_unassigned = relaxed_unassigned.filter(data__lead_source__in=eligible_lead_sources)
+            if eligible_lead_statuses:
+                relaxed_unassigned = relaxed_unassigned.filter(data__lead_status__in=eligible_lead_statuses)
             relaxed_cnt = relaxed_unassigned.count()
             if relaxed_cnt > 0:
-                logger.info("[GetNextLead] Relaxed fallback found %d unassigned leads ignoring lead_stage filter", relaxed_cnt)
+                logger.info("[GetNextLead] Relaxed fallback found %d unassigned leads ignoring lead_stage filter (intersection of party/source/status applied)", relaxed_cnt)
                 unassigned = relaxed_unassigned
                 unassigned_cnt = relaxed_cnt
 
@@ -3988,5 +4015,55 @@ class RMAssignedMixpanelView(TenantScopedMixin, APIView):
                 {'error': f'Internal error: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class ScoringRuleListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
+    """
+    List all scoring rules for the current tenant, or create a new one.
+    
+    GET /crm-records/scoring-rules/?entity_type=lead
+    POST /crm-records/scoring-rules/
+    """
+    permission_classes = [IsTenantAuthenticated]
+    serializer_class = ScoringRuleModelSerializer
+    pagination_class = MetaPageNumberPagination
+    
+    def get_queryset(self):
+        """Return rules filtered by tenant and optionally by entity_type."""
+        queryset = ScoringRule.objects.filter(tenant=self.request.tenant)
+        
+        # Filter by entity_type if provided in query params
+        entity_type = self.request.query_params.get('entity_type')
+        if entity_type:
+            queryset = queryset.filter(entity_type=entity_type)
+        
+        # Filter by is_active if provided
+        is_active = self.request.query_params.get('is_active')
+        if is_active is not None:
+            is_active_bool = is_active.lower() in ('true', '1', 'yes')
+            queryset = queryset.filter(is_active=is_active_bool)
+        
+        return queryset.order_by('order', 'created_at')
+    
+    def perform_create(self, serializer):
+        """Set tenant automatically on create."""
+        serializer.save(tenant=self.request.tenant)
+
+
+class ScoringRuleDetailView(TenantScopedMixin, generics.RetrieveUpdateDestroyAPIView):
+    """
+    Retrieve, update, or delete a scoring rule.
+    
+    GET /crm-records/scoring-rules/<id>/
+    PUT /crm-records/scoring-rules/<id>/
+    PATCH /crm-records/scoring-rules/<id>/
+    DELETE /crm-records/scoring-rules/<id>/
+    """
+    permission_classes = [IsTenantAuthenticated]
+    serializer_class = ScoringRuleModelSerializer
+    
+    def get_queryset(self):
+        """Return rules filtered by tenant."""
+        return ScoringRule.objects.filter(tenant=self.request.tenant)
 
 
