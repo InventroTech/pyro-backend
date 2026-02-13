@@ -11,27 +11,64 @@ from .models import Record, EntityTypeSchema
 logger = logging.getLogger(__name__)
 
 
-def _get_nested_value(data: Dict[str, Any], attr_path: str) -> Any:
+def _get_attribute_value(record: Record, attr_path: str) -> Any:
     """
-    Get nested value from data dict using dot notation path.
+    Get attribute value from Record, checking both direct Record fields and nested data fields.
     
-    Example: data.assigned_to -> data['assigned_to']
-    Example: data.user.profile.name -> data['user']['profile']['name']
+    Handles:
+    - Direct Record fields: id, entity_type, created_at, updated_at, tenant_id
+    - Nested data fields: data.assigned_to, data.user.profile.name
     
     Args:
-        data: Dictionary to extract value from
-        attr_path: Dot-separated path to the value
+        record: Record instance
+        attr_path: Attribute path (e.g., 'id', 'entity_type', 'data.assigned_to', 'data.user.name')
         
     Returns:
         The value at the path, or None if not found
+        
+    Examples:
+        >>> _get_attribute_value(lead, 'id')  # Returns lead.id
+        >>> _get_attribute_value(lead, 'entity_type')  # Returns lead.entity_type
+        >>> _get_attribute_value(lead, 'data.assigned_to')  # Returns lead.data['assigned_to']
+        >>> _get_attribute_value(lead, 'assigned_to')  # Returns lead.data['assigned_to'] (if data. prefix missing)
     """
-    if not attr_path or not data:
+    if not attr_path or not record:
         return None
     
+    # List of direct Record model fields (not in data JSONB)
+    direct_fields = {
+        'id', 'entity_type', 'created_at', 'updated_at', 
+        'tenant', 'tenant_id', 'pyro_data'
+    }
+    
+    # Check if it's a direct Record field (no 'data.' prefix and matches direct fields)
+    if not attr_path.startswith('data.') and attr_path in direct_fields:
+        try:
+            # Handle tenant specially (it's a ForeignKey object)
+            if attr_path == 'tenant_id' and hasattr(record, 'tenant'):
+                return str(record.tenant.id) if record.tenant else None
+            elif attr_path == 'tenant' and hasattr(record, 'tenant'):
+                return record.tenant.id if record.tenant else None
+            else:
+                value = getattr(record, attr_path, None)
+                # Convert datetime to string for comparison
+                if hasattr(value, 'isoformat'):
+                    return value.isoformat()
+                return value
+        except (AttributeError, TypeError):
+            return None
+    
+    # Handle nested data fields (with or without 'data.' prefix)
     # Remove 'data.' prefix if present
     if attr_path.startswith('data.'):
         attr_path = attr_path[5:]  # Remove 'data.' prefix
     
+    # Get data dict
+    data = record.data if record.data else {}
+    if not data:
+        return None
+    
+    # Navigate nested path
     keys = attr_path.split('.')
     value = data
     
@@ -46,12 +83,12 @@ def _get_nested_value(data: Dict[str, Any], attr_path: str) -> Any:
         return None
 
 
-def _evaluate_rule(lead_data: Dict[str, Any], rule: Dict[str, Any]) -> bool:
+def _evaluate_rule(record: Record, rule: Dict[str, Any]) -> bool:
     """
-    Evaluate if a rule matches the lead data.
+    Evaluate if a rule matches the record.
     
     Args:
-        lead_data: The data dict from the lead record
+        record: Record instance (lead, ticket, etc.)
         rule: Dict with 'attr', 'operator', 'value', 'weight'
     
     Returns:
@@ -61,8 +98,8 @@ def _evaluate_rule(lead_data: Dict[str, Any], rule: Dict[str, Any]) -> bool:
     operator = rule.get('operator', '==')
     expected_value = rule.get('value', '')
     
-    # Get the actual value from lead data
-    actual_value = _get_nested_value(lead_data, attr_path)
+    # Get the actual value from record (checks both direct fields and data JSONB)
+    actual_value = _get_attribute_value(record, attr_path)
     
     if actual_value is None:
         return False
@@ -152,15 +189,12 @@ def calculate_lead_score(lead: Record, tenant_id: Optional[str] = None) -> float
         logger.debug(f"calculate_lead_score: No rules found for entity_type '{entity_type}'")
         return 0.0
     
-    # Get lead data
-    lead_data = lead.data if lead.data else {}
-    
     # Calculate total score
     total_score = 0.0
     matched_rules_count = 0
     
     for rule in rules:
-        if _evaluate_rule(lead_data, rule):
+        if _evaluate_rule(lead, rule):
             weight = rule.get('weight', 0)
             try:
                 total_score += float(weight)
