@@ -14,6 +14,8 @@ import re
 import copy
 from django.core.cache import cache
 
+from django.db.models import Q
+
 from .models import RuleSet, RuleExecutionLog, Record
 from background_jobs.queue_service import get_queue_service
 from background_jobs.models import JobType
@@ -739,6 +741,223 @@ def action_compute_next_call_from_attempts(
         f"Computed {target_field} for record {record.id} using attempts={attempts}, minutes={minutes}: {iso_ts}"
     )
     return {"attempts": attempts, "target_field": target_field, "value": iso_ts, "minutes": minutes}
+
+
+@register_action("bulk_update_requests_in_cart")
+def action_bulk_update_requests_in_cart(
+    ctx: Dict[str, Any],
+    target_status: Optional[str] = None,
+    copy_invoice_and_terms: bool = True,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """
+    Find all inventory_request records whose data.cart_id matches the cart record's id,
+    and update their status (and optionally invoice_number, payment_terms from cart).
+    Used when PM "applies" or "approves" a cart so all requests in the cart get the same
+    status and shared invoice/terms.
+
+    Args:
+        ctx: Context containing 'record' (the inventory_cart) and 'payload'
+        target_status: Status to set on all requests (e.g. PAYMENT_PENDING, IN_SHIPPING).
+                       If None, taken from payload.target_status.
+        copy_invoice_and_terms: If True, copy cart.data.invoice_number and
+                               cart.data.payment_terms to each request's data.
+
+    Returns:
+        Dict with updated_count and list of updated record ids.
+    """
+    record = ctx["record"]
+    payload = ctx.get("payload") or {}
+
+    if record.entity_type != "inventory_cart":
+        logger.warning(
+            f"[bulk_update_requests_in_cart] Record {record.id} is not inventory_cart (entity_type={record.entity_type}), skipping"
+        )
+        return {"updated_count": 0, "updated_ids": [], "skipped_reason": "not_inventory_cart"}
+
+    status_to_apply = target_status or payload.get("target_status")
+    if not status_to_apply:
+        logger.warning(
+            "[bulk_update_requests_in_cart] No target_status in args or payload, skipping bulk update"
+        )
+        return {"updated_count": 0, "updated_ids": [], "skipped_reason": "no_target_status"}
+
+    copy_invoice = copy_invoice_and_terms if "copy_invoice_and_terms" not in payload else payload.get("copy_invoice_and_terms", copy_invoice_and_terms)
+    cart_data = record.data or {}
+    invoice_number = cart_data.get("invoice_number") if copy_invoice else None
+    payment_terms = cart_data.get("payment_terms") if copy_invoice else None
+    comments = cart_data.get("comments") if copy_invoice else None
+
+    # Match cart_id as string or int for backward compatibility
+    cart_id_str = str(record.id)
+    requests_qs = Record.objects.filter(
+        tenant_id=record.tenant_id,
+        entity_type="inventory_request",
+    ).filter(Q(data__cart_id=cart_id_str) | Q(data__cart_id=record.id))
+
+    updated_ids = []
+    for req in requests_qs:
+        if not isinstance(req.data, dict):
+            req.data = {}
+        req.data["status"] = status_to_apply
+        if invoice_number is not None:
+            req.data["invoice_number"] = invoice_number
+        if payment_terms is not None:
+            req.data["payment_terms"] = payment_terms
+        if comments is not None:
+            req.data["comments"] = comments
+        req.save(update_fields=["data", "updated_at"])
+        updated_ids.append(req.id)
+
+    logger.info(
+        f"[bulk_update_requests_in_cart] Cart {record.id}: updated {len(updated_ids)} request(s) to status={status_to_apply}"
+    )
+    return {"updated_count": len(updated_ids), "updated_ids": updated_ids}
+
+
+@register_action("receive_add_to_inventory")
+def action_receive_add_to_inventory(
+    ctx: Dict[str, Any],
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """
+    For an inventory_request (e.g. status IN_SHIPPING): add received quantity to inventory.
+    - If an inventory_item exists with matching part_number_or_sku (or name), add quantity to
+      that item's available_quantity and set request status to FULFILLED.
+    - If no matching inventory_item exists, create a new inventory_item with data from the
+      request (part_number_or_sku, name, quantity as available_quantity) and set request to FULFILLED.
+    """
+    record = ctx["record"]
+    if record.entity_type != "inventory_request":
+        logger.warning(
+            f"[receive_add_to_inventory] Record {record.id} is not inventory_request (entity_type={record.entity_type}), skipping"
+        )
+        return {"success": False, "reason": "not_inventory_request", "inventory_item_id": None}
+
+    data = record.data or {}
+    part_number = (data.get("part_number_or_sku") or "").strip()
+    name = (data.get("item_name_freeform") or data.get("name") or "").strip()
+    qty = data.get("quantity_required") or data.get("quantity")
+    if qty is None:
+        try:
+            qty = int(data.get("quantity_required", 0) or 0)
+        except (TypeError, ValueError):
+            qty = 0
+    else:
+        try:
+            qty = int(qty)
+        except (TypeError, ValueError):
+            qty = 0
+
+    if qty < 1:
+        logger.warning(f"[receive_add_to_inventory] Request {record.id} has no positive quantity, skipping")
+        return {"success": False, "reason": "no_quantity", "inventory_item_id": None}
+
+    # Prefer match by part_number_or_sku; fallback to name
+    lookup_value = part_number or name
+    if not lookup_value:
+        logger.warning(f"[receive_add_to_inventory] Request {record.id} has no part_number_or_sku or item name, skipping")
+        return {"success": False, "reason": "no_identifier", "inventory_item_id": None}
+
+    inventory_item = None
+    if part_number:
+        inventory_item = (
+            Record.objects.filter(
+                tenant_id=record.tenant_id,
+                entity_type="inventory_item",
+            )
+            .filter(data__part_number_or_sku=part_number)
+            .first()
+        )
+    if inventory_item is None and name:
+        inventory_item = (
+            Record.objects.filter(
+                tenant_id=record.tenant_id,
+                entity_type="inventory_item",
+            )
+            .filter(Q(data__name=name) | Q(data__part_number_or_sku=name))
+            .first()
+        )
+
+    if inventory_item is not None:
+        if not isinstance(inventory_item.data, dict):
+            inventory_item.data = {}
+        avail = inventory_item.data.get("available_quantity")
+        alloc = inventory_item.data.get("allocated_quantity")
+        try:
+            avail = int(avail) if avail is not None else 0
+        except (TypeError, ValueError):
+            avail = 0
+        try:
+            alloc = int(alloc) if alloc is not None else 0
+        except (TypeError, ValueError):
+            alloc = 0
+        inventory_item.data["available_quantity"] = avail + qty
+        # Keep total_quantity = allocated_quantity + available_quantity
+        inventory_item.data["total_quantity"] = alloc + (avail + qty)
+        inventory_item.save(update_fields=["data", "updated_at"])
+        logger.info(
+            f"[receive_add_to_inventory] Request {record.id}: added {qty} to inventory_item {inventory_item.id} (available_quantity={inventory_item.data['available_quantity']}, total_quantity={inventory_item.data['total_quantity']})"
+        )
+    else:
+        # Create new inventory_item from request data (total_quantity = allocated + available)
+        new_data = {
+            "part_number_or_sku": part_number or name,
+            "name": name or part_number or "Received item",
+            "available_quantity": qty,
+            "allocated_quantity": 0,
+            "total_quantity": qty,
+            "status": "IN_STOCK",
+        }
+        # Copy optional fields from request if present
+        for key in ("default_vendor", "location", "default_cost_per_unit"):
+            if data.get(key) is not None:
+                new_data[key] = data[key]
+        if data.get("vendor_name") and "default_vendor" not in new_data:
+            new_data["default_vendor"] = data["vendor_name"]
+        inventory_item = Record.objects.create(
+            tenant_id=record.tenant_id,
+            entity_type="inventory_item",
+            data=new_data,
+        )
+        logger.info(
+            f"[receive_add_to_inventory] Request {record.id}: created inventory_item {inventory_item.id} with available_quantity={qty}"
+        )
+
+    # Mark request as FULFILLED
+    if not isinstance(record.data, dict):
+        record.data = {}
+    record.data["status"] = "FULFILLED"
+    record.save(update_fields=["data", "updated_at"])
+
+    return {
+        "success": True,
+        "inventory_item_id": inventory_item.id,
+        "quantity_added": qty,
+    }
+
+
+@register_action("roll_back_to_pm")
+def action_roll_back_to_pm(
+    ctx: Dict[str, Any],
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """
+    Set inventory_request status to PENDING_PM (e.g. defective product, problem with shipment).
+    Used by inventory manager from Receive Shipments flow.
+    """
+    record = ctx["record"]
+    if record.entity_type != "inventory_request":
+        logger.warning(
+            f"[roll_back_to_pm] Record {record.id} is not inventory_request (entity_type={record.entity_type}), skipping"
+        )
+        return {"success": False, "reason": "not_inventory_request"}
+    if not isinstance(record.data, dict):
+        record.data = {}
+    record.data["status"] = "PENDING_PM"
+    record.save(update_fields=["data", "updated_at"])
+    logger.info(f"[roll_back_to_pm] Request {record.id} set to PENDING_PM")
+    return {"success": True}
 
 
 def _evaluate_simple_condition(condition: Dict[str, Any], ctx: Dict[str, Any]) -> bool:
