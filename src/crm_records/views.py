@@ -1195,7 +1195,19 @@ class GetNextLeadView(APIView):
     Atomically fetches and assigns the highest-scoring unassigned lead to the caller.
     """
     permission_classes = [IsTenantAuthenticated]
-    
+
+    # Enforce next_call_at cooldown: lead is eligible only if call_attempts=0 or next_call_at is null/past.
+    # Applied in _order_by_score so it cannot be lost when the queryset is cloned (e.g. by .extra(select=) or .filter()).
+    _NEXT_CALL_READY_WHERE = """
+        (
+            COALESCE((data->>'call_attempts')::int, 0) = 0
+            OR data->>'next_call_at' IS NULL
+            OR data->>'next_call_at' = ''
+            OR data->>'next_call_at' = 'null'
+            OR (data->>'next_call_at')::timestamptz <= NOW()
+        )
+    """
+
     QUEUEABLE_STATUSES = ('in_queue', 'assigned', 'call_later', 'scheduled')
     ASSIGNED_STATUS = 'assigned'
     
@@ -1299,12 +1311,28 @@ class GetNextLeadView(APIView):
         2. Then by call_attempts: 0 attempts > 1 attempt > 2 attempt > 3 attempt > 4 attempt > 5 attempt
         3. Within each attempt level: LIFO (Last In First Out) - most recent updated_at first
         4. Then by lead score (descending), then creation date
-        
+
         This ensures:
         - Fresh leads (0 attempts) come first
         - "Not connected" leads ordered by attempts (1, 2, 3, 4, 5)
         - Most recently updated leads within each attempt level come first (LIFO)
         """
+        # Re-apply next_call_at filter here so it is never lost when qs is cloned (e.g. by .filter(id__in=...)
+        # or by chained .extra(select=). The base _queueable_where already has this; re-applying guarantees
+        # compute_next_call_from_attempts timing is respected regardless of queryset pipeline.
+        qs = qs.extra(where=[self._NEXT_CALL_READY_WHERE])
+
+        if logger.isEnabledFor(logging.DEBUG):
+            try:
+                sql = str(qs.query)
+                has_next_call = "next_call_at" in sql
+                logger.debug(
+                    "[GetNextLead] _order_by_score: next_call_at in WHERE=%s (re-applied here so base filter cannot be lost)",
+                    has_next_call,
+                )
+            except Exception:
+                pass
+
         if now_iso:
             qs = qs.extra(
                 select={
@@ -1499,8 +1527,6 @@ class GetNextLeadView(APIView):
             daily_limit = None
 
         # Optional: allow request to pass current lead-assignment page selection (intersection of all is used)
-        # When provided, these override saved settings for this request so Get Next Lead returns leads
-        # matching ALL selected: party AND lead_source AND lead_status.
         party_param = request.query_params.get('party') or request.query_params.get('lead_types')
         lead_sources_param = request.query_params.get('lead_sources')
         lead_statuses_param = request.query_params.get('lead_statuses')
@@ -1769,12 +1795,9 @@ class GetNextLeadView(APIView):
             logger.info("[GetNextLead] Filtered unassigned leads by eligible types: %s", eligible_lead_types)
 
         # Intersection of all selected: only leads matching party AND lead_source AND lead_status (when each is configured).
-        # Filter by eligible lead sources (if configured): only leads whose lead_source is in the RM's list
         if eligible_lead_sources:
             unassigned = unassigned.filter(data__lead_source__in=eligible_lead_sources)
             logger.info("[GetNextLead] Filtered unassigned leads by eligible lead sources (intersection): %s", eligible_lead_sources)
-        
-        # Filter by eligible lead statuses (if configured): only leads whose lead_status is in the RM's list
         if eligible_lead_statuses:
             unassigned = unassigned.filter(data__lead_status__in=eligible_lead_statuses)
             logger.info("[GetNextLead] Filtered unassigned leads by eligible lead statuses (intersection): %s", eligible_lead_statuses)
@@ -1942,19 +1965,17 @@ class GetNextLeadView(APIView):
                 """]
             )
             # Only apply affiliated_party_filter if eligible_lead_types are configured
-            # If no party types configured, don't filter by affiliated_party (allow NULL)
             if eligible_lead_types:
                 relaxed_unassigned = relaxed_qs.filter(affiliated_party_filter)
             else:
                 relaxed_unassigned = relaxed_qs
-            # Apply same intersection: lead_sources and lead_statuses so relaxed fallback respects all selected columns
             if eligible_lead_sources:
                 relaxed_unassigned = relaxed_unassigned.filter(data__lead_source__in=eligible_lead_sources)
             if eligible_lead_statuses:
                 relaxed_unassigned = relaxed_unassigned.filter(data__lead_status__in=eligible_lead_statuses)
             relaxed_cnt = relaxed_unassigned.count()
             if relaxed_cnt > 0:
-                logger.info("[GetNextLead] Relaxed fallback found %d unassigned leads ignoring lead_stage filter (intersection of party/source/status applied)", relaxed_cnt)
+                logger.info("[GetNextLead] Relaxed fallback found %d unassigned leads (intersection of party/source/status applied)", relaxed_cnt)
                 unassigned = relaxed_unassigned
                 unassigned_cnt = relaxed_cnt
 
