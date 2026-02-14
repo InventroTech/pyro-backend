@@ -160,6 +160,7 @@ class UserSettingsDetailView(APIView):
 
 
 class LeadTypeAssignmentView(APIView):
+
     """Manage lead type assignments for users (tenant-authenticated)"""
     permission_classes = [IsTenantAuthenticated]
 
