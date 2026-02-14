@@ -1498,6 +1498,26 @@ class GetNextLeadView(APIView):
             eligible_lead_statuses = []
             daily_limit = None
 
+        # Optional: allow request to pass current lead-assignment page selection (intersection of all is used)
+        party_param = request.query_params.get('party') or request.query_params.get('lead_types')
+        lead_sources_param = request.query_params.get('lead_sources')
+        lead_statuses_param = request.query_params.get('lead_statuses')
+        if party_param is not None:
+            party_list = [s.strip() for s in str(party_param).split(',') if s.strip()]
+            if party_list:
+                eligible_lead_types = party_list
+                logger.info("[GetNextLead] Using party/lead_types from request (intersection): %s", eligible_lead_types)
+        if lead_sources_param is not None:
+            sources_list = [s.strip() for s in str(lead_sources_param).split(',') if s.strip()]
+            eligible_lead_sources = sources_list
+            if eligible_lead_sources:
+                logger.info("[GetNextLead] Using lead_sources from request (intersection): %s", eligible_lead_sources)
+        if lead_statuses_param is not None:
+            statuses_list = [s.strip() for s in str(lead_statuses_param).split(',') if s.strip()]
+            eligible_lead_statuses = statuses_list
+            if eligible_lead_statuses:
+                logger.info("[GetNextLead] Using lead_statuses from request (intersection): %s", eligible_lead_statuses)
+
         # If user has no eligible lead types assigned, push all leads to the RM
         # (no filtering by affiliated_party / party type)
         if not eligible_lead_types:
@@ -1746,16 +1766,13 @@ class GetNextLeadView(APIView):
             unassigned = base_qs.filter(affiliated_party_filter)
             logger.info("[GetNextLead] Filtered unassigned leads by eligible types: %s", eligible_lead_types)
 
-        # Filter by eligible lead sources (if configured): only direct leads whose lead_source is in the RM's list
+        # Intersection of all selected: only leads matching party AND lead_source AND lead_status (when each is configured).
         if eligible_lead_sources:
             unassigned = unassigned.filter(data__lead_source__in=eligible_lead_sources)
-            logger.info("[GetNextLead] Filtered unassigned leads by eligible lead sources: %s", eligible_lead_sources)
-        
-        # Filter by eligible lead statuses (if configured): only direct leads whose lead_status is in the RM's list
-        # If nothing selected, query all (no filtering)
+            logger.info("[GetNextLead] Filtered unassigned leads by eligible lead sources (intersection): %s", eligible_lead_sources)
         if eligible_lead_statuses:
             unassigned = unassigned.filter(data__lead_status__in=eligible_lead_statuses)
-            logger.info("[GetNextLead] Filtered unassigned leads by eligible lead statuses: %s", eligible_lead_statuses)
+            logger.info("[GetNextLead] Filtered unassigned leads by eligible lead statuses (intersection): %s", eligible_lead_statuses)
 
         # Filter by call attempt matrix rules (max attempts, SLA, min time between calls)
         # Load call attempt matrices for all eligible lead types - BULK FETCH to avoid N+1 queries
@@ -1920,14 +1937,17 @@ class GetNextLeadView(APIView):
                 """]
             )
             # Only apply affiliated_party_filter if eligible_lead_types are configured
-            # If no party types configured, don't filter by affiliated_party (allow NULL)
             if eligible_lead_types:
                 relaxed_unassigned = relaxed_qs.filter(affiliated_party_filter)
             else:
                 relaxed_unassigned = relaxed_qs
+            if eligible_lead_sources:
+                relaxed_unassigned = relaxed_unassigned.filter(data__lead_source__in=eligible_lead_sources)
+            if eligible_lead_statuses:
+                relaxed_unassigned = relaxed_unassigned.filter(data__lead_status__in=eligible_lead_statuses)
             relaxed_cnt = relaxed_unassigned.count()
             if relaxed_cnt > 0:
-                logger.info("[GetNextLead] Relaxed fallback found %d unassigned leads ignoring lead_stage filter", relaxed_cnt)
+                logger.info("[GetNextLead] Relaxed fallback found %d unassigned leads (intersection of party/source/status applied)", relaxed_cnt)
                 unassigned = relaxed_unassigned
                 unassigned_cnt = relaxed_cnt
 
