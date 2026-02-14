@@ -19,25 +19,15 @@ class RolesView(APIView):
 
 
     def get(self, request, *args, **kwargs):
-        """
-        NEW: Added support for 'key' query parameter to filter by role key
-        GET /api/authz/roles?key=public -> returns role with key='public'
-        GET /api/authz/roles -> returns all roles for tenant
-        """
-        tenant = request.tenant
-        role_key = request.query_params.get('key', '').strip()
-        
-        # NEW: Filter by key if provided (for public role lookup)
-        if role_key:
-            qs = Role.objects.filter(tenant=tenant, key__iexact=role_key)
-        else:
-            qs = (
-                Role.objects
-                .filter(tenant=tenant)
-                .annotate(norm_name=Lower('name'))
-                .order_by('norm_name', 'id')   # order_by must include distinct keys prefix
-                .distinct('norm_name')         # collapse GM/gm/etc.
-            )
+        tenant = request.tenant 
+
+        qs = (
+            Role.objects
+            .filter(tenant=tenant)
+            .annotate(norm_name=Lower('name'))
+            .order_by('norm_name', 'id')   # order_by must include distinct keys prefix
+            .distinct('norm_name')         # collapse GM/gm/etc.
+        )
 
         data = [{
             "id": str(r.id),
@@ -72,26 +62,28 @@ class ListTenantUsersView(APIView):
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
-        """
-        NEW: Uses TenantMembership.name directly (no LegacyUser fallback).
-        The name field has been migrated from LegacyUser to TenantMembership.
-        """
+        from django.db.models import Q, OuterRef, Subquery
+        
+        # Create a subquery to get the name from LegacyUser
+        legacy_user_subquery = LegacyUser.objects.filter(
+            email=OuterRef('email'),
+            role_id=OuterRef('role__id'),
+            tenant=request.tenant
+        ).values('name')[:1]
+        
+        # Query TenantMembership with left join to LegacyUser
         qs = (TenantMembership.objects
               .select_related("role", "user_parent_id")
               .filter(tenant=request.tenant)
+              .annotate(name=Subquery(legacy_user_subquery))
               .order_by("-is_active", "email"))
         
         # Serialize the data
         data = TenantMembershipUserSerializer(qs, many=True).data
         
-        # Add name and company_name fields to each result (from TenantMembership)
+        # Add name field to each result
         for i, item in enumerate(data):
-            membership = qs[i]
-            # Use TenantMembership.name directly (migrated from LegacyUser)
-            item['name'] = membership.name or ''
-            # Include company_name if serializer doesn't already include it
-            if 'company_name' not in item:
-                item['company_name'] = membership.company_name or ''
+            item['name'] = qs[i].name or ''
         
         return Response({"count": len(data), "results": data}, status=status.HTTP_200_OK)
 

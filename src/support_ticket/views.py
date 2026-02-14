@@ -25,7 +25,7 @@ from authz.permissions import IsTenantAuthenticated
 from accounts.models import LegacyUser
 from datetime import timedelta
 from analytics.serializers import SupportTicketSerializer
-from .utils import send_to_mixpanel, ticket_to_mixpanel_data
+from .utils import send_to_mixpanel
 
 logger = logging.getLogger(__name__)
 
@@ -288,13 +288,13 @@ class SaveAndContinueView(APIView):
             mixpanel_event_name = ''
             
             if resolution_status == 'Resolved':
-                mixpanel_event_name = 'pyro_st_resolve'
+                mixpanel_event_name = 'pyro_resolve'
             elif resolution_status == "Can't Resolve":
-                mixpanel_event_name = 'pyro_st_cannot_resolve'
+                mixpanel_event_name = 'pyro_cannot_resolve'
             elif resolution_status == 'WIP':
-                mixpanel_event_name = 'pyro_st_call_later'
+                mixpanel_event_name = 'pyro_call_later'
             
-            # Send Mixpanel events - REQUIRED, must work (old properties + all ticket column data)
+            # Send Mixpanel events - REQUIRED, must work
             if mixpanel_event_name and current_ticket.user_id:
                 logger.info(f'Sending REQUIRED Mixpanel events for user_id: {current_ticket.user_id}, event: {mixpanel_event_name}')
                 
@@ -305,19 +305,19 @@ class SaveAndContinueView(APIView):
                     'reasons': other_reasons or [],
                     'review_requested': review_requested
                 }
-                mixpanel_properties.update(ticket_to_mixpanel_data(current_ticket))
                 
                 jwt_token = getattr(request, 'token', None)
                 
+                # Send Mixpanel events - exactly like working Edge function
                 mixpanel_service.send_to_mixpanel_sync(
-                    current_ticket.user_id,
-                    'pyro_st_connected',
+                    current_ticket.user_id, 
+                    'pyro_connected', 
                     mixpanel_properties
                 )
                 
                 mixpanel_service.send_to_mixpanel_sync(
-                    current_ticket.user_id,
-                    mixpanel_event_name,
+                    current_ticket.user_id, 
+                    mixpanel_event_name, 
                     mixpanel_properties
                 )
 
@@ -771,20 +771,18 @@ class UpdateCallStatusView(APIView):
 
                 ticket.save()
 
-            # Send Mixpanel event (outside transaction): old properties + all ticket column data
+            # Send Mixpanel event (outside transaction)
             if call_status == "Not Connected" and ticket.user_id:
                 mixpanel_service = MixpanelService()
-                mixpanel_properties = {
-                    "support_ticket_id": ticket_id,
-                    "remarks": cse_remarks or "",
-                    "cse_email_id": getattr(request.user, "email", None),
-                    "reasons": other_reasons or [],
-                }
-                mixpanel_properties.update(ticket_to_mixpanel_data(ticket))
                 mixpanel_service.send_to_mixpanel_sync(
                     ticket.user_id,
-                    "pyro_st_not_connected",
-                    mixpanel_properties,
+                    "pyro_not_connected",
+                    {
+                        "support_ticket_id": ticket_id,
+                        "remarks": cse_remarks or "",
+                        "cse_email_id": getattr(request.user, "email", None),
+                        "reasons": other_reasons or [],
+                    },
                 )
             return Response(SupportTicketSerializer(ticket).data, status=200)
 
@@ -1070,7 +1068,7 @@ class ProcessDumpedTicketsView(APIView):
                     from background_jobs.models import JobType
                     
                     user_id = ticket.user_id or str(ticket.id)
-                    event_name = 'pyro_st_ticket_created'
+                    event_name = 'pyro_supportTicket_ticket_created'
                     
                     logger.info("=" * 80)
                     logger.info(f"🎫 [Mixpanel] Creating ticket {ticket.id}, sending to Mixpanel")

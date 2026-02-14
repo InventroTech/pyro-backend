@@ -172,7 +172,7 @@ class SaveAndContinueViewTest(BaseAPITestCase):
         self.assertIsNotNone(updated_ticket.completed_at)
         
         # Verify Mixpanel calls
-        self.assertEqual(mock_mixpanel.call_count, 2)  # pyro_st_connected + pyro_st_resolve
+        self.assertEqual(mock_mixpanel.call_count, 2)  # pyro_connected + pyro_resolve
     
     def test_save_and_continue_time_accumulation(self):
         """Test time accumulation functionality"""
@@ -254,9 +254,9 @@ class SaveAndContinueViewTest(BaseAPITestCase):
         mock_mixpanel.return_value = True
         
         test_cases = [
-            ('Resolved', 'pyro_st_resolve'),
-            ("Can't Resolve", 'pyro_st_cannot_resolve'),
-            ('WIP', 'pyro_st_call_later'),
+            ('Resolved', 'pyro_resolve'),
+            ("Can't Resolve", 'pyro_cannot_resolve'),
+            ('WIP', 'pyro_call_later'),
         ]
         
         for resolution_status, expected_event in test_cases:
@@ -278,7 +278,7 @@ class SaveAndContinueViewTest(BaseAPITestCase):
                 
                 # Check the calls
                 calls = mock_mixpanel.call_args_list
-                self.assertEqual(calls[0][0][1], 'pyro_st_connected')  # First call
+                self.assertEqual(calls[0][0][1], 'pyro_connected')  # First call
                 self.assertEqual(calls[1][0][1], expected_event)    # Second call
     
     @patch('support_ticket.services.MixpanelService.send_to_mixpanel_sync')
