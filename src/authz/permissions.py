@@ -24,6 +24,8 @@ def HasTenantRole(role_key: str):
     class _HasTenantRole(BasePermission):
         def has_permission(self, request, view):
             info = _get_membership_info(request)
+            print(info)
+            # print(info)
             return bool(info and info['role_key'] == role_key)
     _HasTenantRole.__name__ = f"HasTenantRole_{role_key}"
     return _HasTenantRole
