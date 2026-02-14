@@ -6,7 +6,7 @@ from django.shortcuts import get_object_or_404
 from django.db import transaction
 import uuid
 
-from authz.permissions import IsTenantAuthenticated, HasTenantRole
+from authz.permissions import IsTenantAuthenticated
 
 from authz.models import TenantMembership
 from .models import UserSettings, RoutingRule
@@ -160,8 +160,8 @@ class UserSettingsDetailView(APIView):
 
 
 class LeadTypeAssignmentView(APIView):
-    """Manage lead type assignments for users (GM functionality)"""
-    permission_classes = [IsTenantAuthenticated, HasTenantRole("GM")]
+    """Manage lead type assignments for users."""
+    permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
         """Get all lead type assignments for the tenant"""
