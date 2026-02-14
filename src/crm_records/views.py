@@ -1195,7 +1195,19 @@ class GetNextLeadView(APIView):
     Atomically fetches and assigns the highest-scoring unassigned lead to the caller.
     """
     permission_classes = [IsTenantAuthenticated]
-    
+
+    # Enforce next_call_at cooldown: lead is eligible only if call_attempts=0 or next_call_at is null/past.
+    # Applied in _order_by_score so it cannot be lost when the queryset is cloned (e.g. by .extra(select=) or .filter()).
+    _NEXT_CALL_READY_WHERE = """
+        (
+            COALESCE((data->>'call_attempts')::int, 0) = 0
+            OR data->>'next_call_at' IS NULL
+            OR data->>'next_call_at' = ''
+            OR data->>'next_call_at' = 'null'
+            OR (data->>'next_call_at')::timestamptz <= NOW()
+        )
+    """
+
     QUEUEABLE_STATUSES = ('in_queue', 'assigned', 'call_later', 'scheduled')
     ASSIGNED_STATUS = 'assigned'
     
@@ -1299,12 +1311,28 @@ class GetNextLeadView(APIView):
         2. Then by call_attempts: 0 attempts > 1 attempt > 2 attempt > 3 attempt > 4 attempt > 5 attempt
         3. Within each attempt level: LIFO (Last In First Out) - most recent updated_at first
         4. Then by lead score (descending), then creation date
-        
+
         This ensures:
         - Fresh leads (0 attempts) come first
         - "Not connected" leads ordered by attempts (1, 2, 3, 4, 5)
         - Most recently updated leads within each attempt level come first (LIFO)
         """
+        # Re-apply next_call_at filter here so it is never lost when qs is cloned (e.g. by .filter(id__in=...)
+        # or by chained .extra(select=). The base _queueable_where already has this; re-applying guarantees
+        # compute_next_call_from_attempts timing is respected regardless of queryset pipeline.
+        qs = qs.extra(where=[self._NEXT_CALL_READY_WHERE])
+
+        if logger.isEnabledFor(logging.DEBUG):
+            try:
+                sql = str(qs.query)
+                has_next_call = "next_call_at" in sql
+                logger.debug(
+                    "[GetNextLead] _order_by_score: next_call_at in WHERE=%s (re-applied here so base filter cannot be lost)",
+                    has_next_call,
+                )
+            except Exception:
+                pass
+
         if now_iso:
             qs = qs.extra(
                 select={
