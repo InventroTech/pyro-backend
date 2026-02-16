@@ -2573,10 +2573,22 @@ class PrajaLeadsAPIView(APIView):
             if 'call_attempts' not in request_data['data'] or request_data['data'].get('call_attempts') in (None, '', 'null'):
                 request_data['data']['call_attempts'] = 0
         
+        # Extract lead data safely for logging/debugging
+        request_lead_data = request_data.get('data') if isinstance(request_data.get('data'), dict) else {}
+        
         # Check for duplicate praja_id before creating
-        praja_id = None
-        if 'data' in request_data and isinstance(request_data.get('data'), dict):
-            praja_id = request_data['data'].get('praja_id')
+        praja_id = request_lead_data.get('praja_id')
+        
+        # Compact, structured log for every create attempt (helps debug 4xx like 409)
+        logger.info(
+            "[PrajaLeadsAPI] Incoming CREATE: tenant=%s entity_type=%s praja_id=%s phone=%s lead_stage=%s poster=%s",
+            getattr(tenant, "slug", None),
+            entity_type,
+            praja_id,
+            request_lead_data.get("phone_number"),
+            request_lead_data.get("lead_stage"),
+            request_lead_data.get("poster"),
+        )
         
         if praja_id:
             existing_record = Record.objects.filter(
@@ -2586,12 +2598,17 @@ class PrajaLeadsAPIView(APIView):
             ).first()
             
             if existing_record:
+                existing_data = existing_record.data or {}
                 logger.warning(
-                    "[PrajaLeadsAPI] Duplicate praja_id blocked: praja_id=%s tenant=%s entity_type=%s existing_record_id=%s",
+                    "[PrajaLeadsAPI] Duplicate praja_id blocked: praja_id=%s tenant=%s entity_type=%s existing_record_id=%s "
+                    "existing_phone=%s existing_lead_stage=%s existing_poster=%s",
                     praja_id,
                     tenant.slug,
                     entity_type,
-                    existing_record.id
+                    existing_record.id,
+                    existing_data.get("phone_number"),
+                    existing_data.get("lead_stage"),
+                    existing_data.get("poster"),
                 )
                 return Response(
                     {
