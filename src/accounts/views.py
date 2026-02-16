@@ -223,7 +223,7 @@ class DeleteUserEverywhereView(APIView):
           3) public.authz_tenantmembership (scoped to tenant)
       - Idempotent; returns counts of actually deleted rows.
     """
-    permission_classes = [IsTenantAuthenticated, HasTenantRole("GM")]  # adjust to your policy
+    permission_classes = [IsTenantAuthenticated]  # adjust to your policy
 
     def delete(self, request):
         try:
