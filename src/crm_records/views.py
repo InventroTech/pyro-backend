@@ -537,6 +537,24 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
                 logger.error(f"RecordDetailView: Error calculating lead score for updated lead {updated_record.id}: {e}")
                 # Don't fail the request if scoring fails, just log the error
 
+    def delete(self, request, *args, **kwargs):
+        """
+        Delete the record identified by URL pk (e.g. DELETE /crm-records/records/2642/).
+        """
+        record = self.get_object()
+        record_data = {
+            'id': record.id,
+            'name': (record.data or {}).get('name', '') if isinstance(record.data, dict) else '',
+            'entity_type': record.entity_type,
+            'tenant_id': str(record.tenant_id)
+        }
+        record.delete()
+        return Response({
+            'success': True,
+            'message': f'Record {record.id} deleted successfully',
+            'deleted_record': record_data
+        }, status=status.HTTP_200_OK)
+
 
 class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
     """
