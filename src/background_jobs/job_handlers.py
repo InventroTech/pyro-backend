@@ -4,14 +4,28 @@ Job Handler Plugin System
 This module provides the plugin-based handler system for processing different types
 of background jobs. Each job type has its own handler that implements the JobHandler interface.
 """
+import base64
+import importlib
+import json
 import logging
+import os
+import pickle
+import time
 from abc import ABC, abstractmethod
 from typing import Dict, Any
-from django.utils import timezone
+
+import requests
 from django.db import transaction
 from django.db.utils import OperationalError
-from .models import BackgroundJob
-from support_ticket.services import MixpanelService
+from django.utils import timezone
+
+from crm_records.models import Record
+from crm_records.scoring import calculate_and_update_lead_score
+from crm_records.services import PrajaService
+from support_ticket.models import SupportTicket
+from support_ticket.services import MixpanelService, RMAssignedMixpanelService
+
+from .models import BackgroundJob, JobType
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +106,6 @@ class MixpanelJobHandler(JobHandler):
             raise ValueError(error_msg)
         
         try:
-            import time
             start_time = time.time()
             
             service = MixpanelService()
@@ -122,7 +135,6 @@ class MixpanelJobHandler(JobHandler):
                 return True
             else:
                 # Determine the specific reason for failure
-                import os
                 if not os.environ.get("MIXPANEL_TOKEN"):
                     error_msg = "MIXPANEL_TOKEN not configured"
                 else:
@@ -169,6 +181,82 @@ class MixpanelJobHandler(JobHandler):
         return True
 
 
+class RMAssignedMixpanelJobHandler(JobHandler):
+    """
+    Handler for sending RM assigned events to Mixpanel via rm_assigned endpoint.
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        """
+        Process an RM assigned Mixpanel job.
+
+        Expected payload:
+        {
+            "praja_id": int,
+            "rm_email": str
+        }
+        """
+        payload = job.payload
+        praja_id = payload.get("praja_id")
+        rm_email = payload.get("rm_email")
+
+        if praja_id is None or not rm_email:
+            error_msg = (
+                f"Invalid RM assigned job payload: missing praja_id or rm_email "
+                f"(praja_id={praja_id}, rm_email={bool(rm_email)})"
+            )
+            logger.error(f"Invalid RM assigned job payload for job {job.id}: {error_msg}")
+            raise ValueError(error_msg)
+
+        try:
+            start_time = time.time()
+            praja_id_int = int(praja_id)
+            service = RMAssignedMixpanelService()
+            success = service.send_to_mixpanel_sync(praja_id_int, rm_email)
+            execution_time = time.time() - start_time
+
+            if success:
+                job.result = {
+                    "success": True,
+                    "praja_id": praja_id_int,
+                    "rm_email": rm_email,
+                    "execution_time_seconds": round(execution_time, 3),
+                    "timestamp": timezone.now().isoformat(),
+                }
+                logger.info(
+                    f"RM assigned event sent successfully for job {job.id}: "
+                    f"praja_id={praja_id_int} rm_email={rm_email}"
+                )
+                return True
+            else:
+                job.result = {
+                    "success": False,
+                    "praja_id": praja_id_int,
+                    "error": "RMAssignedMixpanelService returned False",
+                    "timestamp": timezone.now().isoformat(),
+                }
+                logger.warning(f"RM assigned event returned False for job {job.id}")
+                raise Exception("RMAssignedMixpanelService returned False")
+        except Exception as e:
+            logger.error(
+                f"RM assigned event failed for job {job.id}: praja_id={praja_id} error={e}",
+                exc_info=True,
+            )
+            raise
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [1, 10, 60]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+    def validate_payload(self, payload: Dict[str, Any]) -> bool:
+        required = ["praja_id", "rm_email"]
+        for field in required:
+            if field not in payload:
+                logger.error(f"Missing required field '{field}' in RM assigned job payload")
+                return False
+        return True
+
+
 class WebhookJobHandler(JobHandler):
     """
     Handler for sending webhook requests.
@@ -184,8 +272,6 @@ class WebhookJobHandler(JobHandler):
             "payload": dict (optional, defaults to empty dict)
         }
         """
-        import requests
-        
         payload = job.payload
         url = payload.get("url")
         webhook_payload = payload.get("payload", {})
@@ -196,8 +282,6 @@ class WebhookJobHandler(JobHandler):
             raise ValueError(error_msg)
         
         try:
-            import time
-            
             start_time = time.time()
             
             response = requests.post(
@@ -280,10 +364,6 @@ class FunctionJobHandler(JobHandler):
             "function_pickle": str   # Optional: base64-encoded pickled function (for closures/lambdas)
         }
         """
-        import pickle
-        import base64
-        import importlib
-        
         payload = job.payload
         function_module = payload.get("function_module")
         function_name = payload.get("function_name")
@@ -309,8 +389,6 @@ class FunctionJobHandler(JobHandler):
                 func_display = f"{function_module}.{function_name}"
             
             # Execute the function
-            import time
-            
             logger.info(
                 f"Executing function {func_display} for job {job.id} "
                 f"with args={args}, kwargs={kwargs}"
@@ -326,7 +404,6 @@ class FunctionJobHandler(JobHandler):
             
             # Store result with metadata if it's JSON-serializable
             try:
-                import json
                 json.dumps(result)  # Test if serializable
                 # Store result with metadata
                 job.result = {
@@ -412,9 +489,6 @@ class LeadScoringJobHandler(JobHandler):
             "batch_size": 100       # Optional, defaults to 100
         }
         """
-        from crm_records.models import Record
-        from crm_records.scoring import calculate_and_update_lead_score
-        
         payload = job.payload
         entity_type = payload.get("entity_type", "lead")
         batch_size = payload.get("batch_size", 100)
@@ -582,8 +656,6 @@ class PrajaJobHandler(JobHandler):
             "data": dict (full object data to send)
         }
         """
-        from crm_records.services import PrajaService
-        
         payload = job.payload
         object_type = payload.get("object_type")
         object_id = payload.get("object_id")
@@ -595,7 +667,6 @@ class PrajaJobHandler(JobHandler):
             raise ValueError(error_msg)
         
         try:
-            import time
             start_time = time.time()
             
             print(f"\n🚀 [PRAJA JOB] Processing job {job.id} for {object_type} {object_id}...")
@@ -604,7 +675,6 @@ class PrajaJobHandler(JobHandler):
             
             if object_type == "record":
                 # For records, we need to reconstruct the record object
-                from crm_records.models import Record
                 try:
                     record = Record.objects.get(id=object_id)
                     print(f"📋 [PRAJA JOB] Found record {object_id}, sending to Praja server...")
@@ -616,7 +686,6 @@ class PrajaJobHandler(JobHandler):
                     raise Exception(error_msg)
             elif object_type == "ticket":
                 # For tickets, we need to reconstruct the ticket object
-                from support_ticket.models import SupportTicket
                 try:
                     ticket = SupportTicket.objects.get(id=object_id)
                     print(f"📋 [PRAJA JOB] Found ticket {object_id}, sending to Praja server...")
@@ -695,9 +764,8 @@ class JobHandlerRegistry:
     
     def _register_default_handlers(self):
         """Register default handlers"""
-        from .models import JobType
-        
         self.register_handler(JobType.SEND_MIXPANEL_EVENT, MixpanelJobHandler())
+        self.register_handler(JobType.SEND_RM_ASSIGNED_EVENT, RMAssignedMixpanelJobHandler())
         self.register_handler(JobType.SEND_WEBHOOK, WebhookJobHandler())
         self.register_handler(JobType.EXECUTE_FUNCTION, FunctionJobHandler())
         self.register_handler(JobType.SCORE_LEADS, LeadScoringJobHandler())
