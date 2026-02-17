@@ -14,6 +14,7 @@ class JobStatus(models.TextChoices):
 class JobType(models.TextChoices):
     """Job type choices for background jobs"""
     SEND_MIXPANEL_EVENT = "send_mixpanel_event", "Send Mixpanel Event"
+    SEND_RM_ASSIGNED_EVENT = "send_rm_assigned_event", "Send RM Assigned Event"
     SEND_WEBHOOK = "send_webhook", "Send Webhook"
     EXECUTE_FUNCTION = "execute_function", "Execute Function"
     SCORE_LEADS = "score_leads", "Score Leads"
