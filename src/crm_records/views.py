@@ -27,6 +27,8 @@ from .scoring import calculate_and_update_lead_score
 from user_settings.models import UserSettings
 from .permissions import HasAPISecret
 from support_ticket.services import MixpanelService, RMAssignedMixpanelService
+from background_jobs.queue_service import get_queue_service
+from background_jobs.models import JobType
 from user_settings.routing import apply_routing_rule_to_queryset
 import requests
 import uuid
@@ -2208,105 +2210,87 @@ class GetNextLeadView(APIView):
                 
                 logger.info(f"[GetNextLead] Extracted data - praja_id: {praja_id}, rm_email: {rm_email}")
                 
-                # Call original MixpanelService with detailed event
-                # For lead events, use praja_id as user_id instead of tenant_membership.id
+                queue_service = get_queue_service()
+                tenant_id = str(tenant.id) if tenant else None
+                
+                # Enqueue Mixpanel event (pyro_crm_rm_assigned_backend)
                 if praja_id:
-                    # Convert praja_id to appropriate format for Mixpanel
-                    # Handle different formats: integer, numeric string, or string like "PRAJA123"
                     try:
                         if isinstance(praja_id, int):
-                            # Already an integer, use directly
                             mixpanel_user_id = str(praja_id)
                         elif isinstance(praja_id, str):
-                            # Try to extract numeric part from strings like "PRAJA123", "PRAJA-123", or just "123"
                             cleaned = praja_id.upper().replace("PRAJA", "").replace("-", "").replace("_", "").strip()
-                            if cleaned.isdigit():
-                                # Convert to integer string if it's all digits
-                                mixpanel_user_id = cleaned
-                            else:
-                                # If not all digits, use as-is
-                                mixpanel_user_id = praja_id
+                            mixpanel_user_id = cleaned if cleaned.isdigit() else praja_id
                         else:
-                            # Other types, convert to string
                             mixpanel_user_id = str(praja_id)
-                    except (ValueError, TypeError, AttributeError) as e:
-                        logger.warning(f"[GetNextLead] Failed to convert praja_id={praja_id}: {e}, using as-is")
-                        mixpanel_user_id = str(praja_id) if praja_id else praja_id
+                    except (ValueError, TypeError, AttributeError):
+                        mixpanel_user_id = str(praja_id) if praja_id else None
                     
-                    logger.info("-" * 80)
-                    logger.info("📊 [GetNextLead] Calling ORIGINAL MixpanelService")
-                    logger.info(f"   Service: MixpanelService")
-                    logger.info(f"   Endpoint: https://api.thecircleapp.in/pyro/send_to_mixpanel")
-                    logger.info(f"   Event Name: pyro_crm_rm_assigned_backend")
-                    logger.info(f"   User ID: {mixpanel_user_id} (praja_id, not tenant_membership.id)")
-                    logger.info("-" * 80)
-                    
-                    mixpanel_service = MixpanelService()
-                    mixpanel_properties = {
-                        'lead_id': candidate_locked.id,
-                        'lead_name': lead_name,
-                        'lead_status': lead_data_dict.get('lead_stage', 'assigned'),
-                        'lead_score': lead_data_dict.get('lead_score'),
-                        'lead_type': lead_data_dict.get('affiliated_party'),
-                        'assigned_to': user_identifier,
-                        'praja_id': praja_id,
-                        'rm_email': rm_email,
-                    }
-                    # Add all lead data attributes
-                    mixpanel_properties.update(lead_data_dict)
-                    
-                    logger.info(f"[GetNextLead] Payload properties count: {len(mixpanel_properties)}")
-                    logger.info(f"[GetNextLead] Key properties: lead_id={mixpanel_properties.get('lead_id')}, praja_id={mixpanel_properties.get('praja_id')}, rm_email={mixpanel_properties.get('rm_email')}")
-                    
-                    result = mixpanel_service.send_to_mixpanel_sync(
-                        mixpanel_user_id,
-                        'pyro_crm_rm_assigned_backend',
-                        mixpanel_properties
-                    )
-                    
-                    if result:
-                        logger.info("✅ [GetNextLead] Original MixpanelService call SUCCESSFUL")
+                    if mixpanel_user_id:
+                        mixpanel_properties = {
+                            'lead_id': candidate_locked.id,
+                            'lead_name': lead_name,
+                            'lead_status': lead_data_dict.get('lead_stage', 'assigned'),
+                            'lead_score': lead_data_dict.get('lead_score'),
+                            'lead_type': lead_data_dict.get('affiliated_party'),
+                            'assigned_to': user_identifier,
+                            'praja_id': praja_id,
+                            'rm_email': rm_email,
+                        }
+                        mixpanel_properties.update(lead_data_dict)
+                        
+                        job1 = queue_service.enqueue_job(
+                            job_type=JobType.SEND_MIXPANEL_EVENT,
+                            payload={
+                                'user_id': mixpanel_user_id,
+                                'event_name': 'pyro_crm_rm_assigned_backend',
+                                'properties': mixpanel_properties,
+                            },
+                            tenant_id=tenant_id,
+                        )
+                        logger.info(
+                            "[GetNextLead] Enqueued pyro_crm_rm_assigned_backend job_id=%s lead_id=%s",
+                            job1.id, candidate_locked.id,
+                        )
                     else:
-                        logger.warning("⚠️ [GetNextLead] Original MixpanelService call FAILED")
+                        logger.warning("[GetNextLead] Skipping Mixpanel job - no mixpanel_user_id from praja_id=%s", praja_id)
                 else:
-                    logger.warning("[GetNextLead] Skipping original MixpanelService - no user_uuid or user_identifier")
+                    logger.warning("[GetNextLead] Skipping Mixpanel job - no praja_id")
                 
-                # Call new RMAssignedMixpanelService with simplified payload
-                logger.info("-" * 80)
-                logger.info("📊 [GetNextLead] Calling NEW RMAssignedMixpanelService")
-                logger.info(f"   Service: RMAssignedMixpanelService")
-                logger.info(f"   Endpoint: https://api.thecircleapp.in/pyro/rm_assigned")
-                logger.info("-" * 80)
-                
+                # Enqueue RM assigned event (rm_assigned endpoint)
                 if praja_id and rm_email:
                     try:
                         praja_id_int = int(praja_id)
-                        logger.info(f"[GetNextLead] Payload - praja_id: {praja_id_int} (will be sent as user_id), rm_email: {rm_email}")
-                        
-                        rm_assigned_service = RMAssignedMixpanelService()
-                        result = rm_assigned_service.send_to_mixpanel_sync(
-                            praja_id_int,
-                            rm_email
+                        job2 = queue_service.enqueue_job(
+                            job_type=JobType.SEND_RM_ASSIGNED_EVENT,
+                            payload={
+                                'praja_id': praja_id_int,
+                                'rm_email': rm_email,
+                            },
+                            tenant_id=tenant_id,
                         )
-                        
-                        if result:
-                            logger.info("✅ [GetNextLead] RMAssignedMixpanelService call SUCCESSFUL")
-                        else:
-                            logger.warning("⚠️ [GetNextLead] RMAssignedMixpanelService call FAILED")
+                        logger.info(
+                            "[GetNextLead] Enqueued send_rm_assigned_event job_id=%s lead_id=%s praja_id=%s",
+                            job2.id, candidate_locked.id, praja_id_int,
+                        )
                     except (ValueError, TypeError) as e:
-                        logger.error(f"❌ [GetNextLead] Could not convert praja_id to integer: {praja_id}, error: {e}")
+                        logger.error(
+                            "[GetNextLead] Could not enqueue RM assigned job - praja_id=%s error=%s",
+                            praja_id, e,
+                        )
                 else:
-                    logger.warning(f"⚠️ [GetNextLead] Missing praja_id or rm_email for RM assigned Mixpanel")
-                    logger.warning(f"   praja_id: {praja_id} (type: {type(praja_id)}), rm_email: {rm_email}")
+                    logger.warning(
+                        "[GetNextLead] Skipping RM assigned job - missing praja_id or rm_email praja_id=%s rm_email=%s",
+                        praja_id, bool(rm_email),
+                    )
                     
                 logger.info("=" * 80)
-                logger.info("🏁 [GetNextLead] Completed Mixpanel event calls")
+                logger.info("🏁 [GetNextLead] Completed Mixpanel job enqueue")
                 logger.info("=" * 80)
                     
             except Exception as mixpanel_error:
-                # Don't fail the request if Mixpanel fails
                 logger.error("=" * 80)
-                logger.error(f"❌ [GetNextLead] EXCEPTION while sending Mixpanel events: {str(mixpanel_error)}")
+                logger.error(f"❌ [GetNextLead] EXCEPTION while enqueueing Mixpanel jobs: {str(mixpanel_error)}")
                 logger.error("=" * 80)
                 logger.error(f"[GetNextLead] Error details:", exc_info=True)
 
