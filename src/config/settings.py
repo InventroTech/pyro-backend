@@ -83,6 +83,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'middleware.api_logging.APILoggingMiddleware',  # API logging middleware
     'object_history.middleware.HistoryMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -124,11 +125,20 @@ LOGGING = {
             'format': '{levelname} {message}',
             'style': '{',
         },
+        'api_simple': {
+            '()': 'middleware.log_formatters.SimpleAPILogFormatter',
+            'format': '{levelname} {asctime} - {message}',
+            'style': '{',
+        },
     },
     'handlers': {
         'console': {
             'class': 'logging.StreamHandler',
             'formatter': 'verbose',
+        },
+        'api_console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'api_simple',
         },
         # will add file logging in future
     },
@@ -149,11 +159,21 @@ LOGGING = {
         },
         'object_history': {
             'handlers': ['console'],
-            'level': 'DEBUG' if IS_DEV else 'INFO',
+            'level': 'WARNING',  # Reduce noise - only show warnings/errors
+            'propagate': False,
+        },
+        'django.server': {
+            'handlers': ['console'],
+            'level': 'WARNING',  # Suppress normal request logs
             'propagate': False,
         },
         'background_jobs': {
             'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'api_logging': {
+            'handlers': ['api_console'],
             'level': 'INFO',
             'propagate': False,
         },
