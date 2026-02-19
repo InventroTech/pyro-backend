@@ -129,12 +129,17 @@ class CurrentUserRoleView(APIView):
             return Response({
                 'role_key': None,
                 'role_name': None,
+                'role_id': None,
+                'tenant_id': None,
                 'error': 'No active tenant membership found'
             }, status=status.HTTP_200_OK)
         
+        # Enhanced response: Include tenant_id and role_id for frontend JWT fallback
         return Response({
             'role_key': membership.role.key,
             'role_name': membership.role.name,
+            'role_id': str(membership.role.id),  # Added for JWT fallback
+            'tenant_id': str(tenant.id),          # Added for JWT fallback
             'is_active': membership.is_active
         }, status=status.HTTP_200_OK)
 
