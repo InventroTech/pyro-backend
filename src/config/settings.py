@@ -174,7 +174,7 @@ LOGGING = {
         },
         'api_logging': {
             'handlers': ['api_console'],
-            'level': 'INFO',
+            'level': 'DEBUG',
             'propagate': False,
         },
     },
