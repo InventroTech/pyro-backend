@@ -14,6 +14,8 @@ class Page(TimeStampedModel, RoleModel):
         db_index=True,
     )
     name = models.CharField(max_length=255)
+    header_title = models.CharField(max_length=255, blank=True, null=True)
+    display_order = models.IntegerField(default=0)
     config = models.JSONField(
         default=list,
         blank=True,
@@ -32,7 +34,7 @@ class Page(TimeStampedModel, RoleModel):
 
     class Meta:
         db_table = 'pages'
-        ordering = ['-updated_at']
+        ordering = ['display_order', '-updated_at']
         indexes = [
             models.Index(fields=['tenant', 'user_id']),
             models.Index(fields=['tenant', 'role']),
