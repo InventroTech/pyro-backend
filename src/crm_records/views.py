@@ -1999,7 +1999,8 @@ class GetNextLeadView(APIView):
                             AND (data->>'next_call_at')::timestamptz <= NOW()
                         )
                     )
-                """]
+                """],
+                params=[now_iso, now_iso],
             )
             # Only apply affiliated_party_filter if eligible_lead_types are configured
             if eligible_lead_types:
