@@ -3,6 +3,8 @@ from django.db import models
 from django.utils import timezone
 from django.core.validators import RegexValidator
 
+from authz.models import Role
+
 
 class TimeStampedModel(models.Model):
     """
@@ -50,6 +52,25 @@ class TenantModel(models.Model):
         db_index=True,
         db_column='tenant_id',          # use existing column name
         related_name='%(app_label)s_%(class)s_set',  # avoid reverse name clashes
+    )
+
+    class Meta:
+        abstract = True
+
+
+class RoleModel(TenantModel):
+    """
+    Tenant-scoped role (authz_role is per-tenant). Adds role_id; tenant comes from TenantModel.
+    Use with BaseModel for tenant + timestamps + role.
+    """
+    role = models.ForeignKey(
+        Role,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        db_index=True,
+        db_column='role_id',
+        related_name='%(app_label)s_%(class)s_set',
     )
 
     class Meta:

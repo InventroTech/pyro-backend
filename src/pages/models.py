@@ -1,20 +1,14 @@
 import uuid
 from django.db import models
-from core.models import Tenant, TimeStampedModel
+from core.models import TimeStampedModel, RoleModel
 
 
-class Page(TimeStampedModel):
+class Page(TimeStampedModel, RoleModel):
     """
     User-defined dashboard page: name, role visibility, and widget config (JSON).
-    Stored in public.pages; role references authz_role (not legacy roles).
+    Stored in public.pages; tenant + role from RoleModel (role column is "role").
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    tenant = models.ForeignKey(
-        Tenant,
-        on_delete=models.CASCADE,
-        db_column='tenant_id',
-        related_name='pages',
-    )
     user_id = models.UUIDField(
         help_text='Supabase auth user id (owner of this page).',
         db_index=True,
@@ -25,14 +19,15 @@ class Page(TimeStampedModel):
         blank=True,
         help_text='List of widget configs, e.g. [{"id": "...", "type": "ticketTable", "config": {...}}].',
     )
+    # Override RoleModel.role: existing DB column is "role", not "role_id"; keep related_name='pages'
     role = models.ForeignKey(
         'authz.Role',
-        on_delete=models.SET_NULL,
         null=True,
         blank=True,
+        on_delete=models.SET_NULL,
+        db_index=True,
         db_column='role',
         related_name='pages',
-        help_text='Role this page is scoped to (from authz_role).',
     )
 
     class Meta:
