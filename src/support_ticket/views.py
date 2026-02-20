@@ -12,6 +12,7 @@ from rest_framework.permissions import AllowAny
 from django.utils import timezone
 from django.db import transaction
 from django.db.models import Q
+from django.db import IntegrityError
 from config.supabase_auth import SupabaseJWTAuthentication
 from authz.permissions import IsTenantAuthenticated
 import os
@@ -22,7 +23,7 @@ from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSeria
 from .services import MixpanelService, TicketTimeService
 from user_settings.routing import apply_routing_rule_to_queryset
 from authz.permissions import IsTenantAuthenticated
-from accounts.models import LegacyUser
+from accounts.models import LegacyUser, SupabaseAuthUser
 from datetime import timedelta
 from analytics.serializers import SupportTicketSerializer
 from .utils import send_to_mixpanel, ticket_to_mixpanel_data
@@ -385,6 +386,47 @@ class GetNextTicketView(APIView):
             logger.info(f"User ID: {user_id}")
             logger.info(f"User Email: {user_email}")
 
+            # Ensure current user exists in auth.users (FK target for assigned_to) before assigning
+            try:
+                user_uuid = UUID(str(user_id))
+            except (ValueError, AttributeError, TypeError):
+                logger.warning(
+                    "[GetNextTicketView] Invalid user supabase_uid; cannot assign ticket",
+                    extra={"user_id": user_id, "user_email": user_email},
+                )
+                response = Response(
+                    {
+                        "error": "Your account could not be verified. Please sign out and sign in again, or contact support.",
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+                response["Access-Control-Allow-Origin"] = "*"
+                return response
+
+            if not SupabaseAuthUser.objects.filter(id=user_uuid).exists():
+                logger.warning(
+                    "[GetNextTicketView] User not found in auth.users (assignee would violate FK); refusing to assign",
+                    extra={
+                        "user_id": str(user_uuid),
+                        "user_email": user_email,
+                        "assignee_in_auth_users": False,
+                    },
+                )
+                try:
+                    import sentry_sdk
+                    sentry_sdk.set_user({"id": str(user_uuid), "email": user_email or ""})
+                    sentry_sdk.set_tag("get_next_ticket_assigned_to_fk", "assignee_not_in_auth_users")
+                except Exception:
+                    pass
+                response = Response(
+                    {
+                        "error": "Your account is not found in the auth system. Please sign out and sign in again, or contact support.",
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+                response["Access-Control-Allow-Origin"] = "*"
+                return response
+
             # Get the next ticket
             logger.info(f"[GetNextTicketView] Calling _get_and_assign_ticket to find and assign ticket...")
             with transaction.atomic():
@@ -409,12 +451,45 @@ class GetNextTicketView(APIView):
             logger.info("=" * 80)
             return response
             
+        except IntegrityError as error:
+            user_id_ctx = getattr(request.user, "supabase_uid", None)
+            user_email_ctx = getattr(request.user, "email", None)
+            logger.error(
+                "get-next-ticket: database constraint violation (e.g. assigned_to FK); assignee may not exist in auth.users",
+                exc_info=True,
+                extra={
+                    "user_id": str(user_id_ctx) if user_id_ctx else None,
+                    "user_email": user_email_ctx,
+                    "error": str(error),
+                },
+            )
+            try:
+                import sentry_sdk
+                sentry_sdk.set_user({"id": str(user_id_ctx), "email": user_email_ctx or ""})
+                sentry_sdk.set_tag("get_next_ticket_assigned_to_fk", "integrity_error")
+                sentry_sdk.capture_exception(error)
+            except Exception:
+                pass
+            response = Response(
+                {"error": "Internal server error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+            response["Access-Control-Allow-Origin"] = "*"
+            return response
         except Exception as error:
-            logger.error(f'Error in get-next-ticket function: {error}')
-            response = Response({
-                'error': 'Internal server error'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-            response['Access-Control-Allow-Origin'] = '*'
+            user_id_ctx = getattr(request.user, "supabase_uid", None)
+            user_email_ctx = getattr(request.user, "email", None)
+            logger.error(f"Error in get-next-ticket function: {error}", exc_info=True)
+            try:
+                import sentry_sdk
+                sentry_sdk.set_user({"id": str(user_id_ctx), "email": user_email_ctx or ""})
+            except Exception:
+                pass
+            response = Response(
+                {"error": "Internal server error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+            response["Access-Control-Allow-Origin"] = "*"
             return response
 
     def _get_and_assign_ticket(self, request, user, user_email):

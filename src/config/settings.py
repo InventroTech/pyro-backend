@@ -72,6 +72,7 @@ INSTALLED_APPS = [
     'email_protocol',
     'object_history',
     'whatsapp',
+    'pages',
 ]
 
 MIDDLEWARE = [
