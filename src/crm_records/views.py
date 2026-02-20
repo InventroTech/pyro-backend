@@ -7,7 +7,7 @@ from authz.permissions import IsTenantAuthenticated
 from core.pagination import MetaPageNumberPagination
 from core.models import Tenant
 from django.utils import timezone
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone as std_utc
 try:
     from dateutil import parser as date_parser
 except ImportError:
@@ -1216,15 +1216,16 @@ class GetNextLeadView(APIView):
     """
     permission_classes = [IsTenantAuthenticated]
 
-    # Enforce next_call_at cooldown: lead is eligible only if call_attempts=0 or next_call_at is null/past.
-    # Applied in _order_by_score so it cannot be lost when the queryset is cloned (e.g. by .extra(select=) or .filter()).
+    # Enforce next_call_at cooldown: fresh (0 attempts) always eligible; retry (1+ attempts) only when next_call_at is set and past.
     _NEXT_CALL_READY_WHERE = """
         (
             COALESCE((data->>'call_attempts')::int, 0) = 0
-            OR data->>'next_call_at' IS NULL
-            OR data->>'next_call_at' = ''
-            OR data->>'next_call_at' = 'null'
-            OR (data->>'next_call_at')::timestamptz <= NOW()
+            OR (
+                data->>'next_call_at' IS NOT NULL
+                AND data->>'next_call_at' != ''
+                AND data->>'next_call_at' != 'null'
+                AND (data->>'next_call_at')::timestamptz <= NOW()
+            )
         )
     """
 
@@ -1310,11 +1311,12 @@ class GetNextLeadView(APIView):
                     # Fallback to datetime.fromisoformat
                     next_call_at = datetime.fromisoformat(next_call_at_str.replace('Z', '+00:00'))
                 
-                # Ensure both are timezone-aware or both are naive
+                # Ensure both comparable: rule engine stores UTC; treat naive next_call_at as UTC
                 if now.tzinfo is None and next_call_at.tzinfo is not None:
                     next_call_at = next_call_at.replace(tzinfo=None)
                 elif now.tzinfo is not None and next_call_at.tzinfo is None:
-                    next_call_at = timezone.make_aware(next_call_at)
+                    # Rule engine stores timezone.now() (UTC); treat naive next_call_at as UTC
+                    next_call_at = next_call_at.replace(tzinfo=std_utc.utc)
                 
                 hours_since_last_call = (now - next_call_at).total_seconds() / 3600
                 if hours_since_last_call < matrix.min_time_between_calls_hours:
@@ -1323,6 +1325,34 @@ class GetNextLeadView(APIView):
                 logger.debug(f"[GetNextLead] Error parsing next_call_at for min time check: {e}")
         
         return False, None
+    
+    def _lead_is_due_for_call(self, lead_data: dict, now) -> bool:
+        """Return True if lead is eligible to be called now (cooldown respected). Fresh (0 attempts) always due; retry only when next_call_at <= now."""
+        if not isinstance(lead_data, dict):
+            return True
+        try:
+            call_attempts_int = int(lead_data.get('call_attempts') or 0)
+        except (TypeError, ValueError):
+            call_attempts_int = 0
+        if call_attempts_int == 0:
+            return True
+        raw = lead_data.get('next_call_at')
+        if raw is None or raw == '' or raw == 'null':
+            return False
+        try:
+            if isinstance(raw, datetime):
+                next_call_at = raw
+            elif date_parser:
+                next_call_at = date_parser.parse(str(raw))
+            else:
+                next_call_at = datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
+            if now.tzinfo is None and next_call_at.tzinfo:
+                next_call_at = next_call_at.replace(tzinfo=None)
+            elif now.tzinfo and next_call_at.tzinfo is None:
+                next_call_at = next_call_at.replace(tzinfo=std_utc.utc)
+            return next_call_at <= now
+        except Exception:
+            return False
     
     def _order_by_score(self, qs, now_iso=None):
         """
@@ -1337,9 +1367,6 @@ class GetNextLeadView(APIView):
         - "Not connected" leads ordered by attempts (1, 2, 3, 4, 5)
         - Most recently updated leads within each attempt level come first (LIFO)
         """
-        # Re-apply next_call_at filter here so it is never lost when qs is cloned (e.g. by .filter(id__in=...)
-        # or by chained .extra(select=). The base _queueable_where already has this; re-applying guarantees
-        # compute_next_call_from_attempts timing is respected regardless of queryset pipeline.
         qs = qs.extra(where=[self._NEXT_CALL_READY_WHERE])
 
         if logger.isEnabledFor(logging.DEBUG):
@@ -1379,7 +1406,7 @@ class GetNextLeadView(APIView):
                 'id'
             )
         else:
-            # Fallback when now_iso is not provided
+            # Fallback when now_iso is not provided (same ordering, no is_expired_snoozed)
             qs = qs.extra(
                 select={
                     'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
@@ -1638,7 +1665,7 @@ class GetNextLeadView(APIView):
                         daily_limit_int,
                     )
                     # Fallback: still allow "not connected" follow-up leads, prioritized by call attempts
-                    # (attempt 1 first, then 2, then 3...), without assigning new leads.
+                    # (attempt 1 first, then 2, 3, 4, 5 - exclude only when at or past max e.g. 6).
                     retry_candidate = Record.objects.filter(
                         tenant=tenant,
                         entity_type="lead",
@@ -1652,7 +1679,7 @@ class GetNextLeadView(APIView):
                         where=[
                             """
                             COALESCE((data->>'call_attempts')::int, 0) >= 1
-                            AND COALESCE((data->>'call_attempts')::int, 0) <= 3
+                            AND COALESCE((data->>'call_attempts')::int, 0) <= 6
                             AND (
                                 UPPER(COALESCE(data->>'lead_stage','')) = 'NOT_CONNECTED'
                                 OR LOWER(COALESCE(data->>'last_call_outcome','')) IN ('not connected', 'not_connected', 'notconnected')
@@ -1673,6 +1700,15 @@ class GetNextLeadView(APIView):
                         logger.info(
                             "[GetNextLead] Daily limit reached and no retryable not-connected leads found for user=%s",
                             user_identifier,
+                        )
+                        return Response({}, status=status.HTTP_200_OK)
+
+                    # Only return retry lead if cooldown has passed (next_call_at <= now)
+                    if retry_candidate and not self._lead_is_due_for_call(retry_candidate.data, now):
+                        logger.info(
+                            "[GetNextLead] Daily limit fallback: not returning lead_id=%s (not due yet: next_call_at=%s)",
+                            retry_candidate.id,
+                            (retry_candidate.data or {}).get("next_call_at"),
                         )
                         return Response({}, status=status.HTTP_200_OK)
 
@@ -1721,17 +1757,13 @@ class GetNextLeadView(APIView):
         from django.db.models import Q
 
         # Common WHERE conditions for queueable leads (assignment + status + next_call_at)
-        # Use UPPER() for lead_stage to handle case variations (In_Queue vs in_queue)
         _queueable_where = """
                 (
-                    -- Unassigned leads
                     (data->>'assigned_to' IS NULL OR
                      data->>'assigned_to' = '' OR
                      data->>'assigned_to' = 'null' OR
                      data->>'assigned_to' = 'None')
-                    -- OR in_queue status (can be assigned or unassigned)
                     OR UPPER(COALESCE(data->>'lead_stage','')) = 'IN_QUEUE'
-                    -- OR expired snoozed leads (should be available regardless of assigned_to)
                     OR (
                         UPPER(COALESCE(data->>'lead_stage','')) = 'SNOOZED'
                         AND data->>'next_call_at' IS NOT NULL
@@ -1741,11 +1773,9 @@ class GetNextLeadView(APIView):
                     )
                 )
                 AND (
-                    -- Regular queueable statuses (case-insensitive)
                     UPPER(COALESCE(data->>'lead_stage','')) IN ('IN_QUEUE', 'ASSIGNED', 'CALL_LATER', 'SCHEDULED')
                     OR data->>'lead_stage' IS NULL
                     OR data->>'lead_stage' = ''
-                    -- OR snoozed leads where next_call_at has passed
                     OR (
                         UPPER(COALESCE(data->>'lead_stage','')) = 'SNOOZED'
                         AND data->>'next_call_at' IS NOT NULL
@@ -1754,16 +1784,14 @@ class GetNextLeadView(APIView):
                         AND (data->>'next_call_at')::timestamptz <= NOW()
                     )
                 )
-                -- Exclude leads where next_call_at is in the future (unless fresh lead with 0 attempts)
                 AND (
-                    -- Fresh leads (0 attempts) are always available
                     COALESCE((data->>'call_attempts')::int, 0) = 0
-                    -- OR next_call_at is null/empty (no restriction)
-                    OR data->>'next_call_at' IS NULL
-                    OR data->>'next_call_at' = ''
-                    OR data->>'next_call_at' = 'null'
-                    -- OR next_call_at has passed (snooze expired)
-                    OR (data->>'next_call_at')::timestamptz <= NOW()
+                    OR (
+                        data->>'next_call_at' IS NOT NULL
+                        AND data->>'next_call_at' != ''
+                        AND data->>'next_call_at' != 'null'
+                        AND (data->>'next_call_at')::timestamptz <= NOW()
+                    )
                 )
                 """
         # When party types are configured, require affiliated_party; when not, include all leads
@@ -1884,13 +1912,11 @@ class GetNextLeadView(APIView):
                     )
             
             # Additional check for minimum time between calls (requires per-record evaluation)
-            # This is more complex and requires checking next_call_at, so we do it in Python
             if call_attempt_matrices:
                 final_valid_ids = []
                 for lead in unassigned[:1000]:  # Limit to first 1000 for performance
                     lead_data = lead.data or {}
                     lead_type = lead_data.get('affiliated_party')
-                    
                     # Find matching matrix
                     matrix = None
                     for lt, m in call_attempt_matrices.items():
@@ -1939,48 +1965,39 @@ class GetNextLeadView(APIView):
             ).extra(
                 where=["""
                     (
-                        -- Unassigned leads
                         (data->>'assigned_to' IS NULL OR
                          data->>'assigned_to' = '' OR
                          data->>'assigned_to' = 'null' OR
                          data->>'assigned_to' = 'None')
-                        -- OR in_queue status (can be assigned or unassigned)
                         OR UPPER(COALESCE(data->>'lead_stage','')) = 'IN_QUEUE'
-                        -- OR expired snoozed leads (should be available regardless of assigned_to)
                         OR (
                             UPPER(COALESCE(data->>'lead_stage','')) = 'SNOOZED'
                             AND data->>'next_call_at' IS NOT NULL
                             AND data->>'next_call_at' != ''
                             AND data->>'next_call_at' != 'null'
-                            AND (data->>'next_call_at')::timestamptz <= NOW()
+                            AND (data->>'next_call_at')::timestamptz <= %s
                         )
                     )
-                    -- Only require affiliated_party if eligible_lead_types are configured
-                    -- (This will be handled by the filter below, not in SQL WHERE clause)
                     AND (
-                        -- Regular queueable statuses (case-insensitive)
                         UPPER(COALESCE(data->>'lead_stage','')) IN ('IN_QUEUE', 'ASSIGNED', 'CALL_LATER', 'SCHEDULED')
                         OR data->>'lead_stage' IS NULL
                         OR data->>'lead_stage' = ''
-                        -- OR snoozed leads where next_call_at has passed
                         OR (
                             UPPER(COALESCE(data->>'lead_stage','')) = 'SNOOZED'
                             AND data->>'next_call_at' IS NOT NULL
                             AND data->>'next_call_at' != ''
                             AND data->>'next_call_at' != 'null'
-                            AND (data->>'next_call_at')::timestamptz <= NOW()
+                            AND (data->>'next_call_at')::timestamptz <= %s
                         )
                     )
-                    -- Exclude leads where next_call_at is in the future (unless fresh lead with 0 attempts)
                     AND (
-                        -- Fresh leads (0 attempts) are always available
                         COALESCE((data->>'call_attempts')::int, 0) = 0
-                        -- OR next_call_at is null/empty (no restriction)
-                        OR data->>'next_call_at' IS NULL
-                        OR data->>'next_call_at' = ''
-                        OR data->>'next_call_at' = 'null'
-                        -- OR next_call_at has passed (snooze expired)
-                        OR (data->>'next_call_at')::timestamptz <= NOW()
+                        OR (
+                            data->>'next_call_at' IS NOT NULL
+                            AND data->>'next_call_at' != ''
+                            AND data->>'next_call_at' != 'null'
+                            AND (data->>'next_call_at')::timestamptz <= NOW()
+                        )
                     )
                 """]
             )
@@ -2081,15 +2098,23 @@ class GetNextLeadView(APIView):
                 "distinct_affiliated_parties": list(Record.objects.filter(tenant=tenant, entity_type='lead').values_list('data__affiliated_party', flat=True).distinct()[:20]),
             }, status=status.HTTP_200_OK)
 
-        candidate = self._order_by_score(unassigned, now_iso).first()
+        ordered = self._order_by_score(unassigned, now_iso)
+        candidate = None
+        for c in ordered[:50]:
+            if self._lead_is_due_for_call(c.data, now):
+                candidate = c
+                break
+            logger.info(
+                "[GetNextLead] Skipping lead_id=%s (not due yet: call_attempts=%s next_call_at=%s)",
+                c.id, (c.data or {}).get('call_attempts'), (c.data or {}).get('next_call_at'),
+            )
 
         # Step 5: Return first entry (or empty if none found)
 
         if not candidate:
-            logger.info("[GetNextLead] No unassigned leads available after filtering and sorting by score")
-            # --- Extra Diagnostics ---
+            logger.info("[GetNextLead] No unassigned leads available after filtering and sorting by score (or none due yet)")
             if unassigned_cnt > 0:
-                logger.info("[GetNextLead] Unassigned leads exist but none passed the lead score ordering filter")
+                logger.info("[GetNextLead] Unassigned leads exist but none passed the lead score ordering filter or cooldown check")
             return Response({}, status=status.HTTP_200_OK)
 
         # Lock and assign the lead
@@ -2098,6 +2123,15 @@ class GetNextLeadView(APIView):
 
             if not candidate_locked:
                 logger.info("[GetNextLead] Lead was taken by another request")
+                return Response({}, status=status.HTTP_200_OK)
+
+            if not self._lead_is_due_for_call(candidate_locked.data, timezone.now()):
+                logger.info(
+                    "[GetNextLead] Skipping lead_id=%s after lock (not due yet: call_attempts=%s next_call_at=%s)",
+                    candidate_locked.id,
+                    (candidate_locked.data or {}).get("call_attempts"),
+                    (candidate_locked.data or {}).get("next_call_at"),
+                )
                 return Response({}, status=status.HTTP_200_OK)
 
             # Update the candidate's data
@@ -2352,14 +2386,12 @@ class GetNextLeadView(APIView):
 class GetMyCurrentLeadView(APIView):
     """
     Get the user's currently assigned lead from the database.
-    Always queries the database directly (no cache) to ensure fresh data.
-    Returns the same lead the user was working on, even after page refresh.
+    Only returns a lead when lead_stage is "assigned" (after any of the 4 buttons
+    is clicked and stage changes to in_queue, snoozed, won, lost, etc., it will not appear).
     
     GET /crm-records/leads/current/
     """
     permission_classes = [IsTenantAuthenticated]
-    
-    QUEUEABLE_STATUSES = ('in_queue', 'assigned', 'call_later', 'scheduled')
     
     @extend_schema(
         summary="Get my current assigned lead",
@@ -2414,16 +2446,12 @@ class GetMyCurrentLeadView(APIView):
         
         logger.info("[GetMyCurrentLead] Getting current lead for user: %s", user_identifier)
         
-        # Always query database directly - get leads assigned to this user
-        # Filter by queueable statuses (assigned, call_later, scheduled, in_queue)
-        # Order by updated_at descending to get the most recently worked on lead
+        # Only return lead when lead_stage is "assigned" (not in_queue, call_later, scheduled, etc.)
         current_lead = Record.objects.filter(
             tenant=tenant,
             entity_type='lead',
-            data__assigned_to=user_identifier
-        ).filter(
-            Q(data__lead_stage__in=self.QUEUEABLE_STATUSES) | 
-            Q(data__lead_stage__isnull=True)  # Include leads without explicit stage
+            data__assigned_to=user_identifier,
+            data__lead_stage='assigned'
         ).order_by('-updated_at').first()
         
         # Force fresh DB query - refresh from database
