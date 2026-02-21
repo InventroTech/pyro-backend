@@ -1852,7 +1852,7 @@ class GetNextLeadView(APIView):
 
         # IN_QUEUE and SNOOZED leads that have an assignee stick to that RM: only that user can pull them via Get Next Lead.
         unassigned = unassigned.exclude(
-            (Q(data__lead_stage='IN_QUEUE') | Q(data__lead_stage='SNOOZED'))
+            (Q(data__lead_stage='in_queue') | Q(data__lead_stage='SNOOZED'))
             & Q(data__assigned_to__isnull=False)
             & ~Q(data__assigned_to='')
             & ~Q(data__assigned_to='null')
