@@ -1850,6 +1850,17 @@ class GetNextLeadView(APIView):
             unassigned = unassigned.filter(data__lead_status__in=eligible_lead_statuses)
             logger.info("[GetNextLead] Filtered unassigned leads by eligible lead statuses (intersection): %s", eligible_lead_statuses)
 
+        # Expired SNOOZED leads that have an assignee stick to that RM: only that user can pull them via Get Next Lead.
+        # (Unassigned or IN_QUEUE leads, and SNOOZED with no assignee, remain available to any eligible RM.)
+        unassigned = unassigned.exclude(
+            Q(data__lead_stage='SNOOZED')
+            & Q(data__assigned_to__isnull=False)
+            & ~Q(data__assigned_to='')
+            & ~Q(data__assigned_to='null')
+            & ~Q(data__assigned_to='None')
+            & ~Q(data__assigned_to=user_identifier)
+        )
+
         # Filter by call attempt matrix rules (max attempts, SLA, min time between calls)
         # Load call attempt matrices for all eligible lead types - BULK FETCH to avoid N+1 queries
         call_attempt_matrices = {}
