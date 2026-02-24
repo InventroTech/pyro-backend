@@ -20,7 +20,7 @@ class Page(TimeStampedModel, RoleModel):
         max_length=100, 
         blank=True, 
         null=True, 
-        default='wip tickets praja',
+        default='Sparkles',
         help_text="Key matching the navigationIconMap in the frontend."
     )
     config = models.JSONField(
