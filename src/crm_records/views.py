@@ -19,7 +19,7 @@ from drf_spectacular.types import OpenApiTypes
 import logging
 
 logger = logging.getLogger(__name__)
-from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule
+from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule, PartnerEvent
 from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer, CallAttemptMatrixSerializer, ScoringRuleModelSerializer
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
@@ -2615,6 +2615,274 @@ class GetMyCurrentLeadView(APIView):
         )
         
         return Response(flattened_response, status=status.HTTP_200_OK)
+
+
+def _flatten_lead_response(record):
+    """Build the same flattened lead response used by GetMyCurrentLeadView / GetNextLeadView."""
+    serialized_data = RecordSerializer(record).data
+    lead_data = record.data or {}
+    return {
+        "id": record.id,
+        "name": (record.data or {}).get('name', '') if isinstance(record.data, dict) else '',
+        "phone_no": lead_data.get('phone_number', ''),
+        "praja_id": lead_data.get('praja_id'),
+        "lead_status": lead_data.get('lead_stage') or '',
+        "lead_score": lead_data.get('lead_score'),
+        "lead_type": lead_data.get('affiliated_party') or lead_data.get('poster'),
+        "assigned_to": lead_data.get('assigned_to'),
+        "attempt_count": lead_data.get('call_attempts', 0),
+        "last_call_outcome": lead_data.get('last_call_outcome'),
+        "next_call_at": lead_data.get('next_call_at'),
+        "do_not_call": lead_data.get('do_not_call', False),
+        "resolved_at": lead_data.get('closure_time'),
+        "premium_poster_count": lead_data.get('premium_poster_count'),
+        "package_to_pitch": lead_data.get('package_to_pitch'),
+        "last_active_date_time": lead_data.get('last_active_date_time'),
+        "latest_remarks": lead_data.get('latest_remarks'),
+        "lead_description": lead_data.get('lead_description'),
+        "affiliated_party": lead_data.get('affiliated_party'),
+        "rm_dashboard": lead_data.get('rm_dashboard'),
+        "user_profile_link": lead_data.get('user_profile_link'),
+        "whatsapp_link": lead_data.get('whatsapp_link'),
+        "lead_source": lead_data.get('lead_source'),
+        "created_at": serialized_data.get('created_at'),
+        "updated_at": serialized_data.get('updated_at'),
+        "data": lead_data,
+        "record": serialized_data
+    }
+
+
+class PartnerEventsView(APIView):
+    """
+    Partner webhook: accept events (e.g. work_on_lead) from partner systems (Halocom, etc.).
+    Authenticated via X-Secret-Pyro. Enqueues assignment as a background job and returns 202.
+    """
+    authentication_classes = []
+    permission_classes = [HasAPISecret]
+
+    def _get_tenant(self, request):
+        """
+        Resolve tenant: prefer tenant derived from API secret (so partner does not need to send tenant_id).
+        When the secret is from ApiSecretKey, that key is mapped to a tenant; otherwise fall back to
+        tenant_id in request or default tenant slug.
+        """
+        from django.conf import settings
+        # 1) Derive from API secret: when partner uses a secret from DB, tenant is fixed per key
+        api_secret_obj = getattr(request, 'api_secret_obj', None)
+        if api_secret_obj and api_secret_obj.tenant:
+            return api_secret_obj.tenant, None
+        # 2) Optional: tenant_id in request (e.g. when using default PYRO_SECRET without DB mapping)
+        tenant_id = request.query_params.get('tenant_id') or request.data.get('tenant_id')
+        if tenant_id:
+            try:
+                tenant = Tenant.objects.get(id=tenant_id)
+                return tenant, None
+            except Tenant.DoesNotExist:
+                return None, Response({'error': f'Tenant with id {tenant_id} not found'}, status=status.HTTP_404_NOT_FOUND)
+            except (ValueError, TypeError):
+                return None, Response({'error': f'Invalid tenant_id format: {tenant_id}'}, status=status.HTTP_400_BAD_REQUEST)
+        # 3) Default tenant from settings
+        default_slug = getattr(settings, 'DEFAULT_TENANT_SLUG', 'bibhab-thepyro-ai')
+        try:
+            return Tenant.objects.get(slug=default_slug), None
+        except Tenant.DoesNotExist:
+            tenant = Tenant.objects.first()
+            if tenant:
+                return tenant, None
+            return None, Response({'error': 'No tenant found in database'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def _get_allowed_partner_slugs(self):
+        from django.conf import settings
+        return getattr(settings, 'PARTNER_SLUGS', ['halocom'])
+
+    def _resolve_record(self, tenant, praja_id):
+        """Resolve Record by praja_id (record.data.praja_id)."""
+        if not praja_id:
+            return None
+        return Record.objects.filter(
+            tenant=tenant,
+            entity_type='lead',
+            data__praja_id=praja_id
+        ).first()
+
+    @extend_schema(
+        summary="Partner events webhook",
+        description="Accept partner events (e.g. work_on_lead). Requires X-Secret-Pyro. Returns 202 and processes assignment asynchronously.",
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'event': {'type': 'string', 'example': 'work_on_lead'},
+                    'praja_id': {'type': 'string', 'description': 'Lead identifier from partner (record.data.praja_id)'},
+                    'email_id': {'type': 'string', 'format': 'email'},
+                    'partner_slug': {'type': 'string', 'example': 'halocom'},
+                    'tenant_id': {'type': 'string', 'format': 'uuid'},
+                },
+                'required': ['event', 'praja_id', 'email_id'],
+            }
+        },
+        responses={
+            202: OpenApiResponse(description="Event accepted"),
+            400: OpenApiResponse(description="Validation error"),
+            404: OpenApiResponse(description="Tenant / record / user not found"),
+        },
+        tags=["Partner", "Webhooks"]
+    )
+    def post(self, request):
+        data = request.data or {}
+        event = data.get('event')
+        email_id = (data.get('email_id') or '').strip().lower()
+        praja_id = data.get('praja_id')
+        if isinstance(praja_id, str):
+            praja_id = praja_id.strip() or None
+        partner_slug = (data.get('partner_slug') or 'halocom').strip().lower()
+
+        if not event:
+            return Response({'error': 'event is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not email_id:
+            return Response({'error': 'email_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not praja_id:
+            return Response({'error': 'praja_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        allowed = self._get_allowed_partner_slugs()
+        if partner_slug not in [s.lower() for s in allowed]:
+            return Response({'error': f'partner_slug "{partner_slug}" is not allowed'}, status=status.HTTP_400_BAD_REQUEST)
+
+        tenant, err = self._get_tenant(request)
+        if err:
+            return err
+        if not tenant:
+            return Response({'error': 'Tenant not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        record = self._resolve_record(tenant, praja_id=praja_id)
+        if not record:
+            return Response(
+                {'error': 'Lead record not found for the given praja_id and tenant'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        membership = TenantMembership.objects.filter(
+            tenant=tenant,
+            email__iexact=email_id,
+            is_active=True
+        ).first()
+        if not membership:
+            return Response(
+                {'error': f'No active tenant membership found for email {email_id}'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Store event in DB for audit trail and debugging (independent of background_jobs)
+        partner_event = PartnerEvent.objects.create(
+            tenant=tenant,
+            partner_slug=partner_slug,
+            event=event,
+            payload=dict(data),
+            status='pending',
+            record=record,
+        )
+
+        queue_service = get_queue_service()
+        payload = {
+            'tenant_id': str(tenant.id),
+            'email_id': email_id,
+            'partner_slug': partner_slug,
+            'event': event,
+            'record_id': record.id,
+            'partner_event_id': partner_event.id,
+        }
+        job = queue_service.enqueue_job(
+            job_type=JobType.PARTNER_LEAD_ASSIGN,
+            payload=payload,
+            priority=5,
+            tenant_id=str(tenant.id),
+        )
+        partner_event.job_id = job.id
+        partner_event.save(update_fields=['job_id', 'updated_at'])
+
+        logger.info(
+            "[PartnerEvents] Stored partner_event_id=%s enqueued job_id=%s record_id=%s email_id=%s partner_slug=%s",
+            partner_event.id, job.id, record.id, email_id, partner_slug
+        )
+        return Response(
+            {'job_id': str(job.id), 'message': 'Event accepted'},
+            status=status.HTTP_202_ACCEPTED
+        )
+
+
+class PartnerLeadView(APIView):
+    """
+    Get the current user's lead assigned by a partner (e.g. Halocom).
+    Same response shape as GetMyCurrentLeadView for frontend compatibility.
+    GET /crm-records/leads/partner/<partner_slug>/
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    @extend_schema(
+        summary="Get my partner-assigned lead",
+        description="Returns the lead assigned to the current user by the given partner (e.g. halocom). Same shape as get next lead.",
+        parameters=[OpenApiParameter(name='partner_slug', type=str, location='path', description='Partner slug (e.g. halocom)')],
+        responses={
+            200: OpenApiResponse(description="Lead found or empty"),
+        },
+        tags=["Leads", "Partner"]
+    )
+    def get(self, request, partner_slug):
+        user = request.user
+        tenant = request.tenant
+        if not tenant:
+            logger.warning("[PartnerLead] No tenant context")
+            return Response({}, status=status.HTTP_200_OK)
+        user_identifier = getattr(user, 'supabase_uid', None) or getattr(user, 'email', None)
+        if not user_identifier:
+            logger.warning("[PartnerLead] No user_identifier (supabase_uid or email)")
+            return Response({}, status=status.HTTP_200_OK)
+
+        partner_slug = (partner_slug or '').strip().lower()
+        if not partner_slug:
+            logger.warning("[PartnerLead] Empty partner_slug")
+            return Response({}, status=status.HTTP_200_OK)
+
+        logger.info(
+            "[PartnerLead] GET partner_slug=%s tenant=%s user_identifier=%s",
+            partner_slug, tenant.slug, user_identifier
+        )
+
+        # Partner source can be in data or pyro_data
+        current_lead = Record.objects.filter(
+            tenant=tenant,
+            entity_type='lead',
+            data__assigned_to=user_identifier,
+            data__lead_stage='assigned',
+        ).filter(
+            Q(data__partner_source=partner_slug) | Q(pyro_data__partner_source=partner_slug)
+        ).order_by('-updated_at').first()
+
+        if not current_lead:
+            # Diagnostic: count partner leads for this tenant and how many match assigned+stage
+            partner_leads_count = Record.objects.filter(
+                tenant=tenant,
+                entity_type='lead',
+            ).filter(
+                Q(data__partner_source=partner_slug) | Q(pyro_data__partner_source=partner_slug)
+            ).count()
+            assigned_stage_count = Record.objects.filter(
+                tenant=tenant,
+                entity_type='lead',
+                data__assigned_to=user_identifier,
+                data__lead_stage='assigned',
+            ).count()
+            logger.info(
+                "[PartnerLead] No lead returned. partner_slug=%s tenant=%s user_identifier=%s | "
+                "Leads with partner_source=%s: %d | Leads with assigned_to=%s and lead_stage=assigned: %d. "
+                "Record must have assigned_to=user_identifier, lead_stage='assigned', and partner_source=%s.",
+                partner_slug, tenant.slug, user_identifier,
+                partner_slug, partner_leads_count, user_identifier, assigned_stage_count, partner_slug
+            )
+            return Response({}, status=status.HTTP_200_OK)
+        current_lead.refresh_from_db()
+        logger.info("[PartnerLead] Returning record_id=%s for user_identifier=%s", current_lead.id, user_identifier)
+        return Response(_flatten_lead_response(current_lead), status=status.HTTP_200_OK)
 
 
 class PrajaLeadsAPIView(APIView):
