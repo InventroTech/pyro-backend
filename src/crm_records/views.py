@@ -1484,25 +1484,36 @@ class GetNextLeadView(APIView):
         tenant = request.tenant
         debug_mode = request.query_params.get('debug') in ('1', 'true', 'yes')
 
+        logger.info(
+            "[GetNextLead] START request user=%s tenant=%s debug=%s",
+            getattr(user, 'email', getattr(user, 'supabase_uid', None)),
+            tenant.id if tenant else None,
+            debug_mode,
+        )
+
         if not tenant:
-            logger.warning("[GetNextLead] No tenant context available")
+            logger.warning("[GetNextLead] Step 0: Abort - no tenant context available")
+            logger.info("[GetNextLead] END EMPTY: no tenant.")
             return Response({}, status=status.HTTP_200_OK)
 
         # Step 1: Get user identifier (supabase_uid or email)
         user_identifier = getattr(user, 'supabase_uid', None) or getattr(user, 'email', None)
 
         if not user_identifier:
-            logger.warning("[GetNextLead] No user identifier available")
+            logger.warning("[GetNextLead] Step 1: Abort - no user identifier available")
+            logger.info("[GetNextLead] END EMPTY: no user identifier.")
             return Response({}, status=status.HTTP_200_OK)
 
-        logger.info("[GetNextLead] Getting next lead for user: %s", user_identifier)
+        logger.info("[GetNextLead] Step 1: user_identifier=%s", user_identifier)
 
         # Get current time for checking snoozed leads expiration
         from django.utils import timezone
         now = timezone.now()
         now_iso = now.isoformat()
+        logger.info("[GetNextLead] Step 1 done: now=%s", now_iso)
 
         # Step 2: Check the RM is eligible for what leads - get from user settings (lead types + lead sources + lead statuses)
+        logger.info("[GetNextLead] Step 2: Fetching user settings (lead types, sources, statuses, daily_limit)...")
         eligible_lead_types = []
         eligible_lead_sources = []
         eligible_lead_statuses = []
@@ -1567,11 +1578,19 @@ class GetNextLeadView(APIView):
             else:
                 logger.warning("[GetNextLead] Could not resolve user UUID for %s", user_identifier)
         except Exception as e:
-            logger.error("[GetNextLead] Error fetching user settings: %s", str(e))
+            logger.error("[GetNextLead] Step 2: Error fetching user settings: %s", str(e))
             eligible_lead_types = []
             eligible_lead_sources = []
             eligible_lead_statuses = []
             daily_limit = None
+
+        logger.info(
+            "[GetNextLead] Step 2 done: eligible_lead_types=%s eligible_lead_sources=%s eligible_lead_statuses=%s daily_limit=%s",
+            eligible_lead_types,
+            eligible_lead_sources or "(none)",
+            eligible_lead_statuses or "(none)",
+            daily_limit,
+        )
 
         # Optional: allow request to pass current lead-assignment page selection (intersection of all is used)
         party_param = request.query_params.get('party') or request.query_params.get('lead_types')
@@ -1604,6 +1623,7 @@ class GetNextLeadView(APIView):
         # Step 2.5: Enforce daily lead pull limit (if configured)
         # Count how many leads this user has been assigned today for this tenant.
         # We use Record.updated_at (assignment updates updated_at) as the time signal.
+        logger.info("[GetNextLead] Step 2.5: Checking daily limit (daily_limit=%s)...", daily_limit)
         if daily_limit is not None:
             try:
                 daily_limit_int = int(daily_limit)
@@ -1657,15 +1677,26 @@ class GetNextLeadView(APIView):
                     params=[user_identifier, start_of_day, user_identifier, start_of_day]
                 ).count()
 
+                logger.info(
+                    "[GetNextLead] Step 2.5: assigned_today=%d daily_limit_int=%d limit_reached=%s",
+                    assigned_today,
+                    daily_limit_int,
+                    assigned_today >= daily_limit_int and not debug_mode,
+                )
+
                 if assigned_today >= daily_limit_int and not debug_mode:
                     logger.info(
-                        "[GetNextLead] Daily limit reached for user=%s (assigned_today=%d, daily_limit=%d). Returning empty.",
+                        "[GetNextLead] Step 2.5: Daily limit reached for user=%s (assigned_today=%d, daily_limit=%d).",
                         user_identifier,
                         assigned_today,
                         daily_limit_int,
                     )
-                    # Fallback: still allow "not connected" follow-up leads, prioritized by call attempts
-                    # (attempt 1 first, then 2, 3, 4, 5 - exclude only when at or past max e.g. 6).
+                    logger.info(
+                        "[GetNextLead] FALLBACK [daily-limit]: Using not-connected-retry path (not main queue). "
+                        "Assigned-to-user not-connected leads only: due (next_call_at <= now), minimum call_attempts (1 first, then 2..6).",
+                    )
+                    # Fallback [daily-limit]: only not-connected retry leads assigned to this user, due (next_call_at in the past).
+                    # Return the one with minimum call_attempts so attempt=1 is served before attempt=2.
                     retry_candidate = Record.objects.filter(
                         tenant=tenant,
                         entity_type="lead",
@@ -1688,6 +1719,10 @@ class GetNextLeadView(APIView):
                                 data->>'lead_stage' IN ('assigned', 'call_later', 'scheduled', 'SNOOZED', 'in_queue', 'NOT_CONNECTED')
                                 OR data->>'lead_stage' IS NULL
                             )
+                            AND data->>'next_call_at' IS NOT NULL
+                            AND data->>'next_call_at' != ''
+                            AND data->>'next_call_at' != 'null'
+                            AND (data->>'next_call_at')::timestamptz <= NOW()
                             """
                         ],
                     ).order_by(
@@ -1696,22 +1731,33 @@ class GetNextLeadView(APIView):
                         "id",
                     ).first()
 
-                    if not retry_candidate and not debug_mode:
+                    if retry_candidate:
+                        attempt_count = (retry_candidate.data or {}).get("call_attempts", 0)
+                        lead_stage = (retry_candidate.data or {}).get("lead_stage", "")
+                        last_outcome = (retry_candidate.data or {}).get("last_call_outcome", "")
                         logger.info(
-                            "[GetNextLead] Daily limit reached and no retryable not-connected leads found for user=%s",
-                            user_identifier,
-                        )
-                        return Response({}, status=status.HTTP_200_OK)
-
-                    # Only return retry lead if cooldown has passed (next_call_at <= now)
-                    if retry_candidate and not self._lead_is_due_for_call(retry_candidate.data, now):
-                        logger.info(
-                            "[GetNextLead] Daily limit fallback: not returning lead_id=%s (not due yet: next_call_at=%s)",
+                            "[GetNextLead] FALLBACK [daily-limit]: Found due not-connected retry lead (min call_attempts) lead_id=%s call_attempts=%s lead_stage=%s last_call_outcome=%s next_call_at=%s.",
                             retry_candidate.id,
+                            attempt_count,
+                            lead_stage,
+                            last_outcome,
                             (retry_candidate.data or {}).get("next_call_at"),
                         )
+                    else:
+                        logger.info(
+                            "[GetNextLead] FALLBACK [daily-limit]: No due not-connected retry leads for user=%s "
+                            "(assigned_to=user, call_attempts 1–6, next_call_at <= now, NOT_CONNECTED or last_call_outcome not connected).",
+                            user_identifier,
+                        )
+
+                    if not retry_candidate and not debug_mode:
+                        logger.info(
+                            "[GetNextLead] FALLBACK [daily-limit]: No due not-connected retry leads (next_call_at <= now, call_attempts 1–6).",
+                        )
+                        logger.info("[GetNextLead] END EMPTY: daily limit reached, no due retry leads.")
                         return Response({}, status=status.HTTP_200_OK)
 
+                    # Candidate is already due (filtered in query by next_call_at <= NOW()) and has minimum call_attempts.
                     # Serialize and flatten for frontend compatibility (same format as normal GetNextLead)
                     serialized_data = RecordSerializer(retry_candidate).data
                     lead_data = retry_candidate.data or {}
@@ -1745,16 +1791,31 @@ class GetNextLeadView(APIView):
                         "record": serialized_data,
                     }
 
+                    attempt_count = flattened_response.get("attempt_count", 0)
                     logger.info(
-                        "[GetNextLead] Daily limit fallback returning not-connected lead: record_id=%s user=%s call_attempts=%s",
+                        "[GetNextLead] FALLBACK [daily-limit]: Returning not-connected retry lead record_id=%s user=%s call_attempts=%s (attempt %s of max 6).",
                         retry_candidate.id,
                         user_identifier,
-                        flattened_response.get("attempt_count"),
+                        attempt_count,
+                        attempt_count,
                     )
                     return Response(flattened_response, status=status.HTTP_200_OK)
+                else:
+                    logger.info(
+                        "[GetNextLead] Step 2.5: Under daily limit (assigned_today=%d < daily_limit=%d) or debug_mode - not using fallback.",
+                        assigned_today, daily_limit_int,
+                    )
+                    logger.info(
+                        "[GetNextLead] MAIN QUEUE: Fetching next lead from main queue (fresh + unassigned retry due), not daily-limit retry path.",
+                    )
+            else:
+                logger.info("[GetNextLead] Step 2.5: daily_limit value invalid or disabled - proceeding to Step 3 (main queue).")
+        else:
+            logger.info("[GetNextLead] Step 2.5: daily_limit not set - proceeding to Step 3 (main queue).")
 
         # Step 3: Filter leads by eligible lead types (affiliated_party field) and unassigned status
         from django.db.models import Q
+        logger.info("[GetNextLead] Step 3: Building main queue (queueable WHERE + affiliated_party + routing)...")
 
         # Common WHERE conditions for queueable leads (assignment + status + next_call_at)
         _queueable_where = """
@@ -1826,6 +1887,9 @@ class GetNextLeadView(APIView):
                 user_id=user_uuid,
                 queue_type="lead",
             )
+            logger.info("[GetNextLead] Step 3: Applied routing rule for user_uuid=%s", user_uuid)
+        else:
+            logger.info("[GetNextLead] Step 3: No user_uuid - skipping routing rule.")
 
         # Filter by eligible lead types (affiliated_party field must match one of the eligible types)
         # When no party types configured: push ALL leads to RM (use relaxed_base_qs, no filter)
@@ -1851,6 +1915,7 @@ class GetNextLeadView(APIView):
             logger.info("[GetNextLead] Filtered unassigned leads by eligible lead statuses (intersection): %s", eligible_lead_statuses)
 
         # IN_QUEUE and SNOOZED leads that have an assignee stick to that RM: only that user can pull them via Get Next Lead.
+        before_exclude = unassigned.count()
         unassigned = unassigned.exclude(
             (Q(data__lead_stage='in_queue') | Q(data__lead_stage='SNOOZED'))
             & Q(data__assigned_to__isnull=False)
@@ -1858,6 +1923,11 @@ class GetNextLeadView(APIView):
             & ~Q(data__assigned_to='null')
             & ~Q(data__assigned_to='None')
             & ~Q(data__assigned_to=user_identifier)
+        )
+        after_exclude = unassigned.count()
+        logger.info(
+            "[GetNextLead] Step 3: After excluding IN_QUEUE/SNOOZED assigned to other users: count %d -> %d",
+            before_exclude, after_exclude,
         )
 
         # Filter by call attempt matrix rules (max attempts, SLA, min time between calls)
@@ -1954,8 +2024,10 @@ class GetNextLeadView(APIView):
         # --- Enhanced Diagnostics: Log possible unassigned counts for debugging ---
         unassigned_cnt = unassigned.count()
         total_unassigned_cnt = base_qs.count()
-        logger.info("[GetNextLead] Diagnostic: total_unassigned_in_queueable=%d, unassigned_matching_types=%d for user=%s",
-                    total_unassigned_cnt, unassigned_cnt, user_identifier)
+        logger.info(
+            "[GetNextLead] Step 3 done: total_queueable=%d unassigned_matching_filters=%d user=%s",
+            total_unassigned_cnt, unassigned_cnt, user_identifier,
+        )
 
         if unassigned_cnt == 0 and total_unassigned_cnt > 0:
             # There are unassigned queueable leads, but none matching the user's eligible lead types
@@ -1965,7 +2037,10 @@ class GetNextLeadView(APIView):
                 lead_types_in_queue, eligible_lead_types
             )
         elif total_unassigned_cnt == 0:
-            logger.info("[GetNextLead] There are currently no unassigned leads in any queueable status for tenant=%s", tenant)
+            logger.info(
+                "[GetNextLead] Step 3: total_queueable=0 for tenant=%s. Trying relaxed fallback (drop lead_stage filter).",
+                tenant,
+            )
             # Relaxed fallback: drop lead_stage filter to recover from inconsistent/missing stages
             # But still include snoozed leads where next_call_at has passed
             # Use UPPER() for lead_stage to handle case variations
@@ -2023,7 +2098,10 @@ class GetNextLeadView(APIView):
                 relaxed_unassigned = relaxed_unassigned.filter(data__lead_status__in=eligible_lead_statuses)
             relaxed_cnt = relaxed_unassigned.count()
             if relaxed_cnt > 0:
-                logger.info("[GetNextLead] Relaxed fallback found %d unassigned leads (intersection of party/source/status applied)", relaxed_cnt)
+                logger.info(
+                    "[GetNextLead] Step 3: Relaxed fallback found %d unassigned leads (intersection of party/source/status applied). Using as unassigned pool.",
+                    relaxed_cnt,
+                )
                 unassigned = relaxed_unassigned
                 unassigned_cnt = relaxed_cnt
 
@@ -2109,41 +2187,60 @@ class GetNextLeadView(APIView):
                 "distinct_affiliated_parties": list(Record.objects.filter(tenant=tenant, entity_type='lead').values_list('data__affiliated_party', flat=True).distinct()[:20]),
             }, status=status.HTTP_200_OK)
 
+        logger.info("[GetNextLead] Step 4: Ordering by score (call_attempts asc, score desc, LIFO)...")
         ordered = self._order_by_score(unassigned, now_iso)
         candidate = None
+        checked = 0
         for c in ordered[:50]:
+            checked += 1
             if self._lead_is_due_for_call(c.data, now):
                 candidate = c
+                logger.info(
+                    "[GetNextLead] Step 4: Selected candidate lead_id=%s (checked %d, call_attempts=%s)",
+                    c.id, checked, (c.data or {}).get('call_attempts'),
+                )
                 break
             logger.info(
-                "[GetNextLead] Skipping lead_id=%s (not due yet: call_attempts=%s next_call_at=%s)",
+                "[GetNextLead] Step 4: Skipping lead_id=%s (not due yet: call_attempts=%s next_call_at=%s)",
                 c.id, (c.data or {}).get('call_attempts'), (c.data or {}).get('next_call_at'),
             )
+        if not candidate and checked > 0:
+            logger.info("[GetNextLead] Step 4: No candidate due for call among first 50 ordered leads (checked=%d).", checked)
 
         # Step 5: Return first entry (or empty if none found)
+        logger.info("[GetNextLead] Step 5: Lock and assign (candidate=%s)...", candidate.id if candidate else None)
 
         if not candidate:
-            logger.info("[GetNextLead] No unassigned leads available after filtering and sorting by score (or none due yet)")
+            logger.info(
+                "[GetNextLead] Step 5: No candidate - returning empty. unassigned_cnt=%d",
+                unassigned_cnt,
+            )
             if unassigned_cnt > 0:
-                logger.info("[GetNextLead] Unassigned leads exist but none passed the lead score ordering filter or cooldown check")
+                logger.info("[GetNextLead] Step 5: Unassigned leads existed but none passed ordering or cooldown check.")
+            logger.info("[GetNextLead] END EMPTY: no lead assigned (no candidate or none due).")
             return Response({}, status=status.HTTP_200_OK)
 
         # Lock and assign the lead
+        logger.info("[GetNextLead] Step 5: Acquiring lock for lead_id=%s...", candidate.pk)
         with transaction.atomic():
             candidate_locked = Record.objects.select_for_update(skip_locked=True).filter(pk=candidate.pk).first()
 
             if not candidate_locked:
-                logger.info("[GetNextLead] Lead was taken by another request")
+                logger.info("[GetNextLead] Step 5: Lead_id=%s was taken by another request (skip_locked).", candidate.pk)
+                logger.info("[GetNextLead] END EMPTY: lead taken by another request.")
                 return Response({}, status=status.HTTP_200_OK)
 
             if not self._lead_is_due_for_call(candidate_locked.data, timezone.now()):
                 logger.info(
-                    "[GetNextLead] Skipping lead_id=%s after lock (not due yet: call_attempts=%s next_call_at=%s)",
+                    "[GetNextLead] Step 5: After lock lead_id=%s not due (call_attempts=%s next_call_at=%s).",
                     candidate_locked.id,
                     (candidate_locked.data or {}).get("call_attempts"),
                     (candidate_locked.data or {}).get("next_call_at"),
                 )
+                logger.info("[GetNextLead] END EMPTY: lead not due after lock.")
                 return Response({}, status=status.HTTP_200_OK)
+
+            logger.info("[GetNextLead] Step 5: Lock acquired. Assigning lead_id=%s to user=%s...", candidate_locked.id, user_identifier)
 
             # Update the candidate's data
             data = candidate_locked.data.copy() if candidate_locked.data else {}
@@ -2228,9 +2325,10 @@ class GetNextLeadView(APIView):
                 # Don't fail the request if event logging fails
 
             logger.info(
-                "[GetNextLead] Assigned new lead: record_id=%s user=%s",
+                "[GetNextLead] Step 5 done: Assigned lead record_id=%s user=%s (fresh=%s). Saving and building response.",
                 candidate_locked.id,
-                user_identifier
+                user_identifier,
+                is_fresh_assignment,
             )
 
             # Send both Mixpanel events when lead is assigned
@@ -2383,13 +2481,13 @@ class GetNextLeadView(APIView):
         }
 
         logger.info(
-            "[GetNextLead] Returning lead data: record_id=%s name=%s phone_no=%s source=%s last_active=%s",
+            "[GetNextLead] Step 5: Returning lead record_id=%s name=%s phone_no=%s source=%s",
             candidate_locked.id,
             flattened_response.get('name'),
             flattened_response.get('phone_no'),
             flattened_response.get('lead_source'),
-            flattened_response.get('last_active_date_time')
         )
+        logger.info("[GetNextLead] END SUCCESS: assigned lead_id=%s to user=%s", candidate_locked.id, user_identifier)
 
         return Response(flattened_response, status=status.HTTP_200_OK)
 
