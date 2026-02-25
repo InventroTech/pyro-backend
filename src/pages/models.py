@@ -16,6 +16,13 @@ class Page(TimeStampedModel, RoleModel):
     name = models.CharField(max_length=255)
     header_title = models.CharField(max_length=255, blank=True, null=True)
     display_order = models.IntegerField(default=0)
+    icon_name = models.CharField(
+        max_length=100, 
+        blank=True, 
+        null=True, 
+        default='Sparkles',
+        help_text="Key matching the navigationIconMap in the frontend."
+    )
     config = models.JSONField(
         default=list,
         blank=True,
