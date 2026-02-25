@@ -1,4 +1,7 @@
+import re
+import uuid
 from django.db import transaction, connection
+from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, serializers
@@ -9,6 +12,7 @@ from authz.permissions import IsTenantAuthenticated, HasTenantRole
 from authz.service import get_authz_role_from_legacy_role  # DEPRECATED: Will be removed
 from authz.models import TenantMembership, Role
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from core.models import Tenant
 
 from django.db.models import Subquery
 from .serializers import LegacyUserLiteSerializer  # DEPRECATED: Will be replaced
@@ -174,6 +178,105 @@ class AssigneesByRoleView(APIView):
             logger.error(f"Error in AssigneesByRoleView: {e}", exc_info=True)
             # Return empty result on error (no legacy fallback)
             return Response({'count': 0, 'results': []}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+PYRO_ADMIN_ROLE_KEY = "pyro_admin"
+PYRO_ADMIN_ROLE_NAME = "PYRO_ADMIN"
+
+
+def _slugify_tenant_slug(raw: str) -> str:
+    """Normalize to lowercase alphanumeric and hyphens (matches Tenant.slug validator)."""
+    if not raw or not isinstance(raw, str):
+        return ""
+    s = re.sub(r"[^a-z0-9\-]", "", raw.lower().strip())
+    return re.sub(r"-+", "-", s).strip("-") or ""
+
+
+class SetupNewTenantView(APIView):
+    """
+    Signup flow: create tenant → PYRO_ADMIN role → TenantMembership.
+    POST with Supabase JWT. Body: { "tenant_slug": "...", "tenant_name": "..." (optional) }.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        tenant_slug = (request.data.get("tenant_slug") or "").strip()
+        tenant_name = (request.data.get("tenant_name") or "").strip()
+        if not tenant_slug:
+            return Response({"error": "tenant_slug is required"}, status=status.HTTP_400_BAD_REQUEST)
+        slug = _slugify_tenant_slug(tenant_slug)
+        if not slug:
+            return Response(
+                {"error": "tenant_slug must contain at least one letter or number"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        email = (getattr(request.user, "email", None) or "").lower().strip()
+        if not email:
+            return Response({"error": "User email not found"}, status=status.HTTP_400_BAD_REQUEST)
+        supabase_uid = getattr(request.user, "supabase_uid", None)
+        if not supabase_uid:
+            return Response({"error": "User supabase_uid not found"}, status=status.HTTP_400_BAD_REQUEST)
+
+        existing = (
+            TenantMembership.objects.filter(user_id=supabase_uid, is_active=True)
+            .select_related("tenant", "role")
+            .first()
+        )
+        if existing:
+            return Response(
+                {
+                    "success": True,
+                    "tenant_id": str(existing.tenant.id),
+                    "tenant_slug": existing.tenant.slug,
+                    "role_id": str(existing.role.id),
+                    "role_key": existing.role.key,
+                    "message": "Already set up",
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        name = tenant_name or slug.replace("-", " ").title()
+        with transaction.atomic():
+            tenant, tenant_created = Tenant.objects.get_or_create(
+                slug=slug,
+                defaults={"id": uuid.uuid4(), "name": name, "created_at": timezone.now()},
+            )
+            if not tenant_created:
+                return Response(
+                    {"error": f"Organization slug '{slug}' is already taken"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            role, _ = Role.objects.get_or_create(
+                tenant=tenant,
+                key=PYRO_ADMIN_ROLE_KEY,
+                defaults={"name": PYRO_ADMIN_ROLE_NAME, "description": "Default admin role"},
+            )
+            membership, _ = TenantMembership.objects.get_or_create(
+                tenant=tenant,
+                email=email,
+                role=role,
+                defaults={
+                    "user_id": supabase_uid,
+                    "is_active": True,
+                    "name": name or email.split("@")[0],
+                },
+            )
+            if membership.user_id != supabase_uid:
+                membership.user_id = supabase_uid
+                membership.is_active = True
+                membership.save(update_fields=["user_id", "is_active"])
+
+        return Response(
+            {
+                "success": True,
+                "tenant_id": str(tenant.id),
+                "tenant_slug": tenant.slug,
+                "role_id": str(role.id),
+                "role_key": role.key,
+                "message": "Tenant, PYRO_ADMIN role, and membership created",
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class LinkUserUidView(APIView):
