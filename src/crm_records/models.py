@@ -106,6 +106,49 @@ class RuleExecutionLog(BaseModel):
         return f"Rule execution: {self.event_name} ({'matched' if self.matched else 'no match'}) at {self.created_at}"
 
 
+class PartnerEvent(BaseModel):
+    """
+    Stores every incoming partner webhook event (e.g. Halocom work_on_lead) with full payload.
+    Gives a durable audit trail and debugging source independent of background_jobs.
+    """
+    partner_slug = models.CharField(max_length=64, db_index=True)
+    event = models.CharField(max_length=100, db_index=True)
+    payload = models.JSONField(default=dict, blank=True, help_text="Full request payload (praja_id, email_id, etc.)")
+    status = models.CharField(
+        max_length=20,
+        db_index=True,
+        default="pending",
+        help_text="pending, processing, completed, failed",
+    )
+    record = models.ForeignKey(
+        Record,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="partner_events",
+        help_text="Resolved lead record when applicable",
+    )
+    job_id = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Background job id that processed this event",
+    )
+    processed_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = "partner_events"
+        indexes = [
+            models.Index(fields=["tenant", "partner_slug", "-created_at"]),
+            models.Index(fields=["tenant", "status", "-created_at"]),
+        ]
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.partner_slug} {self.event} ({self.status}) at {self.created_at}"
+
+
 class EntityTypeSchema(BaseModel):
     """
     Schema definition for entity types - stores the list of attributes for each entity type.
