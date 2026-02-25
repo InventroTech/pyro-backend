@@ -19,7 +19,7 @@ from drf_spectacular.types import OpenApiTypes
 import logging
 
 logger = logging.getLogger(__name__)
-from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule
+from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule, PartnerEvent
 from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer, CallAttemptMatrixSerializer, ScoringRuleModelSerializer
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
