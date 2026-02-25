@@ -19,7 +19,9 @@ from django.db import transaction
 from django.db.utils import OperationalError
 from django.utils import timezone
 
-from crm_records.models import Record
+from core.models import Tenant
+from authz.models import TenantMembership
+from crm_records.models import Record, PartnerEvent
 from crm_records.scoring import calculate_and_update_lead_score
 from crm_records.services import PrajaService
 from support_ticket.models import SupportTicket
@@ -752,6 +754,142 @@ class PrajaJobHandler(JobHandler):
         return True
 
 
+class PartnerLeadAssignJobHandler(JobHandler):
+    """
+    Handler for partner-initiated lead assignment (e.g. Halocom work_on_lead).
+    Assigns the given record to the user identified by email_id in the tenant.
+    Updates PartnerEvent status for audit trail.
+    """
+    def _update_partner_event(self, partner_event_id: int, status: str, error_message: str = None):
+        try:
+            PartnerEvent.objects.filter(pk=partner_event_id).update(
+                status=status,
+                processed_at=timezone.now(),
+                error_message=error_message,
+                updated_at=timezone.now(),
+            )
+        except Exception as e:
+            logger.warning("[PartnerLeadAssign] Failed to update PartnerEvent %s: %s", partner_event_id, e)
+
+    def process(self, job: BackgroundJob) -> bool:
+        payload = job.payload
+        tenant_id = payload.get("tenant_id")
+        email_id = (payload.get("email_id") or "").strip().lower()
+        partner_slug = (payload.get("partner_slug") or "halocom").strip().lower()
+        record_id = payload.get("record_id")
+        partner_event_id = payload.get("partner_event_id")
+
+        if not tenant_id or not email_id or not record_id:
+            error_msg = (
+                f"Invalid partner lead assign payload: missing tenant_id, email_id or record_id "
+                f"(tenant_id={tenant_id}, email_id={bool(email_id)}, record_id={record_id})"
+            )
+            logger.error(f"Partner lead assign job {job.id}: {error_msg}")
+            if partner_event_id:
+                self._update_partner_event(partner_event_id, "failed", error_msg)
+            raise ValueError(error_msg)
+
+        try:
+            tenant = Tenant.objects.get(id=tenant_id)
+        except (Tenant.DoesNotExist, ValueError, TypeError) as e:
+            logger.error(f"Partner lead assign job {job.id}: tenant not found: {e}")
+            if partner_event_id:
+                self._update_partner_event(partner_event_id, "failed", str(e))
+            raise ValueError(f"Tenant not found: {tenant_id}") from e
+
+        membership = TenantMembership.objects.filter(
+            tenant=tenant,
+            email__iexact=email_id,
+            is_active=True
+        ).first()
+        if not membership:
+            error_msg = f"No active tenant membership for email {email_id}"
+            logger.error(f"Partner lead assign job {job.id}: {error_msg}")
+            if partner_event_id:
+                self._update_partner_event(partner_event_id, "failed", error_msg)
+            raise ValueError(error_msg)
+
+        user_identifier = str(membership.user_id) if membership.user_id else membership.email
+
+        record = Record.objects.filter(
+            tenant=tenant,
+            entity_type="lead",
+            pk=record_id
+        ).first()
+        if not record:
+            error_msg = f"Record {record_id} not found for tenant"
+            logger.error(f"Partner lead assign job {job.id}: {error_msg}")
+            if partner_event_id:
+                self._update_partner_event(partner_event_id, "failed", error_msg)
+            raise ValueError(error_msg)
+
+        try:
+            with transaction.atomic():
+                data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
+                previous_assigned_to = data.get("assigned_to")
+                is_fresh_assignment = (
+                    previous_assigned_to is None
+                    or previous_assigned_to == ""
+                    or previous_assigned_to == "null"
+                    or previous_assigned_to == "None"
+                )
+                data["assigned_to"] = user_identifier
+                data["lead_stage"] = "assigned"
+                data["partner_source"] = partner_slug
+                if "call_attempts" not in data or data.get("call_attempts") in (None, "", "null"):
+                    data["call_attempts"] = 0
+                call_attempts = data.get("call_attempts", 0)
+                try:
+                    call_attempts_int = int(call_attempts) if call_attempts is not None else 0
+                except (TypeError, ValueError):
+                    call_attempts_int = 0
+                last_call_outcome = (data.get("last_call_outcome") or "").lower()
+                lead_stage = (data.get("lead_stage") or "").upper()
+                is_not_connected_retry = (
+                    call_attempts_int > 0
+                    or last_call_outcome in ("not connected", "not_connected", "notconnected")
+                    or last_call_outcome == "call_back_later"
+                    or lead_stage in ("NOT_CONNECTED", "CALL_BACK_LATER", "IN_QUEUE")
+                )
+                if is_fresh_assignment and "first_assigned_at" not in data and not is_not_connected_retry:
+                    data["first_assigned_at"] = timezone.now().isoformat()
+                    data["first_assigned_to"] = user_identifier
+                record.data = data
+                record.updated_at = timezone.now()
+                record.save(update_fields=["data", "updated_at"])
+        except Exception as e:
+            if partner_event_id:
+                self._update_partner_event(partner_event_id, "failed", str(e))
+            raise
+
+        if partner_event_id:
+            self._update_partner_event(partner_event_id, "completed")
+
+        logger.info(
+            "[PartnerLeadAssign] Assigned record_id=%s to %s partner_slug=%s",
+            record_id, user_identifier, partner_slug
+        )
+        job.result = {
+            "success": True,
+            "record_id": record_id,
+            "assigned_to": user_identifier,
+            "partner_slug": partner_slug,
+            "timestamp": timezone.now().isoformat(),
+        }
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [2, 10, 60]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+    def validate_payload(self, payload: Dict[str, Any]) -> bool:
+        for key in ("tenant_id", "email_id", "record_id"):
+            if not payload.get(key):
+                logger.error(f"Missing required field '{key}' in partner lead assign payload")
+                return False
+        return True
+
+
 class JobHandlerRegistry:
     """
     Registry for job handlers.
@@ -769,6 +907,7 @@ class JobHandlerRegistry:
         self.register_handler(JobType.SEND_WEBHOOK, WebhookJobHandler())
         self.register_handler(JobType.EXECUTE_FUNCTION, FunctionJobHandler())
         self.register_handler(JobType.SCORE_LEADS, LeadScoringJobHandler())
+        self.register_handler(JobType.PARTNER_LEAD_ASSIGN, PartnerLeadAssignJobHandler())
         # Praja handler removed - now using MixpanelService instead
         # self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
     
