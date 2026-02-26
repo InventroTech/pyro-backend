@@ -1,12 +1,11 @@
 import logging
 from typing import Optional, Tuple
 
-from django.db import transaction, connection
+from django.db import transaction
 from django.db.models import Q
 
-from accounts.models import LegacyUser, SupabaseAuthUser, LegacyRole
+from accounts.models import SupabaseAuthUser
 from authz.models import TenantMembership, Role as AuthZRole
-from authz.service import get_authz_role_from_legacy_role  # you already have this helper
 
 logger = logging.getLogger(__name__)
 
@@ -30,47 +29,25 @@ class DeleteReport(dict):
 
 def _resolve_uid_from_email_role(tenant, email: str, role_id) -> Tuple[Optional[str], list]:
     """
-    Attempt to find uid using (tenant, email, role), supporting either legacy or authz role ids.
-    Strategy:
-      1) Try LegacyUser rows (public.users) for (tenant,email[,legacy_role_id]) -> uid
-      2) Try TenantMembership (authz) for (tenant,email[,authz_role_id]) -> user_id
-      3) If still no uid, return None (it may never have been linked in auth.users)
+    Resolve uid from (tenant, email, role_id) using TenantMembership only.
+    LegacyUser / LegacyRole are no longer used (tables may be dropped).
     """
     notes = []
 
-    # 1) Legacy path: role_id provided may be legacy role id (public.roles.id)
-    legacy_uid = (
-        LegacyUser.objects
-        .filter(tenant=tenant, email__iexact=email)
-        .filter(Q(role_id=role_id) | Q(role_id__isnull=True) | Q(role_id__isnull=False))  # accept any role if unsure
-        .values_list("uid", flat=True)
-        .exclude(uid__isnull=True)
-        .first()
-    )
-    if legacy_uid:
-        notes.append(f"Resolved uid from LegacyUser: {legacy_uid}")
-        return str(legacy_uid), notes
-
-    # 2) AuthZ path: role_id may be an AuthZ role id; if it’s actually legacy, map it.
+    # AuthZ path: role_id may be an AuthZ role id; if it’s actually legacy, map it.
     authz_role_id = None
     try:
         # Try direct assume-as-authz first
         if AuthZRole.objects.filter(id=role_id, tenant=tenant).exists():
             authz_role_id = role_id
-        else:
-            # Attempt to map legacy->authz
-            mapped = get_authz_role_from_legacy_role(role_id, tenant)
-            if isinstance(mapped, AuthZRole):
-                authz_role_id = mapped.id
     except Exception as e:
-        notes.append(f"Role resolution warning: {e!r}")
+        notes.append(f"Role lookup warning: {e!r}")
 
-    tm_uid = (
-        TenantMembership.objects
-        .filter(tenant=tenant, email=email)
-        .filter(role_id=authz_role_id) if authz_role_id else
-        TenantMembership.objects.filter(tenant=tenant, email=email)
-    ).values_list("user_id", flat=True).exclude(user_id__isnull=True).first()
+    email_clean = email.strip().lower() if email else ""
+    tm_q = TenantMembership.objects.filter(tenant=tenant, email__iexact=email_clean)
+    if authz_role_id:
+        tm_q = tm_q.filter(role_id=authz_role_id)
+    tm_uid = tm_q.values_list("user_id", flat=True).exclude(user_id__isnull=True).first()
 
     if tm_uid:
         notes.append(f"Resolved uid from TenantMembership: {tm_uid}")
