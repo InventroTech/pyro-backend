@@ -334,21 +334,6 @@ def resolve_context(request) -> Optional[GetNextLeadContext]:
         return None
 
 
-def apply_request_overrides(ctx: GetNextLeadContext, request) -> None:
-    """Apply optional query params (party, lead_sources, lead_statuses) to context."""
-    party_param = request.query_params.get("party") or request.query_params.get("lead_types")
-    if party_param is not None:
-        party_list = [s.strip() for s in str(party_param).split(",") if s.strip()]
-        if party_list:
-            ctx.eligible_lead_types = party_list
-    lead_sources_param = request.query_params.get("lead_sources")
-    if lead_sources_param is not None:
-        ctx.eligible_lead_sources = [s.strip() for s in str(lead_sources_param).split(",") if s.strip()]
-    lead_statuses_param = request.query_params.get("lead_statuses")
-    if lead_statuses_param is not None:
-        ctx.eligible_lead_statuses = [s.strip() for s in str(lead_statuses_param).split(",") if s.strip()]
-
-
 def daily_limit_retry_response(ctx: GetNextLeadContext) -> Optional[Response]:
     """
     Step 2.5: If daily limit is reached, try to return a not-connected retry lead for this user.
@@ -808,7 +793,8 @@ def get_next_lead(request) -> Response:
         logger.info("[GetNextLead] END EMPTY: no tenant or no user identifier.")
         return Response({}, status=status.HTTP_200_OK)
 
-    apply_request_overrides(ctx, request)
+    # Use only user settings (eligible_lead_types, eligible_lead_sources, eligible_lead_statuses, daily_limit).
+    # Do not apply request/query param overrides from the frontend.
     ret = daily_limit_retry_response(ctx)
     if ret is not None:
         return ret

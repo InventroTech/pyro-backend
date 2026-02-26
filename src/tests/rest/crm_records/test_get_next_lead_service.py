@@ -18,7 +18,6 @@ from crm_records.get_next_lead_service import (
     lead_is_due_for_call,
     should_exclude_lead_by_matrix,
     resolve_context,
-    apply_request_overrides,
     daily_limit_retry_response,
     build_main_queue,
     lock_assign_and_respond,
@@ -188,45 +187,6 @@ class TestResolveContext(SimpleTestCase):
         self.assertTrue(ctx.debug_mode)
 
 
-# --- apply_request_overrides ---
-
-
-class TestApplyRequestOverrides(SimpleTestCase):
-    def setUp(self):
-        self.ctx = GetNextLeadContext(
-            tenant=MagicMock(),
-            user=MagicMock(),
-            user_identifier="u1",
-            user_uuid=uuid.uuid4(),
-            tenant_membership=None,
-            now=django_tz.now(),
-            now_iso=django_tz.now().isoformat(),
-            debug_mode=False,
-            eligible_lead_types=[],
-            eligible_lead_sources=[],
-            eligible_lead_statuses=[],
-            daily_limit=None,
-        )
-
-    def test_party_param_overrides_eligible_lead_types(self):
-        request = MagicMock()
-        request.query_params = {"party": "in_trial, sales_lead"}
-        apply_request_overrides(self.ctx, request)
-        self.assertEqual(self.ctx.eligible_lead_types, ["in_trial", "sales_lead"])
-
-    def test_lead_sources_param_overrides(self):
-        request = MagicMock()
-        request.query_params = {"lead_sources": "web, api"}
-        apply_request_overrides(self.ctx, request)
-        self.assertEqual(self.ctx.eligible_lead_sources, ["web", "api"])
-
-    def test_lead_statuses_param_overrides(self):
-        request = MagicMock()
-        request.query_params = {"lead_statuses": "new, contacted"}
-        apply_request_overrides(self.ctx, request)
-        self.assertEqual(self.ctx.eligible_lead_statuses, ["new", "contacted"])
-
-
 # --- daily_limit_retry_response (mocked) ---
 
 
@@ -300,10 +260,9 @@ class TestGetNextLeadIntegration(SimpleTestCase):
 
     @patch("crm_records.get_next_lead_service.build_main_queue")
     @patch("crm_records.get_next_lead_service.daily_limit_retry_response")
-    @patch("crm_records.get_next_lead_service.apply_request_overrides")
     @patch("crm_records.get_next_lead_service.resolve_context")
     def test_no_unassigned_leads_returns_200_empty(
-        self, mock_resolve, mock_apply, mock_retry, mock_build
+        self, mock_resolve, mock_retry, mock_build
     ):
         mock_retry.return_value = None
         mock_build.return_value = (MagicMock(), 0, 0)
@@ -333,10 +292,9 @@ class TestGetNextLeadIntegration(SimpleTestCase):
     @patch("crm_records.get_next_lead_service.build_debug_response")
     @patch("crm_records.get_next_lead_service.build_main_queue")
     @patch("crm_records.get_next_lead_service.daily_limit_retry_response")
-    @patch("crm_records.get_next_lead_service.apply_request_overrides")
     @patch("crm_records.get_next_lead_service.resolve_context")
     def test_debug_mode_returns_debug_response(
-        self, mock_resolve, mock_apply, mock_retry, mock_build, mock_debug_response
+        self, mock_resolve, mock_retry, mock_build, mock_debug_response
     ):
         mock_retry.return_value = None
         mock_build.return_value = (MagicMock(), 0, 0)
