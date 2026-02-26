@@ -29,25 +29,20 @@ class DeleteReport(dict):
 
 def _resolve_uid_from_email_role(tenant, email: str, role_id) -> Tuple[Optional[str], list]:
     """
-    Resolve uid from (tenant, email, role_id) using TenantMembership only.
-    LegacyUser / LegacyRole are no longer used (tables may be dropped).
+    Find uid using (tenant, email, role) via TenantMembership and AuthZ Role only.
     """
     notes = []
 
-    # AuthZ path: role_id may be an AuthZ role id; if it’s actually legacy, map it.
     authz_role_id = None
-    try:
-        # Try direct assume-as-authz first
-        if AuthZRole.objects.filter(id=role_id, tenant=tenant).exists():
-            authz_role_id = role_id
-    except Exception as e:
-        notes.append(f"Role lookup warning: {e!r}")
+    if role_id and AuthZRole.objects.filter(id=role_id, tenant=tenant).exists():
+        authz_role_id = role_id
 
-    email_clean = email.strip().lower() if email else ""
-    tm_q = TenantMembership.objects.filter(tenant=tenant, email__iexact=email_clean)
-    if authz_role_id:
-        tm_q = tm_q.filter(role_id=authz_role_id)
-    tm_uid = tm_q.values_list("user_id", flat=True).exclude(user_id__isnull=True).first()
+    tm_uid = (
+        TenantMembership.objects
+        .filter(tenant=tenant, email=email)
+        .filter(role_id=authz_role_id) if authz_role_id else
+        TenantMembership.objects.filter(tenant=tenant, email=email)
+    ).values_list("user_id", flat=True).exclude(user_id__isnull=True).first()
 
     if tm_uid:
         notes.append(f"Resolved uid from TenantMembership: {tm_uid}")
@@ -60,12 +55,9 @@ def _resolve_uid_from_email_role(tenant, email: str, role_id) -> Tuple[Optional[
 @transaction.atomic
 def delete_user_everywhere(*, tenant, uid=None, email=None, role_id=None):
     """
-    NEW: Deletes rows for a user across:
+    Deletes rows for a user across:
       - auth.users (Supabase)
       - public.authz_tenantmembership (TenantMembership)
-    
-    DEPRECATED: LegacyUser deletion removed. LegacyUser rows will be cleaned up separately
-    or via cascade from auth.users deletion if FK exists.
 
     Idempotent: if nothing exists, returns '0' in counts.
     """
@@ -75,7 +67,7 @@ def delete_user_everywhere(*, tenant, uid=None, email=None, role_id=None):
         matched_by="none",
         deleted={
             "auth_users": 0,
-            "legacy_users": 0,  # DEPRECATED: Always 0, kept for backward compatibility
+            "legacy_users": 0,
             "tenant_memberships": 0
         },
         notes=[]
@@ -105,22 +97,11 @@ def delete_user_everywhere(*, tenant, uid=None, email=None, role_id=None):
     logger.info("TenantMembership deleted", extra={"count": tm_deleted, "tenant_id": str(tenant.id), "email": email, "uid": resolved_uid})
 
     # 3) Delete from auth.users when we have a uid
-    # NOTE: If LegacyUser has FK to auth.users, this will cascade delete LegacyUser rows
     if resolved_uid:
         au_deleted, _ = SupabaseAuthUser.objects.filter(id=resolved_uid).delete()
         report["deleted"]["auth_users"] = au_deleted
         logger.info("auth.users deleted", extra={"count": au_deleted, "tenant_id": str(tenant.id), "uid": resolved_uid})
-        if au_deleted > 0:
-            report["notes"].append("LegacyUser rows may be cascade-deleted via FK from auth.users if FK exists.")
 
-    # DEPRECATED: LegacyUser explicit deletion removed
-    # LegacyUser rows will be cleaned up via cascade from auth.users deletion if FK exists,
-    # or can be cleaned up separately in a maintenance task.
-    report["deleted"]["legacy_users"] = 0
-    report["notes"].append("LegacyUser explicit deletion skipped (deprecated).")
-
-    # 4) If no uid and caller still wants to remove auth.users by email:
-    #     This is DANGEROUS cross-tenant; we *do not* do it automatically.
     if not resolved_uid and email and report["deleted"]["auth_users"] == 0:
         report["notes"].append("Skipped deleting auth.users by email-only for safety (cross-tenant risk).")
 

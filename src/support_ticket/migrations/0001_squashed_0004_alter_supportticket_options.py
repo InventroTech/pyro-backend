@@ -15,7 +15,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('core', '__latest__'),
-        ('accounts', '__latest__'),
+        ('accounts', '0003_supabaseauthuser'),  # Pinned so adding accounts.0004 doesn't break existing DBs
         ('contenttypes', '__latest__'),
         ('auth', '__latest__'),
     ]
