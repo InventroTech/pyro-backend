@@ -6,7 +6,8 @@ import jwt
 from jwt import ExpiredSignatureError, InvalidTokenError
 
 SKIP_PATH_PREFIXES = ("/admin", "/health", "/_health", "/metrics", "/docs", "/schema",
-                      "/auth", "/authentication", "/api/auth", "/sentry", "/favicon.ico")
+                      "/auth", "/authentication", "/api/auth", "/sentry", "/favicon.ico",
+                      "/accounts/setup-new-tenant")
 CACHE_TTL = 60  # seconds
 
 def _get_bearer_token(request) -> str | None:
