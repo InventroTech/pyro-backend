@@ -6,7 +6,6 @@ from rest_framework.test import APIRequestFactory
 
 from core.models import Tenant
 from authz.models import Role, TenantMembership
-from accounts.models import LegacyRole
 from authz.views_management import RolesView
 
 
@@ -90,8 +89,6 @@ class RolesApiTestCase(TestCase):
 
         # Authz role exists
         self.assertTrue(Role.objects.filter(id=role_id, tenant=self.tenant).exists())
-        # Legacy role mirrored with SAME UUID
-        self.assertTrue(LegacyRole.objects.filter(id=role_id, tenant=self.tenant).exists())
 
     def test_post_create_role_idempotent_case_insensitive(self):
         # Pre-create "gm" then POST "GM" -> should be 200, not 201

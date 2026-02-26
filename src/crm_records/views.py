@@ -1525,13 +1525,13 @@ class GetNextLeadView(APIView):
                 user_uuid = uuid.UUID(str(user_identifier))
                 logger.debug("[GetNextLead] User identifier %s parsed as UUID: %s", user_identifier, user_uuid)
             except (ValueError, AttributeError):
-                from accounts.models import LegacyUser
-                legacy_user = LegacyUser.objects.filter(
+                from authz.models import TenantMembership
+                tenant_membership = TenantMembership.objects.filter(
                     tenant=tenant,
-                    email=user_identifier
-                ).first()
-                user_uuid = legacy_user.uid if legacy_user and legacy_user.uid else None
-                logger.debug("[GetNextLead] Resolved user_uuid from LegacyUser: %s", user_uuid)
+                    email__iexact=str(user_identifier)
+                ).exclude(user_id__isnull=True).first()
+                user_uuid = tenant_membership.user_id if tenant_membership and tenant_membership.user_id else None
+                logger.debug("[GetNextLead] Resolved user_uuid from TenantMembership: %s", user_uuid)
 
             if user_uuid:
                 # Find TenantMembership for this user

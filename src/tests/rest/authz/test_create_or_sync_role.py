@@ -1,7 +1,6 @@
 from django.test import TestCase
 from core.models import Tenant
 from authz.models import Role
-from accounts.models import LegacyRole
 from authz.service import create_or_sync_role
 
 
@@ -19,7 +18,6 @@ class CreateOrSyncRoleServiceTestCase(TestCase):
         rid = out["role"]["id"]
 
         self.assertTrue(Role.objects.filter(id=rid, tenant=self.tenant).exists())
-        self.assertTrue(LegacyRole.objects.filter(id=rid, tenant=self.tenant).exists())
 
     def test_idempotent_case_insensitive(self):
         create_or_sync_role(self.tenant, key="gm", name="General Manager")

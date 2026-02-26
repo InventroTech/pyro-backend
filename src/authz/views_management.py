@@ -7,7 +7,6 @@ from authz.models import Role, TenantMembership
 from .serializers import RoleListSerializer, CreateSyncedRoleSerializer, TenantMembershipUserSerializer
 from .service import create_or_sync_role
 from django.db.models.functions import Lower
-from accounts.models import LegacyRole, LegacyUser 
 
 
 class RolesView(APIView):
