@@ -2091,6 +2091,13 @@ class GetNextLeadView(APIView):
                 """],
                 params=[now_iso, now_iso],
             )
+            if user_uuid:
+                relaxed_qs = apply_routing_rule_to_queryset(
+                    relaxed_qs,
+                    tenant=tenant,
+                    user_id=user_uuid,
+                    queue_type="lead",
+                )
             # Only apply affiliated_party_filter if eligible_lead_types are configured
             if eligible_lead_types:
                 relaxed_unassigned = relaxed_qs.filter(affiliated_party_filter)
