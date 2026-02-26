@@ -3,7 +3,6 @@ from django.db import transaction
 from unittest.mock import patch
 from authz.service import link_user_uid_and_activate
 from authz.models import TenantMembership, Role, Permission
-from accounts.models import LegacyUser
 from core.models import Tenant
 
 
@@ -24,15 +23,7 @@ class LinkUserUidTestCase(TestCase):
             description='Test agent role'
         )
         
-        # Create a test user
-        self.user = LegacyUser.objects.create(
-            id=1,
-            name='Test User',
-            email='test@example.com',
-            tenant=self.tenant
-        )
-        
-        # Create a test tenant membership
+        # Create a test tenant membership (no LegacyUser; link targets TenantMembership only)
         self.membership = TenantMembership.objects.create(
             tenant=self.tenant,
             email='test@example.com',
@@ -49,12 +40,7 @@ class LinkUserUidTestCase(TestCase):
         self.assertTrue(result['success'])
         self.assertEqual(result['uid'], uid)
         self.assertEqual(result['activated_memberships'], 1)
-        self.assertIn('users', result['tables_updated'])
         self.assertIn('authz_tenantmembership', result['tables_updated'])
-        
-        # Verify user UID was updated
-        self.user.refresh_from_db()
-        self.assertEqual(self.user.uid, uid)
         
         # Verify membership was activated and linked
         self.membership.refresh_from_db()
@@ -62,13 +48,14 @@ class LinkUserUidTestCase(TestCase):
         self.assertTrue(self.membership.is_active)
 
     def test_link_user_uid_user_not_found(self):
-        """Test error when user not found"""
+        """Test when email has no TenantMembership"""
         uid = '123e4567-e89b-12d3-a456-426614174000'
         
         result = link_user_uid_and_activate('nonexistent@example.com', uid)
         
-        self.assertFalse(result['success'])
-        self.assertIn('not found', result['message'])
+        self.assertTrue(result['success'])
+        self.assertEqual(result['activated_memberships'], 0)
+        self.assertTrue(result.get('no_tenant_membership') or 'not found' in result.get('message', '').lower())
 
     def test_link_user_uid_no_memberships(self):
         """Test when user exists but has no memberships"""
@@ -81,7 +68,3 @@ class LinkUserUidTestCase(TestCase):
         
         self.assertTrue(result['success'])
         self.assertEqual(result['activated_memberships'], 0)
-        
-        # Verify user UID was still updated
-        self.user.refresh_from_db()
-        self.assertEqual(self.user.uid, uid)

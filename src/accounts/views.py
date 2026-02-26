@@ -4,20 +4,16 @@ from rest_framework.response import Response
 from rest_framework import status, serializers
 from django.conf import settings
 from accounts.serializers import LegacyUserCreateSerializer
-from .models import LegacyUser, LegacyRole  # DEPRECATED: Keep for backward compatibility during transition
 from authz.permissions import IsTenantAuthenticated, HasTenantRole
 from authz.service import get_authz_role_from_legacy_role  # DEPRECATED: Will be removed
 from authz.models import TenantMembership, Role
 from rest_framework.permissions import IsAuthenticated, AllowAny
 
 from django.db.models import Subquery
-from .serializers import LegacyUserLiteSerializer  # DEPRECATED: Will be replaced
-from authz.serializers import TenantMembershipUserSerializer
-
-from authz.service import link_user_uid_and_activate, drop_permissions_cache
-import logging
 from .serializers import LinkUserUidSerializer, DeleteUserEverywhereSerializer
+from authz.service import link_user_uid_and_activate, drop_permissions_cache
 from accounts.services.delete_user_everywhere import delete_user_everywhere
+import logging
 
 logger = logging.getLogger(__name__)
 
