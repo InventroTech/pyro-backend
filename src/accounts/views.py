@@ -354,7 +354,7 @@ class DeleteUserEverywhereView(APIView):
             )
 
         except Exception as e:
-            logger.error("DeleteUserEverywhereView error", exc_info=True, extra={"message": str(e)})
+            logger.error("DeleteUserEverywhereView error: %s", str(e), exc_info=True)
             return Response(
                 {"success": False, "error": "Internal server error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
