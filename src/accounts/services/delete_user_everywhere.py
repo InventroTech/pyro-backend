@@ -1,7 +1,7 @@
 import logging
 from typing import Optional, Tuple
 
-from django.db import transaction, connection
+from django.db import transaction
 from django.db.models import Q
 
 from accounts.models import SupabaseAuthUser
