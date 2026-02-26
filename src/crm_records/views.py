@@ -1914,19 +1914,23 @@ class GetNextLeadView(APIView):
             unassigned = unassigned.filter(data__lead_status__in=eligible_lead_statuses)
             logger.info("[GetNextLead] Filtered unassigned leads by eligible lead statuses (intersection): %s", eligible_lead_statuses)
 
-        # IN_QUEUE and SNOOZED leads that have an assignee stick to that RM: only that user can pull them via Get Next Lead.
+        # Exclude leads assigned to another RM: only unassigned or self-assigned leads are pullable.
         before_exclude = unassigned.count()
-        unassigned = unassigned.exclude(
-            (Q(data__lead_stage='in_queue') | Q(data__lead_stage='SNOOZED'))
-            & Q(data__assigned_to__isnull=False)
-            & ~Q(data__assigned_to='')
-            & ~Q(data__assigned_to='null')
-            & ~Q(data__assigned_to='None')
-            & ~Q(data__assigned_to=user_identifier)
+        unassigned = unassigned.extra(
+            where=["""
+                NOT (
+                    data->>'assigned_to' IS NOT NULL
+                    AND data->>'assigned_to' != ''
+                    AND data->>'assigned_to' != 'null'
+                    AND data->>'assigned_to' != 'None'
+                    AND data->>'assigned_to' != %s
+                )
+            """],
+            params=[user_identifier],
         )
         after_exclude = unassigned.count()
         logger.info(
-            "[GetNextLead] Step 3: After excluding IN_QUEUE/SNOOZED assigned to other users: count %d -> %d",
+            "[GetNextLead] Step 3: After excluding leads assigned to other users: count %d -> %d",
             before_exclude, after_exclude,
         )
 
@@ -2087,6 +2091,13 @@ class GetNextLeadView(APIView):
                 """],
                 params=[now_iso, now_iso],
             )
+            if user_uuid:
+                relaxed_qs = apply_routing_rule_to_queryset(
+                    relaxed_qs,
+                    tenant=tenant,
+                    user_id=user_uuid,
+                    queue_type="lead",
+                )
             # Only apply affiliated_party_filter if eligible_lead_types are configured
             if eligible_lead_types:
                 relaxed_unassigned = relaxed_qs.filter(affiliated_party_filter)
