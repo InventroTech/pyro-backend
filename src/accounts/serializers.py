@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from accounts.models import LegacyUser
+
 
 class LegacyUserCreateSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255)
@@ -40,22 +40,8 @@ class LegacyUserCreateSerializer(serializers.Serializer):
                 raise serializers.ValidationError({
                     'email': 'User with this email already exists in this tenant.'
                 })
-        
-        # DEPRECATED: Legacy check - remove after migration complete
-        # Keep for backward compatibility during transition
-        if LegacyUser.objects.filter(tenant=tenant, email__iexact=email).exists():
-            # Don't fail, just log a warning - LegacyUser is being phased out
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(f"LegacyUser found for {email} in tenant {tenant.id}, but proceeding with TenantMembership creation")
-        
+
         return attrs
-
-
-class LegacyUserLiteSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = LegacyUser
-        fields = ['id', 'name', 'email', 'company_name', 'uid']
 
 
 class LinkUserUidSerializer(serializers.Serializer):

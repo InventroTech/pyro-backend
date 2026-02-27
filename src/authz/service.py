@@ -5,13 +5,11 @@ from authz.models import (
     TenantMembership, RolePermission, Permission,
     GroupMembership, GroupPermission, GroupRole, UserPermission
 )
-from accounts.models import LegacyUser, LegacyRole
+from authz.models import Role as AuthzRole
 
 import uuid
 from django.db import transaction, IntegrityError
 from django.db.models import Q
-from authz.models import Role as AuthzRole
-from accounts.models import LegacyRole
 
 _CACHE: Dict[str, dict] = {}
 _TTL = timedelta(minutes=10)
@@ -76,61 +74,9 @@ def get_effective_permissions(user_uuid: str, tenant) -> dict:
 
 def get_authz_role_from_legacy_role(legacy_role_id: str, tenant):
     """
-    DEPRECATED: Map a legacy role ID to the corresponding authz Role.
-    This function is kept for backward compatibility during transition.
-    
-    NEW: Assumes role_id is already an AuthZ role ID (since LegacyRole is being phased out).
-    Falls back to LegacyRole lookup only if AuthZ role not found.
-    
-    Args:
-        legacy_role_id: UUID of the role (assumed to be AuthZ role ID)
-        tenant: Tenant instance
-    
-    Returns:
-        Role: The corresponding authz Role instance
-        
-    Raises:
-        Exception: If role not found
+    Resolve role_id to AuthZ Role. role_id must be an AuthZ role ID for this tenant.
     """
-    # NEW: Try AuthZ role first (assume role_id is AuthZ role ID)
-    try:
-        return AuthzRole.objects.get(id=legacy_role_id, tenant=tenant)
-    except AuthzRole.DoesNotExist:
-        pass
-    
-    # DEPRECATED: Fallback to LegacyRole lookup (for backward compatibility)
-    # This will be removed after migration complete
-    try:
-        legacy_role = LegacyRole.objects.get(id=legacy_role_id, tenant=tenant)
-    except LegacyRole.DoesNotExist:
-        raise Exception(f"Role with ID {legacy_role_id} not found in AuthZ or Legacy roles")
-    
-    # Map legacy role name to authz role key
-    role_name_mapping = {
-        'General Manager': 'GM',
-        'GM': 'GM',
-        'Owner': 'OWNER',
-        'OWNER': 'OWNER',
-        'Agent': 'AGENT',
-        'AGENT': 'AGENT',
-        'Manager': 'MANAGER',
-        'MANAGER': 'MANAGER',
-        'Admin': 'ADMIN',
-        'ADMIN': 'ADMIN',
-    }
-    
-    authz_role_key = role_name_mapping.get(legacy_role.name)
-    if authz_role_key:
-        try:
-            return AuthzRole.objects.get(tenant=tenant, key__iexact=authz_role_key)
-        except AuthzRole.DoesNotExist:
-            pass
-    
-    # Try by name match
-    try:
-        return AuthzRole.objects.get(tenant=tenant, name__iexact=legacy_role.name)
-    except AuthzRole.DoesNotExist:
-        raise Exception(f"No corresponding authz role found for legacy role '{legacy_role.name}'")
+    return AuthzRole.objects.get(id=legacy_role_id, tenant=tenant)
 
 
 def link_user_uid_and_activate(email: str, uid: str) -> dict:
