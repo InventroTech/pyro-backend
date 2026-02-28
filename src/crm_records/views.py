@@ -1914,7 +1914,7 @@ class GetNextLeadView(APIView):
             unassigned = unassigned.filter(data__lead_status__in=eligible_lead_statuses)
             logger.info("[GetNextLead] Filtered unassigned leads by eligible lead statuses (intersection): %s", eligible_lead_statuses)
 
-        # Exclude leads that are already assigned to someone else; only unassigned or self-assigned leads are pullable.
+        # Exclude leads assigned to another RM: only unassigned or self-assigned leads are pullable.
         before_exclude = unassigned.count()
         unassigned = unassigned.extra(
             where=["""
