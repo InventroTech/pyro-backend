@@ -1816,6 +1816,11 @@ class GetNextLeadView(APIView):
         # Step 3: Filter leads by eligible lead types (affiliated_party field) and unassigned status
         from django.db.models import Q
         logger.info("[GetNextLead] Step 3: Building main queue (queueable WHERE + affiliated_party + routing)...")
+        total_leads_in_tenant = Record.objects.filter(tenant=tenant, entity_type='lead').count()
+        logger.info(
+            "[GetNextLead] Step 3: tenant=%s total_leads_in_tenant=%d user_identifier=%s user_uuid=%s",
+            tenant.slug if getattr(tenant, 'slug', None) else tenant.id, total_leads_in_tenant, user_identifier, user_uuid,
+        )
 
         # Common WHERE conditions for queueable leads (assignment + status + next_call_at)
         _queueable_where = """
@@ -1866,12 +1871,22 @@ class GetNextLeadView(APIView):
             tenant=tenant,
             entity_type='lead'
         ).extra(where=[_queueable_where + _affiliated_extra])
+        queueable_with_aff_before_routing = base_qs.count()
+        logger.info(
+            "[GetNextLead] Step 3: queueable (with affiliated_party) before routing: count=%d",
+            queueable_with_aff_before_routing,
+        )
 
         # Relaxed base (no affiliated_party requirement) - for when no party types configured
         relaxed_base_qs = Record.objects.filter(
             tenant=tenant,
             entity_type='lead'
         ).extra(where=[_queueable_where])
+        queueable_no_aff_before_routing = relaxed_base_qs.count()
+        logger.info(
+            "[GetNextLead] Step 3: queueable (no affiliated_party) before routing: count=%d",
+            queueable_no_aff_before_routing,
+        )
 
         # Apply optional per-user routing rule for leads (e.g. by state)
         if user_uuid:
@@ -1888,6 +1903,12 @@ class GetNextLeadView(APIView):
                 queue_type="lead",
             )
             logger.info("[GetNextLead] Step 3: Applied routing rule for user_uuid=%s", user_uuid)
+            base_after_routing = base_qs.count()
+            relaxed_after_routing = relaxed_base_qs.count()
+            logger.info(
+                "[GetNextLead] Step 3: After routing: base_qs=%d relaxed_base_qs=%d",
+                base_after_routing, relaxed_after_routing,
+            )
         else:
             logger.info("[GetNextLead] Step 3: No user_uuid - skipping routing rule.")
 
@@ -1914,7 +1935,7 @@ class GetNextLeadView(APIView):
             unassigned = unassigned.filter(data__lead_status__in=eligible_lead_statuses)
             logger.info("[GetNextLead] Filtered unassigned leads by eligible lead statuses (intersection): %s", eligible_lead_statuses)
 
-        # Exclude leads assigned to another RM: only unassigned or self-assigned leads are pullable.
+        # Exclude leads that are already assigned to someone else; only unassigned or self-assigned leads are pullable.
         before_exclude = unassigned.count()
         unassigned = unassigned.extra(
             where=["""
@@ -1930,8 +1951,8 @@ class GetNextLeadView(APIView):
         )
         after_exclude = unassigned.count()
         logger.info(
-            "[GetNextLead] Step 3: After excluding leads assigned to other users: count %d -> %d",
-            before_exclude, after_exclude,
+            "[GetNextLead] Step 3: After excluding leads assigned to other users: count %d -> %d (user_identifier=%s)",
+            before_exclude, after_exclude, user_identifier,
         )
 
         # Filter by call attempt matrix rules (max attempts, SLA, min time between calls)
@@ -2022,8 +2043,21 @@ class GetNextLeadView(APIView):
                 
                 if final_valid_ids:
                     unassigned = unassigned.filter(id__in=final_valid_ids)
+                    logger.info(
+                        "[GetNextLead] Step 3: After call attempt matrix (min_time_between_calls): %d leads remaining (valid_ids count=%d)",
+                        len(final_valid_ids), len(final_valid_ids),
+                    )
                 else:
                     unassigned = unassigned.none()
+                    logger.warning(
+                        "[GetNextLead] Step 3: Call attempt matrix excluded all leads (min_time_between_calls or other matrix rules). unassigned set to none.",
+                    )
+        after_matrix_cnt = unassigned.count()
+        if call_attempt_matrices and after_matrix_cnt == 0:
+            logger.info(
+                "[GetNextLead] Step 3: unassigned count after call attempt matrix = 0 (matrices applied for types: %s)",
+                list(call_attempt_matrices.keys()),
+            )
 
         # --- Enhanced Diagnostics: Log possible unassigned counts for debugging ---
         unassigned_cnt = unassigned.count()
@@ -2036,14 +2070,15 @@ class GetNextLeadView(APIView):
         if unassigned_cnt == 0 and total_unassigned_cnt > 0:
             # There are unassigned queueable leads, but none matching the user's eligible lead types
             lead_types_in_queue = list(base_qs.values_list("data__affiliated_party", flat=True).distinct())
-            logger.info(
-                "[GetNextLead] No unassigned leads matching user's eligible types. Present types in queueable/unassigned leads: %s. User eligible types: %s",
-                lead_types_in_queue, eligible_lead_types
+            logger.warning(
+                "[GetNextLead] Zero leads after filters but base_qs had %d: no match for user's eligible types. "
+                "Present affiliated_party in queue: %s. User eligible_lead_types: %s eligible_lead_sources: %s eligible_lead_statuses: %s",
+                total_unassigned_cnt, lead_types_in_queue, eligible_lead_types, eligible_lead_sources or "(none)", eligible_lead_statuses or "(none)",
             )
         elif total_unassigned_cnt == 0:
             logger.info(
                 "[GetNextLead] Step 3: total_queueable=0 for tenant=%s. Trying relaxed fallback (drop lead_stage filter).",
-                tenant,
+                tenant.slug if getattr(tenant, 'slug', None) else tenant,
             )
             # Relaxed fallback: drop lead_stage filter to recover from inconsistent/missing stages
             # But still include snoozed leads where next_call_at has passed
@@ -2091,16 +2126,43 @@ class GetNextLeadView(APIView):
                 """],
                 params=[now_iso, now_iso],
             )
+            relaxed_before_routing = relaxed_qs.count()
+            logger.info(
+                "[GetNextLead] Relaxed fallback: queueable leads (relaxed WHERE) before routing: count=%d",
+                relaxed_before_routing,
+            )
+            if user_uuid:
+                relaxed_qs = apply_routing_rule_to_queryset(
+                    relaxed_qs,
+                    tenant=tenant,
+                    user_id=user_uuid,
+                    queue_type="lead",
+                )
+                relaxed_after_routing = relaxed_qs.count()
+                logger.info(
+                    "[GetNextLead] Relaxed fallback: after routing: count=%d",
+                    relaxed_after_routing,
+                )
             # Only apply affiliated_party_filter if eligible_lead_types are configured
             if eligible_lead_types:
                 relaxed_unassigned = relaxed_qs.filter(affiliated_party_filter)
+                logger.info(
+                    "[GetNextLead] Relaxed fallback: after affiliated_party filter (types=%s): count=%d",
+                    eligible_lead_types, relaxed_unassigned.count(),
+                )
             else:
                 relaxed_unassigned = relaxed_qs
             if eligible_lead_sources:
                 relaxed_unassigned = relaxed_unassigned.filter(data__lead_source__in=eligible_lead_sources)
+                logger.info("[GetNextLead] Relaxed fallback: after lead_sources filter: count=%d", relaxed_unassigned.count())
             if eligible_lead_statuses:
                 relaxed_unassigned = relaxed_unassigned.filter(data__lead_status__in=eligible_lead_statuses)
+                logger.info("[GetNextLead] Relaxed fallback: after lead_statuses filter: count=%d", relaxed_unassigned.count())
             relaxed_cnt = relaxed_unassigned.count()
+            logger.info(
+                "[GetNextLead] Relaxed fallback: final count=%d (will use as unassigned pool if > 0)",
+                relaxed_cnt,
+            )
             if relaxed_cnt > 0:
                 logger.info(
                     "[GetNextLead] Step 3: Relaxed fallback found %d unassigned leads (intersection of party/source/status applied). Using as unassigned pool.",
@@ -2108,6 +2170,11 @@ class GetNextLeadView(APIView):
                 )
                 unassigned = relaxed_unassigned
                 unassigned_cnt = relaxed_cnt
+            else:
+                logger.warning(
+                    "[GetNextLead] Relaxed fallback also returned 0 leads (total_queueable was 0, relaxed path also 0). "
+                    "Check: routing rule, eligible_lead_types/sources/statuses, or lead_stage/assigned_to/next_call_at on records.",
+                )
 
         # Step 4: Order by priority (expired snoozed first), then lead score (descending: 100, 90, 80, etc.)
         # Log snoozed leads count for debugging (check before affiliated_party filter)
@@ -2216,12 +2283,19 @@ class GetNextLeadView(APIView):
 
         if not candidate:
             logger.info(
-                "[GetNextLead] Step 5: No candidate - returning empty. unassigned_cnt=%d",
-                unassigned_cnt,
+                "[GetNextLead] Step 5: No candidate - returning empty. unassigned_cnt=%d total_unassigned_cnt=%d",
+                unassigned_cnt, total_unassigned_cnt,
             )
             if unassigned_cnt > 0:
-                logger.info("[GetNextLead] Step 5: Unassigned leads existed but none passed ordering or cooldown check.")
-            logger.info("[GetNextLead] END EMPTY: no lead assigned (no candidate or none due).")
+                logger.info(
+                    "[GetNextLead] Step 5: Unassigned leads existed (%d) but none passed ordering or _lead_is_due_for_call check.",
+                    unassigned_cnt,
+                )
+            logger.info(
+                "[GetNextLead] END EMPTY: no lead assigned. Pipeline: total_leads=%d queueable_no_aff=%d total_queueable=%d unassigned_after_filters=%d. "
+                "Check logs above for which step reduced count to 0.",
+                total_leads_in_tenant, queueable_no_aff_before_routing, total_unassigned_cnt, unassigned_cnt,
+            )
             return Response({}, status=status.HTTP_200_OK)
 
         # Lock and assign the lead
