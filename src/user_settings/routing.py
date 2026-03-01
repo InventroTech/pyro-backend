@@ -10,6 +10,9 @@ from .models import RoutingRule
 logger = logging.getLogger(__name__)
 
 
+logger = logging.getLogger(__name__)
+
+
 def _get_active_rule(tenant, user_id, queue_type: str) -> Optional[RoutingRule]:
     """
     Return the active routing rule for this user and queue type.
@@ -81,6 +84,7 @@ def _build_filters_from_conditions(
           ]
         }
 
+    We use a very small whitelist of fields to keep queries index-friendly.
     For "equals" on string values we use normalized (case- and space-insensitive) matching
     so e.g. rule value "tamilnadu" matches lead data "Tamil Nadu".
     Returns (q, applied_filters, normalized_equals) where normalized_equals is list of
@@ -113,7 +117,6 @@ def _build_filters_from_conditions(
         "[RoutingRule] _build_filters_from_conditions: queue_type=%s allowed_fields=%s raw_filters_count=%d",
         queue_type, list(field_map.keys()), len(filters) if filters else 0,
     )
-
     for i, item in enumerate(filters):
         if not isinstance(item, dict):
             logger.warning("[RoutingRule] _build_filters_from_conditions: filter[%d] not a dict, skip", i)
@@ -177,7 +180,6 @@ def _apply_normalized_equals(qs: QuerySet, normalized_equals: List[Dict[str, Any
     if not normalized_equals:
         return qs
     from django.db import connection
-
     meta = qs.model._meta
     table = connection.ops.quote_name(meta.db_table)
     try:
@@ -185,7 +187,6 @@ def _apply_normalized_equals(qs: QuerySet, normalized_equals: List[Dict[str, Any
         data_col = connection.ops.quote_name(data_field.column)
     except Exception:
         data_col = connection.ops.quote_name("data")
-
     where_parts = []
     params = []
     for item in normalized_equals:
@@ -198,7 +199,6 @@ def _apply_normalized_equals(qs: QuerySet, normalized_equals: List[Dict[str, Any
             f"LOWER(REPLACE(COALESCE({table}.{data_col}->>%s, ''), ' ', '')) = LOWER(REPLACE(%s, ' ', ''))"
         )
         params.extend([key, value])
-
     if not where_parts:
         return qs
     logger.info(
@@ -221,6 +221,7 @@ def apply_routing_rule_to_queryset(
     Enforcement logic:
     - If no rule exists, return the queryset unchanged (whole possible queryset).
     - If a rule exists, enforce it strictly by applying its filters, even if it results in 0 matches.
+    - If a rule exists but has no valid filters (empty condition_q), return empty queryset to enforce the rule.
     - String "equals" on lead queue uses normalized matching (case- and space-insensitive).
     """
     rule = _get_active_rule(tenant=tenant, user_id=user_id, queue_type=queue_type)
@@ -245,6 +246,7 @@ def apply_routing_rule_to_queryset(
         )
         return qs
 
+    # Apply the filters strictly (even if it results in 0 matches)
     before_count = qs.count()
     if has_q:
         qs = qs.filter(condition_q)
@@ -252,7 +254,6 @@ def apply_routing_rule_to_queryset(
         qs = _apply_normalized_equals(qs, normalized_equals, queue_type)
     filtered_qs = qs
     after_count = filtered_qs.count()
-
     logger.info(
         "[RoutingRule] apply_routing_rule_to_queryset: rule id=%s queue_type=%s applied_filters=%s "
         "count before=%d after=%d (leads must match: %s)",
@@ -262,7 +263,7 @@ def apply_routing_rule_to_queryset(
         before_count,
         after_count,
         " AND ".join(
-            f"{f['field']}={f['value']!r}" if f['op'] == 'equals' else f"{f['field']} in {f['value']!r}"
+            f"{f['field']}={f['value']!r}" if f.get('op') == 'equals' or 'normalized' in str(f.get('op', '')) else f"{f['field']} in {f['value']!r}"
             for f in applied_filters
         ) or "(none)",
     )
@@ -270,7 +271,6 @@ def apply_routing_rule_to_queryset(
         # Log sample of actual values in DB for the fields the rule filters on (to compare with rule value)
         try:
             sample_fields = [f.get("model_field") or f.get("field") for f in applied_filters]
-            # Normalize: we store as data__state etc.; for Record we need data__state for distinct
             actual_samples = {}
             if queue_type == RoutingRule.QUEUE_TYPE_LEAD:
                 for f in applied_filters:
@@ -297,7 +297,4 @@ def apply_routing_rule_to_queryset(
                 "Rule conditions: %s applied_filters: %s (sample query failed: %s)",
                 before_count, rule.conditions, applied_filters, e,
             )
-
     return filtered_qs
-
-
