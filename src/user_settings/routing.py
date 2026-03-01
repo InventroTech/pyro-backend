@@ -7,6 +7,8 @@ from django.db.models import QuerySet, Q
 
 from .models import RoutingRule
 
+logger = logging.getLogger(__name__)
+
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +105,6 @@ def _build_filters_from_conditions(
             "state": "state",
         }
     elif queue_type == RoutingRule.QUEUE_TYPE_LEAD:
-        # Leads live in Record.data JSON
         field_map = {
             "state": "data__state",
             "lead_source": "data__lead_source",
@@ -229,7 +230,6 @@ def apply_routing_rule_to_queryset(
         return qs
 
     # Rule exists but has no conditions or no valid filters - treat as "no restrictions"
-    # (return qs unchanged; previously returned empty which blocked all leads)
     if not rule.conditions:
         logger.info(
             "[RoutingRule] apply_routing_rule_to_queryset: rule id=%s has no conditions → queryset unchanged",

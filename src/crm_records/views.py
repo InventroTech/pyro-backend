@@ -1935,7 +1935,7 @@ class GetNextLeadView(APIView):
             unassigned = unassigned.filter(data__lead_status__in=eligible_lead_statuses)
             logger.info("[GetNextLead] Filtered unassigned leads by eligible lead statuses (intersection): %s", eligible_lead_statuses)
 
-        # Exclude leads that are already assigned to someone else; only unassigned or self-assigned leads are pullable.
+        # Exclude leads assigned to another RM: only unassigned or self-assigned leads are pullable.
         before_exclude = unassigned.count()
         unassigned = unassigned.extra(
             where=["""
@@ -1954,6 +1954,12 @@ class GetNextLeadView(APIView):
             "[GetNextLead] Step 3: After excluding leads assigned to other users: count %d -> %d (user_identifier=%s)",
             before_exclude, after_exclude, user_identifier,
         )
+        if before_exclude > 0 and after_exclude == 0:
+            logger.warning(
+                "[GetNextLead] Step 3: All %d leads were excluded by assigned_to filter (none match user_identifier=%s). "
+                "Check if data.assigned_to is stored as UUID while user_identifier is email (or vice versa).",
+                before_exclude, user_identifier,
+            )
 
         # Filter by call attempt matrix rules (max attempts, SLA, min time between calls)
         # Load call attempt matrices for all eligible lead types - BULK FETCH to avoid N+1 queries
