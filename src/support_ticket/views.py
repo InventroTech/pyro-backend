@@ -23,7 +23,7 @@ from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSeria
 from .services import MixpanelService, TicketTimeService
 from user_settings.routing import apply_routing_rule_to_queryset
 from authz.permissions import IsTenantAuthenticated
-from accounts.models import LegacyUser, SupabaseAuthUser
+from accounts.models import SupabaseAuthUser
 from datetime import timedelta
 from analytics.serializers import SupportTicketSerializer
 from .utils import send_to_mixpanel, ticket_to_mixpanel_data

@@ -6,7 +6,7 @@ class Migration(migrations.Migration):
     initial = False
     dependencies = [
         ('core', '__latest__'),
-        ('accounts', '__latest__'),
+        ('accounts', '0003_supabaseauthuser'),
     ]
     operations = [
         migrations.SeparateDatabaseAndState(
