@@ -14,10 +14,10 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
-        ('core', '__latest__'),
-        ('accounts', '0003_supabaseauthuser'),  # Pinned so adding accounts.0004 doesn't break existing DBs
-        ('contenttypes', '__latest__'),
-        ('auth', '__latest__'),
+        ('core', '0001_initial'),
+        ('accounts', '0003_supabaseauthuser'),
+        ('contenttypes', '0002_remove_content_type_name'),
+        ('auth', '0012_alter_user_first_name_max_length'),
     ]
 
     operations = [

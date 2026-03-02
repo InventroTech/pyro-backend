@@ -10,22 +10,26 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        # Database: add ONLY daily_limit safely (daily_target already exists in DB in your environment)
+        # Database: add daily_limit and daily_target (IF NOT EXISTS for fresh DBs)
         migrations.RunSQL(
             sql="""
                 ALTER TABLE user_settings
                 ADD COLUMN IF NOT EXISTS daily_limit integer;
+                ALTER TABLE user_settings
+                ADD COLUMN IF NOT EXISTS daily_target integer;
             """,
             reverse_sql="""
                 ALTER TABLE user_settings
                 DROP COLUMN IF EXISTS daily_limit;
+                ALTER TABLE user_settings
+                DROP COLUMN IF EXISTS daily_target;
             """,
         ),
         # State: ensure Django model state matches DB
         migrations.SeparateDatabaseAndState(
             database_operations=[],
             state_operations=[
-                # daily_target: model already has it; we record it in migration state WITHOUT touching the DB
+                # daily_target and daily_limit: columns added above; record in state
                 migrations.AddField(
                     model_name="usersettings",
                     name="daily_target",

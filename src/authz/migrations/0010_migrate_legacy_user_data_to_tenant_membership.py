@@ -7,17 +7,23 @@ def migrate_legacy_user_data(apps, schema_editor):
     """
     Copy name and company_name from LegacyUser (public.users) to TenantMembership (authz_tenantmembership).
     Matches by tenant_id + email.
+    No-op when LegacyUser has already been removed (e.g. fresh DB after accounts.0004).
     """
+    try:
+        LegacyUser = apps.get_model('accounts', 'LegacyUser')
+    except LookupError:
+        # LegacyUser already dropped (e.g. accounts.0004 ran); nothing to migrate
+        return
+
     TenantMembership = apps.get_model('authz', 'TenantMembership')
-    LegacyUser = apps.get_model('accounts', 'LegacyUser')
     Tenant = apps.get_model('core', 'Tenant')
-    
+
     updated_count = 0
     skipped_count = 0
-    
+
     # Get all legacy users
     legacy_users = LegacyUser.objects.all()
-    
+
     for legacy_user in legacy_users:
         # In migrations, access tenant_id directly (db_column) or use getattr
         tenant_id = getattr(legacy_user, 'tenant_id', None)
@@ -77,7 +83,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('authz', '0009_add_name_company_to_tenant_membership'),
-        ('accounts', '0002_legacyrole'),  # Ensure LegacyUser model is available
+        ('accounts', '0004_drop_legacy_users_and_roles'),  # Run after accounts; forward no-ops when LegacyUser is gone
     ]
 
     operations = [
