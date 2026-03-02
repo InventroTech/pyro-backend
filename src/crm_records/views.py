@@ -1359,13 +1359,13 @@ class GetNextLeadView(APIView):
         Order queryset with priority:
         1. Expired snoozed leads first
         2. Then by call_attempts: 0 attempts > 1 attempt > 2 attempt > 3 attempt > 4 attempt > 5 attempt
-        3. Within each attempt level: LIFO (Last In First Out) - most recent updated_at first
-        4. Then by lead score (descending), then creation date
+        3. Within each attempt level: lead score (descending) first, then LIFO (most recent updated_at)
+        4. Then creation date, id
 
         This ensures:
         - Fresh leads (0 attempts) come first
         - "Not connected" leads ordered by attempts (1, 2, 3, 4, 5)
-        - Most recently updated leads within each attempt level come first (LIFO)
+        - Higher-scoring leads within each attempt level come before lower-scoring; LIFO as tie-breaker
         """
         qs = qs.extra(where=[self._NEXT_CALL_READY_WHERE])
 
@@ -1400,8 +1400,8 @@ class GetNextLeadView(APIView):
             ).order_by(
                 'is_expired_snoozed',  # Expired snoozed leads first (0), then others (1)
                 'call_attempts_int',  # Priority: 0 attempts > 1 attempt > 2 attempt > 3 attempt > 4 attempt > 5 attempt
-                '-updated_at',  # LIFO: Most recent first within each attempt level
-                F('lead_score').desc(nulls_last=True),  # Descending: 100, 90, 80, etc.
+                F('lead_score').desc(nulls_last=True),  # Higher score first within each attempt level
+                '-updated_at',  # LIFO as tie-breaker when scores are equal
                 'created_at',
                 'id'
             )
@@ -1414,8 +1414,8 @@ class GetNextLeadView(APIView):
                 }
             ).order_by(
                 'call_attempts_int',  # Priority: 0 attempts > 1 attempt > 2 attempt > 3 attempt > 4 attempt > 5 attempt
-                '-updated_at',  # LIFO: Most recent first within each attempt level
-                F('lead_score').desc(nulls_last=True),  # Descending: 100, 90, 80, etc.
+                F('lead_score').desc(nulls_last=True),  # Higher score first within each attempt level
+                '-updated_at',  # LIFO as tie-breaker when scores are equal
                 'created_at',
                 'id'
             )
