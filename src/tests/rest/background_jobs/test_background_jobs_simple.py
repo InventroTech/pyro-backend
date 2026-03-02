@@ -72,10 +72,14 @@ class SimpleBackgroundJobsTest(TestCase):
                 )
             self.assertIn("Invalid job type", str(cm.exception))
     
+    @patch('background_jobs.job_processor.close_old_connections')
+    @patch('background_jobs.job_processor.transaction')
     @patch('background_jobs.job_processor.BackgroundJob.objects')
-    def test_lock_and_fetch_job_locks_correctly(self, mock_objects):
+    def test_lock_and_fetch_job_locks_correctly(self, mock_objects, mock_transaction, _mock_close):
         """Test that lock_and_fetch_job locks and updates job correctly"""
-        # Mock job query chain
+        mock_transaction.atomic.return_value.__enter__ = Mock(return_value=None)
+        mock_transaction.atomic.return_value.__exit__ = Mock(return_value=False)
+
         mock_job = Mock()
         mock_job.id = 1
         mock_job.status = JobStatus.PENDING
@@ -83,29 +87,28 @@ class SimpleBackgroundJobsTest(TestCase):
         mock_job.max_attempts = 3
         mock_job.scheduled_at = None
         
-        # Mock the query chain: filter -> order_by -> first
         mock_query = Mock()
         mock_query.filter.return_value = mock_query
         mock_query.order_by.return_value = mock_query
         mock_query.first.return_value = mock_job
         mock_objects.select_for_update.return_value = mock_query
         
-        # Mock the update call
         mock_objects.filter.return_value.update.return_value = 1
         
-        # Lock and fetch
         locked_job = self.processor.lock_and_fetch_job()
         
-        # Verify job was locked
         self.assertIsNotNone(locked_job)
         self.assertEqual(locked_job.id, 1)
-        # Verify update was called to lock the job
         mock_objects.filter.assert_called()
     
+    @patch('background_jobs.job_processor.close_old_connections')
+    @patch('background_jobs.job_processor.transaction')
     @patch('background_jobs.job_processor.BackgroundJob.objects')
-    def test_lock_and_fetch_job_returns_none_when_no_jobs(self, mock_objects):
+    def test_lock_and_fetch_job_returns_none_when_no_jobs(self, mock_objects, mock_transaction, _mock_close):
         """Test that lock_and_fetch_job returns None when no jobs available"""
-        # Mock query chain to return None
+        mock_transaction.atomic.return_value.__enter__ = Mock(return_value=None)
+        mock_transaction.atomic.return_value.__exit__ = Mock(return_value=False)
+
         mock_query = Mock()
         mock_query.filter.return_value = mock_query
         mock_query.order_by.return_value = mock_query

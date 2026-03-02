@@ -46,8 +46,8 @@ class EntityApiTests(TestCase):
         self.existing_record = Record.objects.create(
             tenant=self.default_tenant,
             entity_type="lead",
-            name="Existing Lead",
             data={
+                "name": "Existing Lead",
                 "praja_id": "PRAJA001",
                 "phone_number": "+1234567890",
                 "lead_score": 80,
@@ -82,7 +82,7 @@ class EntityApiTests(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertIn("id", response.data)
         self.assertEqual(response.data["entity_type"], "lead")
-        self.assertEqual(response.data["name"], "New Lead")
+        self.assertEqual(response.data["data"]["name"], "New Lead")
         self.assertEqual(response.data["data"]["praja_id"], "PRAJA123")
         
         # Verify database
@@ -134,8 +134,7 @@ class EntityApiTests(TestCase):
         Record.objects.create(
             tenant=self.default_tenant,
             entity_type="lead",
-            name="Lead 2",
-            data={"praja_id": "PRAJA002", "lead_stage": "assigned"}
+            data={"name": "Lead 2", "praja_id": "PRAJA002", "lead_stage": "assigned"}
         )
         
         response = self.client.get(self.entity_url, **self.valid_headers)
@@ -166,7 +165,7 @@ class EntityApiTests(TestCase):
         # Verify response
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["id"], self.existing_record.id)
-        self.assertEqual(response.data["name"], "Existing Lead")
+        self.assertEqual(response.data["data"]["name"], "Existing Lead")
         self.assertEqual(response.data["data"]["praja_id"], "PRAJA001")
         
         # Performance check
@@ -199,8 +198,7 @@ class EntityApiTests(TestCase):
         Record.objects.create(
             tenant=self.default_tenant,
             entity_type="lead",
-            name="Assigned Lead",
-            data={"praja_id": "PRAJA003", "lead_stage": "assigned"}
+            data={"name": "Assigned Lead", "praja_id": "PRAJA003", "lead_stage": "assigned"}
         )
         
         response = self.client.get(
@@ -219,8 +217,7 @@ class EntityApiTests(TestCase):
         Record.objects.create(
             tenant=self.default_tenant,
             entity_type="lead",
-            name="Premium Lead",
-            data={"praja_id": "PRAJA004", "poster": "premium"}
+            data={"name": "Premium Lead", "praja_id": "PRAJA004", "poster": "premium"}
         )
         
         response = self.client.get(
@@ -328,8 +325,8 @@ class EntityApiTests(TestCase):
         record = Record.objects.create(
             tenant=self.default_tenant,
             entity_type="lead",
-            name="Lead with Tasks",
             data={
+                "name": "Lead with Tasks",
                 "praja_id": "PRAJA005",
                 "tasks": [
                     {"task": "call", "status": "pending"},
@@ -386,7 +383,7 @@ class EntityApiTests(TestCase):
         
         # Verify response
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["name"], "Updated Name")
+        self.assertEqual(response.data["data"]["name"], "Updated Name")
         self.assertEqual(response.data["data"]["lead_score"], 100)
         self.assertEqual(response.data["data"]["lead_stage"], "won")
         self.assertEqual(response.data["data"]["latest_remarks"], "Fully replaced")
@@ -427,8 +424,7 @@ class EntityApiTests(TestCase):
         ticket = Record.objects.create(
             tenant=self.default_tenant,
             entity_type="ticket",
-            name="Test Ticket",
-            data={"praja_id": "TICKET001", "status": "open"}
+            data={"name": "Test Ticket", "praja_id": "TICKET001", "status": "open"}
         )
         
         replacement_data = {
@@ -460,8 +456,7 @@ class EntityApiTests(TestCase):
         record_to_delete = Record.objects.create(
             tenant=self.default_tenant,
             entity_type="lead",
-            name="To Delete",
-            data={"praja_id": "PRAJA_DELETE"}
+            data={"name": "To Delete", "praja_id": "PRAJA_DELETE"}
         )
         
         response = self.client.delete(
@@ -486,8 +481,7 @@ class EntityApiTests(TestCase):
         record_to_delete = Record.objects.create(
             tenant=self.default_tenant,
             entity_type="lead",
-            name="To Delete 2",
-            data={"praja_id": "PRAJA_DELETE2"}
+            data={"name": "To Delete 2", "praja_id": "PRAJA_DELETE2"}
         )
         
         delete_data = {"praja_id": "PRAJA_DELETE2"}
@@ -551,8 +545,7 @@ class EntityApiTests(TestCase):
         Record.objects.create(
             tenant=self.default_tenant,
             entity_type="ticket",
-            name="Ticket 1",
-            data={"praja_id": "TICKET001", "status": "open"}
+            data={"name": "Ticket 1", "praja_id": "TICKET001", "status": "open"}
         )
         
         response = self.client.get(
@@ -572,8 +565,7 @@ class EntityApiTests(TestCase):
             Record.objects.create(
                 tenant=self.default_tenant,
                 entity_type="lead",
-                name=f"Lead {i}",
-                data={"praja_id": f"PRAJA{i:03d}"}
+                data={"name": f"Lead {i}", "praja_id": f"PRAJA{i:03d}"}
             )
         
         response = self.client.get(
@@ -594,8 +586,7 @@ class EntityApiTests(TestCase):
         Record.objects.create(
             tenant=self.other_tenant,
             entity_type="lead",
-            name="Other Tenant Lead",
-            data={"praja_id": "OTHER001"}
+            data={"name": "Other Tenant Lead", "praja_id": "OTHER001"}
         )
         
         response = self.client.get(self.entity_url, **self.valid_headers)
@@ -636,7 +627,7 @@ class EntityApiTests(TestCase):
             **self.valid_headers
         )
         self.assertEqual(read_response.status_code, 200)
-        self.assertEqual(read_response.data["name"], "CRUD Test Lead")
+        self.assertEqual(read_response.data["data"]["name"], "CRUD Test Lead")
         
         # UPDATE (PATCH)
         patch_data = {
