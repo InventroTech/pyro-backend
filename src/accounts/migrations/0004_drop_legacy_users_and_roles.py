@@ -6,7 +6,6 @@ from django.db import migrations
 
 def drop_legacy_tables(apps, schema_editor):
     with schema_editor.connection.cursor() as cursor:
-        # Drop roles first in case users references it; then users.
         cursor.execute("DROP TABLE IF EXISTS public.roles CASCADE;")
         cursor.execute("DROP TABLE IF EXISTS public.users CASCADE;")
 

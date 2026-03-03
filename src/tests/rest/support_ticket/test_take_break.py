@@ -3,10 +3,11 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 from unittest.mock import patch
-from model_bakery import baker
 from uuid import uuid4
 
+from core.models import Tenant
 from support_ticket.models import SupportTicket
+from tests.factories.support_ticket_factory import SupportTicketFactory
 
 # Use the Django DB marker to ensure each test runs with a clean database.
 @pytest.mark.django_db
@@ -37,13 +38,14 @@ class TestTakeBreakView:
         """
         A pytest fixture to create a SupportTicket instance for testing.
         """
-        # Create a SupportTicket using baker, ensuring it has all the necessary fields.
-        ticket = baker.make(
-            SupportTicket,
-            assigned_to=uuid4(),
-            cse_name="existing_cse_name"
+        tenant = Tenant.objects.create(
+            id=uuid4(), name="Test Tenant", slug="test-tenant"
         )
-        return ticket
+        return SupportTicketFactory(
+            tenant=tenant,
+            cse_name="existing_cse_name",
+            assigned_to=None,
+        )
 
     def test_take_break_unassigns_ticket_successfully(self, authenticated_client, test_ticket):
         """

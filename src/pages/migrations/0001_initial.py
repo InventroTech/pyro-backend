@@ -3,6 +3,26 @@ import django.db.models.deletion
 import uuid
 
 
+CREATE_PAGES_IF_NOT_EXISTS = """
+CREATE TABLE IF NOT EXISTS public.pages (
+    id UUID NOT NULL PRIMARY KEY,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    user_id UUID NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    config JSONB NOT NULL DEFAULT '[]',
+    role UUID NULL REFERENCES authz_role(id) ON DELETE SET NULL,
+    tenant_id UUID NULL REFERENCES tenants(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS pages_tenant__138dc7_idx ON public.pages (tenant_id, user_id);
+CREATE INDEX IF NOT EXISTS pages_tenant__7bb27b_idx ON public.pages (tenant_id, role);
+"""
+
+DROP_PAGES = """
+DROP TABLE IF EXISTS public.pages;
+"""
+
+
 class Migration(migrations.Migration):
 
     initial = True
@@ -14,7 +34,9 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.SeparateDatabaseAndState(
-            database_operations=[],
+            database_operations=[
+                migrations.RunSQL(CREATE_PAGES_IF_NOT_EXISTS, reverse_sql=DROP_PAGES),
+            ],
             state_operations=[
                 migrations.CreateModel(
                     name='Page',

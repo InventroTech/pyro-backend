@@ -5,6 +5,17 @@ import django.utils.timezone
 import uuid
 from django.db import migrations, models
 
+CREATE_PG_TRGM = "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+
+CREATE_TENANTS_IF_MISSING = """
+CREATE TABLE IF NOT EXISTS public.tenants (
+    id UUID NOT NULL PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    slug VARCHAR(64) NOT NULL UNIQUE
+);
+"""
+
 
 class Migration(migrations.Migration):
 
@@ -14,6 +25,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunSQL(CREATE_PG_TRGM, reverse_sql="DROP EXTENSION IF EXISTS pg_trgm;"),
         migrations.CreateModel(
             name='Tenant',
             fields=[
@@ -26,5 +38,9 @@ class Migration(migrations.Migration):
                 'db_table': 'tenants',
                 'managed': False,
             },
+        ),
+        migrations.RunSQL(
+            CREATE_TENANTS_IF_MISSING,
+            reverse_sql="DROP TABLE IF EXISTS public.tenants;",
         ),
     ]

@@ -9,44 +9,51 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
+        ('support_ticket', '0004_alter_supportticket_options'),
     ]
 
     operations = [
-        migrations.CreateModel(
-            name='SupportTicket',
-            fields=[
-                ('id', models.BigAutoField(primary_key=True, serialize=False)),
-                ('created_at', models.DateTimeField()),
-                ('ticket_date', models.DateTimeField(blank=True, null=True)),
-                ('user_id', models.CharField(blank=True, max_length=255, null=True)),
-                ('name', models.CharField(blank=True, max_length=255, null=True)),
-                ('phone', models.CharField(blank=True, max_length=50, null=True)),
-                ('source', models.CharField(blank=True, max_length=255, null=True)),
-                ('subscription_status', models.TextField(blank=True, null=True)),
-                ('atleast_paid_once', models.BooleanField(blank=True, null=True)),
-                ('reason', models.TextField(blank=True, null=True)),
-                ('other_reasons', django.contrib.postgres.fields.ArrayField(base_field=models.TextField(), blank=True, null=True, size=None)),
-                ('badge', models.CharField(blank=True, max_length=255, null=True)),
-                ('poster', models.CharField(blank=True, max_length=255, null=True)),
-                ('tenant_id', models.UUIDField(blank=True, null=True)),
-                ('assigned_to', models.UUIDField(blank=True, null=True)),
-                ('layout_status', models.CharField(blank=True, max_length=255, null=True)),
-                ('resolution_status', models.CharField(blank=True, max_length=255, null=True)),
-                ('resolution_time', models.CharField(blank=True, max_length=255, null=True)),
-                ('cse_name', models.CharField(blank=True, max_length=255, null=True)),
-                ('cse_remarks', models.TextField(blank=True, null=True)),
-                ('call_status', models.CharField(blank=True, max_length=255, null=True)),
-                ('call_attempts', models.IntegerField(blank=True, null=True)),
-                ('rm_name', models.TextField(blank=True, null=True)),
-                ('completed_at', models.DateTimeField(blank=True, null=True)),
-                ('snooze_until', models.DateTimeField(blank=True, null=True)),
-                ('praja_dashboard_user_link', models.TextField(blank=True, null=True)),
-                ('display_pic_url', models.TextField(blank=True, null=True)),
-                ('dumped_at', models.DateTimeField(blank=True, null=True)),
+        # SupportTicket table is created by support_ticket app; only add to state here.
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.CreateModel(
+                    name='SupportTicket',
+                    fields=[
+                        ('id', models.BigAutoField(primary_key=True, serialize=False)),
+                        ('created_at', models.DateTimeField()),
+                        ('ticket_date', models.DateTimeField(blank=True, null=True)),
+                        ('user_id', models.CharField(blank=True, max_length=255, null=True)),
+                        ('name', models.CharField(blank=True, max_length=255, null=True)),
+                        ('phone', models.CharField(blank=True, max_length=50, null=True)),
+                        ('source', models.CharField(blank=True, max_length=255, null=True)),
+                        ('subscription_status', models.TextField(blank=True, null=True)),
+                        ('atleast_paid_once', models.BooleanField(blank=True, null=True)),
+                        ('reason', models.TextField(blank=True, null=True)),
+                        ('other_reasons', django.contrib.postgres.fields.ArrayField(base_field=models.TextField(), blank=True, null=True, size=None)),
+                        ('badge', models.CharField(blank=True, max_length=255, null=True)),
+                        ('poster', models.CharField(blank=True, max_length=255, null=True)),
+                        ('tenant_id', models.UUIDField(blank=True, null=True)),
+                        ('assigned_to', models.UUIDField(blank=True, null=True)),
+                        ('layout_status', models.CharField(blank=True, max_length=255, null=True)),
+                        ('resolution_status', models.CharField(blank=True, max_length=255, null=True)),
+                        ('resolution_time', models.CharField(blank=True, max_length=255, null=True)),
+                        ('cse_name', models.CharField(blank=True, max_length=255, null=True)),
+                        ('cse_remarks', models.TextField(blank=True, null=True)),
+                        ('call_status', models.CharField(blank=True, max_length=255, null=True)),
+                        ('call_attempts', models.IntegerField(blank=True, null=True)),
+                        ('rm_name', models.TextField(blank=True, null=True)),
+                        ('completed_at', models.DateTimeField(blank=True, null=True)),
+                        ('snooze_until', models.DateTimeField(blank=True, null=True)),
+                        ('praja_dashboard_user_link', models.TextField(blank=True, null=True)),
+                        ('display_pic_url', models.TextField(blank=True, null=True)),
+                        ('dumped_at', models.DateTimeField(blank=True, null=True)),
+                    ],
+                    options={
+                        'db_table': 'support_ticket',
+                        'managed': True,
+                    },
+                ),
             ],
-            options={
-                'db_table': 'support_ticket',
-                'managed': True,
-            },
+            database_operations=[],
         ),
     ]
