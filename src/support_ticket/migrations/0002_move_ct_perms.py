@@ -51,8 +51,8 @@ def noop(apps, schema_editor):
 class Migration(migrations.Migration):
     dependencies = [
         ('support_ticket', '0001_supportticket_state'),
-        ('contenttypes', '__latest__'),
-        ('auth', '__latest__'),
+        ('contenttypes', '0002_remove_content_type_name'),
+        ('auth', '0012_alter_user_first_name_max_length'),
     ]
     operations = [
         migrations.RunPython(move_ct_and_perms, reverse_code=noop),

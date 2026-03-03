@@ -35,20 +35,17 @@ class RecordApiTests(TestCase):
         self.rec_a1 = Record.objects.create(
             tenant=self.tenant_a, 
             entity_type="lead", 
-            name="Lead A1", 
-            data={"status": "new", "email": "lead1@tenant-a.com"}
+            data={"name": "Lead A1", "status": "new", "email": "lead1@tenant-a.com"}
         )
         self.rec_a2 = Record.objects.create(
             tenant=self.tenant_a, 
             entity_type="ticket", 
-            name="Ticket A1", 
-            data={"priority": "high", "status": "open"}
+            data={"name": "Ticket A1", "priority": "high", "status": "open"}
         )
         self.rec_b1 = Record.objects.create(
             tenant=self.tenant_b, 
             entity_type="lead", 
-            name="Lead B1", 
-            data={"status": "new", "email": "lead1@tenant-b.com"}
+            data={"name": "Lead B1", "status": "new", "email": "lead1@tenant-b.com"}
         )
 
         self.list_url = "/crm-records/records/"
@@ -67,8 +64,7 @@ class RecordApiTests(TestCase):
         
         payload = {
             "entity_type": "ticket",
-            "name": "New Ticket",
-            "data": {"priority": "low", "status": "open", "description": "Test ticket"}
+            "data": {"name": "New Ticket", "priority": "low", "status": "open", "description": "Test ticket"}
         }
         
         response = self.client.post(self.list_url, payload, format="json", **headers)
@@ -77,7 +73,7 @@ class RecordApiTests(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertIn("id", response.data)
         self.assertEqual(response.data["entity_type"], "ticket")
-        self.assertEqual(response.data["name"], "New Ticket")
+        self.assertEqual(response.data["data"]["name"], "New Ticket")
         
         # Verify database
         record = Record.objects.get(id=response.data["id"])
@@ -104,7 +100,7 @@ class RecordApiTests(TestCase):
         self.assertIn("page_meta", response.data)
         
         # Check tenant isolation
-        names = [r["name"] for r in response.data["data"]]
+        names = [r["data"]["name"] for r in response.data["data"]]
         self.assertIn("Lead A1", names)
         self.assertIn("Ticket A1", names)
         self.assertNotIn("Lead B1", names)  # Tenant B's record should not appear
@@ -116,7 +112,7 @@ class RecordApiTests(TestCase):
         response = self.client.get(self.list_url, **headers)
         self.assertEqual(response.status_code, 200)
         
-        names = [r["name"] for r in response.data["data"]]
+        names = [r["data"]["name"] for r in response.data["data"]]
         self.assertIn("Lead B1", names)
         self.assertNotIn("Lead A1", names)  # Tenant A's records should not appear
         self.assertNotIn("Ticket A1", names)
@@ -136,8 +132,8 @@ class RecordApiTests(TestCase):
         
         # Update JSON data
         update_data = {
-            "name": "Updated Lead A1",
             "data": {
+                "name": "Updated Lead A1",
                 "status": "contacted",
                 "email": "lead1@tenant-a.com",
                 "phone": "+1234567890",
@@ -149,13 +145,13 @@ class RecordApiTests(TestCase):
         
         # Verify response
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["name"], "Updated Lead A1")
+        self.assertEqual(response.data["data"]["name"], "Updated Lead A1")
         self.assertEqual(response.data["data"]["status"], "contacted")
         self.assertEqual(response.data["data"]["phone"], "+1234567890")
         
         # Verify database
         self.rec_a1.refresh_from_db()
-        self.assertEqual(self.rec_a1.name, "Updated Lead A1")
+        self.assertEqual(self.rec_a1.data["name"], "Updated Lead A1")
         self.assertEqual(self.rec_a1.data["status"], "contacted")
         self.assertEqual(self.rec_a1.data["phone"], "+1234567890")
         
@@ -178,7 +174,7 @@ class RecordApiTests(TestCase):
         self.assertEqual(response.status_code, 403)
         
         # PATCH should return 403
-        response = self.client.patch(detail_url, {"name": "Hacked"}, format="json", **headers)
+        response = self.client.patch(detail_url, {"data": {"name": "Hacked"}}, format="json", **headers)
         self.assertEqual(response.status_code, 403)
         
         # Performance check
@@ -210,15 +206,13 @@ class RecordApiTests(TestCase):
         rec_a3 = Record.objects.create(
             tenant=self.tenant_a,
             entity_type="contact",
-            name="Contact A3",
-            data={"email": "contact3@tenant-a.com"}
+            data={"name": "Contact A3", "email": "contact3@tenant-a.com"}
         )
         
         rec_b2 = Record.objects.create(
             tenant=self.tenant_b,
             entity_type="ticket",
-            name="Ticket B2",
-            data={"priority": "medium"}
+            data={"name": "Ticket B2", "priority": "medium"}
         )
         
         # Test Tenant A can only see their records
@@ -228,7 +222,7 @@ class RecordApiTests(TestCase):
         response = self.client.get(self.list_url, **headers)
         self.assertEqual(response.status_code, 200)
         
-        tenant_a_records = [r["name"] for r in response.data["data"]]
+        tenant_a_records = [r["data"]["name"] for r in response.data["data"]]
         self.assertEqual(len(tenant_a_records), 3)  # A1, A2, A3
         self.assertIn("Lead A1", tenant_a_records)
         self.assertIn("Ticket A1", tenant_a_records)
@@ -243,7 +237,7 @@ class RecordApiTests(TestCase):
         response = self.client.get(self.list_url, **headers)
         self.assertEqual(response.status_code, 200)
         
-        tenant_b_records = [r["name"] for r in response.data["data"]]
+        tenant_b_records = [r["data"]["name"] for r in response.data["data"]]
         self.assertEqual(len(tenant_b_records), 2)  # B1, B2
         self.assertIn("Lead B1", tenant_b_records)
         self.assertIn("Ticket B2", tenant_b_records)
@@ -256,8 +250,7 @@ class RecordApiTests(TestCase):
         # Test valid data
         valid_data = {
             "entity_type": "lead",
-            "name": "Valid Lead",
-            "data": {"email": "valid@example.com", "status": "new"}
+            "data": {"name": "Valid Lead", "email": "valid@example.com", "status": "new"}
         }
         
         serializer = RecordSerializer(data=valid_data)
@@ -266,8 +259,7 @@ class RecordApiTests(TestCase):
         # Test invalid entity_type (empty)
         invalid_data = {
             "entity_type": "",
-            "name": "Invalid Lead",
-            "data": {"email": "invalid@example.com"}
+            "data": {"name": "Invalid Lead", "email": "invalid@example.com"}
         }
         
         serializer = RecordSerializer(data=invalid_data)
@@ -277,7 +269,6 @@ class RecordApiTests(TestCase):
         # Test invalid data (not dict)
         invalid_data = {
             "entity_type": "lead",
-            "name": "Invalid Lead",
             "data": "not_a_dict"
         }
         

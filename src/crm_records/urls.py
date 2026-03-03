@@ -4,6 +4,8 @@ from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 from .public_views import PublicJobsView, PublicJobApplicationView
 
 
+app_name = "crm_records"
+
 urlpatterns = [
     # Universal endpoint - supports entity_type filtering
     path("records/", RecordListCreateView.as_view(), name="record-list"),

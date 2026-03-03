@@ -5,7 +5,7 @@ from django.contrib.postgres.fields import ArrayField
 class Migration(migrations.Migration):
     initial = False
     dependencies = [
-        ('core', '__latest__'),
+        ('core', '0001_initial'),
         ('accounts', '0003_supabaseauthuser'),
     ]
     operations = [
