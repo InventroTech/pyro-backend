@@ -14,6 +14,7 @@ except ImportError:
     date_parser = None
 from django.db.models import Q, F, Count, Case, When, Value, IntegerField
 from django.db import transaction
+from django.db import IntegrityError
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 import logging
@@ -252,6 +253,52 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
             
         return queryset
     
+    def create(self, request, *args, **kwargs):
+        """Block duplicate leads by praja_id (same tenant) and return 409."""
+        entity_type = request.query_params.get('entity_type') or request.data.get('entity_type')
+        request_data = request.data.get('data') if isinstance(request.data.get('data'), dict) else {}
+        praja_id = request_data.get('praja_id')
+        if entity_type == 'lead' and praja_id:
+            existing = Record.objects.filter(
+                tenant=request.tenant,
+                entity_type='lead',
+                data__praja_id=praja_id,
+            ).first()
+            if existing:
+                return Response(
+                    {
+                        'error': f'Lead with praja_id "{praja_id}" already exists',
+                        'praja_id': praja_id,
+                        'existing_record_id': existing.id,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+        try:
+            return super().create(request, *args, **kwargs)
+        except IntegrityError:
+            # Race: another request inserted same praja_id; unique index rejected us. Return 409.
+            if entity_type == 'lead':
+                if praja_id:
+                    existing = Record.objects.filter(
+                        tenant=request.tenant,
+                        entity_type='lead',
+                        data__praja_id=praja_id,
+                    ).first()
+                    if existing:
+                        return Response(
+                            {
+                                'error': f'Lead with praja_id "{praja_id}" already exists',
+                                'praja_id': praja_id,
+                                'existing_record_id': existing.id,
+                            },
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                return Response(
+                    {'error': 'Duplicate lead (conflict on praja_id)'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            raise
+    
     def perform_create(self, serializer):
         """
         Create record with tenant and entity_type assignment.
@@ -317,7 +364,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 if record.pyro_data:
                     properties.update(record.pyro_data)
                 
-                # Enqueue background job
+                # Enqueue background job (single send; do not also send sync to avoid duplicate Mixpanel events)
                 queue_service = get_queue_service()
                 queue_service.enqueue_job(
                     job_type=JobType.SEND_MIXPANEL_EVENT,
@@ -330,10 +377,6 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                     tenant_id=str(record.tenant.id) if record.tenant else None,
                     max_attempts=3
                 )
-                
-                # Send sync
-                mixpanel_service = MixpanelService()
-                mixpanel_service.send_to_mixpanel_sync(str(user_id), event_name, properties)
             except Exception as e:
                 logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
     
@@ -604,6 +647,51 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
             queryset = queryset.filter(entity_type=self.entity_type)
         return queryset
     
+    def create(self, request, *args, **kwargs):
+        """Block duplicate leads by praja_id (same tenant) and return 409."""
+        request_data = request.data.get('data') if isinstance(request.data.get('data'), dict) else {}
+        praja_id = request_data.get('praja_id') if self.entity_type == 'lead' else None
+        if self.entity_type == 'lead' and praja_id:
+            existing = Record.objects.filter(
+                tenant=request.tenant,
+                entity_type='lead',
+                data__praja_id=praja_id,
+            ).first()
+            if existing:
+                return Response(
+                    {
+                        'error': f'Lead with praja_id "{praja_id}" already exists',
+                        'praja_id': praja_id,
+                        'existing_record_id': existing.id,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+        try:
+            return super().create(request, *args, **kwargs)
+        except IntegrityError:
+            # Race: another request inserted same praja_id; unique index rejected us. Return 409.
+            if self.entity_type == 'lead':
+                if praja_id:
+                    existing = Record.objects.filter(
+                        tenant=request.tenant,
+                        entity_type='lead',
+                        data__praja_id=praja_id,
+                    ).first()
+                    if existing:
+                        return Response(
+                            {
+                                'error': f'Lead with praja_id "{praja_id}" already exists',
+                                'praja_id': praja_id,
+                                'existing_record_id': existing.id,
+                            },
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                return Response(
+                    {'error': 'Duplicate lead (conflict on praja_id)'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            raise
+    
     def perform_create(self, serializer):
         """Create record with tenant and the specific entity type. Automatically calculates lead score if entity_type is 'lead'."""
         record = serializer.save(
@@ -654,7 +742,7 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
                 if record.pyro_data:
                     properties.update(record.pyro_data)
                 
-                # Enqueue background job
+                # Enqueue background job (single send; do not also send sync to avoid duplicate Mixpanel events)
                 queue_service = get_queue_service()
                 job = queue_service.enqueue_job(
                     job_type=JobType.SEND_MIXPANEL_EVENT,
@@ -667,9 +755,6 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
                     tenant_id=str(record.tenant.id) if record.tenant else None,
                     max_attempts=3
                 )
-                # Send sync
-                mixpanel_service = MixpanelService()
-                mixpanel_service.send_to_mixpanel_sync(str(user_id), event_name, properties)
             except Exception as e:
                 logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
 
@@ -3200,11 +3285,10 @@ class PrajaLeadsAPIView(APIView):
         
         # Compact, structured log for every create attempt (helps debug 4xx like 409)
         logger.info(
-            "[PrajaLeadsAPI] Incoming CREATE: tenant=%s entity_type=%s praja_id=%s phone=%s lead_stage=%s poster=%s",
+            "[PrajaLeadsAPI] Incoming CREATE: tenant=%s entity_type=%s praja_id=%s lead_stage=%s poster=%s",
             getattr(tenant, "slug", None),
             entity_type,
             praja_id,
-            request_lead_data.get("phone_number"),
             request_lead_data.get("lead_stage"),
             request_lead_data.get("poster"),
         )
@@ -3240,10 +3324,42 @@ class PrajaLeadsAPIView(APIView):
         
         serializer = RecordSerializer(data=request_data)
         if serializer.is_valid():
-            record = serializer.save(
-                tenant=tenant,
-                entity_type=entity_type
-            )
+            try:
+                record = serializer.save(
+                    tenant=tenant,
+                    entity_type=entity_type
+                )
+            except IntegrityError:
+                # Unique constraint (tenant_id, praja_id) - race with concurrent request
+                if entity_type == 'lead':
+                    if praja_id:
+                        existing_record = Record.objects.filter(
+                            data__praja_id=praja_id,
+                            tenant=tenant,
+                            entity_type=entity_type
+                        ).first()
+                        if existing_record:
+                            logger.warning(
+                                "[PrajaLeadsAPI] Duplicate praja_id (race): praja_id=%s tenant=%s existing_record_id=%s",
+                                praja_id, tenant.slug, existing_record.id,
+                            )
+                            return Response(
+                                {
+                                    'error': f'{entity_type.capitalize()} with praja_id "{praja_id}" already exists',
+                                    'praja_id': praja_id,
+                                    'existing_record_id': existing_record.id
+                                },
+                                status=status.HTTP_409_CONFLICT
+                            )
+                    logger.warning(
+                        "[PrajaLeadsAPI] Duplicate lead (race): praja_id=%s tenant=%s",
+                        praja_id, tenant.slug,
+                    )
+                    return Response(
+                        {'error': 'Duplicate lead (conflict on praja_id)'},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                raise
             
             # Get name from data for logging
             record_name = (record.data or {}).get('name', '')
@@ -3310,7 +3426,7 @@ class PrajaLeadsAPIView(APIView):
                     if record.pyro_data:
                         properties.update(record.pyro_data)
                     
-                    # Enqueue background job
+                    # Enqueue background job (single send; do not also send sync to avoid duplicate Mixpanel events)
                     queue_service = get_queue_service()
                     job = queue_service.enqueue_job(
                         job_type=JobType.SEND_MIXPANEL_EVENT,
@@ -3323,9 +3439,6 @@ class PrajaLeadsAPIView(APIView):
                         tenant_id=str(record.tenant.id) if record.tenant else None,
                         max_attempts=3
                     )
-                    # Send sync
-                    mixpanel_service = MixpanelService()
-                    mixpanel_service.send_to_mixpanel_sync(str(user_id), event_name, properties)
                 except Exception as e:
                     logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
             
