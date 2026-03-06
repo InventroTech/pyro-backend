@@ -130,6 +130,7 @@ class CurrentUserRoleView(APIView):
                 'role_name': None,
                 'role_id': None,
                 'tenant_id': None,
+                'department': None,
                 'error': 'No active tenant membership found'
             }, status=status.HTTP_200_OK)
         
@@ -139,7 +140,8 @@ class CurrentUserRoleView(APIView):
             'role_id': str(membership.role.id),
             'tenant_id': str(tenant.id),
             'tenant_slug': tenant.slug,
-            'is_active': membership.is_active
+            'is_active': membership.is_active,
+            'department': membership.department,
         }, status=status.HTTP_200_OK)
 
 

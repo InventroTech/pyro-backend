@@ -78,6 +78,7 @@ class TenantMembership(models.Model):
     # Fields migrated from LegacyUser (public.users)
     name = models.CharField(max_length=255, null=True, blank=True, help_text="User's display name")
     company_name = models.CharField(max_length=255, null=True, blank=True, help_text="Optional company name")
+    department = models.CharField(max_length=255, null=True, blank=True, help_text="Optional department")
 
     def save(self, *args, **kwargs):
         if self.email:
