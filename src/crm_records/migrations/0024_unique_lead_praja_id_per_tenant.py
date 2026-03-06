@@ -8,7 +8,7 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("crm_records", "0021_rename_partner_ev_tenant_partner_created_idx_partner_eve_tenant__0d3ff2_idx_and_more"),
+        ("crm_records", "0023_apisecretkey_plaintext_secret"),
     ]
 
     operations = [

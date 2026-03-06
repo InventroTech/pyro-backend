@@ -3385,6 +3385,9 @@ class PrajaLeadsAPIView(APIView):
             if 'call_attempts' not in request_data['data'] or request_data['data'].get('call_attempts') in (None, '', 'null'):
                 request_data['data']['call_attempts'] = 0
         
+        # RecordSerializer expects entity_type in input for validation
+        request_data['entity_type'] = entity_type
+
         # Extract lead data safely for logging/debugging
         request_lead_data = request_data.get('data') if isinstance(request_data.get('data'), dict) else {}
         
@@ -3614,7 +3617,7 @@ class PrajaLeadsAPIView(APIView):
         affiliated_party = request.query_params.get('affiliated_party')
         if affiliated_party:
             queryset = queryset.filter(data__affiliated_party=affiliated_party)
-        
+
         # Order by creation date (newest first)
         queryset = queryset.order_by('-created_at')
         
@@ -3740,7 +3743,7 @@ class PrajaLeadsAPIView(APIView):
         
         logger.info(
             "[PrajaLeadsAPI] Updated %s: id=%s praja_id=%s tenant=%s fields=%s",
-            entity_type,
+            record.entity_type,
             record.id,
             praja_id,
             tenant.slug,
@@ -3888,7 +3891,7 @@ class PrajaLeadsAPIView(APIView):
         
         logger.info(
             "[PrajaLeadsAPI] Updated %s: id=%s praja_id=%s tenant=%s fields=%s",
-            entity_type,
+            record.entity_type,
             record.id,
             praja_id,
             tenant.slug,
