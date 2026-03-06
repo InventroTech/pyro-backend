@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('crm_records', '0021_apisecretkey_secret_sha256'),
+        ('crm_records', '0022_apisecretkey_secret_sha256'),
     ]
 
     operations = [
