@@ -41,20 +41,17 @@ class EventApiTests(TestCase):
         self.rec_a1 = Record.objects.create(
             tenant=self.tenant_a, 
             entity_type="lead", 
-            name="Lead A1", 
-            data={"status": "new", "email": "lead1@tenant-a.com"}
+            data={"name": "Lead A1", "status": "new", "email": "lead1@tenant-a.com"}
         )
         self.rec_a2 = Record.objects.create(
             tenant=self.tenant_a, 
             entity_type="ticket", 
-            name="Ticket A1", 
-            data={"priority": "high", "status": "open"}
+            data={"name": "Ticket A1", "priority": "high", "status": "open"}
         )
         self.rec_b1 = Record.objects.create(
             tenant=self.tenant_b, 
             entity_type="lead", 
-            name="Lead B1", 
-            data={"status": "new", "email": "lead1@tenant-b.com"}
+            data={"name": "Lead B1", "status": "new", "email": "lead1@tenant-b.com"}
         )
 
         self.event_url = f"/crm-records/records/{self.rec_a1.id}/events/"
