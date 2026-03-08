@@ -3,7 +3,6 @@ from django.contrib.postgres.fields import ArrayField
 from django.contrib.postgres.indexes import GinIndex
 from core.models import BaseModel
 from object_history.models import HistoryTrackedModel
-from django.db import connection
 import logging
 
 logger = logging.getLogger(__name__)
@@ -236,15 +235,14 @@ class ScoringRule(BaseModel):
 class ApiSecretKey(BaseModel):
     """
     Model to store API secret keys and their associated tenants.
-    Allows dynamic mapping of secret keys to tenants without requiring code changes.
-    Each secret key maps to a specific tenant for external API access.
+    Secret is stored plainly; lookup is simple equality match (no hashing).
     """
-    # We store only a one-way bcrypt hash of the secret (never plaintext) for security.
-    # Hash format: pgcrypto crypt(raw_secret, gen_salt('bf', ...)) (salt embedded in the hash).
-    secret_key_hash = models.CharField(
-        max_length=128,
+    secret = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
         db_index=True,
-        help_text="bcrypt hash of the raw secret (pgcrypto crypt). Do NOT store plaintext secrets."
+        help_text="API secret value (plain). Used for X-Secret-Pyro; set by set_raw_secret().",
     )
     secret_key_last4 = models.CharField(
         max_length=4,
@@ -277,20 +275,17 @@ class ApiSecretKey(BaseModel):
     class Meta:
         db_table = "api_secret_keys"
         indexes = [
-            models.Index(fields=["secret_key_hash", "is_active"]),
+            models.Index(fields=["secret", "is_active"]),
             models.Index(fields=["tenant", "is_active"]),
         ]
         verbose_name = "API Secret Key"
         verbose_name_plural = "API Secret Keys"
-    
+
     def set_raw_secret(self, raw_secret: str) -> None:
         raw_secret = (raw_secret or "").strip()
         if not raw_secret:
             raise ValueError("raw_secret cannot be empty")
-        # Compute bcrypt hash using Postgres pgcrypto (keeps format aligned with DB inserts)
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT crypt(%s, gen_salt('bf', 12))", [raw_secret])
-            self.secret_key_hash = cursor.fetchone()[0]
+        self.secret = raw_secret
         self.secret_key_last4 = raw_secret[-4:] if len(raw_secret) >= 4 else raw_secret
 
     def __str__(self):
