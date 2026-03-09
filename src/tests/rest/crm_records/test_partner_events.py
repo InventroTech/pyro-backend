@@ -39,7 +39,7 @@ from tests.factories import (
 # =============================================================================
 
 def _lead_data(praja_id="PRAJA-456", **extra):
-    base = {"praja_id": praja_id, "email": "lead@test.com", "name": "Test Lead", "lead_stage": "new"}
+    base = {"praja_id": praja_id, "email": "lead@test.com", "name": "Test Lead", "lead_stage": "FRESH"}
     base.update(extra)
     return base
 
@@ -342,7 +342,7 @@ class TestPartnerLeadAssignJobHandler(TestCase):
         assert result is True
         self.lead.refresh_from_db()
         assert self.lead.data["assigned_to"] == str(self.membership.user_id)
-        assert self.lead.data["lead_stage"] == "assigned"
+        assert self.lead.data["lead_stage"] == "ASSIGNED"
         assert self.lead.data["partner_source"] == "halocom"
 
         self.partner_event.refresh_from_db()
@@ -372,7 +372,7 @@ class TestPartnerLeadAssignJobHandler(TestCase):
     def test_reassignment_overwrites_assigned_to(self):
         """If lead was already assigned, partner reassignment overrides it."""
         self.lead.data["assigned_to"] = "old-agent@example.com"
-        self.lead.data["lead_stage"] = "assigned"
+        self.lead.data["lead_stage"] = "ASSIGNED"
         self.lead.save()
 
         job = self._make_job()
@@ -473,7 +473,7 @@ class TestPartnerLeadView(TestCase):
             data={
                 **_lead_data("PRAJA-100"),
                 "assigned_to": self.user.supabase_uid,
-                "lead_stage": "assigned",
+                "lead_stage": "ASSIGNED",
                 "partner_source": "halocom",
             },
         )
