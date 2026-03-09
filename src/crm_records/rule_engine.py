@@ -189,7 +189,7 @@ def action_update_fields(
         current_assigned_to = record.data.get("assigned_to")
         
         # Check if this is a "not connected" retry lead
-        # (has call_attempts > 0, or last_call_outcome = 'not_connected', or lead_stage was 'in_queue')
+        # (has call_attempts > 0, or last_call_outcome = 'not_connected', or lead_stage was 'IN_QUEUE')
         call_attempts = record.data.get("call_attempts", 0)
         try:
             call_attempts_int = int(call_attempts) if call_attempts is not None else 0
@@ -198,16 +198,13 @@ def action_update_fields(
         
         last_call_outcome = record.data.get("last_call_outcome", "").lower()
         lead_stage = record.data.get("lead_stage", "").upper()
-        # Check if this is a retry lead
-        # Only "not connected" and "call back later" can be retried
+        # Check if this is a retry lead (NOT_CONNECTED only)
         # These leads should NOT set first_assigned_to when reassigned to a new RM
         is_not_connected_retry = (
             call_attempts_int > 0 or
             last_call_outcome in ("not connected", "not_connected", "notconnected") or
             last_call_outcome == "call_back_later" or
-            lead_stage == "NOT_CONNECTED" or
-            lead_stage == "IN_QUEUE" or
-            lead_stage == "CALL_BACK_LATER"
+            lead_stage == "NOT_CONNECTED"
         )
         
         # Check if this is a fresh assignment (was unassigned, now being assigned)

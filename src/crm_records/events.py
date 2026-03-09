@@ -99,17 +99,17 @@ def simulate_workflow_actions(event_name: str, record: Record, payload: Dict[str
     simulated_actions = {
         "win_clicked": {
             "action": "update_fields",
-            "updates": {"status": "won", "resolution_status": "Resolved"},
-            "message": "Lead marked as won"
+            "updates": {"lead_stage": "CLOSED", "resolution_status": "Resolved"},
+            "message": "Lead marked as closed"
         },
         "lost_clicked": {
-            "action": "update_fields", 
-            "updates": {"status": "lost", "resolution_status": "Closed"},
-            "message": "Lead marked as lost"
+            "action": "update_fields",
+            "updates": {"lead_stage": "CLOSED", "resolution_status": "Closed"},
+            "message": "Lead marked as closed"
         },
         "call_later_clicked": {
             "action": "update_fields",
-            "updates": {"status": "call_later", "next_call_at": "2025-01-02T10:00:00Z"},
+            "updates": {"lead_stage": "SNOOZED", "next_call_at": "2025-01-02T10:00:00Z"},
             "message": "Lead scheduled for follow-up call"
         },
         "button_click": {

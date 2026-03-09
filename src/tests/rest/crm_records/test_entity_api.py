@@ -37,7 +37,7 @@ class EntityApiTests(TestCase):
                 "praja_id": "PRAJA001",
                 "phone_number": "+1234567890",
                 "lead_score": 80,
-                "lead_stage": "in_queue",
+                "lead_stage": "IN_QUEUE",
                 "poster": "free",
             },
         )
@@ -52,7 +52,7 @@ class EntityApiTests(TestCase):
                 "praja_id": "PRAJA123",
                 "phone_number": "+1234567890",
                 "lead_score": 85,
-                "lead_stage": "in_queue",
+                "lead_stage": "IN_QUEUE",
                 "poster": "free"
             }
         }
@@ -119,7 +119,7 @@ class EntityApiTests(TestCase):
             "data": {
                 "praja_id": "PRAJA001",  # same as self.existing_record
                 "phone_number": "+1999999999",
-                "lead_stage": "in_queue",
+                "lead_stage": "IN_QUEUE",
             },
         }
         response = self.client.post(
@@ -147,7 +147,7 @@ class EntityApiTests(TestCase):
         RecordFactory(
             tenant=self.default_tenant,
             entity_type="lead",
-            data={"name": "Lead 2", "praja_id": "PRAJA002", "lead_stage": "assigned"},
+            data={"name": "Lead 2", "praja_id": "PRAJA002", "lead_stage": "ASSIGNED"},
         )
         
         response = self.client.get(self.entity_url, **self.valid_headers)
@@ -211,18 +211,18 @@ class EntityApiTests(TestCase):
         RecordFactory(
             tenant=self.default_tenant,
             entity_type="lead",
-            data={"name": "Assigned Lead", "praja_id": "PRAJA003", "lead_stage": "assigned"},
+            data={"name": "Assigned Lead", "praja_id": "PRAJA003", "lead_stage": "ASSIGNED"},
         )
         
         response = self.client.get(
-            f"{self.entity_url}?lead_stage=assigned",
+            f"{self.entity_url}?lead_stage=ASSIGNED",
             **self.valid_headers
         )
         
         self.assertEqual(response.status_code, 200)
-        # All returned leads should have lead_stage=assigned
+        # All returned leads should have lead_stage=ASSIGNED
         for record in response.data["data"]:
-            self.assertEqual(record["data"]["lead_stage"], "assigned")
+            self.assertEqual(record["data"]["lead_stage"], "ASSIGNED")
 
     def test_patch_update_lead_returns_200(self):
         """Test: PATCH /entity/?praja_id=X → Update lead → returns 200"""
@@ -230,10 +230,10 @@ class EntityApiTests(TestCase):
         
         update_data = {
             "lead_score": 95,
-            "lead_stage": "assigned",
+            "lead_stage": "ASSIGNED",
             "data": {
                 "lead_score": 95,
-                "lead_stage": "assigned",
+                "lead_stage": "ASSIGNED",
                 "latest_remarks": "Updated via PATCH"
             }
         }
@@ -247,13 +247,13 @@ class EntityApiTests(TestCase):
         
         # Verify response (lead_score is recalculated by scoring; assert other fields)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["data"]["lead_stage"], "assigned")
+        self.assertEqual(response.data["data"]["lead_stage"], "ASSIGNED")
         self.assertEqual(response.data["data"]["latest_remarks"], "Updated via PATCH")
         self.assertIn("lead_score", response.data["data"])
         
         # Verify database
         self.existing_record.refresh_from_db()
-        self.assertEqual(self.existing_record.data["lead_stage"], "assigned")
+        self.assertEqual(self.existing_record.data["lead_stage"], "ASSIGNED")
         
         # Performance check
         elapsed = time.time() - start_time
@@ -363,7 +363,7 @@ class EntityApiTests(TestCase):
                 "praja_id": "PRAJA001",
                 "phone_number": "+9876543210",
                 "lead_score": 100,
-                "lead_stage": "won",
+                "lead_stage": "CLOSED",
                 "poster": "premium",
                 "latest_remarks": "Fully replaced"
             }
@@ -379,13 +379,13 @@ class EntityApiTests(TestCase):
         # Verify response (lead_score is recalculated by scoring, so assert other fields)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["data"]["name"], "Updated Name")
-        self.assertEqual(response.data["data"]["lead_stage"], "won")
+        self.assertEqual(response.data["data"]["lead_stage"], "CLOSED")
         self.assertEqual(response.data["data"]["latest_remarks"], "Fully replaced")
         self.assertIn("lead_score", response.data["data"])
         
         # Verify database - full replacement occurred
         self.existing_record.refresh_from_db()
-        self.assertEqual(self.existing_record.data["lead_stage"], "won")
+        self.assertEqual(self.existing_record.data["lead_stage"], "CLOSED")
         self.assertEqual(self.existing_record.data["latest_remarks"], "Fully replaced")
         # Verify old field value was replaced
         self.assertEqual(self.existing_record.data["poster"], "premium")
@@ -601,7 +601,7 @@ class EntityApiTests(TestCase):
                 "praja_id": "CRUD001",
                 "phone_number": "+1234567890",
                 "lead_score": 50,
-                "lead_stage": "in_queue"
+                "lead_stage": "IN_QUEUE"
             }
         }
         
@@ -626,7 +626,7 @@ class EntityApiTests(TestCase):
         # UPDATE (PATCH)
         patch_data = {
             "lead_score": 75,
-            "data": {"lead_score": 75, "lead_stage": "assigned"}
+            "data": {"lead_score": 75, "lead_stage": "ASSIGNED"}
         }
         patch_response = self.client.patch(
             f"{self.entity_url}?praja_id={praja_id}",
@@ -636,7 +636,7 @@ class EntityApiTests(TestCase):
         )
         self.assertEqual(patch_response.status_code, 200)
         # lead_score may be recalculated by scoring; assert lead_stage was updated
-        self.assertEqual(patch_response.data["data"]["lead_stage"], "assigned")
+        self.assertEqual(patch_response.data["data"]["lead_stage"], "ASSIGNED")
         
         # DELETE
         delete_response = self.client.delete(

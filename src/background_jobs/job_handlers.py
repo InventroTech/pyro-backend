@@ -834,7 +834,7 @@ class PartnerLeadAssignJobHandler(JobHandler):
                     or previous_assigned_to == "None"
                 )
                 data["assigned_to"] = user_identifier
-                data["lead_stage"] = "assigned"
+                data["lead_stage"] = "ASSIGNED"
                 data["partner_source"] = partner_slug
                 if "call_attempts" not in data or data.get("call_attempts") in (None, "", "null"):
                     data["call_attempts"] = 0
@@ -849,7 +849,7 @@ class PartnerLeadAssignJobHandler(JobHandler):
                     call_attempts_int > 0
                     or last_call_outcome in ("not connected", "not_connected", "notconnected")
                     or last_call_outcome == "call_back_later"
-                    or lead_stage in ("NOT_CONNECTED", "CALL_BACK_LATER", "IN_QUEUE")
+                    or lead_stage == "NOT_CONNECTED"
                 )
                 if is_fresh_assignment and "first_assigned_at" not in data and not is_not_connected_retry:
                     data["first_assigned_at"] = timezone.now().isoformat()
