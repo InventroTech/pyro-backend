@@ -3,12 +3,12 @@ from .models import Page
 
 
 class PageSerializer(serializers.ModelSerializer):
-    """Read serializer: id, name, config, role (id), created_at, updated_at."""
+    """Read serializer: id, name, config, role (id), created_at, updated_at, display_order, icon_name, header_title."""
     role = serializers.SerializerMethodField()
 
     class Meta:
         model = Page
-        fields = ['id', 'name', 'config', 'role', 'created_at', 'updated_at']
+        fields = ['id', 'name', 'config', 'role', 'created_at', 'updated_at', 'display_order', 'icon_name', 'header_title'  ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def get_role(self, obj):
@@ -18,12 +18,12 @@ class PageSerializer(serializers.ModelSerializer):
 
 
 class PageCreateUpdateSerializer(serializers.ModelSerializer):
-    """Write serializer: name, config, role (optional UUID)."""
+    """Write serializer: name, config, role (optional UUID), display_order, icon_name, header_title."""
     role = serializers.UUIDField(required=False, allow_null=True)
 
     class Meta:
         model = Page
-        fields = ['name', 'config', 'role']
+        fields = ['name', 'config', 'role', 'display_order', 'icon_name', 'header_title']
 
     def validate_role(self, value):
         if value is None:

@@ -19,7 +19,7 @@ from drf_spectacular.types import OpenApiTypes
 import logging
 
 logger = logging.getLogger(__name__)
-from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule, PartnerEvent
+from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule, PartnerEvent, ApiSecretKey
 from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer, CallAttemptMatrixSerializer, ScoringRuleModelSerializer
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
@@ -3065,6 +3065,114 @@ class PartnerLeadView(APIView):
         current_lead.refresh_from_db()
         logger.info("[PartnerLead] Returning record_id=%s for user_identifier=%s", current_lead.id, user_identifier)
         return Response(_flatten_lead_response(current_lead), status=status.HTTP_200_OK)
+
+
+class ApiSecretKeySetView(APIView):
+    """
+    POST: Store an API secret for the current tenant. Value is saved as-is (no hashing).
+    Used for /entity/ (X-Secret-Pyro). Requires tenant auth.
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    @extend_schema(
+        request=OpenApiTypes.OBJECT,
+        responses={201: OpenApiResponse(description="Secret saved."), 400: OpenApiResponse(description="Bad request.")},
+        description="Store an API secret for the current tenant. Secret is stored as-is (no hashing).",
+    )
+    def post(self, request):
+        secret = (request.data.get("secret") or "").strip()
+        if not secret:
+            return Response(
+                {"error": "Field 'secret' is required and cannot be empty."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        tenant = getattr(request, "tenant", None)
+        if not tenant:
+            return Response(
+                {"error": "Tenant context required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        description = (request.data.get("description") or "").strip()
+        key_id = request.data.get("id")
+        if key_id:
+            key = ApiSecretKey.objects.filter(id=key_id, tenant=tenant).first()
+            if not key:
+                return Response(
+                    {"error": f"ApiSecretKey id={key_id} not found for this tenant."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            key.secret = secret
+            key.secret_key_last4 = secret[-4:] if len(secret) >= 4 else ""
+            if description:
+                key.description = description
+            key.save()
+            return Response(
+                {
+                    "id": key.id,
+                    "tenant_slug": tenant.slug,
+                    "message": "Secret updated. Use X-Secret-Pyro with your secret for /entity/.",
+                },
+                status=status.HTTP_200_OK,
+            )
+        key = ApiSecretKey.objects.create(
+            tenant=tenant,
+            description=description or "",
+            is_active=True,
+        )
+        key.secret = secret
+        key.secret_key_last4 = secret[-4:] if len(secret) >= 4 else ""
+        key.save()
+        return Response(
+            {
+                "id": key.id,
+                "tenant_slug": tenant.slug,
+                "message": "Secret saved. Use X-Secret-Pyro with your secret when calling /entity/.",
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class ApiSecretKeyUpdateView(APIView):
+    """
+    PUT: Update an existing API secret key by id. Secret is stored as-is (no hashing).
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    @extend_schema(
+        request=OpenApiTypes.OBJECT,
+        responses={200: OpenApiResponse(description="Secret updated."), 400: OpenApiResponse(description="Bad request."), 404: OpenApiResponse(description="Key not found.")},
+        description="Update secret for an existing API secret key. Secret is stored as-is (no hashing).",
+    )
+    def put(self, request, pk):
+        secret = (request.data.get("secret") or "").strip()
+        if not secret:
+            return Response(
+                {"error": "Field 'secret' is required and cannot be empty."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        tenant = getattr(request, "tenant", None)
+        if not tenant:
+            return Response(
+                {"error": "Tenant context required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        key = ApiSecretKey.objects.filter(id=pk, tenant=tenant).first()
+        if not key:
+            return Response(
+                {"error": f"ApiSecretKey id={pk} not found for this tenant."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        key.secret = secret
+        key.secret_key_last4 = secret[-4:] if len(secret) >= 4 else ""
+        key.save()
+        return Response(
+            {
+                "id": key.id,
+                "tenant_slug": tenant.slug,
+                "message": "Secret updated. Use X-Secret-Pyro with your secret for /entity/.",
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class PrajaLeadsAPIView(APIView):
