@@ -253,52 +253,6 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
             
         return queryset
     
-    def create(self, request, *args, **kwargs):
-        """Block duplicate leads by praja_id (same tenant) and return 409."""
-        entity_type = request.query_params.get('entity_type') or request.data.get('entity_type')
-        request_data = request.data.get('data') if isinstance(request.data.get('data'), dict) else {}
-        praja_id = request_data.get('praja_id')
-        if entity_type == 'lead' and praja_id:
-            existing = Record.objects.filter(
-                tenant=request.tenant,
-                entity_type='lead',
-                data__praja_id=praja_id,
-            ).first()
-            if existing:
-                return Response(
-                    {
-                        'error': f'Lead with praja_id "{praja_id}" already exists',
-                        'praja_id': praja_id,
-                        'existing_record_id': existing.id,
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
-        try:
-            return super().create(request, *args, **kwargs)
-        except IntegrityError:
-            # Race: another request inserted same praja_id; unique index rejected us. Return 409.
-            if entity_type == 'lead':
-                if praja_id:
-                    existing = Record.objects.filter(
-                        tenant=request.tenant,
-                        entity_type='lead',
-                        data__praja_id=praja_id,
-                    ).first()
-                    if existing:
-                        return Response(
-                            {
-                                'error': f'Lead with praja_id "{praja_id}" already exists',
-                                'praja_id': praja_id,
-                                'existing_record_id': existing.id,
-                            },
-                            status=status.HTTP_409_CONFLICT,
-                        )
-                return Response(
-                    {'error': 'Duplicate lead (conflict on praja_id)'},
-                    status=status.HTTP_409_CONFLICT,
-                )
-            raise
-    
     def perform_create(self, serializer):
         """
         Create record with tenant and entity_type assignment.
@@ -646,51 +600,6 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
         if self.entity_type:
             queryset = queryset.filter(entity_type=self.entity_type)
         return queryset
-    
-    def create(self, request, *args, **kwargs):
-        """Block duplicate leads by praja_id (same tenant) and return 409."""
-        request_data = request.data.get('data') if isinstance(request.data.get('data'), dict) else {}
-        praja_id = request_data.get('praja_id') if self.entity_type == 'lead' else None
-        if self.entity_type == 'lead' and praja_id:
-            existing = Record.objects.filter(
-                tenant=request.tenant,
-                entity_type='lead',
-                data__praja_id=praja_id,
-            ).first()
-            if existing:
-                return Response(
-                    {
-                        'error': f'Lead with praja_id "{praja_id}" already exists',
-                        'praja_id': praja_id,
-                        'existing_record_id': existing.id,
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
-        try:
-            return super().create(request, *args, **kwargs)
-        except IntegrityError:
-            # Race: another request inserted same praja_id; unique index rejected us. Return 409.
-            if self.entity_type == 'lead':
-                if praja_id:
-                    existing = Record.objects.filter(
-                        tenant=request.tenant,
-                        entity_type='lead',
-                        data__praja_id=praja_id,
-                    ).first()
-                    if existing:
-                        return Response(
-                            {
-                                'error': f'Lead with praja_id "{praja_id}" already exists',
-                                'praja_id': praja_id,
-                                'existing_record_id': existing.id,
-                            },
-                            status=status.HTTP_409_CONFLICT,
-                        )
-                return Response(
-                    {'error': 'Duplicate lead (conflict on praja_id)'},
-                    status=status.HTTP_409_CONFLICT,
-                )
-            raise
     
     def perform_create(self, serializer):
         """Create record with tenant and the specific entity type. Automatically calculates lead score if entity_type is 'lead'."""
@@ -3388,51 +3297,13 @@ class PrajaLeadsAPIView(APIView):
         # RecordSerializer expects entity_type in input for validation
         request_data['entity_type'] = entity_type
 
-        # Extract lead data safely for logging/debugging
         request_lead_data = request_data.get('data') if isinstance(request_data.get('data'), dict) else {}
-        
-        # Check for duplicate praja_id before creating
         praja_id = request_lead_data.get('praja_id')
-        
-        # Compact, structured log for every create attempt (helps debug 4xx like 409)
         logger.info(
-            "[PrajaLeadsAPI] Incoming CREATE: tenant=%s entity_type=%s praja_id=%s lead_stage=%s poster=%s",
-            getattr(tenant, "slug", None),
-            entity_type,
-            praja_id,
-            request_lead_data.get("lead_stage"),
-            request_lead_data.get("poster"),
+            "[PrajaLeadsAPI] Incoming CREATE: tenant=%s entity_type=%s praja_id=%s",
+            getattr(tenant, "slug", None), entity_type, praja_id,
         )
-        
-        if praja_id:
-            existing_record = Record.objects.filter(
-                data__praja_id=praja_id,
-                tenant=tenant,
-                entity_type=entity_type
-            ).first()
-            
-            if existing_record:
-                existing_data = existing_record.data or {}
-                logger.warning(
-                    "[PrajaLeadsAPI] Duplicate praja_id blocked: praja_id=%s tenant=%s entity_type=%s existing_record_id=%s "
-                    "existing_phone=%s existing_lead_stage=%s existing_poster=%s",
-                    praja_id,
-                    tenant.slug,
-                    entity_type,
-                    existing_record.id,
-                    existing_data.get("phone_number"),
-                    existing_data.get("lead_stage"),
-                    existing_data.get("poster"),
-                )
-                return Response(
-                    {
-                        'error': f'{entity_type.capitalize()} with praja_id "{praja_id}" already exists',
-                        'praja_id': praja_id,
-                        'existing_record_id': existing_record.id
-                    },
-                    status=status.HTTP_409_CONFLICT
-                )
-        
+
         serializer = RecordSerializer(data=request_data)
         if serializer.is_valid():
             try:
@@ -3441,36 +3312,35 @@ class PrajaLeadsAPIView(APIView):
                     entity_type=entity_type
                 )
             except IntegrityError:
-                # Unique constraint (tenant_id, praja_id) - race with concurrent request
-                if entity_type == 'lead':
-                    if praja_id:
-                        existing_record = Record.objects.filter(
-                            data__praja_id=praja_id,
-                            tenant=tenant,
-                            entity_type=entity_type
-                        ).first()
-                        if existing_record:
-                            logger.warning(
-                                "[PrajaLeadsAPI] Duplicate praja_id (race): praja_id=%s tenant=%s existing_record_id=%s",
-                                praja_id, tenant.slug, existing_record.id,
-                            )
-                            return Response(
-                                {
-                                    'error': f'{entity_type.capitalize()} with praja_id "{praja_id}" already exists',
-                                    'praja_id': praja_id,
-                                    'existing_record_id': existing_record.id
-                                },
-                                status=status.HTTP_409_CONFLICT
-                            )
+                # Unique constraint (tenant_id, praja_id) - duplicate or race.
+                # Roll back so we can query for existing_record (DB connection is broken until we roll back).
+                transaction.rollback()
+                existing_record = (
+                    Record.objects.filter(
+                        data__praja_id=praja_id,
+                        tenant=tenant,
+                        entity_type=entity_type,
+                    ).first()
+                    if praja_id
+                    else None
+                )
+                if existing_record:
                     logger.warning(
-                        "[PrajaLeadsAPI] Duplicate lead (race): praja_id=%s tenant=%s",
-                        praja_id, tenant.slug,
+                        "[PrajaLeadsAPI] Duplicate praja_id: praja_id=%s tenant=%s existing_record_id=%s",
+                        praja_id, tenant.slug, existing_record.id,
                     )
                     return Response(
-                        {'error': 'Duplicate lead (conflict on praja_id)'},
-                        status=status.HTTP_409_CONFLICT,
+                        {
+                            'error': f'{entity_type.capitalize()} with praja_id "{praja_id}" already exists',
+                            'praja_id': praja_id,
+                            'existing_record_id': existing_record.id
+                        },
+                        status=status.HTTP_409_CONFLICT
                     )
-                raise
+                return Response(
+                    {'error': 'Duplicate (conflict on praja_id)'},
+                    status=status.HTTP_409_CONFLICT,
+                )
             
             # Get name from data for logging
             record_name = (record.data or {}).get('name', '')
