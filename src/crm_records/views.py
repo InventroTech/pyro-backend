@@ -1680,15 +1680,15 @@ class GetNextLeadView(APIView):
                             AND data->>'first_assigned_at' != ''
                             AND (data->>'first_assigned_at')::timestamptz >= %s
                         )
-                        -- For backward compatibility: if first_assigned_at doesn't exist, 
-                        -- count leads currently assigned to this user that were updated today
-                        -- AND call_attempts = 0 (to exclude retry leads that don't have first_assigned_at set)
+                        -- For backward compatibility: if first_assigned_at doesn't exist,
+                        -- count leads currently assigned to this user (assigned_to = user, non-null) that were updated today
                         OR (
-                            (data->>'first_assigned_at' IS NULL OR data->>'first_assigned_at' = '')
+                            (data->>'first_assigned_at' IS NULL OR TRIM(COALESCE(data->>'first_assigned_at', '')) = '')
+                            AND (data->>'assigned_to') IS NOT NULL
+                            AND TRIM(COALESCE(data->>'assigned_to', '')) != ''
+                            AND LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) NOT IN ('null', 'none')
                             AND data->>'assigned_to' = %s
                             AND updated_at >= %s
-                            -- Exclude retry leads: call_attempts > 0 indicates it's been attempted before
-                            -- (only for backward compatibility path where first_assigned_at doesn't exist)
                             AND COALESCE((data->>'call_attempts')::int, 0) = 0
                         )
                         """
@@ -1731,9 +1731,9 @@ class GetNextLeadView(APIView):
                             COALESCE((data->>'call_attempts')::int, 0) >= 1
                             AND COALESCE((data->>'call_attempts')::int, 0) <= 6
                             AND UPPER(COALESCE(data->>'lead_stage','')) = 'NOT_CONNECTED'
-                            AND data->>'next_call_at' IS NOT NULL
-                            AND data->>'next_call_at' != ''
-                            AND data->>'next_call_at' != 'null'
+                            AND (data->>'next_call_at') IS NOT NULL
+                            AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
+                            AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
                             AND (data->>'next_call_at')::timestamptz <= NOW()
                             """
                         ],
@@ -1765,13 +1765,17 @@ class GetNextLeadView(APIView):
                     # If no assigned retry lead found, try unassigned NOT_CONNECTED due leads (e.g. SELF TRIAL where assigned_to is set to null on "not connected")
                     if not retry_candidate and not debug_mode:
                         _unassigned_not_connected_where = """
-                            (data->>'assigned_to' IS NULL OR data->>'assigned_to' = '' OR data->>'assigned_to' = 'null' OR data->>'assigned_to' = 'None')
+                            (
+                                (data->>'assigned_to') IS NULL
+                                OR TRIM(COALESCE(data->>'assigned_to', '')) = ''
+                                OR LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) IN ('null', 'none')
+                            )
                             AND COALESCE((data->>'call_attempts')::int, 0) >= 1
                             AND COALESCE((data->>'call_attempts')::int, 0) <= 6
                             AND UPPER(COALESCE(data->>'lead_stage','')) = 'NOT_CONNECTED'
-                            AND data->>'next_call_at' IS NOT NULL
-                            AND data->>'next_call_at' != ''
-                            AND data->>'next_call_at' != 'null'
+                            AND (data->>'next_call_at') IS NOT NULL
+                            AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
+                            AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
                             AND (data->>'next_call_at')::timestamptz <= NOW()
                             """
                         unassigned_retry_qs = Record.objects.filter(
@@ -1898,20 +1902,21 @@ class GetNextLeadView(APIView):
         )
 
         # Common WHERE conditions for fresh leads: unassigned, lead_stage=FRESH only, 0 call attempts
+        # assigned_to: match JSON null, empty, or string 'null'/'None' (exact data shape)
+        # next_call_at: when used, must be non-null and parseable (not JSON null or empty string)
         _queueable_where = """
                 (
-                    data->>'assigned_to' IS NULL OR
-                    data->>'assigned_to' = '' OR
-                    data->>'assigned_to' = 'null' OR
-                    data->>'assigned_to' = 'None'
+                    (data->>'assigned_to') IS NULL
+                    OR TRIM(COALESCE(data->>'assigned_to', '')) = ''
+                    OR LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) IN ('null', 'none')
                 )
                 AND UPPER(COALESCE(data->>'lead_stage','')) = 'FRESH'
                 AND (
                     COALESCE((data->>'call_attempts')::int, 0) = 0
                     OR (
-                        data->>'next_call_at' IS NOT NULL
-                        AND data->>'next_call_at' != ''
-                        AND data->>'next_call_at' != 'null'
+                        (data->>'next_call_at') IS NOT NULL
+                        AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
+                        AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
                         AND (data->>'next_call_at')::timestamptz <= NOW()
                     )
                 )
@@ -1990,15 +1995,15 @@ class GetNextLeadView(APIView):
             unassigned = unassigned.filter(data__lead_status__in=eligible_lead_statuses)
             logger.info("[GetNextLead] Filtered unassigned leads by eligible lead statuses (intersection): %s", eligible_lead_statuses)
 
-        # Exclude leads that are already assigned to someone else; only unassigned or self-assigned leads are pullable.
+        # Exclude leads assigned to someone else (assigned_to = non-empty and != current user).
+        # Treat JSON null, empty, 'null', 'none' as unassigned (exact data shape).
         before_exclude = unassigned.count()
         unassigned = unassigned.extra(
             where=["""
                 NOT (
-                    data->>'assigned_to' IS NOT NULL
-                    AND data->>'assigned_to' != ''
-                    AND data->>'assigned_to' != 'null'
-                    AND data->>'assigned_to' != 'None'
+                    (data->>'assigned_to') IS NOT NULL
+                    AND TRIM(COALESCE(data->>'assigned_to', '')) != ''
+                    AND LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) NOT IN ('null', 'none')
                     AND data->>'assigned_to' != %s
                 )
             """],
@@ -2317,10 +2322,10 @@ class GetNextLeadView(APIView):
             lead_stage = data.get('lead_stage', '').upper()
             # Check if this is a retry lead (NOT_CONNECTED only)
             # These leads should NOT set first_assigned_to when reassigned to a new RM
+            # last_call_outcome in DB is exactly "not_connected"
             is_not_connected_retry = (
                 call_attempts_int > 0 or
-                last_call_outcome in ('not connected', 'not_connected', 'notconnected') or
-                last_call_outcome == 'call_back_later' or
+                last_call_outcome == 'not_connected' or
                 lead_stage == 'NOT_CONNECTED'
             )
             

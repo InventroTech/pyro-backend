@@ -19,7 +19,7 @@ def dispatch_event(event_name: str, record: Record, payload: Dict[str, Any]) -> 
     It executes all matching rules for the tenant and event.
     
     Args:
-        event_name (str): The name of the event (e.g., 'button_click', 'win_clicked')
+        event_name (str): The name of the event (e.g. 'lead.call_not_connected', 'lead.call_back_later')
         record (Record): The record that triggered the event
         payload (Dict[str, Any]): Additional data associated with the event
         
@@ -27,7 +27,7 @@ def dispatch_event(event_name: str, record: Record, payload: Dict[str, Any]) -> 
         bool: True if event was processed successfully, False otherwise
         
     Example:
-        dispatch_event("win_clicked", record, {"button_type": "win", "user_id": "123"})
+        dispatch_event("lead.call_not_connected", record, {"user_id": "123"})
     """
     logger.info(f"[DISPATCH] Event '{event_name}' for Record {record.id} (tenant {record.tenant.id})")
     logger.debug(f"[DISPATCH] Payload: {payload}")
@@ -86,7 +86,7 @@ def get_tenant_events(tenant, event_name: Optional[str] = None, limit: int = 100
 def simulate_workflow_actions(event_name: str, record: Record, payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Simulate workflow actions that would be triggered by rules.
-    This is a placeholder for future rule engine implementation.
+    Uses event names that exist in the system (lead.*, agent.*).
     
     Args:
         event_name (str): The name of the event
@@ -97,28 +97,33 @@ def simulate_workflow_actions(event_name: str, record: Record, payload: Dict[str
         Dict[str, Any]: Simulated action results
     """
     simulated_actions = {
-        "win_clicked": {
+        "lead.call_not_connected": {
             "action": "update_fields",
-            "updates": {"lead_stage": "CLOSED", "resolution_status": "Resolved"},
-            "message": "Lead marked as closed"
+            "updates": {"lead_stage": "NOT_CONNECTED", "last_call_outcome": "not_connected"},
+            "message": "Lead marked as not connected"
         },
-        "lost_clicked": {
+        "lead.call_back_later": {
             "action": "update_fields",
-            "updates": {"lead_stage": "CLOSED", "resolution_status": "Closed"},
-            "message": "Lead marked as closed"
-        },
-        "call_later_clicked": {
-            "action": "update_fields",
-            "updates": {"lead_stage": "SNOOZED", "next_call_at": "2025-01-02T10:00:00Z"},
+            "updates": {"lead_stage": "SNOOZED", "next_call_at": payload.get("next_call_at", "")},
             "message": "Lead scheduled for follow-up call"
         },
-        "button_click": {
-            "action": "log_event",
-            "message": f"Button clicked: {payload.get('button_type', 'unknown')}"
-        }
+        "lead.trial_activated": {
+            "action": "update_fields",
+            "updates": {"lead_stage": "TRIAL_ACTIVATED"},
+            "message": "Lead marked as trial activated"
+        },
+        "lead.not_interested": {
+            "action": "update_fields",
+            "updates": {"lead_stage": "NOT_INTERESTED"},
+            "message": "Lead marked as not interested"
+        },
+        "agent.take_break": {
+            "action": "update_fields",
+            "updates": {"lead_stage": "IN_QUEUE", "assigned_to": None},
+            "message": "Lead unassigned (agent take break)"
+        },
     }
     
-    # Return simulated action for the event
     return simulated_actions.get(event_name, {
         "action": "no_action",
         "message": f"No workflow defined for event: {event_name}"

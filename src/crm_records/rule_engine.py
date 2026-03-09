@@ -200,10 +200,10 @@ def action_update_fields(
         lead_stage = record.data.get("lead_stage", "").upper()
         # Check if this is a retry lead (NOT_CONNECTED only)
         # These leads should NOT set first_assigned_to when reassigned to a new RM
+        # last_call_outcome in DB is exactly "not_connected"
         is_not_connected_retry = (
             call_attempts_int > 0 or
-            last_call_outcome in ("not connected", "not_connected", "notconnected") or
-            last_call_outcome == "call_back_later" or
+            last_call_outcome == "not_connected" or
             lead_stage == "NOT_CONNECTED"
         )
         
