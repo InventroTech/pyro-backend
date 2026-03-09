@@ -4,10 +4,14 @@ and full form payload (department, vendor, product_link, urgency_level, etc.).
 """
 import uuid
 
-from django.test import TestCase, Client
+from django.core.cache import cache
+from django.test import TestCase
 from django.contrib.auth import get_user_model
+from rest_framework.test import APIClient
 
 from core.models import Tenant
+from authz import service as authz_service
+from authz.models import Role, TenantMembership
 from crm_records.models import Record
 
 User = get_user_model()
@@ -17,17 +21,37 @@ class InventoryRequestFormBackendTests(TestCase):
     """Test that inventory request form data is stored correctly via records API."""
 
     def setUp(self):
+        # Clear authz permissions cache so this test's membership is used (avoids stale cache from prior test)
+        authz_service._CACHE.clear()
+
         self.tenant = Tenant.objects.create(
             id=uuid.uuid4(),
             name="Test Tenant",
             slug="test-tenant",
         )
+        # Clear tenant middleware cache so this test's tenant is resolved (avoids stale tenant from prior test)
+        cache.delete(f"tenant:slug:{self.tenant.slug}")
+        cache.delete(f"tenant:id:{self.tenant.id}")
+
         self.user = User.objects.create_user(
             email="requester@example.com",
             password="pass1234",
             supabase_uid=str(uuid.uuid4()),
         )
-        self.client = Client()
+        # IsTenantAuthenticated requires an active TenantMembership for the user in this tenant
+        role = Role.objects.create(
+            tenant=self.tenant,
+            key="AGENT",
+            name="Agent",
+        )
+        TenantMembership.objects.create(
+            tenant=self.tenant,
+            user_id=self.user.supabase_uid,
+            email=self.user.email,
+            role=role,
+            is_active=True,
+        )
+        self.client = APIClient()
         self.list_url = "/crm-records/records/"
 
     def _auth_headers(self):
