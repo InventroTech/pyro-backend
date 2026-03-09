@@ -14,6 +14,7 @@ except ImportError:
     date_parser = None
 from django.db.models import Q, F, Count, Case, When, Value, IntegerField
 from django.db import transaction
+from django.db import IntegrityError
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 import logging
@@ -317,7 +318,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 if record.pyro_data:
                     properties.update(record.pyro_data)
                 
-                # Enqueue background job
+                # Enqueue background job (single send; do not also send sync to avoid duplicate Mixpanel events)
                 queue_service = get_queue_service()
                 queue_service.enqueue_job(
                     job_type=JobType.SEND_MIXPANEL_EVENT,
@@ -330,10 +331,6 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                     tenant_id=str(record.tenant.id) if record.tenant else None,
                     max_attempts=3
                 )
-                
-                # Send sync
-                mixpanel_service = MixpanelService()
-                mixpanel_service.send_to_mixpanel_sync(str(user_id), event_name, properties)
             except Exception as e:
                 logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
     
@@ -654,7 +651,7 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
                 if record.pyro_data:
                     properties.update(record.pyro_data)
                 
-                # Enqueue background job
+                # Enqueue background job (single send; do not also send sync to avoid duplicate Mixpanel events)
                 queue_service = get_queue_service()
                 job = queue_service.enqueue_job(
                     job_type=JobType.SEND_MIXPANEL_EVENT,
@@ -667,9 +664,6 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
                     tenant_id=str(record.tenant.id) if record.tenant else None,
                     max_attempts=3
                 )
-                # Send sync
-                mixpanel_service = MixpanelService()
-                mixpanel_service.send_to_mixpanel_sync(str(user_id), event_name, properties)
             except Exception as e:
                 logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
 
@@ -3300,58 +3294,53 @@ class PrajaLeadsAPIView(APIView):
             if 'call_attempts' not in request_data['data'] or request_data['data'].get('call_attempts') in (None, '', 'null'):
                 request_data['data']['call_attempts'] = 0
         
-        # Extract lead data safely for logging/debugging
+        # RecordSerializer expects entity_type in input for validation
+        request_data['entity_type'] = entity_type
+
         request_lead_data = request_data.get('data') if isinstance(request_data.get('data'), dict) else {}
-        
-        # Check for duplicate praja_id before creating
         praja_id = request_lead_data.get('praja_id')
-        
-        # Compact, structured log for every create attempt (helps debug 4xx like 409)
         logger.info(
-            "[PrajaLeadsAPI] Incoming CREATE: tenant=%s entity_type=%s praja_id=%s phone=%s lead_stage=%s poster=%s",
-            getattr(tenant, "slug", None),
-            entity_type,
-            praja_id,
-            request_lead_data.get("phone_number"),
-            request_lead_data.get("lead_stage"),
-            request_lead_data.get("poster"),
+            "[PrajaLeadsAPI] Incoming CREATE: tenant=%s entity_type=%s praja_id=%s",
+            getattr(tenant, "slug", None), entity_type, praja_id,
         )
-        
-        if praja_id:
-            existing_record = Record.objects.filter(
-                data__praja_id=praja_id,
-                tenant=tenant,
-                entity_type=entity_type
-            ).first()
-            
-            if existing_record:
-                existing_data = existing_record.data or {}
-                logger.warning(
-                    "[PrajaLeadsAPI] Duplicate praja_id blocked: praja_id=%s tenant=%s entity_type=%s existing_record_id=%s "
-                    "existing_phone=%s existing_lead_stage=%s existing_poster=%s",
-                    praja_id,
-                    tenant.slug,
-                    entity_type,
-                    existing_record.id,
-                    existing_data.get("phone_number"),
-                    existing_data.get("lead_stage"),
-                    existing_data.get("poster"),
-                )
-                return Response(
-                    {
-                        'error': f'{entity_type.capitalize()} with praja_id "{praja_id}" already exists',
-                        'praja_id': praja_id,
-                        'existing_record_id': existing_record.id
-                    },
-                    status=status.HTTP_409_CONFLICT
-                )
-        
+
         serializer = RecordSerializer(data=request_data)
         if serializer.is_valid():
-            record = serializer.save(
-                tenant=tenant,
-                entity_type=entity_type
-            )
+            try:
+                record = serializer.save(
+                    tenant=tenant,
+                    entity_type=entity_type
+                )
+            except IntegrityError:
+                # Unique constraint (tenant_id, praja_id) - duplicate or race.
+                # Roll back so we can query for existing_record (DB connection is broken until we roll back).
+                transaction.rollback()
+                existing_record = (
+                    Record.objects.filter(
+                        data__praja_id=praja_id,
+                        tenant=tenant,
+                        entity_type=entity_type,
+                    ).first()
+                    if praja_id
+                    else None
+                )
+                if existing_record:
+                    logger.warning(
+                        "[PrajaLeadsAPI] Duplicate praja_id: praja_id=%s tenant=%s existing_record_id=%s",
+                        praja_id, tenant.slug, existing_record.id,
+                    )
+                    return Response(
+                        {
+                            'error': f'{entity_type.capitalize()} with praja_id "{praja_id}" already exists',
+                            'praja_id': praja_id,
+                            'existing_record_id': existing_record.id
+                        },
+                        status=status.HTTP_409_CONFLICT
+                    )
+                return Response(
+                    {'error': 'Duplicate (conflict on praja_id)'},
+                    status=status.HTTP_409_CONFLICT,
+                )
             
             # Get name from data for logging
             record_name = (record.data or {}).get('name', '')
@@ -3418,7 +3407,7 @@ class PrajaLeadsAPIView(APIView):
                     if record.pyro_data:
                         properties.update(record.pyro_data)
                     
-                    # Enqueue background job
+                    # Enqueue background job (single send; do not also send sync to avoid duplicate Mixpanel events)
                     queue_service = get_queue_service()
                     job = queue_service.enqueue_job(
                         job_type=JobType.SEND_MIXPANEL_EVENT,
@@ -3431,9 +3420,6 @@ class PrajaLeadsAPIView(APIView):
                         tenant_id=str(record.tenant.id) if record.tenant else None,
                         max_attempts=3
                     )
-                    # Send sync
-                    mixpanel_service = MixpanelService()
-                    mixpanel_service.send_to_mixpanel_sync(str(user_id), event_name, properties)
                 except Exception as e:
                     logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
             
@@ -3501,7 +3487,7 @@ class PrajaLeadsAPIView(APIView):
         affiliated_party = request.query_params.get('affiliated_party')
         if affiliated_party:
             queryset = queryset.filter(data__affiliated_party=affiliated_party)
-        
+
         # Order by creation date (newest first)
         queryset = queryset.order_by('-created_at')
         
@@ -3627,7 +3613,7 @@ class PrajaLeadsAPIView(APIView):
         
         logger.info(
             "[PrajaLeadsAPI] Updated %s: id=%s praja_id=%s tenant=%s fields=%s",
-            entity_type,
+            record.entity_type,
             record.id,
             praja_id,
             tenant.slug,
@@ -3775,7 +3761,7 @@ class PrajaLeadsAPIView(APIView):
         
         logger.info(
             "[PrajaLeadsAPI] Updated %s: id=%s praja_id=%s tenant=%s fields=%s",
-            entity_type,
+            record.entity_type,
             record.id,
             praja_id,
             tenant.slug,
