@@ -53,20 +53,20 @@ class GetNextLeadExcludeLogicTests(TestCase):
 
     def test_exclude_lead_assigned_to_other_user(self):
         """Lead with assigned_to = other user should be excluded."""
-        lead = {"lead_stage": "in_queue", "assigned_to": "user-a-uuid", "call_attempts": 0}
+        lead = {"lead_stage": "IN_QUEUE", "assigned_to": "user-a-uuid", "call_attempts": 0}
         assert _should_exclude_lead(lead, "user-b-uuid") is True
         assert _should_exclude_lead(lead, "user-a-uuid") is False
 
     def test_do_not_exclude_unassigned_lead(self):
         """Lead with no assigned_to should not be excluded."""
-        lead = {"lead_stage": "in_queue", "call_attempts": 0}
+        lead = {"lead_stage": "IN_QUEUE", "call_attempts": 0}
         assert _should_exclude_lead(lead, "user-a-uuid") is False
-        lead_empty = {"lead_stage": "in_queue", "assigned_to": ""}
+        lead_empty = {"lead_stage": "IN_QUEUE", "assigned_to": ""}
         assert _should_exclude_lead(lead_empty, "user-a-uuid") is False
 
     def test_do_not_exclude_lead_assigned_to_current_user(self):
         """Lead with assigned_to = current user should not be excluded."""
-        lead = {"lead_stage": "in_queue", "assigned_to": "current-uuid", "call_attempts": 0}
+        lead = {"lead_stage": "IN_QUEUE", "assigned_to": "current-uuid", "call_attempts": 0}
         assert _should_exclude_lead(lead, "current-uuid") is False
 
 
@@ -116,7 +116,7 @@ class GetNextLeadAPITests(BaseAPITestCase):
             data={
                 "name": "Queueable Lead",
                 "phone_number": "+1234567890",
-                "lead_stage": "in_queue",
+                "lead_stage": "IN_QUEUE",
                 "lead_source": "SALES LEAD",
                 "call_attempts": 0,
             },
@@ -128,7 +128,7 @@ class GetNextLeadAPITests(BaseAPITestCase):
         self.assertIn("id", data)
         self.assertIn("data", data)
         self.assertEqual(data["data"].get("assigned_to"), self.supabase_uid)
-        self.assertEqual(data.get("lead_status"), "assigned")
+        self.assertEqual(data.get("lead_status"), "ASSIGNED")
 
     def test_tenant_isolation(self):
         """Leads from another tenant are not returned."""
@@ -139,7 +139,7 @@ class GetNextLeadAPITests(BaseAPITestCase):
             entity_type="lead",
             data={
                 "name": "Other Tenant Lead",
-                "lead_stage": "in_queue",
+                "lead_stage": "IN_QUEUE",
                 "lead_source": "SALES LEAD",
                 "call_attempts": 0,
             },
@@ -177,7 +177,7 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
             entity_type="lead",
             data={
                 "name": "Sales Lead",
-                "lead_stage": "in_queue",
+                "lead_stage": "IN_QUEUE",
                 "lead_source": "SALES LEAD",
                 "call_attempts": 0,
             },
@@ -187,7 +187,7 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
             entity_type="lead",
             data={
                 "name": "Self Trial Lead",
-                "lead_stage": "in_queue",
+                "lead_stage": "IN_QUEUE",
                 "lead_source": "SELF TRIAL",
                 "call_attempts": 0,
             },
@@ -217,7 +217,7 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
             data={
                 "first_assigned_to": self.supabase_uid,
                 "first_assigned_at": now.isoformat(),
-                "lead_stage": "assigned",
+                "lead_stage": "ASSIGNED",
                 "lead_source": "SALES LEAD",
             },
         )
