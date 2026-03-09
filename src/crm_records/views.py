@@ -1963,6 +1963,7 @@ class GetNextLeadView(APIView):
                 user_id=user_uuid,
                 queue_type="lead",
             )
+            logger.info("[GetNextLead] Step 3: Applied routing rule for user_uuid=%s", user_uuid)
             base_after_routing = base_qs.count()
             relaxed_after_routing = relaxed_base_qs.count()
             logger.info(
@@ -2118,7 +2119,6 @@ class GetNextLeadView(APIView):
                     logger.warning(
                         "[GetNextLead] Step 3: Call attempt matrix excluded all leads (min_time_between_calls or other matrix rules). unassigned set to none.",
                     )
-
         after_matrix_cnt = unassigned.count()
         if call_attempt_matrices and after_matrix_cnt == 0:
             logger.info(
