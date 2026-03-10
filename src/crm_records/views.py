@@ -31,6 +31,7 @@ from support_ticket.services import MixpanelService, RMAssignedMixpanelService
 from background_jobs.queue_service import get_queue_service
 from background_jobs.models import JobType
 from user_settings.routing import apply_routing_rule_to_queryset
+from .lead_filters import get_lead_filters_for_user
 import requests
 import uuid
 from authz.models import TenantMembership
@@ -1239,44 +1240,17 @@ class GetNextLeadView(APIView):
         (
             COALESCE((data->>'call_attempts')::int, 0) = 0
             OR (
-                data->>'next_call_at' IS NOT NULL
-                AND data->>'next_call_at' != ''
-                AND data->>'next_call_at' != 'null'
+                (data->>'next_call_at') IS NOT NULL
+                AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
+                AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
                 AND (data->>'next_call_at')::timestamptz <= NOW()
             )
         )
     """
 
     # Fresh leads (for RM assignment) are those with lead_stage = FRESH only.
-    QUEUEABLE_STATUSES = ('FRESH',)
+    QUEUEABLE_STATUSES = ('FRESH','IN_QUEUE')
     ASSIGNED_STATUS = 'ASSIGNED'
-    
-    def _affiliated_party_aliases(self, lead_type: str):
-        """
-        Normalize known affiliated party type typos/synonyms so filtering matches real data.
-        Keep both canonical and legacy spellings to be safe.
-        Include case variants since DB vs settings may differ in casing (JSONField has no __iexact).
-        """
-        aliases = {
-            # common typo observed in data/user settings
-            'in_trail': ['in_trial', 'in_trail'],
-            'in_trial': ['in_trial', 'in_trail'],
-        }
-        base = aliases.get(lead_type, [lead_type])
-        if isinstance(base, str):
-            base = [base]
-        # Add case variants for matching (lead_type, lower, upper, title)
-        seen = set()
-        out = []
-        for a in base:
-            if a and a not in seen:
-                seen.add(a)
-                out.append(a)
-            for v in (a.lower(), a.upper(), a.title()) if a else []:
-                if v not in seen:
-                    seen.add(v)
-                    out.append(v)
-        return out if out else [lead_type]
     
     def _get_call_attempt_matrix(self, tenant, lead_type: str):
         """
@@ -1407,9 +1381,9 @@ class GetNextLeadView(APIView):
                     'is_expired_snoozed': """
                         CASE 
                             WHEN data->>'lead_stage' = 'SNOOZED' 
-                            AND data->>'next_call_at' IS NOT NULL 
-                            AND data->>'next_call_at' != '' 
-                            AND data->>'next_call_at' != 'null'
+                            AND (data->>'next_call_at') IS NOT NULL 
+                            AND TRIM(COALESCE(data->>'next_call_at', '')) != '' 
+                            AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
                             AND (data->>'next_call_at')::timestamptz <= NOW()
                             THEN 0
                             ELSE 1
@@ -1443,9 +1417,9 @@ class GetNextLeadView(APIView):
     @extend_schema(
         summary="Get next lead from queue",
         description="Atomically fetches and assigns the next available lead from the queue for CRM records. "
-                   "Logic: 1) Get user's info from request 2) Check RM's eligible lead types from user settings "
-                   "3) Filter leads by eligible lead types (affiliated_party field); if no party types configured, push all leads to RM "
-                   "4) Order by lead score (100, 90, 80 descending) 5) Return first entry.",
+                   "Lead filters (party, lead source, lead status, routing rules) are loaded from the database only; "
+                   "no frontend overrides. Logic: 1) Resolve user 2) Load lead filters from DB (UserSettings + routing) "
+                   "3) Filter leads by eligible party/source/status and apply routing 4) Order by score 5) Return first entry.",
         responses={
             200: OpenApiResponse(
                 description="Lead assigned successfully or no leads available",
@@ -1531,77 +1505,14 @@ class GetNextLeadView(APIView):
         now_iso = now.isoformat()
         logger.info("[GetNextLead] Step 1 done: now=%s", now_iso)
 
-        # Step 2: Check the RM is eligible for what leads - get from user settings (lead types + lead sources + lead statuses)
-        logger.info("[GetNextLead] Step 2: Fetching user settings (lead types, sources, statuses, daily_limit)...")
-        eligible_lead_types = []
-        eligible_lead_sources = []
-        eligible_lead_statuses = []
-        user_uuid = None
-        daily_limit = None
-        try:
-            import uuid
-            try:
-                user_uuid = uuid.UUID(str(user_identifier))
-                logger.debug("[GetNextLead] User identifier %s parsed as UUID: %s", user_identifier, user_uuid)
-            except (ValueError, AttributeError):
-                from authz.models import TenantMembership
-                tenant_membership = TenantMembership.objects.filter(
-                    tenant=tenant,
-                    email__iexact=str(user_identifier)
-                ).exclude(user_id__isnull=True).first()
-                user_uuid = tenant_membership.user_id if tenant_membership and tenant_membership.user_id else None
-                logger.debug("[GetNextLead] Resolved user_uuid from TenantMembership: %s", user_uuid)
-
-            if user_uuid:
-                # Find TenantMembership for this user
-                from authz.models import TenantMembership
-                import uuid
-                tenant_membership = TenantMembership.objects.filter(
-                    tenant=tenant,
-                    user_id=uuid.UUID(str(user_uuid))
-                ).first()
-                
-                if tenant_membership:
-                    # Daily limit is a user-level attribute; fetch from any user_settings row for this user
-                    any_setting = UserSettings.objects.filter(tenant=tenant, tenant_membership=tenant_membership).first()
-                    daily_limit = getattr(any_setting, "daily_limit", None) if any_setting else None
-
-                    try:
-                        setting = UserSettings.objects.get(
-                            tenant=tenant,
-                            tenant_membership=tenant_membership,
-                            key='LEAD_TYPE_ASSIGNMENT'
-                        )
-                        eligible_lead_types = setting.value if isinstance(setting.value, list) else []
-                        eligible_lead_sources = setting.lead_sources if isinstance(getattr(setting, 'lead_sources', None), list) else []
-                        # Safely access lead_statuses in case migration hasn't been run yet
-                        try:
-                            eligible_lead_statuses = setting.lead_statuses if isinstance(getattr(setting, 'lead_statuses', None), list) else []
-                        except (AttributeError, Exception):
-                            eligible_lead_statuses = []
-                        logger.info("[GetNextLead] Found eligible lead types for user %s: %s", user_identifier, eligible_lead_types)
-                        if eligible_lead_sources:
-                            logger.info("[GetNextLead] Found eligible lead sources for user %s: %s", user_identifier, eligible_lead_sources)
-                        if eligible_lead_statuses:
-                            logger.info("[GetNextLead] Found eligible lead statuses for user %s: %s", user_identifier, eligible_lead_statuses)
-                    except UserSettings.DoesNotExist:
-                        logger.info("[GetNextLead] No lead type assignment found for user %s - will push all leads to RM", user_identifier)
-                        eligible_lead_types = []
-                        eligible_lead_sources = []
-                        eligible_lead_statuses = []
-                else:
-                    logger.warning("[GetNextLead] TenantMembership not found for user UUID %s", user_uuid)
-                    eligible_lead_types = []
-                    eligible_lead_sources = []
-                    daily_limit = None
-            else:
-                logger.warning("[GetNextLead] Could not resolve user UUID for %s", user_identifier)
-        except Exception as e:
-            logger.error("[GetNextLead] Step 2: Error fetching user settings: %s", str(e))
-            eligible_lead_types = []
-            eligible_lead_sources = []
-            eligible_lead_statuses = []
-            daily_limit = None
+        # Step 2: Lead filters from DB only (party, lead source, lead status, routing) - no frontend overrides
+        logger.info("[GetNextLead] Step 2: Loading lead filters from DB (party, sources, statuses, daily_limit)...")
+        filters = get_lead_filters_for_user(tenant, user_identifier)
+        eligible_lead_types = filters.eligible_lead_types
+        eligible_lead_sources = filters.eligible_lead_sources
+        eligible_lead_statuses = filters.eligible_lead_statuses
+        daily_limit = filters.daily_limit
+        user_uuid = filters.user_uuid
 
         logger.info(
             "[GetNextLead] Step 2 done: eligible_lead_types=%s eligible_lead_sources=%s eligible_lead_statuses=%s daily_limit=%s",
@@ -1610,26 +1521,6 @@ class GetNextLeadView(APIView):
             eligible_lead_statuses or "(none)",
             daily_limit,
         )
-
-        # Optional: allow request to pass current lead-assignment page selection (intersection of all is used)
-        party_param = request.query_params.get('party') or request.query_params.get('lead_types')
-        lead_sources_param = request.query_params.get('lead_sources')
-        lead_statuses_param = request.query_params.get('lead_statuses')
-        if party_param is not None:
-            party_list = [s.strip() for s in str(party_param).split(',') if s.strip()]
-            if party_list:
-                eligible_lead_types = party_list
-                logger.info("[GetNextLead] Using party/lead_types from request (intersection): %s", eligible_lead_types)
-        if lead_sources_param is not None:
-            sources_list = [s.strip() for s in str(lead_sources_param).split(',') if s.strip()]
-            eligible_lead_sources = sources_list
-            if eligible_lead_sources:
-                logger.info("[GetNextLead] Using lead_sources from request (intersection): %s", eligible_lead_sources)
-        if lead_statuses_param is not None:
-            statuses_list = [s.strip() for s in str(lead_statuses_param).split(',') if s.strip()]
-            eligible_lead_statuses = statuses_list
-            if eligible_lead_statuses:
-                logger.info("[GetNextLead] Using lead_statuses from request (intersection): %s", eligible_lead_statuses)
 
         # If user has no eligible lead types assigned, push all leads to the RM
         # (no filtering by affiliated_party / party type)
@@ -1788,11 +1679,7 @@ class GetNextLeadView(APIView):
                             where=[_unassigned_not_connected_where],
                         )
                         if eligible_lead_types:
-                            aff_filter = Q()
-                            for _lt in eligible_lead_types:
-                                for _alias in self._affiliated_party_aliases(_lt):
-                                    aff_filter |= Q(data__affiliated_party=_alias)
-                            unassigned_retry_qs = unassigned_retry_qs.filter(aff_filter)
+                            unassigned_retry_qs = unassigned_retry_qs.filter(data__affiliated_party__in=eligible_lead_types)
                         if eligible_lead_sources:
                             unassigned_retry_qs = unassigned_retry_qs.filter(data__lead_source__in=eligible_lead_sources)
                         if eligible_lead_statuses:
@@ -1901,55 +1788,30 @@ class GetNextLeadView(APIView):
             tenant.slug if getattr(tenant, 'slug', None) else tenant.id, total_leads_in_tenant, user_identifier, user_uuid,
         )
 
-        # Common WHERE conditions for fresh leads: unassigned, lead_stage=FRESH only, 0 call attempts
+        # Common WHERE conditions for queueable leads: unassigned, lead_stage in (FRESH, IN_QUEUE), 0 call attempts.
         # assigned_to: match JSON null, empty, or string 'null'/'None' (exact data shape)
-        # next_call_at: when used, must be non-null and parseable (not JSON null or empty string)
+        # Retry logic for NOT_CONNECTED etc. is handled separately; main queue is pure fresh (call_attempts = 0).
         _queueable_where = """
                 (
                     (data->>'assigned_to') IS NULL
                     OR TRIM(COALESCE(data->>'assigned_to', '')) = ''
                     OR LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) IN ('null', 'none')
                 )
-                AND UPPER(COALESCE(data->>'lead_stage','')) = 'FRESH'
-                AND (
-                    COALESCE((data->>'call_attempts')::int, 0) = 0
-                    OR (
-                        (data->>'next_call_at') IS NOT NULL
-                        AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
-                        AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
-                        AND (data->>'next_call_at')::timestamptz <= NOW()
-                    )
-                )
+                AND UPPER(COALESCE(data->>'lead_stage','')) IN ('FRESH','IN_QUEUE')
+                AND COALESCE((data->>'call_attempts')::int, 0) = 0
                 """
-        # When party types are configured, require affiliated_party; when not, include all leads
-        _affiliated_extra = """
-                AND data->>'affiliated_party' IS NOT NULL
-                AND data->>'affiliated_party' != ''
-                AND data->>'affiliated_party' != 'null'
-                """
-
+        # Single queue: queueable leads (unassigned, lead_stage in (FRESH, IN_QUEUE), 0 call_attempts).
         base_qs = Record.objects.filter(
             tenant=tenant,
             entity_type='lead'
-        ).extra(where=[_queueable_where + _affiliated_extra])
-        queueable_with_aff_before_routing = base_qs.count()
-        logger.info(
-            "[GetNextLead] Step 3: queueable (with affiliated_party) before routing: count=%d",
-            queueable_with_aff_before_routing,
-        )
-
-        # Relaxed base (no affiliated_party requirement) - for when no party types configured
-        relaxed_base_qs = Record.objects.filter(
-            tenant=tenant,
-            entity_type='lead'
         ).extra(where=[_queueable_where])
-        queueable_no_aff_before_routing = relaxed_base_qs.count()
+        queueable_before_routing = base_qs.count()
         logger.info(
-            "[GetNextLead] Step 3: queueable (no affiliated_party) before routing: count=%d",
-            queueable_no_aff_before_routing,
+            "[GetNextLead] Step 3: queueable before routing: count=%d",
+            queueable_before_routing,
         )
 
-        # Apply optional per-user routing rule for leads (e.g. by state)
+        # Apply routing rule once (separate from lead filters; looked up from RoutingRule table by user)
         if user_uuid:
             base_qs = apply_routing_rule_to_queryset(
                 base_qs,
@@ -1957,36 +1819,17 @@ class GetNextLeadView(APIView):
                 user_id=user_uuid,
                 queue_type="lead",
             )
-            relaxed_base_qs = apply_routing_rule_to_queryset(
-                relaxed_base_qs,
-                tenant=tenant,
-                user_id=user_uuid,
-                queue_type="lead",
-            )
-            logger.info("[GetNextLead] Step 3: Applied routing rule for user_uuid=%s", user_uuid)
-            base_after_routing = base_qs.count()
-            relaxed_after_routing = relaxed_base_qs.count()
-            logger.info(
-                "[GetNextLead] Step 3: After routing: base_qs=%d relaxed_base_qs=%d",
-                base_after_routing, relaxed_after_routing,
-            )
+            logger.info("[GetNextLead] Step 3: Applied routing rule for user_uuid=%s (after routing: count=%d)", user_uuid, base_qs.count())
         else:
             logger.info("[GetNextLead] Step 3: No user_uuid - skipping routing rule.")
 
-        # Filter by eligible lead types (affiliated_party field must match one of the eligible types)
-        # When no party types configured: push ALL leads to RM (use relaxed_base_qs, no filter)
-        # When party types configured: filter by affiliated_party (case-insensitive match)
-        affiliated_party_filter = Q()  # Used by fallback block; empty Q matches all
+        # Filter by eligible lead types (affiliated_party) from lead filter – use party list from DB as-is
         if not eligible_lead_types:
-            unassigned = relaxed_base_qs
-            base_qs = relaxed_base_qs  # Use same for total_unassigned_cnt / diagnostics
+            unassigned = base_qs
             logger.info("[GetNextLead] No party types configured - using all queueable leads (unfiltered by affiliated_party)")
         else:
-            for lead_type in eligible_lead_types:
-                for alias in self._affiliated_party_aliases(lead_type):
-                    affiliated_party_filter |= Q(data__affiliated_party=alias)
-            unassigned = base_qs.filter(affiliated_party_filter)
-            logger.info("[GetNextLead] Filtered unassigned leads by eligible types: %s", eligible_lead_types)
+            unassigned = base_qs.filter(data__affiliated_party__in=eligible_lead_types)
+            logger.info("[GetNextLead] Filtered unassigned leads by eligible types (from lead filter): %s", eligible_lead_types)
 
         # Intersection of all selected: only leads matching party AND lead_source AND lead_status (when each is configured).
         if eligible_lead_sources:
@@ -2048,10 +1891,8 @@ class GetNextLeadView(APIView):
             exclusion_filters = Q()
             
             for lead_type, matrix in call_attempt_matrices.items():
-                # Filter by lead type (including aliases)
-                lead_type_filter = Q()
-                for alias in self._affiliated_party_aliases(lead_type):
-                    lead_type_filter |= Q(data__affiliated_party=alias)
+                # Filter by lead type (from DB; same party list as lead filter)
+                lead_type_filter = Q(data__affiliated_party=lead_type)
                 
                 # Exclude leads that exceed max call attempts
                 max_attempts_exceeded = lead_type_filter & Q(
@@ -2092,7 +1933,7 @@ class GetNextLeadView(APIView):
                     # Find matching matrix
                     matrix = None
                     for lt, m in call_attempt_matrices.items():
-                        if lead_type == lt or lead_type in self._affiliated_party_aliases(lt):
+                        if lead_type == lt:
                             matrix = m
                             break
                     
@@ -2161,9 +2002,9 @@ class GetNextLeadView(APIView):
         ).extra(
             where=["""
                 data->>'lead_stage' = 'SNOOZED'
-                AND data->>'next_call_at' IS NOT NULL
-                AND data->>'next_call_at' != ''
-                AND data->>'next_call_at' != 'null'
+                AND (data->>'next_call_at') IS NOT NULL
+                AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
+                AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
                 AND (data->>'next_call_at')::timestamptz <= NOW()
             """]
         ).count()
@@ -2172,9 +2013,9 @@ class GetNextLeadView(APIView):
         expired_snoozed_count = unassigned.extra(
             where=["""
                 data->>'lead_stage' = 'SNOOZED'
-                AND data->>'next_call_at' IS NOT NULL
-                AND data->>'next_call_at' != ''
-                AND data->>'next_call_at' != 'null'
+                AND (data->>'next_call_at') IS NOT NULL
+                AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
+                AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
                 AND (data->>'next_call_at')::timestamptz <= NOW()
             """]
         ).count()
@@ -2185,10 +2026,15 @@ class GetNextLeadView(APIView):
         
         # Debug mode: return pipeline counts to diagnose "no leads" issues
         if debug_mode:
-            pre_routing_with_aff = Record.objects.filter(
+            _affiliated_extra = """
+                AND data->>'affiliated_party' IS NOT NULL
+                AND data->>'affiliated_party' != ''
+                AND data->>'affiliated_party' != 'null'
+            """
+            queueable_with_aff = Record.objects.filter(
                 tenant=tenant, entity_type='lead'
             ).extra(where=[_queueable_where + _affiliated_extra]).count()
-            pre_routing_no_aff = Record.objects.filter(
+            queueable_total = Record.objects.filter(
                 tenant=tenant, entity_type='lead'
             ).extra(where=[_queueable_where]).count()
             from user_settings.routing import _get_active_rule
@@ -2213,8 +2059,8 @@ class GetNextLeadView(APIView):
                 "counts": {
                     "total_leads_in_tenant": Record.objects.filter(tenant=tenant, entity_type='lead').count(),
                     "unassigned_minimal": unassigned_minimal.count(),
-                    "queueable_with_affiliated_party": pre_routing_with_aff,
-                    "queueable_without_affiliated_party": pre_routing_no_aff,
+                    "queueable_with_affiliated_party": queueable_with_aff,
+                    "queueable_total": queueable_total,
                     "after_routing_and_filter": unassigned_cnt,
                     "base_qs_count": total_unassigned_cnt,
                 },
@@ -2264,9 +2110,9 @@ class GetNextLeadView(APIView):
                     unassigned_cnt,
                 )
             logger.info(
-                "[GetNextLead] END EMPTY: no lead assigned. Pipeline: total_leads=%d queueable_no_aff=%d total_queueable=%d unassigned_after_filters=%d. "
+                "[GetNextLead] END EMPTY: no lead assigned. Pipeline: total_leads=%d queueable_before_routing=%d total_queueable=%d unassigned_after_filters=%d. "
                 "Check logs above for which step reduced count to 0.",
-                total_leads_in_tenant, queueable_no_aff_before_routing, total_unassigned_cnt, unassigned_cnt,
+                total_leads_in_tenant, queueable_before_routing, total_unassigned_cnt, unassigned_cnt,
             )
             return Response({}, status=status.HTTP_200_OK)
 
