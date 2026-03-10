@@ -198,8 +198,8 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
         self.assertNotEqual(data, {})
         self.assertEqual(data["data"].get("lead_source"), "SALES LEAD")
 
-    def test_daily_limit_fallback_no_unassigned_in_fallback(self):
-        """When daily limit is reached, fallback only returns leads already assigned to user; unassigned NOT_CONNECTED are not in fallback."""
+    def test_daily_limit_fallback_assigns_unassigned_not_connected_when_no_assigned_retry(self):
+        """When daily limit is reached and no assigned-to-user retry lead exists, fallback assigns and returns an unassigned NOT_CONNECTED due lead matching filters (e.g. SELF TRIAL)."""
         from django.utils import timezone
         UserSettings.objects.create(
             tenant=self.tenant,
@@ -221,7 +221,7 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
                 "lead_source": "SALES LEAD",
             },
         )
-        # Unassigned NOT_CONNECTED SELF TRIAL (fallback only looks at assigned_to=user, so this is not returned)
+        # Unassigned NOT_CONNECTED SELF TRIAL: fallback assigns it to user and returns it
         RecordFactory(
             tenant=self.tenant,
             entity_type="lead",
@@ -237,8 +237,10 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
         response = self.client.get(self.url, **self.auth_headers)
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        # Current logic: fallback only returns leads with assigned_to=user; unassigned NOT_CONNECTED are not included
-        self.assertEqual(data, {}, msg="Fallback has no assigned-to-user retry lead; expect empty")
+        self.assertNotEqual(data, {}, msg="Fallback assigns unassigned NOT_CONNECTED due lead and returns it")
+        self.assertEqual(data.get("name"), "Self Trial Not Connected")
+        self.assertEqual(data.get("data", {}).get("lead_source"), "SELF TRIAL")
+        self.assertEqual(data.get("assigned_to"), self.supabase_uid)
 
     def test_only_not_connected_leads_without_daily_limit_returns_empty(self):
         """When no daily limit, NOT_CONNECTED-only leads are not in main queue so Get Next Lead returns empty."""
