@@ -2,11 +2,14 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from django.db.models import Q
+from django.db.models.functions import Lower
+from django.conf import settings
+import jwt
+
 from authz.permissions import IsTenantAuthenticated, HasTenantRole
 from authz.models import Role, TenantMembership
 from .serializers import RoleListSerializer, CreateSyncedRoleSerializer, TenantMembershipUserSerializer
 from .service import create_or_sync_role
-from django.db.models.functions import Lower
 
 
 class RolesView(APIView):
@@ -93,6 +96,79 @@ class ListTenantUsersView(APIView):
                 item['company_name'] = membership.company_name or ''
         
         return Response({"count": len(data), "results": data}, status=status.HTTP_200_OK)
+
+
+class SpoofTenantUserTokenView(APIView):
+    """
+    Generate a Supabase-style JWT for a specific tenant user (membership).
+
+    POST /api/membership/users/<membership_id>/spoof-token/
+
+    This is intended for internal admin "user spoofing" tools only.
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def post(self, request, membership_id, *args, **kwargs):
+        tenant = getattr(request, "tenant", None)
+        if not tenant:
+            return Response(
+                {"error": "Tenant not resolved for request"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            membership = (
+                TenantMembership.objects.select_related("role")
+                .filter(tenant=tenant)
+                .get(id=membership_id)
+            )
+        except TenantMembership.DoesNotExist:
+            return Response(
+                {"error": "User membership not found for this tenant"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if not membership.user_id or not membership.email:
+            return Response(
+                {"error": "Membership is missing user_id or email"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        jwt_secret = getattr(settings, "SUPABASE_JWT_SECRET", None)
+        if not jwt_secret:
+            return Response(
+                {"error": "SUPABASE_JWT_SECRET is not configured"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        payload = {
+            "sub": str(membership.user_id),
+            "email": membership.email.lower(),
+            "tenant_id": str(tenant.id),
+            "role": "authenticated",
+            "aud": "authenticated",
+            "user_data": {
+                "tenant_id": str(tenant.id),
+                "role_id": str(membership.role.id),
+                "user_id": str(membership.user_id),
+            },
+        }
+
+        token = jwt.encode(payload, jwt_secret, algorithm="HS256")
+        if isinstance(token, bytes):
+            token = token.decode("utf-8")
+
+        return Response(
+            {
+                "token": token,
+                "membership_id": membership_id,
+                "email": membership.email,
+                "name": membership.name or "",
+                "tenant_id": str(tenant.id),
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class CurrentUserRoleView(APIView):
