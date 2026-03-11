@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 import jwt
 from django.conf import settings
 from django.test import TestCase
+from django.utils import timezone as django_timezone
 
 from crm_records.models import Record
 from authz import service as authz_service
@@ -303,3 +304,243 @@ class RecordListNotConnectedIncludesUnassignedTests(BaseAPITestCase):
             1,
             msg="List with lead_stage=NOT_CONNECTED and assigned_to=user must include at least assigned leads",
         )
+
+
+class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
+    """
+    Tests for Get Next Lead Step 3a: SNOOZED leads with next_call_at due.
+    Priority: (1) assigned to current user, (2) unassigned, (3) fresh queue.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.url = "/crm-records/leads/next/"
+        authz_service._CACHE.clear()
+        self.client.force_authenticate(user=self.user)
+
+    def test_step_3a_i_returns_assigned_snoozed_due_before_fresh(self):
+        """Step 3a(i): SNOOZED lead assigned to current user with next_call_at due is returned first (before any fresh lead)."""
+        now = django_timezone.now()
+        past = (now - timedelta(hours=1)).isoformat()
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "My Snoozed Due",
+                "lead_stage": "SNOOZED",
+                "lead_source": "SALES LEAD",
+                "assigned_to": self.supabase_uid,
+                "next_call_at": past,
+                "call_attempts": 1,
+            },
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Fresh Lead",
+                "lead_stage": "IN_QUEUE",
+                "lead_source": "SALES LEAD",
+                "call_attempts": 0,
+            },
+        )
+        response = self.client.get(self.url, **self.auth_headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertNotEqual(data, {}, msg="Should return a lead")
+        self.assertEqual(data.get("name"), "My Snoozed Due")
+        self.assertEqual(data["data"].get("lead_stage"), "ASSIGNED")
+        self.assertEqual(data["data"].get("assigned_to"), self.supabase_uid)
+
+    def test_step_3a_ii_returns_unassigned_snoozed_due_when_no_assigned_snoozed(self):
+        """Step 3a(ii): When no assigned-to-me snoozed due, unassigned SNOOZED with next_call_at due is returned (before fresh)."""
+        now = django_timezone.now()
+        past = (now - timedelta(hours=1)).isoformat()
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Unassigned Snoozed Due",
+                "lead_stage": "SNOOZED",
+                "lead_source": "SALES LEAD",
+                "assigned_to": None,
+                "next_call_at": past,
+                "call_attempts": 1,
+            },
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Fresh Lead",
+                "lead_stage": "IN_QUEUE",
+                "lead_source": "SALES LEAD",
+                "call_attempts": 0,
+            },
+        )
+        response = self.client.get(self.url, **self.auth_headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertNotEqual(data, {}, msg="Should return unassigned snoozed due lead")
+        self.assertEqual(data.get("name"), "Unassigned Snoozed Due")
+        self.assertEqual(data["data"].get("lead_stage"), "ASSIGNED")
+        self.assertEqual(data["data"].get("assigned_to"), self.supabase_uid)
+
+    def test_step_3a_assigned_snoozed_takes_priority_over_unassigned_snoozed(self):
+        """When both assigned-to-me snoozed due and unassigned snoozed due exist, assigned-to-me is returned."""
+        now = django_timezone.now()
+        past = (now - timedelta(hours=1)).isoformat()
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Unassigned Snoozed",
+                "lead_stage": "SNOOZED",
+                "lead_source": "SALES LEAD",
+                "assigned_to": None,
+                "next_call_at": past,
+                "call_attempts": 1,
+            },
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "My Snoozed Due",
+                "lead_stage": "SNOOZED",
+                "lead_source": "SALES LEAD",
+                "assigned_to": self.supabase_uid,
+                "next_call_at": past,
+                "call_attempts": 1,
+            },
+        )
+        response = self.client.get(self.url, **self.auth_headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertNotEqual(data, {})
+        self.assertEqual(data.get("name"), "My Snoozed Due")
+
+    def test_snoozed_with_next_call_at_in_future_not_returned_in_step_3a(self):
+        """SNOOZED lead (assigned or unassigned) with next_call_at in the future is not returned in Step 3a; fresh lead can be returned."""
+        now = django_timezone.now()
+        future = (now + timedelta(hours=2)).isoformat()
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Snoozed Future",
+                "lead_stage": "SNOOZED",
+                "lead_source": "SALES LEAD",
+                "assigned_to": self.supabase_uid,
+                "next_call_at": future,
+                "call_attempts": 1,
+            },
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Fresh Lead",
+                "lead_stage": "IN_QUEUE",
+                "lead_source": "SALES LEAD",
+                "call_attempts": 0,
+            },
+        )
+        response = self.client.get(self.url, **self.auth_headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertNotEqual(data, {}, msg="Should return fresh lead when snoozed not due")
+        self.assertEqual(data.get("name"), "Fresh Lead")
+
+    def test_snoozed_with_call_attempts_6_not_eligible_for_step_3a(self):
+        """SNOOZED lead with call_attempts >= 6 is not eligible for Step 3a; fresh lead is returned instead."""
+        now = django_timezone.now()
+        past = (now - timedelta(hours=1)).isoformat()
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Snoozed Exhausted",
+                "lead_stage": "SNOOZED",
+                "lead_source": "SALES LEAD",
+                "assigned_to": None,
+                "next_call_at": past,
+                "call_attempts": 6,
+            },
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Fresh Lead",
+                "lead_stage": "IN_QUEUE",
+                "lead_source": "SALES LEAD",
+                "call_attempts": 0,
+            },
+        )
+        response = self.client.get(self.url, **self.auth_headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertNotEqual(data, {})
+        self.assertEqual(data.get("name"), "Fresh Lead")
+
+    def test_no_snoozed_due_falls_back_to_fresh_queue(self):
+        """When no snoozed-due leads (assigned or unassigned), Get Next Lead returns from fresh queue."""
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Fresh Only",
+                "lead_stage": "IN_QUEUE",
+                "lead_source": "SALES LEAD",
+                "call_attempts": 0,
+            },
+        )
+        response = self.client.get(self.url, **self.auth_headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertNotEqual(data, {})
+        self.assertEqual(data.get("name"), "Fresh Only")
+        self.assertEqual(data["data"].get("lead_stage"), "ASSIGNED")
+
+    def test_snoozed_due_respects_eligible_lead_sources(self):
+        """Step 3a only returns snoozed leads that match user's eligible_lead_sources (e.g. SALES LEAD)."""
+        UserSettings.objects.create(
+            tenant=self.tenant,
+            tenant_membership=self.membership,
+            key="LEAD_TYPE_ASSIGNMENT",
+            value=[],
+            lead_sources=["SALES LEAD"],
+        )
+        now = django_timezone.now()
+        past = (now - timedelta(hours=1)).isoformat()
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Snoozed Sales",
+                "lead_stage": "SNOOZED",
+                "lead_source": "SALES LEAD",
+                "assigned_to": None,
+                "next_call_at": past,
+                "call_attempts": 1,
+            },
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Snoozed Self Trial",
+                "lead_stage": "SNOOZED",
+                "lead_source": "SELF TRIAL",
+                "assigned_to": None,
+                "next_call_at": past,
+                "call_attempts": 1,
+            },
+        )
+        response = self.client.get(self.url, **self.auth_headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertNotEqual(data, {}, msg="Should return one lead")
+        self.assertEqual(data["data"].get("lead_source"), "SALES LEAD")
+        self.assertEqual(data.get("name"), "Snoozed Sales")
