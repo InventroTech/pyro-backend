@@ -6,7 +6,7 @@ from django.db.models.functions import Lower
 from django.conf import settings
 import jwt
 
-from authz.permissions import IsTenantAuthenticated, HasTenantRole
+from authz.permissions import IsTenantAuthenticated, HasPermissionKey
 from authz.models import Role, TenantMembership
 from .serializers import RoleListSerializer, CreateSyncedRoleSerializer, TenantMembershipUserSerializer
 from .service import create_or_sync_role
@@ -107,7 +107,8 @@ class SpoofTenantUserTokenView(APIView):
     This is intended for internal admin "user spoofing" tools only.
     """
 
-    permission_classes = [IsTenantAuthenticated]
+    # Only tenant users with the GM role can spoof other users.
+    permission_classes = [IsTenantAuthenticated, HasPermissionKey("users:spoof")]
 
     def post(self, request, membership_id, *args, **kwargs):
         tenant = getattr(request, "tenant", None)
@@ -117,16 +118,43 @@ class SpoofTenantUserTokenView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Resolve the acting membership (current authenticated user within this tenant)
+        supabase_uid = getattr(request.user, "supabase_uid", None)
+        acting_membership = None
+        if supabase_uid:
+            acting_membership = (
+                TenantMembership.objects.filter(
+                    tenant=tenant,
+                    user_id=supabase_uid,
+                    is_active=True,
+                )
+                .select_related("role")
+                .first()
+            )
+
+        if not acting_membership:
+            return Response(
+                {"error": "No active membership found for requesting user"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         try:
             membership = (
                 TenantMembership.objects.select_related("role")
-                .filter(tenant=tenant)
+                .filter(tenant=tenant, is_active=True)
                 .get(id=membership_id)
             )
         except TenantMembership.DoesNotExist:
             return Response(
                 {"error": "User membership not found for this tenant"},
                 status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Do not allow users to spoof themselves.
+        if membership.user_id == acting_membership.user_id:
+            return Response(
+                {"error": "Cannot spoof your own membership"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         if not membership.user_id or not membership.email:
@@ -159,6 +187,14 @@ class SpoofTenantUserTokenView(APIView):
         if isinstance(token, bytes):
             token = token.decode("utf-8")
 
+        # Lightweight audit metadata in the response for the caller; full audit should go to logs.
+        audit_meta = {
+            "actor_membership_id": str(acting_membership.id),
+            "actor_role_key": getattr(acting_membership.role, "key", None),
+            "target_membership_id": str(membership.id),
+            "target_role_key": getattr(membership.role, "key", None),
+        }
+
         return Response(
             {
                 "token": token,
@@ -166,6 +202,7 @@ class SpoofTenantUserTokenView(APIView):
                 "email": membership.email,
                 "name": membership.name or "",
                 "tenant_id": str(tenant.id),
+                "audit": audit_meta,
             },
             status=status.HTTP_200_OK,
         )

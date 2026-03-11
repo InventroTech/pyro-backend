@@ -54,17 +54,21 @@ def get_effective_permissions(user_uuid: str, tenant) -> dict:
 
     allow_keys = set(role_perm_keys) | set(grp_perm_keys) | set(grp_role_perm_keys)
 
-    user_allow = set(Permission.objects.filter(
-        id__in=UserPermission.objects.filter(
-            tenant=tenant, user_id=user_uuid, effect='allow'
-        ).values('permission_id')
-    ).values_list('perm_key', flat=True))
+    # Per-user overrides are stored against TenantMembership; use the resolved member.
+    user_allow = set()
+    user_deny = set()
+    if member:
+        user_allow = set(Permission.objects.filter(
+            id__in=UserPermission.objects.filter(
+                membership=member, effect='allow'
+            ).values('permission_id')
+        ).values_list('perm_key', flat=True))
 
-    user_deny = set(Permission.objects.filter(
-        id__in=UserPermission.objects.filter(
-            tenant=tenant, user_id=user_uuid, effect='deny'
-        ).values('permission_id')
-    ).values_list('perm_key', flat=True))
+        user_deny = set(Permission.objects.filter(
+            id__in=UserPermission.objects.filter(
+                membership=member, effect='deny'
+            ).values('permission_id')
+        ).values_list('perm_key', flat=True))
 
     final = (allow_keys | user_allow) - user_deny
     val = {'role_key': member.role.key, 'perm_keys': final}
