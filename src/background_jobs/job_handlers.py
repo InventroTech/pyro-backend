@@ -917,28 +917,27 @@ class UnassignSnoozedLeadsJobHandler(JobHandler):
             params=[now],
         )
         unassigned_count = 0
-        with transaction.atomic():
-            for record in qs:
-                data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
-                if not data.get("assigned_to"):
-                    continue
-                data["assigned_to"] = None
-                data.pop("snooze_unassign_at", None)
-                data["next_call_at"] = one_hour_later
-                # Same as 12h release: ensure call_attempts is at least 1 after unassign (call-back with no time)
-                try:
-                    current = int(data.get("call_attempts") or 0)
-                    if current < 1:
-                        data["call_attempts"] = 1
-                except (TypeError, ValueError):
+        for record in qs:
+            data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
+            if not data.get("assigned_to"):
+                continue
+            data["assigned_to"] = None
+            data.pop("snooze_unassign_at", None)
+            data["next_call_at"] = one_hour_later
+            # Same as 12h release: ensure call_attempts is at least 1 after unassign (call-back with no time)
+            try:
+                current = int(data.get("call_attempts") or 0)
+                if current < 1:
                     data["call_attempts"] = 1
-                record.data = data
-                record.save(update_fields=["data", "updated_at"])
-                unassigned_count += 1
-                logger.info(
-                    "[UnassignSnoozedLeads] Unassigned lead record_id=%s (snooze_unassign_at passed)",
-                    record.id,
-                )
+            except (TypeError, ValueError):
+                data["call_attempts"] = 1
+            record.data = data
+            record.save(update_fields=["data", "updated_at"])
+            unassigned_count += 1
+            logger.info(
+                "[UnassignSnoozedLeads] Unassigned lead record_id=%s (snooze_unassign_at passed)",
+                record.id,
+            )
         job.result = {
             "success": True,
             "unassigned_count": unassigned_count,
@@ -982,27 +981,26 @@ class ReleaseLeadsAfter12hJobHandler(JobHandler):
             params=[now],
         )
         released_count = 0
-        with transaction.atomic():
-            for record in qs:
-                data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
-                # Only clear assigned_to; do not change lead_stage (stays NOT_CONNECTED).
-                data["assigned_to"] = None
-                data["next_call_at"] = one_hour_later
-                data.pop("not_connected_unassign_at", None)
-                # call_attempts = current + 1 (increment, not reset to 1)
-                try:
-                    current = int(data.get("call_attempts") or 0)
-                    data["call_attempts"] = current + 1
-                except (TypeError, ValueError):
-                    data["call_attempts"] = 1
-                # Do not remove first_assigned_at or first_assigned_to.
-                record.data = data
-                record.save(update_fields=["data", "updated_at"])
-                released_count += 1
-                logger.info(
-                    "[ReleaseLeadsAfter12h] Released lead record_id=%s (NOT_CONNECTED, not_connected_unassign_at passed, had assigned_to): cleared assigned_to only, stage unchanged",
-                    record.id,
-                )
+        for record in qs:
+            data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
+            # Only clear assigned_to; do not change lead_stage (stays NOT_CONNECTED).
+            data["assigned_to"] = None
+            data["next_call_at"] = one_hour_later
+            data.pop("not_connected_unassign_at", None)
+            # call_attempts = current + 1 (increment, not reset to 1)
+            try:
+                current = int(data.get("call_attempts") or 0)
+                data["call_attempts"] = current + 1
+            except (TypeError, ValueError):
+                data["call_attempts"] = 1
+            # Do not remove first_assigned_at or first_assigned_to.
+            record.data = data
+            record.save(update_fields=["data", "updated_at"])
+            released_count += 1
+            logger.info(
+                "[ReleaseLeadsAfter12h] Released lead record_id=%s (NOT_CONNECTED, not_connected_unassign_at passed, had assigned_to): cleared assigned_to only, stage unchanged",
+                record.id,
+            )
         job.result = {
             "success": True,
             "released_count": released_count,
