@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 class LegacyUserCreateView(APIView):
     """
     NEW: Creates TenantMembership directly (no longer creates LegacyUser).
-    Body: { name, email, [company_name], [role_id], [uid] }
+    Body: { name, email, [company_name], [department], [role_id], [uid] }
     
     DEPRECATED: LegacyUser creation removed. This endpoint now only creates TenantMembership.
     """
@@ -37,6 +37,7 @@ class LegacyUserCreateView(APIView):
         name = ser.validated_data["name"].strip()
         email = ser.validated_data["email"]
         company_name = ser.validated_data.get("company_name")
+        department = (ser.validated_data.get("department") or "").strip() or None
         role_id = ser.validated_data.get("role_id")
         uid = ser.validated_data.get("uid")
 
@@ -69,6 +70,7 @@ class LegacyUserCreateView(APIView):
                     defaults={
                         'name': name,
                         'company_name': company_name,
+                        'department': department,
                         'user_id': uid,
                         'is_active': bool(uid)
                     }
@@ -77,8 +79,10 @@ class LegacyUserCreateView(APIView):
                 # If membership already exists, update it
                 if not created:
                     membership.name = name
-                    if company_name:
+                    if company_name is not None:
                         membership.company_name = company_name
+                    if department is not None:
+                        membership.department = department
                     membership.role = authz_role
                     if uid:
                         membership.user_id = uid
@@ -96,6 +100,7 @@ class LegacyUserCreateView(APIView):
                     'email': membership.email,
                     'tenant_id': str(tenant.id),
                     'company_name': membership.company_name,
+                    'department': membership.department,
                     'role_id': str(membership.role.id),
                     'uid': str(membership.user_id) if membership.user_id else None,
                     'is_active': membership.is_active,
@@ -159,7 +164,8 @@ class AssigneesByRoleView(APIView):
                     'id': str(membership.id),
                     'name': name,
                     'email': membership.email,
-                    'company_name': membership.company_name,  # Include company_name
+                    'company_name': membership.company_name,
+                    'department': membership.department,
                     'uid': str(membership.user_id) if membership.user_id else None,
                     'role': {
                         'id': str(membership.role.id),

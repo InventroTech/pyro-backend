@@ -5,8 +5,9 @@ class LegacyUserCreateSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255)
     email = serializers.EmailField()
     company_name = serializers.CharField(required=False, allow_blank=True)
-    role_id=serializers.UUIDField(required=False,allow_null=True)
-    uid=serializers.UUIDField(required=False,allow_null=True)
+    department = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)
+    role_id = serializers.UUIDField(required=False, allow_null=True)
+    uid = serializers.UUIDField(required=False, allow_null=True)
 
     def validate(self, attrs):
         req = self.context['request']
