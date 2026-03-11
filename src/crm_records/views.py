@@ -1788,6 +1788,95 @@ class GetNextLeadView(APIView):
             tenant.slug if getattr(tenant, 'slug', None) else tenant.id, total_leads_in_tenant, user_identifier, user_uuid,
         )
 
+        # Step 3a: SNOOZED leads with next_call_at due first (before fresh). Priority: (1) assigned to me, (2) unassigned, then main queue.
+        candidate = None
+        _snoozed_due_common = """
+                data->>'lead_stage' = 'SNOOZED'
+                AND (data->>'next_call_at') IS NOT NULL
+                AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
+                AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
+                AND (data->>'next_call_at')::timestamptz <= NOW()
+                AND COALESCE((data->>'call_attempts')::int, 0) < 6
+                """
+        # 3a(i): Assigned to current user (my snoozed leads due for callback)
+        _assigned_snoozed_where = (
+            "data->>'assigned_to' IS NOT NULL AND TRIM(COALESCE(data->>'assigned_to', '')) != '' AND data->>'assigned_to' = %s AND " + _snoozed_due_common
+        )
+        assigned_snoozed_qs = Record.objects.filter(
+            tenant=tenant,
+            entity_type='lead'
+        ).extra(where=[_assigned_snoozed_where], params=[user_identifier])
+        if user_uuid:
+            assigned_snoozed_qs = apply_routing_rule_to_queryset(
+                assigned_snoozed_qs,
+                tenant=tenant,
+                user_id=user_uuid,
+                queue_type="lead",
+            )
+        if eligible_lead_types:
+            assigned_snoozed_qs = assigned_snoozed_qs.filter(data__affiliated_party__in=eligible_lead_types)
+        if eligible_lead_sources:
+            assigned_snoozed_qs = assigned_snoozed_qs.filter(data__lead_source__in=eligible_lead_sources)
+        if eligible_lead_statuses:
+            assigned_snoozed_qs = assigned_snoozed_qs.filter(data__lead_status__in=eligible_lead_statuses)
+        ordered_assigned_snoozed = self._order_by_score(assigned_snoozed_qs, now_iso)
+        for c in ordered_assigned_snoozed[:50]:
+            if self._lead_is_due_for_call(c.data, now):
+                candidate = c
+                logger.info(
+                    "[GetNextLead] Step 3a(i): Selected snoozed-due lead_id=%s assigned to me (next_call_at passed).",
+                    c.id,
+                )
+                break
+        # 3a(ii): If none assigned to me, try unassigned SNOOZED with next_call_at due
+        if not candidate:
+            _unassigned_snoozed_where = """
+                (
+                    (data->>'assigned_to') IS NULL
+                    OR TRIM(COALESCE(data->>'assigned_to', '')) = ''
+                    OR LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) IN ('null', 'none')
+                )
+                AND """ + _snoozed_due_common
+            unassigned_snoozed_qs = Record.objects.filter(
+                tenant=tenant,
+                entity_type='lead'
+            ).extra(where=[_unassigned_snoozed_where])
+            if user_uuid:
+                unassigned_snoozed_qs = apply_routing_rule_to_queryset(
+                    unassigned_snoozed_qs,
+                    tenant=tenant,
+                    user_id=user_uuid,
+                    queue_type="lead",
+                )
+            if eligible_lead_types:
+                unassigned_snoozed_qs = unassigned_snoozed_qs.filter(data__affiliated_party__in=eligible_lead_types)
+            if eligible_lead_sources:
+                unassigned_snoozed_qs = unassigned_snoozed_qs.filter(data__lead_source__in=eligible_lead_sources)
+            if eligible_lead_statuses:
+                unassigned_snoozed_qs = unassigned_snoozed_qs.filter(data__lead_status__in=eligible_lead_statuses)
+            unassigned_snoozed_qs = unassigned_snoozed_qs.extra(
+                where=["""
+                    NOT (
+                        (data->>'assigned_to') IS NOT NULL
+                        AND TRIM(COALESCE(data->>'assigned_to', '')) != ''
+                        AND LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) NOT IN ('null', 'none')
+                        AND data->>'assigned_to' != %s
+                    )
+                """],
+                params=[user_identifier],
+            )
+            ordered_unassigned_snoozed = self._order_by_score(unassigned_snoozed_qs, now_iso)
+            for c in ordered_unassigned_snoozed[:50]:
+                if self._lead_is_due_for_call(c.data, now):
+                    candidate = c
+                    logger.info(
+                        "[GetNextLead] Step 3a(ii): Selected unassigned snoozed-due lead_id=%s (next_call_at passed).",
+                        c.id,
+                    )
+                    break
+        if not candidate:
+            logger.info("[GetNextLead] Step 3a: No snoozed-due leads (assigned to me or unassigned); proceeding to main queue (fresh leads).")
+
         # Common WHERE conditions for queueable leads: unassigned, lead_stage in (FRESH, IN_QUEUE), 0 call attempts.
         # assigned_to: match JSON null, empty, or string 'null'/'None' (exact data shape)
         # Retry logic for NOT_CONNECTED etc. is handled separately; main queue is pure fresh (call_attempts = 0).
@@ -2076,25 +2165,27 @@ class GetNextLeadView(APIView):
                 "distinct_affiliated_parties": list(Record.objects.filter(tenant=tenant, entity_type='lead').values_list('data__affiliated_party', flat=True).distinct()[:20]),
             }, status=status.HTTP_200_OK)
 
-        logger.info("[GetNextLead] Step 4: Ordering by score (call_attempts asc, score desc, LIFO)...")
-        ordered = self._order_by_score(unassigned, now_iso)
-        candidate = None
-        checked = 0
-        for c in ordered[:50]:
-            checked += 1
-            if self._lead_is_due_for_call(c.data, now):
-                candidate = c
+        # Only build ordered list and pick from fresh queue when we did not already get a snoozed-due candidate in Step 3a
+        if candidate is None:
+            logger.info("[GetNextLead] Step 4: Ordering by score (call_attempts asc, score desc, LIFO)...")
+            ordered = self._order_by_score(unassigned, now_iso)
+            candidate = None
+            checked = 0
+            for c in ordered[:50]:
+                checked += 1
+                if self._lead_is_due_for_call(c.data, now):
+                    candidate = c
+                    logger.info(
+                        "[GetNextLead] Step 4: Selected candidate lead_id=%s (checked %d, call_attempts=%s)",
+                        c.id, checked, (c.data or {}).get('call_attempts'),
+                    )
+                    break
                 logger.info(
-                    "[GetNextLead] Step 4: Selected candidate lead_id=%s (checked %d, call_attempts=%s)",
-                    c.id, checked, (c.data or {}).get('call_attempts'),
+                    "[GetNextLead] Step 4: Skipping lead_id=%s (not due yet: call_attempts=%s next_call_at=%s)",
+                    c.id, (c.data or {}).get('call_attempts'), (c.data or {}).get('next_call_at'),
                 )
-                break
-            logger.info(
-                "[GetNextLead] Step 4: Skipping lead_id=%s (not due yet: call_attempts=%s next_call_at=%s)",
-                c.id, (c.data or {}).get('call_attempts'), (c.data or {}).get('next_call_at'),
-            )
-        if not candidate and checked > 0:
-            logger.info("[GetNextLead] Step 4: No candidate due for call among first 50 ordered leads (checked=%d).", checked)
+            if not candidate and checked > 0:
+                logger.info("[GetNextLead] Step 4: No candidate due for call among first 50 ordered leads (checked=%d).", checked)
 
         # Step 5: Return first entry (or empty if none found)
         logger.info("[GetNextLead] Step 5: Lock and assign (candidate=%s)...", candidate.id if candidate else None)
