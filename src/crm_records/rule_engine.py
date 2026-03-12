@@ -230,6 +230,15 @@ def action_update_fields(
                 f"last_call_outcome={last_call_outcome}, lead_stage={lead_stage}, won't count toward new RM's daily limit)"
             )
 
+    # Call-back-later: if user did not select a time, set next_call_at to now + 1 hour so the lead still has a callback time.
+    if is_call_back_later_event:
+        next_call_at_val = resolved_updates.get("next_call_at") if "next_call_at" in resolved_updates else None
+        if not next_call_at_val or (isinstance(next_call_at_val, str) and next_call_at_val.strip() in ("", "null", "None")):
+            resolved_updates["next_call_at"] = (timezone.now() + timedelta(hours=1)).isoformat()
+            logger.info(
+                f"[action_update_fields] Call back later with no time selected: set next_call_at to now + 1h for lead_id={record.id}"
+            )
+
     # Call-back-later (sales lead only): set snooze_unassign_at so background job can unassign after 48h (if time selected) or 12h (if not).
     # Self-trial rule does not set assigned_to (stays unassigned); only the sales-lead rule sets assigned_to, so we only set snooze_unassign_at when the rule is actually assigning (truthy assigned_to), not when clearing it.
     assigned_to_value = resolved_updates.get("assigned_to") if "assigned_to" in resolved_updates else None
