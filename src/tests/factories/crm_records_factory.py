@@ -16,7 +16,7 @@ class RecordFactory(factory.django.DjangoModelFactory):
         "name": _fake.name(),
         "phone": _fake.numerify("##########"),
         "email": _fake.email(),
-        "lead_stage": "new",
+        "lead_stage": "FRESH",
     })
     pyro_data = factory.LazyFunction(dict)
 

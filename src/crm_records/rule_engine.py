@@ -189,7 +189,7 @@ def action_update_fields(
         current_assigned_to = record.data.get("assigned_to")
         
         # Check if this is a "not connected" retry lead
-        # (has call_attempts > 0, or last_call_outcome = 'not_connected', or lead_stage was 'in_queue')
+        # (has call_attempts > 0, or last_call_outcome = 'not_connected', or lead_stage was 'IN_QUEUE')
         call_attempts = record.data.get("call_attempts", 0)
         try:
             call_attempts_int = int(call_attempts) if call_attempts is not None else 0
@@ -198,16 +198,13 @@ def action_update_fields(
         
         last_call_outcome = record.data.get("last_call_outcome", "").lower()
         lead_stage = record.data.get("lead_stage", "").upper()
-        # Check if this is a retry lead
-        # Only "not connected" and "call back later" can be retried
+        # Check if this is a retry lead (NOT_CONNECTED only)
         # These leads should NOT set first_assigned_to when reassigned to a new RM
+        # last_call_outcome in DB is exactly "not_connected"
         is_not_connected_retry = (
             call_attempts_int > 0 or
-            last_call_outcome in ("not connected", "not_connected", "notconnected") or
-            last_call_outcome == "call_back_later" or
-            lead_stage == "NOT_CONNECTED" or
-            lead_stage == "IN_QUEUE" or
-            lead_stage == "CALL_BACK_LATER"
+            last_call_outcome == "not_connected" or
+            lead_stage == "NOT_CONNECTED"
         )
         
         # Check if this is a fresh assignment (was unassigned, now being assigned)
@@ -232,7 +229,39 @@ def action_update_fields(
                 f"(retry lead with previous attempts/outcome - call_attempts={call_attempts_int}, "
                 f"last_call_outcome={last_call_outcome}, lead_stage={lead_stage}, won't count toward new RM's daily limit)"
             )
-    
+
+    # Call-back-later: if user did not select a time, set next_call_at to now + 1 hour so the lead still has a callback time.
+    if is_call_back_later_event:
+        next_call_at_val = resolved_updates.get("next_call_at") if "next_call_at" in resolved_updates else None
+        if not next_call_at_val or (isinstance(next_call_at_val, str) and next_call_at_val.strip() in ("", "null", "None")):
+            resolved_updates["next_call_at"] = (timezone.now() + timedelta(hours=1)).isoformat()
+            logger.info(
+                f"[action_update_fields] Call back later with no time selected: set next_call_at to now + 1h for lead_id={record.id}"
+            )
+
+    # Call-back-later (sales lead only): set snooze_unassign_at so background job can unassign after 48h (if time selected) or 12h (if not).
+    # Self-trial rule does not set assigned_to (stays unassigned); only the sales-lead rule sets assigned_to, so we only set snooze_unassign_at when the rule is actually assigning (truthy assigned_to), not when clearing it.
+    assigned_to_value = resolved_updates.get("assigned_to") if "assigned_to" in resolved_updates else None
+    if is_call_back_later_event and assigned_to_value and str(assigned_to_value).strip() not in ("", "null", "None"):
+        has_next_call_time = bool(original_payload.get("next_call_at"))
+        unassign_hours = 48 if has_next_call_time else 12
+        resolved_updates["snooze_unassign_at"] = (timezone.now() + timedelta(hours=unassign_hours)).isoformat()
+        logger.info(
+            f"[action_update_fields] Set snooze_unassign_at for lead_id={record.id} "
+            f"(call_back_later, has_time={has_next_call_time}, unassign in {unassign_hours}h)"
+        )
+
+    # Not-connected: set not_connected_unassign_at so background job can unassign after 12h (same pattern as snooze_unassign_at).
+    # Only when the rule sets lead_stage to NOT_CONNECTED and the lead has or keeps assigned_to.
+    lead_stage_after = (resolved_updates.get("lead_stage") or record.data.get("lead_stage") or "").strip().upper()
+    assigned_after = resolved_updates.get("assigned_to") if "assigned_to" in resolved_updates else record.data.get("assigned_to")
+    assigned_ok = assigned_after and str(assigned_after).strip() not in ("", "null", "None")
+    if is_not_connected_event and lead_stage_after == "NOT_CONNECTED" and assigned_ok:
+        resolved_updates["not_connected_unassign_at"] = (timezone.now() + timedelta(hours=12)).isoformat()
+        logger.info(
+            f"[action_update_fields] Set not_connected_unassign_at for lead_id={record.id} (not_connected, unassign in 12h)"
+        )
+
     # Apply all updates
     for key, value in resolved_updates.items():
         record.data[key] = value
@@ -266,8 +295,7 @@ def action_update_fields(
                     f"Increment skipped for field '{key}' on record {record.id}: current='{current_value}' delta='{delta}'"
                 )
 
-    # All "not connected" logic is now handled by database rules
-    # No hardcoded logic needed - rules handle next_call_at, unassignment, lead_stage, and 6-attempt limit
+    # DORMANT (max attempts reached) is handled by rule sets; no hardcoded logic here.
 
     # Save only the data and updated_at fields for efficiency
     record.save(update_fields=["data", "updated_at"])

@@ -20,6 +20,8 @@ class JobType(models.TextChoices):
     SCORE_LEADS = "score_leads", "Score Leads"
     SEND_TO_PRAJA = "send_to_praja", "Send to Praja Server"
     PARTNER_LEAD_ASSIGN = "partner_lead_assign", "Partner Lead Assign"
+    UNASSIGN_SNOOZED_LEADS = "unassign_snoozed_leads", "Unassign Snoozed Leads"
+    RELEASE_LEADS_AFTER_12H = "release_leads_after_12h", "Release Leads After 12h"
     # Future job types can be added here:
     # SEND_EMAIL = "send_email", "Send Email"
     # GENERATE_REPORT = "generate_report", "Generate Report"

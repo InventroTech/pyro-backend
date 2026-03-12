@@ -834,7 +834,7 @@ class PartnerLeadAssignJobHandler(JobHandler):
                     or previous_assigned_to == "None"
                 )
                 data["assigned_to"] = user_identifier
-                data["lead_stage"] = "assigned"
+                data["lead_stage"] = "ASSIGNED"
                 data["partner_source"] = partner_slug
                 if "call_attempts" not in data or data.get("call_attempts") in (None, "", "null"):
                     data["call_attempts"] = 0
@@ -845,11 +845,11 @@ class PartnerLeadAssignJobHandler(JobHandler):
                     call_attempts_int = 0
                 last_call_outcome = (data.get("last_call_outcome") or "").lower()
                 lead_stage = (data.get("lead_stage") or "").upper()
+                # last_call_outcome in DB is exactly "not_connected"
                 is_not_connected_retry = (
                     call_attempts_int > 0
-                    or last_call_outcome in ("not connected", "not_connected", "notconnected")
-                    or last_call_outcome == "call_back_later"
-                    or lead_stage in ("NOT_CONNECTED", "CALL_BACK_LATER", "IN_QUEUE")
+                    or last_call_outcome == "not_connected"
+                    or lead_stage == "NOT_CONNECTED"
                 )
                 if is_fresh_assignment and "first_assigned_at" not in data and not is_not_connected_retry:
                     data["first_assigned_at"] = timezone.now().isoformat()
@@ -890,6 +890,118 @@ class PartnerLeadAssignJobHandler(JobHandler):
         return True
 
 
+class UnassignSnoozedLeadsJobHandler(JobHandler):
+    """
+    Job for SNOOZED leads only. Unassigns when snooze_unassign_at has passed:
+    - 48 hours if time was set (call-back-later with time), 12 hours if not.
+    Triggers only when: (1) lead has assigned_to, (2) no other event was clicked in between
+    (lead_stage still SNOOZED), (3) not all attempts done (call_attempts < 6).
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        from datetime import timedelta
+
+        now = timezone.now()
+        one_hour_later = (now + timedelta(hours=1)).isoformat()
+        # SNOOZED only = no other event clicked; has assigned_to; snooze_unassign_at passed; attempts not exhausted
+        qs = Record.objects.filter(entity_type="lead").extra(
+            where=[
+                "data->>'lead_stage' = 'SNOOZED'",
+                "data->>'assigned_to' IS NOT NULL",
+                "TRIM(COALESCE(data->>'assigned_to', '')) != ''",
+                "data->>'snooze_unassign_at' IS NOT NULL",
+                "data->>'snooze_unassign_at' != ''",
+                "(data->>'snooze_unassign_at')::timestamptz <= %s",
+                "COALESCE((data->>'call_attempts')::int, 0) < 6",
+            ],
+            params=[now],
+        )
+        unassigned_count = 0
+        for record in qs:
+            data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
+            if not data.get("assigned_to"):
+                continue
+            data["assigned_to"] = None
+            data.pop("snooze_unassign_at", None)
+            data["next_call_at"] = one_hour_later
+            # Do not change call_attempts on unassign
+            record.data = data
+            record.save(update_fields=["data", "updated_at"])
+            unassigned_count += 1
+            logger.info(
+                "[UnassignSnoozedLeads] Unassigned lead record_id=%s (snooze_unassign_at passed)",
+                record.id,
+            )
+        job.result = {
+            "success": True,
+            "unassigned_count": unassigned_count,
+            "timestamp": timezone.now().isoformat(),
+        }
+        logger.info("[UnassignSnoozedLeads] Completed: unassigned_count=%s", unassigned_count)
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+
+class ReleaseLeadsAfter12hJobHandler(JobHandler):
+    """
+    Job for NOT_CONNECTED leads only. When not_connected_unassign_at has passed (set by rule engine
+    to now + 12h when lead goes NOT_CONNECTED) and assigned_to is not null, clears assigned_to only
+    (lead_stage stays NOT_CONNECTED). Same pattern as UnassignSnoozedLeadsJobHandler (snooze_unassign_at).
+    Does not remove first_assigned_at or first_assigned_to.
+    Triggers only when: (1) not_connected_unassign_at <= now (12h since NOT_CONNECTED), (2) assigned_to is not null,
+    (3) no other event clicked (lead_stage still NOT_CONNECTED), (4) call_attempts < 6.
+    SNOOZED leads are handled by UnassignSnoozedLeadsJobHandler (48h/12h via snooze_unassign_at).
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        from datetime import timedelta
+
+        now = timezone.now()
+        one_hour_later = (now + timedelta(hours=1)).isoformat()
+        # NOT_CONNECTED only = no other event clicked; has assigned_to; not_connected_unassign_at passed (12h); attempts not exhausted
+        qs = Record.objects.filter(entity_type="lead").extra(
+            where=[
+                "UPPER(COALESCE(data->>'lead_stage','')) = 'NOT_CONNECTED'",
+                "data->>'assigned_to' IS NOT NULL",
+                "TRIM(COALESCE(data->>'assigned_to', '')) != ''",
+                "data->>'not_connected_unassign_at' IS NOT NULL",
+                "data->>'not_connected_unassign_at' != ''",
+                "(data->>'not_connected_unassign_at')::timestamptz <= %s",
+                "COALESCE((data->>'call_attempts')::int, 0) < 6",
+            ],
+            params=[now],
+        )
+        released_count = 0
+        for record in qs:
+            data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
+            # Only clear assigned_to; do not change lead_stage (stays NOT_CONNECTED).
+            data["assigned_to"] = None
+            data["next_call_at"] = one_hour_later
+            data.pop("not_connected_unassign_at", None)
+            # Do not change call_attempts on unassign; do not remove first_assigned_at or first_assigned_to.
+            record.data = data
+            record.save(update_fields=["data", "updated_at"])
+            released_count += 1
+            logger.info(
+                "[ReleaseLeadsAfter12h] Released lead record_id=%s (NOT_CONNECTED, not_connected_unassign_at passed, had assigned_to): cleared assigned_to only, stage unchanged",
+                record.id,
+            )
+        job.result = {
+            "success": True,
+            "released_count": released_count,
+            "timestamp": timezone.now().isoformat(),
+        }
+        logger.info("[ReleaseLeadsAfter12h] Completed: released_count=%s", released_count)
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+
 class JobHandlerRegistry:
     """
     Registry for job handlers.
@@ -908,6 +1020,8 @@ class JobHandlerRegistry:
         self.register_handler(JobType.EXECUTE_FUNCTION, FunctionJobHandler())
         self.register_handler(JobType.SCORE_LEADS, LeadScoringJobHandler())
         self.register_handler(JobType.PARTNER_LEAD_ASSIGN, PartnerLeadAssignJobHandler())
+        self.register_handler(JobType.UNASSIGN_SNOOZED_LEADS, UnassignSnoozedLeadsJobHandler())
+        self.register_handler(JobType.RELEASE_LEADS_AFTER_12H, ReleaseLeadsAfter12hJobHandler())
         # Praja handler removed - now using MixpanelService instead
         # self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
     

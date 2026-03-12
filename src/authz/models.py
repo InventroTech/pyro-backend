@@ -78,6 +78,7 @@ class TenantMembership(models.Model):
     # Fields migrated from LegacyUser (public.users)
     name = models.CharField(max_length=255, null=True, blank=True, help_text="User's display name")
     company_name = models.CharField(max_length=255, null=True, blank=True, help_text="Optional company name")
+    department = models.CharField(max_length=255, null=True, blank=True, help_text="Optional department")
 
     def save(self, *args, **kwargs):
         if self.email:
@@ -112,9 +113,18 @@ class GroupRole(models.Model):
         unique_together = (('group','role'),)
 
 class UserPermission(models.Model):
-    tenant = models.ForeignKey('core.Tenant', on_delete=models.CASCADE)
-    user_id = models.UUIDField()
+    """
+    Per-user permission overrides, scoped by TenantMembership.
+    No explicit tenant FK is needed because membership.tenant is the source of truth.
+    """
+    membership = models.ForeignKey(TenantMembership, on_delete=models.CASCADE,null=True,  # now non-nullable
+    blank=True)
     permission = models.ForeignKey(Permission, on_delete=models.CASCADE)
-    effect = models.CharField(max_length=8, choices=[('allow','allow'),('deny','deny')])
+    effect = models.CharField(
+        max_length=8,
+        choices=[('allow', 'allow'), ('deny', 'deny')],
+        default='allow',
+    )
+
     class Meta:
-        unique_together = (('tenant','user_id','permission'),)
+        unique_together = (('membership', 'permission'),)

@@ -2,11 +2,14 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from django.db.models import Q
-from authz.permissions import IsTenantAuthenticated, HasTenantRole
+from django.db.models.functions import Lower
+from django.conf import settings
+import jwt
+
+from authz.permissions import IsTenantAuthenticated, HasPermissionKey
 from authz.models import Role, TenantMembership
 from .serializers import RoleListSerializer, CreateSyncedRoleSerializer, TenantMembershipUserSerializer
 from .service import create_or_sync_role
-from django.db.models.functions import Lower
 
 
 class RolesView(APIView):
@@ -95,6 +98,116 @@ class ListTenantUsersView(APIView):
         return Response({"count": len(data), "results": data}, status=status.HTTP_200_OK)
 
 
+class SpoofTenantUserTokenView(APIView):
+    """
+    Generate a Supabase-style JWT for a specific tenant user (membership).
+
+    POST /api/membership/users/<membership_id>/spoof-token/
+
+    This is intended for internal admin "user spoofing" tools only.
+    """
+
+    # Only tenant users with the GM role can spoof other users.
+    permission_classes = [IsTenantAuthenticated, HasPermissionKey("users:spoof")]
+
+    def post(self, request, membership_id, *args, **kwargs):
+        tenant = getattr(request, "tenant", None)
+        if not tenant:
+            return Response(
+                {"error": "Tenant not resolved for request"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Resolve the acting membership (current authenticated user within this tenant)
+        supabase_uid = getattr(request.user, "supabase_uid", None)
+        acting_membership = None
+        if supabase_uid:
+            acting_membership = (
+                TenantMembership.objects.filter(
+                    tenant=tenant,
+                    user_id=supabase_uid,
+                    is_active=True,
+                )
+                .select_related("role")
+                .first()
+            )
+
+        if not acting_membership:
+            return Response(
+                {"error": "No active membership found for requesting user"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        try:
+            membership = (
+                TenantMembership.objects.select_related("role")
+                .filter(tenant=tenant, is_active=True)
+                .get(id=membership_id)
+            )
+        except TenantMembership.DoesNotExist:
+            return Response(
+                {"error": "User membership not found for this tenant"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Do not allow users to spoof themselves.
+        if membership.user_id == acting_membership.user_id:
+            return Response(
+                {"error": "Cannot spoof your own membership"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not membership.user_id or not membership.email:
+            return Response(
+                {"error": "Membership is missing user_id or email"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        jwt_secret = getattr(settings, "SUPABASE_JWT_SECRET", None)
+        if not jwt_secret:
+            return Response(
+                {"error": "SUPABASE_JWT_SECRET is not configured"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        payload = {
+            "sub": str(membership.user_id),
+            "email": membership.email.lower(),
+            "tenant_id": str(tenant.id),
+            "role": "authenticated",
+            "aud": "authenticated",
+            "user_data": {
+                "tenant_id": str(tenant.id),
+                "role_id": str(membership.role.id),
+                "user_id": str(membership.user_id),
+            },
+        }
+
+        token = jwt.encode(payload, jwt_secret, algorithm="HS256")
+        if isinstance(token, bytes):
+            token = token.decode("utf-8")
+
+        # Lightweight audit metadata in the response for the caller; full audit should go to logs.
+        audit_meta = {
+            "actor_membership_id": str(acting_membership.id),
+            "actor_role_key": getattr(acting_membership.role, "key", None),
+            "target_membership_id": str(membership.id),
+            "target_role_key": getattr(membership.role, "key", None),
+        }
+
+        return Response(
+            {
+                "token": token,
+                "membership_id": membership_id,
+                "email": membership.email,
+                "name": membership.name or "",
+                "tenant_id": str(tenant.id),
+                "audit": audit_meta,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class CurrentUserRoleView(APIView):
     """
     Get the current authenticated user's role from TenantMembership (backend source of truth).
@@ -130,6 +243,7 @@ class CurrentUserRoleView(APIView):
                 'role_name': None,
                 'role_id': None,
                 'tenant_id': None,
+                'department': None,
                 'error': 'No active tenant membership found'
             }, status=status.HTTP_200_OK)
         
@@ -139,7 +253,8 @@ class CurrentUserRoleView(APIView):
             'role_id': str(membership.role.id),
             'tenant_id': str(tenant.id),
             'tenant_slug': tenant.slug,
-            'is_active': membership.is_active
+            'is_active': membership.is_active,
+            'department': membership.department,
         }, status=status.HTTP_200_OK)
 
 

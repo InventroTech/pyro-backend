@@ -86,7 +86,7 @@ def create_lead_schema(tenant_id=None):
         ],
         "praja_id": "PRAJA_277BDA3C",
         "lead_score": 74.42,
-        "lead_stage": "scheduled",
+        "lead_stage": "ASSIGNED",
         "assigned_to": "USER483681",
         "lead_source": "WhatsApp Campaign",
         "closure_time": None,

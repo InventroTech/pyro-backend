@@ -18,7 +18,7 @@ class TenantMembershipUserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = TenantMembership
-        fields = ("id", "email", "name", "company_name", "user_id", "is_active", "created_at", "role", "user_parent_id")
+        fields = ("id", "email", "name", "company_name", "department", "user_id", "is_active", "created_at", "role", "user_parent_id")
 
     def get_user_parent_id(self, obj):
         if obj.user_parent_id_id is None:

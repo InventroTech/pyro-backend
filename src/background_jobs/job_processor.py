@@ -15,10 +15,14 @@ from django.db import transaction, close_old_connections, connections
 from django.db.models import Q, F
 from django.db.utils import InterfaceError, OperationalError
 
-from .models import BackgroundJob, JobStatus
+from .models import BackgroundJob, JobStatus, JobType
+from .queue_service import get_queue_service
 from .job_handlers import get_handler_registry
 
 logger = logging.getLogger(__name__)
+
+# Interval (seconds) between enqueueing lead cron jobs from the worker (no external cron needed)
+LEAD_CRON_ENQUEUE_INTERVAL = 900  # 15 minutes
 
 
 class JobProcessor:
@@ -34,6 +38,8 @@ class JobProcessor:
         self.worker_id = worker_id
         self._stop_event = threading.Event()
         self._handler_registry = get_handler_registry()
+        # Last time we enqueued lead cron jobs (unassign snoozed, release after 12h)
+        self._last_lead_cron_enqueue_at = None
         # Circuit breaker state for connection errors
         self._connection_error_count = 0
         self._last_connection_error_time = None
@@ -364,6 +370,30 @@ class JobProcessor:
             )
         
         return count
+
+    def _maybe_enqueue_lead_cron_jobs(self):
+        """
+        Every LEAD_CRON_ENQUEUE_INTERVAL seconds, enqueue unassign_snoozed_leads and
+        release_leads_after_12h so the worker runs them without needing external cron.
+        """
+        now = timezone.now()
+        if self._last_lead_cron_enqueue_at is not None:
+            elapsed = (now - self._last_lead_cron_enqueue_at).total_seconds()
+            if elapsed < LEAD_CRON_ENQUEUE_INTERVAL:
+                return
+        try:
+            queue = get_queue_service()
+            queue.enqueue_job(job_type=JobType.UNASSIGN_SNOOZED_LEADS, payload={}, priority=0)
+            queue.enqueue_job(job_type=JobType.RELEASE_LEADS_AFTER_12H, payload={}, priority=0)
+            self._last_lead_cron_enqueue_at = now
+            logger.debug(
+                f"[Worker {self.worker_id}] Enqueued lead cron jobs (unassign_snoozed_leads, release_leads_after_12h)"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[Worker {self.worker_id}] Failed to enqueue lead cron jobs: {e}",
+                exc_info=True,
+            )
     
     def process_next_job(self, tenant_id: Optional[str] = None) -> bool:
         """
@@ -455,7 +485,10 @@ class JobProcessor:
                 if iteration_count >= stale_cleanup_interval:
                     self.cleanup_stale_locks()
                     iteration_count = 0
-                
+
+                # Periodically enqueue lead cron jobs (unassign snoozed, release after 12h) so no external cron is needed
+                self._maybe_enqueue_lead_cron_jobs()
+
                 if jobs_processed > 0:
                     logger.debug(
                         f"[Worker {self.worker_id}] Processed {jobs_processed} job(s)"
