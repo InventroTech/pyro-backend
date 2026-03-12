@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('authz', '0011_add_indexes_for_name_company_name'),
+        ('authz', '0012_alter_userpermission_unique_together_and_more'),
     ]
 
     operations = [

@@ -243,6 +243,48 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
         self.assertEqual(data.get("data", {}).get("lead_source"), "SELF TRIAL")
         self.assertEqual(data.get("assigned_to"), self.supabase_uid)
 
+    def test_daily_limit_fallback_assigns_unassigned_in_queue_due_when_no_assigned_retry(self):
+        """When daily limit is reached and no assigned retry lead exists, fallback assigns and returns an unassigned IN_QUEUE due lead (NOT_CONNECTED/IN_QUEUE path)."""
+        from django.utils import timezone
+        UserSettings.objects.create(
+            tenant=self.tenant,
+            tenant_membership=self.membership,
+            key="LEAD_TYPE_ASSIGNMENT",
+            value=[],
+            lead_sources=["SELF TRIAL"],
+            daily_limit=1,
+        )
+        now = timezone.now()
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "first_assigned_to": self.supabase_uid,
+                "first_assigned_at": now.isoformat(),
+                "lead_stage": "ASSIGNED",
+                "lead_source": "SALES LEAD",
+            },
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Self Trial IN_QUEUE Due",
+                "lead_stage": "IN_QUEUE",
+                "lead_source": "SELF TRIAL",
+                "assigned_to": None,
+                "call_attempts": 1,
+                "next_call_at": (now - timezone.timedelta(hours=1)).isoformat(),
+            },
+        )
+        response = self.client.get(self.url, **self.auth_headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertNotEqual(data, {}, msg="Fallback assigns unassigned IN_QUEUE due lead and returns it")
+        self.assertEqual(data.get("name"), "Self Trial IN_QUEUE Due")
+        self.assertEqual(data.get("data", {}).get("lead_stage"), "ASSIGNED")
+        self.assertEqual(data.get("data", {}).get("assigned_to"), self.supabase_uid)
+
     def test_only_not_connected_leads_without_daily_limit_returns_empty(self):
         """When no daily limit, NOT_CONNECTED-only leads are not in main queue so Get Next Lead returns empty."""
         RecordFactory(
@@ -308,7 +350,7 @@ class RecordListNotConnectedIncludesUnassignedTests(BaseAPITestCase):
 
 class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
     """
-    Tests for Get Next Lead Step 3a: SNOOZED leads with next_call_at due.
+    Tests for Get Next Lead Step 3a: SNOOZED/IN_QUEUE leads with next_call_at due.
     Priority: (1) assigned to current user, (2) unassigned, (3) fresh queue.
     """
 
@@ -352,6 +394,40 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
         self.assertEqual(data["data"].get("lead_stage"), "ASSIGNED")
         self.assertEqual(data["data"].get("assigned_to"), self.supabase_uid)
 
+    def test_step_3a_i_returns_assigned_in_queue_due_before_fresh(self):
+        """Step 3a(i): IN_QUEUE lead assigned to current user with next_call_at due is returned first (SNOOZED/IN_QUEUE path)."""
+        now = django_timezone.now()
+        past = (now - timedelta(hours=1)).isoformat()
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "My IN_QUEUE Due",
+                "lead_stage": "IN_QUEUE",
+                "lead_source": "SALES LEAD",
+                "assigned_to": self.supabase_uid,
+                "next_call_at": past,
+                "call_attempts": 1,
+            },
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Fresh Lead",
+                "lead_stage": "IN_QUEUE",
+                "lead_source": "SALES LEAD",
+                "call_attempts": 0,
+            },
+        )
+        response = self.client.get(self.url, **self.auth_headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertNotEqual(data, {}, msg="Should return assigned IN_QUEUE due lead")
+        self.assertEqual(data.get("name"), "My IN_QUEUE Due")
+        self.assertEqual(data["data"].get("lead_stage"), "ASSIGNED")
+        self.assertEqual(data["data"].get("assigned_to"), self.supabase_uid)
+
     def test_step_3a_ii_returns_unassigned_snoozed_due_when_no_assigned_snoozed(self):
         """Step 3a(ii): When no assigned-to-me snoozed due, unassigned SNOOZED with next_call_at due is returned (before fresh)."""
         now = django_timezone.now()
@@ -383,6 +459,40 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
         data = response.json()
         self.assertNotEqual(data, {}, msg="Should return unassigned snoozed due lead")
         self.assertEqual(data.get("name"), "Unassigned Snoozed Due")
+        self.assertEqual(data["data"].get("lead_stage"), "ASSIGNED")
+        self.assertEqual(data["data"].get("assigned_to"), self.supabase_uid)
+
+    def test_step_3a_ii_returns_unassigned_in_queue_due_when_next_call_at_passed(self):
+        """Step 3a(ii): Unassigned IN_QUEUE lead with next_call_at due is returned (SNOOZED/IN_QUEUE path) before fresh."""
+        now = django_timezone.now()
+        past = (now - timedelta(hours=1)).isoformat()
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Unassigned IN_QUEUE Due",
+                "lead_stage": "IN_QUEUE",
+                "lead_source": "SALES LEAD",
+                "assigned_to": None,
+                "next_call_at": past,
+                "call_attempts": 1,
+            },
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Fresh Lead",
+                "lead_stage": "IN_QUEUE",
+                "lead_source": "SALES LEAD",
+                "call_attempts": 0,
+            },
+        )
+        response = self.client.get(self.url, **self.auth_headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertNotEqual(data, {}, msg="Should return unassigned IN_QUEUE due lead")
+        self.assertEqual(data.get("name"), "Unassigned IN_QUEUE Due")
         self.assertEqual(data["data"].get("lead_stage"), "ASSIGNED")
         self.assertEqual(data["data"].get("assigned_to"), self.supabase_uid)
 
