@@ -1,9 +1,9 @@
 import uuid
-
 import pytest
 from django.urls import reverse
 from rest_framework.test import APIClient
 
+from tests.factories.authz_factory import TenantMembershipFactory
 from core.models import Tenant
 from user_settings.models import RoutingRule
 from support_ticket.models import SupportTicket
@@ -11,9 +11,14 @@ from crm_records.models import Record
 
 
 @pytest.mark.django_db
-def test_ticket_routing_rule_filters_to_poster(settings):
-    tenant = Tenant.objects.create(name="T1", slug="t1")
+def test_ticket_routing_rule_filters_to_poster():
+    # Use a unique slug to prevent IntegrityError during test parallelization/reuse
+    unique_slug = f"t1-ticket-{uuid.uuid4().hex[:8]}"
+    tenant = Tenant.objects.create(name="T1", slug=unique_slug)
     user_id = uuid.uuid4()
+
+    # New way: The factory automatically creates a role and attaches it!
+    membership = TenantMembershipFactory(tenant=tenant, user_id=user_id)
 
     # Two tickets for the same tenant, different posters
     t1 = SupportTicket.objects.create(tenant=tenant, poster="Facebook")
@@ -22,6 +27,7 @@ def test_ticket_routing_rule_filters_to_poster(settings):
     RoutingRule.objects.create(
         tenant=tenant,
         user_id=user_id,
+        tenant_membership=membership,
         queue_type="ticket",
         is_active=True,
         conditions={
@@ -35,17 +41,19 @@ def test_ticket_routing_rule_filters_to_poster(settings):
     # Simulate tenant + user context via headers/custom attrs
     client.defaults["HTTP_X_TENANT_SLUG"] = tenant.slug
 
-    # We don't go through full auth stack here – instead, patch user/tenant on request
-    # by using DRF's force_authenticate in a view test would be more complete,
-    # but for a lightweight regression check, we just assert the rule exists
     assert RoutingRule.objects.filter(tenant=tenant, queue_type="ticket").count() == 1
     assert {t.poster for t in SupportTicket.objects.filter(tenant=tenant)} == {"Facebook", "Google"}
 
 
 @pytest.mark.django_db
-def test_lead_routing_rule_filters_by_state(settings):
-    tenant = Tenant.objects.create(name="T1", slug="t1")
+def test_lead_routing_rule_filters_by_state():
+    # Use a unique slug to prevent IntegrityError
+    unique_slug = f"t1-lead-{uuid.uuid4().hex[:8]}"
+    tenant = Tenant.objects.create(name="T1", slug=unique_slug)
     user_id = uuid.uuid4()
+
+    # New way: The factory automatically creates a role and attaches it!
+    membership = TenantMembershipFactory(tenant=tenant, user_id=user_id)
 
     # Two leads with different states in JSON data
     Record.objects.create(tenant=tenant, entity_type="lead", data={"state": "Tamil Nadu"})
@@ -54,6 +62,7 @@ def test_lead_routing_rule_filters_by_state(settings):
     rule = RoutingRule.objects.create(
         tenant=tenant,
         user_id=user_id,
+        tenant_membership=membership,
         queue_type="lead",
         is_active=True,
         conditions={
@@ -64,5 +73,3 @@ def test_lead_routing_rule_filters_by_state(settings):
     )
 
     assert rule.conditions["filters"][0]["value"] == "Tamil Nadu"
-
-

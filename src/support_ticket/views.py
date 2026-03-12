@@ -911,6 +911,10 @@ class SupportTicketUpdateView(APIView):
             # Prepare update data (exclude ticket_id)
             update_data = {k: v for k, v in validated_data.items() if k != 'ticket_id'}
             
+            # 👇 ADD THESE TWO LINES TO FIX THE BUG 👇
+            if 'assigned_to' in update_data:
+                update_data['assigned_to_id'] = update_data.pop('assigned_to')
+            
             # Update the ticket fields in atomic transaction
             with transaction.atomic():
                 for field, value in update_data.items():
