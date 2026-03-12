@@ -83,8 +83,8 @@ class UnassignSnoozedLeadsJobHandlerTests(TestCase):
         self.assertEqual(lead.data.get("call_attempts"), 1)
         self.assertEqual(job.result["unassigned_count"], 1)
 
-    def test_sets_call_attempts_to_1_when_zero(self):
-        """When call_attempts is 0, after unassign it is set to 1."""
+    def test_does_not_change_call_attempts_on_unassign(self):
+        """Unassign does not change call_attempts; it stays as-is (e.g. 0 remains 0)."""
         now = timezone.now()
         past = (now - timedelta(hours=1)).isoformat()
         lead = RecordFactory(
@@ -101,7 +101,7 @@ class UnassignSnoozedLeadsJobHandlerTests(TestCase):
         self.handler.process(job)
 
         lead.refresh_from_db()
-        self.assertEqual(lead.data.get("call_attempts"), 1)
+        self.assertEqual(lead.data.get("call_attempts"), 0)
 
     def test_does_not_unassign_when_snooze_unassign_at_in_future(self):
         """Lead with snooze_unassign_at in the future is not unassigned (job finds no rows)."""
@@ -237,13 +237,13 @@ class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
         self.assertEqual(lead.data.get("lead_stage"), "NOT_CONNECTED")
         self.assertNotIn("not_connected_unassign_at", lead.data)
         _assert_next_call_at_about_one_hour_later(self, lead.data.get("next_call_at"))
-        self.assertEqual(lead.data.get("call_attempts"), 3)
+        self.assertEqual(lead.data.get("call_attempts"), 2)
         self.assertEqual(lead.data.get("first_assigned_to"), "rm-uuid-456")
         self.assertIn("first_assigned_at", lead.data)
         self.assertEqual(job.result["released_count"], 1)
 
-    def test_increments_call_attempts(self):
-        """call_attempts is incremented by 1 (current + 1), not set to 1."""
+    def test_does_not_change_call_attempts_on_release(self):
+        """Release does not change call_attempts; it stays as-is (e.g. 3 remains 3)."""
         now = timezone.now()
         past = (now - timedelta(hours=1)).isoformat()
         lead = RecordFactory(
@@ -260,7 +260,7 @@ class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
         self.handler.process(job)
 
         lead.refresh_from_db()
-        self.assertEqual(lead.data.get("call_attempts"), 4)
+        self.assertEqual(lead.data.get("call_attempts"), 3)
 
     def test_does_not_release_when_not_connected_unassign_at_in_future(self):
         """Lead with not_connected_unassign_at in the future is not released."""
