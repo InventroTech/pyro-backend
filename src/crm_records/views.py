@@ -1621,7 +1621,7 @@ class GetNextLeadView(APIView):
                             """
                             COALESCE((data->>'call_attempts')::int, 0) >= 1
                             AND COALESCE((data->>'call_attempts')::int, 0) <= 6
-                            AND UPPER(COALESCE(data->>'lead_stage','')) = 'NOT_CONNECTED'
+                            AND UPPER(COALESCE(data->>'lead_stage','')) IN ('NOT_CONNECTED', 'IN_QUEUE')
                             AND (data->>'next_call_at') IS NOT NULL
                             AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
                             AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
@@ -1649,7 +1649,7 @@ class GetNextLeadView(APIView):
                     else:
                         logger.info(
                             "[GetNextLead] FALLBACK [daily-limit]: No due not-connected retry leads for user=%s "
-                            "(assigned_to=user, call_attempts 1–6, next_call_at <= now, lead_stage=NOT_CONNECTED only).",
+                            "(assigned_to=user, call_attempts 1–6, next_call_at <= now, lead_stage=NOT_CONNECTED/IN_QUEUE only).",
                             user_identifier,
                         )
 
@@ -1663,7 +1663,7 @@ class GetNextLeadView(APIView):
                             )
                             AND COALESCE((data->>'call_attempts')::int, 0) >= 1
                             AND COALESCE((data->>'call_attempts')::int, 0) <= 6
-                            AND UPPER(COALESCE(data->>'lead_stage','')) = 'NOT_CONNECTED'
+                            AND UPPER(COALESCE(data->>'lead_stage','')) IN ('NOT_CONNECTED', 'IN_QUEUE')
                             AND (data->>'next_call_at') IS NOT NULL
                             AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
                             AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
@@ -1788,17 +1788,17 @@ class GetNextLeadView(APIView):
             tenant.slug if getattr(tenant, 'slug', None) else tenant.id, total_leads_in_tenant, user_identifier, user_uuid,
         )
 
-        # Step 3a: SNOOZED leads with next_call_at due first (before fresh). Priority: (1) assigned to me, (2) unassigned, then main queue.
+        # Step 3a: SNOOZED/IN_QUEUE leads with next_call_at due first (before fresh). Priority: (1) assigned to me, (2) unassigned, then main queue.
         candidate = None
         _snoozed_due_common = """
-                data->>'lead_stage' = 'SNOOZED'
+                UPPER(COALESCE(data->>'lead_stage','')) IN ('SNOOZED', 'IN_QUEUE')
                 AND (data->>'next_call_at') IS NOT NULL
                 AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
                 AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
                 AND (data->>'next_call_at')::timestamptz <= NOW()
                 AND COALESCE((data->>'call_attempts')::int, 0) < 6
                 """
-        # 3a(i): Assigned to current user (my snoozed leads due for callback)
+        # 3a(i): Assigned to current user (my SNOOZED/IN_QUEUE leads due for callback)
         _assigned_snoozed_where = (
             "data->>'assigned_to' IS NOT NULL AND TRIM(COALESCE(data->>'assigned_to', '')) != '' AND data->>'assigned_to' = %s AND " + _snoozed_due_common
         )
@@ -1824,11 +1824,11 @@ class GetNextLeadView(APIView):
             if self._lead_is_due_for_call(c.data, now):
                 candidate = c
                 logger.info(
-                    "[GetNextLead] Step 3a(i): Selected snoozed-due lead_id=%s assigned to me (next_call_at passed).",
+                    "[GetNextLead] Step 3a(i): Selected SNOOZED/IN_QUEUE-due lead_id=%s assigned to me (next_call_at passed).",
                     c.id,
                 )
                 break
-        # 3a(ii): If none assigned to me, try unassigned SNOOZED with next_call_at due
+        # 3a(ii): If none assigned to me, try unassigned SNOOZED/IN_QUEUE with next_call_at due
         if not candidate:
             _unassigned_snoozed_where = """
                 (
@@ -1870,7 +1870,7 @@ class GetNextLeadView(APIView):
                 if self._lead_is_due_for_call(c.data, now):
                     candidate = c
                     logger.info(
-                        "[GetNextLead] Step 3a(ii): Selected unassigned snoozed-due lead_id=%s (next_call_at passed).",
+                        "[GetNextLead] Step 3a(ii): Selected unassigned SNOOZED/IN_QUEUE-due lead_id=%s (next_call_at passed).",
                         c.id,
                     )
                     break
