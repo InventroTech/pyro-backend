@@ -924,13 +924,7 @@ class UnassignSnoozedLeadsJobHandler(JobHandler):
             data["assigned_to"] = None
             data.pop("snooze_unassign_at", None)
             data["next_call_at"] = one_hour_later
-            # Same as 12h release: ensure call_attempts is at least 1 after unassign (call-back with no time)
-            try:
-                current = int(data.get("call_attempts") or 0)
-                if current < 1:
-                    data["call_attempts"] = 1
-            except (TypeError, ValueError):
-                data["call_attempts"] = 1
+            # Do not change call_attempts on unassign
             record.data = data
             record.save(update_fields=["data", "updated_at"])
             unassigned_count += 1
@@ -987,13 +981,7 @@ class ReleaseLeadsAfter12hJobHandler(JobHandler):
             data["assigned_to"] = None
             data["next_call_at"] = one_hour_later
             data.pop("not_connected_unassign_at", None)
-            # call_attempts = current + 1 (increment, not reset to 1)
-            try:
-                current = int(data.get("call_attempts") or 0)
-                data["call_attempts"] = current + 1
-            except (TypeError, ValueError):
-                data["call_attempts"] = 1
-            # Do not remove first_assigned_at or first_assigned_to.
+            # Do not change call_attempts on unassign; do not remove first_assigned_at or first_assigned_to.
             record.data = data
             record.save(update_fields=["data", "updated_at"])
             released_count += 1
