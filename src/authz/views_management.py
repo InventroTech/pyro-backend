@@ -246,7 +246,9 @@ class CurrentUserRoleView(APIView):
                 'department': None,
                 'error': 'No active tenant membership found'
             }, status=status.HTTP_200_OK)
-        
+
+        # Expose tenant_membership_id and user_parent_id for team_lead: use user_parent_id_id if set, else own membership id
+        user_parent_id_value = membership.user_parent_id_id  # FK to parent TenantMembership (integer)
         return Response({
             'role_key': membership.role.key,
             'role_name': membership.role.name,
@@ -255,6 +257,8 @@ class CurrentUserRoleView(APIView):
             'tenant_slug': tenant.slug,
             'is_active': membership.is_active,
             'department': membership.department,
+            'tenant_membership_id': membership.id,
+            'user_parent_id': user_parent_id_value,
         }, status=status.HTTP_200_OK)
 
 
