@@ -1373,11 +1373,23 @@ class GetNextLeadView(APIView):
             except Exception:
                 pass
 
+        # Note on ordering:
+        # - For most lead sources (e.g. SALES LEAD) we keep the existing behavior:
+        #   expired snoozed first, then call_attempts, then lead_score, then LIFO.
+        # - For SELF TRIAL leads we want: call_attempts > LIFO, ignoring lead_score.
+        #   We achieve this by defining a derived lead_score_for_sort that is constant
+        #   for SELF TRIAL, so within that subset LIFO decides after call_attempts.
         if now_iso:
             qs = qs.extra(
                 select={
                     'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
                     'call_attempts_int': "COALESCE((data->>'call_attempts')::int, 0)",
+                    'lead_score_for_sort': """
+                        CASE 
+                            WHEN data->>'lead_source' = 'SELF TRIAL' THEN 0
+                            ELSE COALESCE((data->>'lead_score')::float, -1)
+                        END
+                    """,
                     'is_expired_snoozed': """
                         CASE 
                             WHEN data->>'lead_stage' = 'SNOOZED' 
@@ -1393,7 +1405,7 @@ class GetNextLeadView(APIView):
             ).order_by(
                 'is_expired_snoozed',  # Expired snoozed leads first (0), then others (1)
                 'call_attempts_int',  # Priority: 0 attempts > 1 attempt > 2 attempt > 3 attempt > 4 attempt > 5 attempt
-                F('lead_score').desc(nulls_last=True),  # Higher score first within each attempt level
+                F('lead_score_for_sort').desc(nulls_last=True),  # SELF TRIAL ignores score (constant), others use real score
                 '-updated_at',  # LIFO as tie-breaker when scores are equal
                 'created_at',
                 'id'
@@ -1404,10 +1416,16 @@ class GetNextLeadView(APIView):
                 select={
                     'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
                     'call_attempts_int': "COALESCE((data->>'call_attempts')::int, 0)",
+                    'lead_score_for_sort': """
+                        CASE 
+                            WHEN data->>'lead_source' = 'SELF TRIAL' THEN 0
+                            ELSE COALESCE((data->>'lead_score')::float, -1)
+                        END
+                    """,
                 }
             ).order_by(
                 'call_attempts_int',  # Priority: 0 attempts > 1 attempt > 2 attempt > 3 attempt > 4 attempt > 5 attempt
-                F('lead_score').desc(nulls_last=True),  # Higher score first within each attempt level
+                F('lead_score_for_sort').desc(nulls_last=True),  # SELF TRIAL ignores score, others use real score
                 '-updated_at',  # LIFO as tie-breaker when scores are equal
                 'created_at',
                 'id'
