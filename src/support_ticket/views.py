@@ -175,6 +175,7 @@ class SaveAndContinueView(APIView):
     Updates support tickets with resolution status and sends Mixpanel events.
     """
     authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated] # <--- ADD THIS LINE!
     
     def options(self, request):
         """Handle CORS preflight requests"""

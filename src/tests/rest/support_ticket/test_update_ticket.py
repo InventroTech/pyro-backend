@@ -8,7 +8,6 @@ from accounts.models import SupabaseAuthUser
 from tests.base.test_setup import BaseAPITestCase
 from tests.factories.support_ticket_factory import SupportTicketFactory
 from support_ticket.models import SupportTicket
-from tests.factories.user_factory import UserFactory
 
 
 class SupportTicketUpdateViewTest(BaseAPITestCase):

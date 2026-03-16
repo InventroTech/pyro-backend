@@ -72,14 +72,13 @@ class TicketTimeServiceTest(TestCase):
 class MixpanelServiceTest(TestCase):
     """Test the Mixpanel service independently"""
     
-    def setUp(self):
-        self.service = MixpanelService()
-    
+    # Notice: setUp(self) has been completely removed!
+
     @patch('os.environ.get')
     def test_mixpanel_service_initialization(self, mock_env):
         """Test Mixpanel service initialization"""
         mock_env.return_value = 'test_token'
-        service = MixpanelService()
+        service = MixpanelService() # <-- Initialized AFTER the mock is active
         self.assertEqual(service.mixpanel_api_url, "https://api.thecircleapp.in/pyro/send_to_mixpanel")
         self.assertEqual(service.mixpanel_token, 'test_token')
     
@@ -88,12 +87,13 @@ class MixpanelServiceTest(TestCase):
     def test_send_to_mixpanel_sync_success(self, mock_env, mock_post):
         """Test successful synchronous Mixpanel event sending"""
         mock_env.return_value = 'test_token'
+        service = MixpanelService() # <-- Initialized here now!
         
         mock_response = MagicMock()
         mock_response.ok = True
         mock_post.return_value = mock_response
         
-        result = self.service.send_to_mixpanel_sync(
+        result = service.send_to_mixpanel_sync(
             user_id="123",
             event_name="test_event",
             properties={"key": "value"}
@@ -123,6 +123,7 @@ class MixpanelServiceTest(TestCase):
     def test_send_to_mixpanel_sync_api_error(self, mock_env, mock_post):
         """Test Mixpanel API error handling"""
         mock_env.return_value = 'test_token'
+        service = MixpanelService() # <-- Initialized here now!
         
         mock_response = MagicMock()
         mock_response.ok = False
@@ -130,7 +131,7 @@ class MixpanelServiceTest(TestCase):
         mock_response.text = "Bad Request"
         mock_post.return_value = mock_response
         
-        result = self.service.send_to_mixpanel_sync(
+        result = service.send_to_mixpanel_sync(
             user_id="123",
             event_name="test_event",
             properties={"key": "value"}
@@ -143,10 +144,11 @@ class MixpanelServiceTest(TestCase):
     def test_send_to_mixpanel_sync_request_exception(self, mock_env, mock_post):
         """Test Mixpanel request exception handling"""
         mock_env.return_value = 'test_token'
+        service = MixpanelService() # <-- Initialized here now!
         
         mock_post.side_effect = Exception("Network error")
         
-        result = self.service.send_to_mixpanel_sync(
+        result = service.send_to_mixpanel_sync(
             user_id="123",
             event_name="test_event",
             properties={"key": "value"}
@@ -158,8 +160,9 @@ class MixpanelServiceTest(TestCase):
     def test_send_to_mixpanel_sync_no_token(self, mock_env):
         """Test Mixpanel service without token"""
         mock_env.return_value = None
+        service = MixpanelService() # <-- Initialized here now!
         
-        result = self.service.send_to_mixpanel_sync(
+        result = service.send_to_mixpanel_sync(
             user_id="123",
             event_name="test_event",
             properties={"key": "value"}
@@ -172,10 +175,11 @@ class MixpanelServiceTest(TestCase):
     def test_send_to_mixpanel_sync_timeout(self, mock_env, mock_post):
         """Test Mixpanel request timeout handling"""
         mock_env.return_value = 'test_token'
+        service = MixpanelService() # <-- Initialized here now!
         
         mock_post.side_effect = Exception("Timeout")
         
-        result = self.service.send_to_mixpanel_sync(
+        result = service.send_to_mixpanel_sync(
             user_id="123",
             event_name="test_event",
             properties={"key": "value"}
