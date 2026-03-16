@@ -396,3 +396,18 @@ class CallAttemptMatrixSerializer(serializers.ModelSerializer):
         if value > 168:  # 1 week
             raise serializers.ValidationError("Minimum time between calls cannot exceed 168 hours (1 week).")
         return value
+
+
+class LeadFollowupNotificationSerializer(serializers.Serializer):
+    """
+    Lightweight serializer for RM follow-up notifications.
+    Used by the follow-up notifications endpoint to return only
+    the fields needed by the frontend notification UI.
+    """
+    id = serializers.IntegerField()
+    name = serializers.CharField(allow_blank=True, required=False)
+    phone_no = serializers.CharField(allow_blank=True, required=False)
+    lead_status = serializers.CharField(allow_blank=True, required=False)
+    next_call_at = serializers.CharField(allow_blank=True, required=False)
+    call_attempts = serializers.IntegerField(required=False)
+    latest_remarks = serializers.CharField(allow_blank=True, required=False)

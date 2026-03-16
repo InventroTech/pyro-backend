@@ -2,12 +2,13 @@ from rest_framework import generics, status, serializers
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from authz.permissions import IsTenantAuthenticated
 from core.pagination import MetaPageNumberPagination
 from core.models import Tenant
 from django.utils import timezone
-from datetime import datetime, time, timedelta, timezone as std_utc
+from django.utils.dateparse import parse_datetime
+from datetime import datetime, time, timedelta, timezone as dt_timezone
 try:
     from dateutil import parser as date_parser
 except ImportError:
@@ -21,7 +22,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule, PartnerEvent, ApiSecretKey
-from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer, CallAttemptMatrixSerializer, ScoringRuleModelSerializer
+from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer, CallAttemptMatrixSerializer, ScoringRuleModelSerializer, LeadFollowupNotificationSerializer
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
 from .scoring import calculate_and_update_lead_score
@@ -35,6 +36,117 @@ from .lead_filters import get_lead_filters_for_user
 import requests
 import uuid
 from authz.models import TenantMembership
+
+
+class LeadFollowupListView(APIView):
+    """
+    Returns leads assigned to the current RM whose follow-up time (next_call_at)
+    is due or coming up soon.
+    """
+
+    permission_classes = [IsAuthenticated, IsTenantAuthenticated]
+    FOLLOWUP_HORIZON_MINUTES = 15
+
+    def get(self, request, *args, **kwargs):
+        tenant = getattr(request, "tenant", None)
+        if not tenant:
+            logger.warning("[LeadFollowupListView] Missing tenant on request; returning 403")
+            return Response({"detail": "Tenant not resolved"}, status=status.HTTP_403_FORBIDDEN)
+
+        user = request.user
+        user_identifier = getattr(user, "supabase_uid", None) or str(user.id)
+
+        now = timezone.now()
+        horizon = now + timedelta(minutes=self.FOLLOWUP_HORIZON_MINUTES)
+
+        logger.info(
+            "[LeadFollowupListView] tenant_id=%s user_identifier=%s now=%s horizon=%s",
+            getattr(tenant, "id", None),
+            user_identifier,
+            now.isoformat(),
+            horizon.isoformat(),
+        )
+
+        # We rely on JSONB expression indexes that already exist for next_call_at / lead_stage.
+        # Query only leads assigned to this user, with next_call_at due soon and open statuses.
+        allowed_statuses = ["SNOOZED", "NOT_CONNECTED"]
+
+        queryset = (
+            Record.objects.filter(
+                tenant=tenant,
+                entity_type="lead",
+                data__assigned_to=user_identifier,
+            )
+            .exclude(data__lead_stage__in=["NOT_INTERESTED"])
+        )
+
+        logger.info(
+            "[LeadFollowupListView] base queryset count (assigned_to + tenant + entity_type filter)=%d",
+            queryset.count(),
+        )
+
+        # Filter by next_call_at <= horizon; skip records without valid next_call_at.
+        results = []
+        for rec in queryset:
+            data = rec.data or {}
+            next_call_raw = data.get("next_call_at")
+            if not next_call_raw:
+                logger.debug("[LeadFollowupListView] record id=%s skipped: no next_call_at", rec.id)
+                continue
+
+            # next_call_at is stored as ISO 8601 string in data.
+            # Use Django's parse_datetime for robustness across formats.
+            parsed = parse_datetime(next_call_raw)
+            if parsed is None:
+                logger.warning(
+                    "[LeadFollowupListView] record id=%s has invalid/unsupported next_call_at=%r; skipping",
+                    rec.id,
+                    next_call_raw,
+                )
+                continue
+
+            # Normalise to a naive UTC datetime so we can safely compare with `horizon`
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(dt_timezone.utc).replace(tzinfo=None)
+            next_call_dt = parsed
+
+            lead_stage_val = (data.get("lead_stage") or "").upper()
+            if next_call_dt <= horizon and lead_stage_val in allowed_statuses:
+                logger.debug(
+                    "[LeadFollowupListView] including record id=%s next_call_at=%s lead_stage=%s",
+                    rec.id,
+                    next_call_dt.isoformat(),
+                    lead_stage_val,
+                )
+                results.append(
+                    {
+                        "id": rec.id,
+                        "name": data.get("name", ""),
+                        "phone_no": data.get("phone_number", ""),
+                        "lead_status": data.get("lead_stage", ""),
+                        "next_call_at": next_call_raw,
+                        "call_attempts": data.get("call_attempts", 0),
+                        "latest_remarks": data.get("latest_remarks", ""),
+                    }
+                )
+            else:
+                logger.debug(
+                    "[LeadFollowupListView] record id=%s excluded by window/stage: next_call_at=%s (<= horizon=%s?) lead_stage=%s allowed=%s",
+                    rec.id,
+                    next_call_dt.isoformat(),
+                    horizon.isoformat(),
+                    lead_stage_val,
+                    allowed_statuses,
+                )
+
+        serializer = LeadFollowupNotificationSerializer(results, many=True)
+        logger.info(
+            "[LeadFollowupListView] returning %d followup notification(s) for tenant_id=%s user_identifier=%s",
+            len(results),
+            getattr(tenant, "id", None),
+            user_identifier,
+        )
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 def _parse_lead_stage_param(value):
