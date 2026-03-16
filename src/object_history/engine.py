@@ -199,15 +199,34 @@ class HistoryEngine:
         after_snapshot = after_state or {}
         if config.snapshot_strategy == "minimal":
             changed_fields = set(changes.keys())
+            
+            # Helper function to find a field whether it's at the top level OR inside 'data'
+            def get_val(state, field):
+                if field in state:
+                    return state[field]
+                if "data" in state and isinstance(state["data"], dict) and field in state["data"]:
+                    return state["data"][field]
+                return None
+                
+            def has_field(state, field):
+                if field in state:
+                    return True
+                if "data" in state and isinstance(state["data"], dict) and field in state["data"]:
+                    return True
+                return False
+
             before_snapshot = {
-                field: before_state.get(field)
+                field: get_val(before_state, field)
                 for field in changed_fields
-                if field in before_state
+                if has_field(before_state, field)
             }
+            
+            # Use a temporary reference so we don't overwrite after_snapshot while looping
+            after_temp = after_snapshot 
             after_snapshot = {
-                field: after_snapshot.get(field)
+                field: get_val(after_temp, field)
                 for field in changed_fields
-                if field in after_snapshot
+                if has_field(after_temp, field)
             }
 
         # Retry logic with savepoints to handle race conditions
