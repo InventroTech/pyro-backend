@@ -12,11 +12,9 @@ try:
     from dateutil import parser as date_parser
 except ImportError:
     date_parser = None
-from django.db.models import Q, F, Count, Case, When, Value, IntegerField, FloatField
-from django.db.models.functions import Cast
+from django.db.models import Q, F, Count, Case, When, Value, IntegerField
 from django.db import transaction
 from django.db import IntegrityError
-from django.db.models.fields.json import KeyTextTransform
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 import logging
