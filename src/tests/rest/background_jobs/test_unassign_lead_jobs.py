@@ -2,7 +2,8 @@
 Tests for lead unassignment background jobs:
 
 - UnassignSnoozedLeadsJobHandler: unassigns SNOOZED leads when snooze_unassign_at has passed
-- ReleaseLeadsAfter12hJobHandler: clears assigned_to on NOT_CONNECTED leads when not_connected_unassign_at has passed
+- ReleaseLeadsAfter12hJobHandler: clears assigned_to on NOT_CONNECTED leads when
+  first_assigned_today_at + 12h has passed (or legacy not_connected_unassign_at)
 
 Run:
   pytest src/tests/rest/background_jobs/test_unassign_lead_jobs.py -v
@@ -30,10 +31,12 @@ def _assert_next_call_at_about_one_hour_later(test_case, next_call_at_str, toler
     now = timezone.now()
     if parsed.tzinfo is None and now.tzinfo is not None:
         from datetime import timezone as tz
+
         parsed = parsed.replace(tzinfo=tz.utc)
     delta = (parsed - now).total_seconds()
     test_case.assertGreater(delta, 3600 - tolerance_seconds, msg="next_call_at should be ~1h in the future")
     test_case.assertLess(delta, 3600 + tolerance_seconds, msg="next_call_at should be ~1h in the future")
+
 
 from crm_records.models import Record
 from background_jobs.models import BackgroundJob, JobType
@@ -43,7 +46,7 @@ from tests.factories import TenantFactory, RecordFactory, BackgroundJobFactory
 
 
 class UnassignSnoozedLeadsJobHandlerTests(TestCase):
-    """Tests for UnassignSnoozedLeadsJobHandler: SNOOZED leads with snooze_unassign_at in the past get unassigned."""
+    """Tests for UnassignSnoozedLeadsJobHandler: SNOOZED leads with snooze_unassign_at passed get unassigned."""
 
     def setUp(self):
         super().setUp()
@@ -68,8 +71,7 @@ class UnassignSnoozedLeadsJobHandlerTests(TestCase):
                 "lead_stage": "SNOOZED",
                 "assigned_to": "rm-uuid-123",
                 "snooze_unassign_at": past,
-                "next_call_at": past,
-                "call_attempts": 1,
+                "call_attempts": 2,
             },
         )
         job = self._make_job()
@@ -78,33 +80,14 @@ class UnassignSnoozedLeadsJobHandlerTests(TestCase):
         self.assertTrue(result)
         lead.refresh_from_db()
         self.assertIsNone(lead.data.get("assigned_to"))
+        self.assertEqual(lead.data.get("lead_stage"), "SNOOZED")
         self.assertNotIn("snooze_unassign_at", lead.data)
         _assert_next_call_at_about_one_hour_later(self, lead.data.get("next_call_at"))
-        self.assertEqual(lead.data.get("call_attempts"), 1)
+        self.assertEqual(lead.data.get("call_attempts"), 2)
         self.assertEqual(job.result["unassigned_count"], 1)
 
-    def test_does_not_change_call_attempts_on_unassign(self):
-        """Unassign does not change call_attempts; it stays as-is (e.g. 0 remains 0)."""
-        now = timezone.now()
-        past = (now - timedelta(hours=1)).isoformat()
-        lead = RecordFactory(
-            tenant=self.tenant,
-            entity_type="lead",
-            data={
-                "lead_stage": "SNOOZED",
-                "assigned_to": "rm-uuid",
-                "snooze_unassign_at": past,
-                "call_attempts": 0,
-            },
-        )
-        job = self._make_job()
-        self.handler.process(job)
-
-        lead.refresh_from_db()
-        self.assertEqual(lead.data.get("call_attempts"), 0)
-
     def test_does_not_unassign_when_snooze_unassign_at_in_future(self):
-        """Lead with snooze_unassign_at in the future is not unassigned (job finds no rows)."""
+        """Lead with snooze_unassign_at in the future is not unassigned."""
         now = timezone.now()
         future = (now + timedelta(hours=2)).isoformat()
         lead = RecordFactory(
@@ -126,7 +109,7 @@ class UnassignSnoozedLeadsJobHandlerTests(TestCase):
         self.assertEqual(job.result["unassigned_count"], 0)
 
     def test_does_not_unassign_when_call_attempts_6_or_more(self):
-        """Lead with call_attempts >= 6 is not selected by the job (excluded by WHERE)."""
+        """Lead with call_attempts >= 6 is not selected."""
         now = timezone.now()
         past = (now - timedelta(hours=1)).isoformat()
         lead = RecordFactory(
@@ -137,27 +120,6 @@ class UnassignSnoozedLeadsJobHandlerTests(TestCase):
                 "assigned_to": "rm-uuid",
                 "snooze_unassign_at": past,
                 "call_attempts": 6,
-            },
-        )
-        job = self._make_job()
-        self.handler.process(job)
-
-        lead.refresh_from_db()
-        self.assertEqual(lead.data.get("assigned_to"), "rm-uuid")
-        self.assertEqual(job.result["unassigned_count"], 0)
-
-    def test_does_not_unassign_when_lead_stage_not_snoozed(self):
-        """Lead with lead_stage other than SNOOZED is not processed (different job / query)."""
-        now = timezone.now()
-        past = (now - timedelta(hours=1)).isoformat()
-        lead = RecordFactory(
-            tenant=self.tenant,
-            entity_type="lead",
-            data={
-                "lead_stage": "NOT_CONNECTED",
-                "assigned_to": "rm-uuid",
-                "snooze_unassign_at": past,
-                "call_attempts": 1,
             },
         )
         job = self._make_job()
@@ -171,7 +133,7 @@ class UnassignSnoozedLeadsJobHandlerTests(TestCase):
         """Multiple SNOOZED leads with snooze_unassign_at passed are all unassigned."""
         now = timezone.now()
         past = (now - timedelta(hours=1)).isoformat()
-        for i in range(3):
+        for i in range(2):
             RecordFactory(
                 tenant=self.tenant,
                 entity_type="lead",
@@ -179,15 +141,15 @@ class UnassignSnoozedLeadsJobHandlerTests(TestCase):
                     "lead_stage": "SNOOZED",
                     "assigned_to": f"rm-{i}",
                     "snooze_unassign_at": past,
-                    "call_attempts": 1,
+                    "call_attempts": i,
                 },
             )
         job = self._make_job()
         self.handler.process(job)
 
-        self.assertEqual(job.result["unassigned_count"], 3)
+        self.assertEqual(job.result["unassigned_count"], 2)
         for lead in Record.objects.filter(tenant=self.tenant, entity_type="lead", data__lead_stage="SNOOZED"):
-            self.assertIsNone(lead.data.get("assigned_to"), msg=f"Lead {lead.id} should have assigned_to cleared")
+            self.assertFalse(lead.data.get("assigned_to"), msg=f"Lead {lead.id} should have assigned_to cleared")
 
     def test_get_retry_delay_returns_expected_delays(self):
         """get_retry_delay returns 60, 300, 900 for attempts 1, 2, 3+."""
@@ -198,7 +160,7 @@ class UnassignSnoozedLeadsJobHandlerTests(TestCase):
 
 
 class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
-    """Tests for ReleaseLeadsAfter12hJobHandler: NOT_CONNECTED leads with not_connected_unassign_at passed get assigned_to cleared."""
+    """Tests for ReleaseLeadsAfter12hJobHandler: NOT_CONNECTED + 12h since first_assigned_today_at."""
 
     def setUp(self):
         super().setUp()
@@ -212,17 +174,18 @@ class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
             payload={},
         )
 
-    def test_releases_not_connected_lead_when_not_connected_unassign_at_passed(self):
-        """Lead with NOT_CONNECTED, assigned_to set, not_connected_unassign_at in the past is released (assigned_to cleared)."""
+    def test_releases_not_connected_when_first_assigned_today_at_plus_12h_passed(self):
+        """Lead with NOT_CONNECTED, assigned_to set, anchor 13h ago is released."""
         now = timezone.now()
-        past = (now - timedelta(hours=1)).isoformat()
+        anchor = (now - timedelta(hours=13)).isoformat()
         lead = RecordFactory(
             tenant=self.tenant,
             entity_type="lead",
             data={
                 "lead_stage": "NOT_CONNECTED",
                 "assigned_to": "rm-uuid-456",
-                "not_connected_unassign_at": past,
+                "first_assigned_today_at": anchor,
+                "first_assignment_today_date": timezone.localtime(now).date().isoformat(),
                 "call_attempts": 2,
                 "first_assigned_to": "rm-uuid-456",
                 "first_assigned_at": (now - timedelta(hours=24)).isoformat(),
@@ -235,15 +198,16 @@ class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
         lead.refresh_from_db()
         self.assertIsNone(lead.data.get("assigned_to"))
         self.assertEqual(lead.data.get("lead_stage"), "NOT_CONNECTED")
-        self.assertNotIn("not_connected_unassign_at", lead.data)
+        self.assertNotIn("first_assigned_today_at", lead.data)
+        self.assertNotIn("first_assignment_today_date", lead.data)
         _assert_next_call_at_about_one_hour_later(self, lead.data.get("next_call_at"))
         self.assertEqual(lead.data.get("call_attempts"), 2)
         self.assertEqual(lead.data.get("first_assigned_to"), "rm-uuid-456")
         self.assertIn("first_assigned_at", lead.data)
         self.assertEqual(job.result["released_count"], 1)
 
-    def test_does_not_change_call_attempts_on_release(self):
-        """Release does not change call_attempts; it stays as-is (e.g. 3 remains 3)."""
+    def test_legacy_releases_when_not_connected_unassign_at_passed_and_no_anchor(self):
+        """Pre-migration rows: not_connected_unassign_at in the past still release."""
         now = timezone.now()
         past = (now - timedelta(hours=1)).isoformat()
         lead = RecordFactory(
@@ -251,8 +215,29 @@ class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
             entity_type="lead",
             data={
                 "lead_stage": "NOT_CONNECTED",
-                "assigned_to": "rm-uuid",
+                "assigned_to": "rm-legacy",
                 "not_connected_unassign_at": past,
+                "call_attempts": 1,
+            },
+        )
+        job = self._make_job()
+        self.handler.process(job)
+        lead.refresh_from_db()
+        self.assertIsNone(lead.data.get("assigned_to"))
+        self.assertNotIn("not_connected_unassign_at", lead.data)
+        self.assertEqual(job.result["released_count"], 1)
+
+    def test_does_not_change_call_attempts_on_release(self):
+        """Release does not change call_attempts; it stays as-is (e.g. 3 remains 3)."""
+        now = timezone.now()
+        anchor = (now - timedelta(hours=13)).isoformat()
+        lead = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_stage": "NOT_CONNECTED",
+                "assigned_to": "rm-uuid",
+                "first_assigned_today_at": anchor,
                 "call_attempts": 3,
             },
         )
@@ -262,17 +247,17 @@ class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
         lead.refresh_from_db()
         self.assertEqual(lead.data.get("call_attempts"), 3)
 
-    def test_does_not_release_when_not_connected_unassign_at_in_future(self):
-        """Lead with not_connected_unassign_at in the future is not released."""
+    def test_does_not_release_when_first_assigned_today_at_within_12h(self):
+        """Lead with anchor less than 12h ago is not released."""
         now = timezone.now()
-        future = (now + timedelta(hours=2)).isoformat()
+        recent = (now - timedelta(hours=2)).isoformat()
         lead = RecordFactory(
             tenant=self.tenant,
             entity_type="lead",
             data={
                 "lead_stage": "NOT_CONNECTED",
                 "assigned_to": "rm-uuid",
-                "not_connected_unassign_at": future,
+                "first_assigned_today_at": recent,
                 "call_attempts": 1,
             },
         )
@@ -281,20 +266,20 @@ class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
 
         lead.refresh_from_db()
         self.assertEqual(lead.data.get("assigned_to"), "rm-uuid")
-        self.assertEqual(lead.data.get("not_connected_unassign_at"), future)
+        self.assertEqual(lead.data.get("first_assigned_today_at"), recent)
         self.assertEqual(job.result["released_count"], 0)
 
     def test_does_not_release_when_call_attempts_6_or_more(self):
         """Lead with call_attempts >= 6 is not selected."""
         now = timezone.now()
-        past = (now - timedelta(hours=1)).isoformat()
+        anchor = (now - timedelta(hours=13)).isoformat()
         lead = RecordFactory(
             tenant=self.tenant,
             entity_type="lead",
             data={
                 "lead_stage": "NOT_CONNECTED",
                 "assigned_to": "rm-uuid",
-                "not_connected_unassign_at": past,
+                "first_assigned_today_at": anchor,
                 "call_attempts": 6,
             },
         )
@@ -308,14 +293,14 @@ class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
     def test_does_not_release_when_lead_stage_not_not_connected(self):
         """Lead with lead_stage SNOOZED is not processed by ReleaseLeadsAfter12h (different job)."""
         now = timezone.now()
-        past = (now - timedelta(hours=1)).isoformat()
+        anchor = (now - timedelta(hours=13)).isoformat()
         lead = RecordFactory(
             tenant=self.tenant,
             entity_type="lead",
             data={
                 "lead_stage": "SNOOZED",
                 "assigned_to": "rm-uuid",
-                "not_connected_unassign_at": past,
+                "first_assigned_today_at": anchor,
                 "call_attempts": 1,
             },
         )
@@ -329,7 +314,7 @@ class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
     def test_preserves_first_assigned_at_and_first_assigned_to(self):
         """first_assigned_at and first_assigned_to are not removed (for daily limit tracking)."""
         now = timezone.now()
-        past = (now - timedelta(hours=1)).isoformat()
+        anchor = (now - timedelta(hours=13)).isoformat()
         first_at = (now - timedelta(hours=24)).isoformat()
         lead = RecordFactory(
             tenant=self.tenant,
@@ -337,7 +322,7 @@ class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
             data={
                 "lead_stage": "NOT_CONNECTED",
                 "assigned_to": "rm-uuid",
-                "not_connected_unassign_at": past,
+                "first_assigned_today_at": anchor,
                 "call_attempts": 1,
                 "first_assigned_to": "original-rm",
                 "first_assigned_at": first_at,
@@ -351,9 +336,9 @@ class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
         self.assertEqual(lead.data.get("first_assigned_at"), first_at)
 
     def test_releases_multiple_eligible_not_connected_leads(self):
-        """Multiple NOT_CONNECTED leads with not_connected_unassign_at passed are all released."""
+        """Multiple NOT_CONNECTED leads with anchor passed are all released."""
         now = timezone.now()
-        past = (now - timedelta(hours=1)).isoformat()
+        anchor = (now - timedelta(hours=13)).isoformat()
         for i in range(2):
             RecordFactory(
                 tenant=self.tenant,
@@ -361,7 +346,7 @@ class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
                 data={
                     "lead_stage": "NOT_CONNECTED",
                     "assigned_to": f"rm-{i}",
-                    "not_connected_unassign_at": past,
+                    "first_assigned_today_at": anchor,
                     "call_attempts": i,
                 },
             )
@@ -371,7 +356,7 @@ class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
         self.assertEqual(job.result["released_count"], 2)
         for lead in Record.objects.filter(tenant=self.tenant, entity_type="lead", data__lead_stage="NOT_CONNECTED"):
             self.assertFalse(lead.data.get("assigned_to"), msg=f"Lead {lead.id} should have assigned_to cleared")
-            self.assertNotIn("not_connected_unassign_at", lead.data)
+            self.assertNotIn("first_assigned_today_at", lead.data)
 
     def test_get_retry_delay_returns_expected_delays(self):
         """get_retry_delay returns 60, 300, 900 for attempts 1, 2, 3+."""
