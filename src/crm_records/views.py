@@ -43,6 +43,8 @@ def _parse_lead_stage_param(value):
         return set()
     return {v.strip().upper() for v in value.split(',') if v.strip()}
 
+from .helper import parse_numeric_lookup, coerce_numeric
+
 
 class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
     queryset = Record.objects.all()
@@ -118,6 +120,17 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                     | Q(**{f'data__{field_name}': 'None'})
                 )
                 q_objects &= field_q
+                continue
+            # Numeric comparison lookups: total_price__gte=50000 -> data__total_price__gte with numeric 50000
+            numeric_lookup = parse_numeric_lookup(field_name)
+            if numeric_lookup:
+                base_key, lookup_suffix = numeric_lookup
+                num_val, ok = coerce_numeric(field_value)
+                if ok and num_val is not None:
+                    q_objects &= Q(**{f'data__{base_key}{lookup_suffix}': num_val})
+                else:
+                    # Invalid value for numeric lookup; treat as exact match on the full key (likely no match)
+                    q_objects &= Q(**{f'data__{field_name}': field_value})
                 continue
             # Support multiple values for the same field (comma-separated)
             if ',' in str(field_value):
