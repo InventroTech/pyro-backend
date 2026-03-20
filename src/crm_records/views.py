@@ -2289,15 +2289,16 @@ class GetNextLeadView(APIView):
                 call_attempts_int = 0
             
             # Use pre-assignment stage/outcome (lead_stage is overwritten to ASSIGNED below).
-            last_call_outcome = (candidate_locked.data or {}).get("last_call_outcome", "").lower()
-            prev_lead_stage = ((candidate_locked.data or {}).get("lead_stage") or "").upper()
+            last_call_outcome = data.get('last_call_outcome', '').lower()
+            lead_stage = data.get('lead_stage', '').upper()
             # Check if this is a retry lead (NOT_CONNECTED only)
             # These leads should NOT set first_assigned_to when reassigned to a new RM
             # last_call_outcome in DB is exactly "not_connected"
+
             is_not_connected_retry = (
-                call_attempts_int > 0
-                or last_call_outcome == "not_connected"
-                or prev_lead_stage == "NOT_CONNECTED"
+                call_attempts_int > 0 or
+                last_call_outcome == 'not_connected' or
+                lead_stage == 'NOT_CONNECTED'
             )
             
             if is_fresh_assignment and 'first_assigned_at' not in data and not is_not_connected_retry:
@@ -2311,11 +2312,11 @@ class GetNextLeadView(APIView):
                 logger.info(
                     "[GetNextLead] Skipping first_assigned_to for lead_id=%d (retry lead - call_attempts=%d, "
                     "last_call_outcome=%s, lead_stage=%s, won't count toward daily limit)",
-                    candidate_locked.id, call_attempts_int, last_call_outcome, prev_lead_stage
+                    candidate_locked.id, call_attempts_int, last_call_outcome
                 )
 
-            if is_fresh_assignment:
-                merge_first_assignment_today_anchor(data, now)
+            # if is_fresh_assignment:
+            #     merge_first_assignment_today_anchor(data, now)
 
             candidate_locked.data = data
             candidate_locked.updated_at = timezone.now()
