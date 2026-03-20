@@ -43,36 +43,7 @@ def _parse_lead_stage_param(value):
         return set()
     return {v.strip().upper() for v in value.split(',') if v.strip()}
 
-
-# Numeric comparison lookups for data JSON field (so total_price__gte=50000 works as numeric >= )
-_NUMERIC_LOOKUPS = ('__gt', '__gte', '__lt', '__lte')
-
-
-def _parse_numeric_lookup(field_name):
-    """If field_name is like 'total_price__gte', return ('total_price', '__gte'); else None."""
-    for suffix in _NUMERIC_LOOKUPS:
-        if field_name.endswith(suffix):
-            base = field_name[: -len(suffix)]
-            if base:
-                return base, suffix
-    return None
-
-
-def _coerce_numeric(value):
-    """Coerce string to int or float for use in numeric filters. Returns (value, True) or (original, False)."""
-    if value is None or value == '':
-        return None, False
-    if isinstance(value, (int, float)):
-        return value, True
-    s = str(value).strip()
-    if not s:
-        return None, False
-    try:
-        if '.' in s:
-            return float(s), True
-        return int(s), True
-    except (ValueError, TypeError):
-        return value, False
+from .helper import parse_numeric_lookup, coerce_numeric
 
 
 class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
@@ -151,10 +122,10 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 q_objects &= field_q
                 continue
             # Numeric comparison lookups: total_price__gte=50000 -> data__total_price__gte with numeric 50000
-            numeric_lookup = _parse_numeric_lookup(field_name)
+            numeric_lookup = parse_numeric_lookup(field_name)
             if numeric_lookup:
                 base_key, lookup_suffix = numeric_lookup
-                num_val, ok = _coerce_numeric(field_value)
+                num_val, ok = coerce_numeric(field_value)
                 if ok and num_val is not None:
                     q_objects &= Q(**{f'data__{base_key}{lookup_suffix}': num_val})
                 else:
