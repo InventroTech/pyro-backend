@@ -1,6 +1,7 @@
 from django.db import models
 from django.contrib.postgres.fields import ArrayField
 from django.contrib.postgres.indexes import GinIndex
+from django.core.cache import cache
 from core.models import BaseModel
 from object_history.models import HistoryTrackedModel
 import logging
@@ -12,6 +13,18 @@ class Record(HistoryTrackedModel, BaseModel):
     """
     Universal record model that can hold any tenant's data dynamically using JSONB.
     All future entities (leads, tickets, job applications, etc.) will be built on top of this.
+
+    Lead queue / reassignment (``entity_type="lead"``, ``data`` JSON) — notable keys:
+
+    - ``first_assigned_today_at``: ISO timestamp when the lead was assigned in the current
+      stint (unassigned→assigned). Used with ``ReleaseLeadsAfter12hJobHandler``: 12h after
+      this moment, NOT_CONNECTED leads are unassigned but stay NOT_CONNECTED.
+    - ``first_assignment_today_date``: Local calendar date (``YYYY-MM-DD``) when the anchor
+      was set (audit / debugging).
+    - ``first_assigned_at`` / ``first_assigned_to``: Original fresh assignment (daily limit);
+      not cleared by the 12h NOT_CONNECTED release job.
+    - Legacy ``not_connected_unassign_at``: honored by the release job only if
+      ``first_assigned_today_at`` is absent.
     """
     entity_type = models.CharField(max_length=100, db_index=True)
     data = models.JSONField(default=dict, blank=True)
@@ -327,3 +340,79 @@ class CallAttemptMatrix(BaseModel):
 
     def __str__(self):
         return f"{self.lead_type}: {self.max_call_attempts} attempts, {self.sla_days} days SLA, {self.min_time_between_calls_hours}h min interval"
+
+
+class Bucket(BaseModel):
+    """
+    A named, filterable slice of the lead pool for routing/assignment.
+
+    ``filter_conditions`` is interpreted by ``BucketQuerysetBuilder.build()`` (lead pipeline).
+    Vocabulary (all keys optional unless noted):
+
+    - ``assigned_scope`` (str): ``"unassigned"`` | ``"me"`` | ``"any"``.
+      Who may own ``data.assigned_to`` for rows in this bucket.
+    - ``fallback_assigned_scope`` (str): If set, the pipeline tries the primary
+      ``assigned_scope`` first, then this scope (e.g. ``"me"`` then ``"unassigned"``
+      for follow-up callbacks).
+    - ``lead_stage`` (list[str]): Uppercase stage names matched against
+      ``UPPER(data->>'lead_stage')``.
+    - ``call_attempts`` (dict): Range on ``COALESCE((data->>'call_attempts')::int, 0)``.
+      Supported keys: ``lte``, ``gte``, ``lt``, ``gt`` (int).
+    - ``next_call_due`` (bool): If true, require ``next_call_at`` set and ``<= NOW()``
+      (and attempts ``< 6`` when combined with snoozed-style buckets).
+    - ``apply_routing_rule`` (bool, default True): Apply ``apply_routing_rule_to_queryset``
+      for this RM when ``user_uuid`` is set.
+    - ``daily_limit_applies`` (bool): If true, this bucket is skipped when the user has
+      hit their daily pull limit (fresh pool only in typical setups).
+    - ``exclude_other_assignees`` (bool, default True when ``assigned_scope`` is
+      ``"unassigned"``): Exclude rows clearly assigned to another user (legacy pool safety).
+    """
+
+    name = models.CharField(max_length=100)
+    slug = models.SlugField()
+    description = models.TextField(blank=True)
+
+    # What leads belong in this bucket (interpreted by the pipeline services).
+    filter_conditions = models.JSONField(default=dict)
+
+    is_system = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = [("tenant", "slug")]
+        indexes = [models.Index(fields=["tenant", "slug"]), models.Index(fields=["tenant", "is_active"])]
+
+    def __str__(self):
+        return f"{self.tenant_id}:{self.slug}"
+
+
+class UserBucketAssignment(BaseModel):
+    """
+    Assigns a priority-ordered pull bucket to a specific RM (TenantMembership).
+    """
+
+    user = models.ForeignKey("authz.TenantMembership", on_delete=models.CASCADE)
+    bucket = models.ForeignKey(Bucket, on_delete=models.CASCADE)
+
+    priority = models.IntegerField(default=100)
+    pull_strategy = models.JSONField(default=dict)
+
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = [("tenant", "user", "bucket")]
+        ordering = ["priority"]
+        indexes = [models.Index(fields=["tenant", "user"]), models.Index(fields=["tenant", "bucket", "priority"])]
+
+    def __str__(self):
+        return f"{self.tenant_id}:{self.user_id}->{self.bucket_id}({self.priority})"
+    
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        # Keep in sync with `crm_records.lead_pipeline.bucket_resolver.BucketResolver`.
+        cache.delete(f"bucket_assignments:{self.tenant_id}:{self.user_id}:v2")
+
+    def delete(self, *args, **kwargs):
+        super().delete(*args, **kwargs)
+        # Keep in sync with `crm_records.lead_pipeline.bucket_resolver.BucketResolver`.
+        cache.delete(f"bucket_assignments:{self.tenant_id}:{self.user_id}:v2")
