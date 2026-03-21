@@ -35,10 +35,16 @@ def set_first_assignment_today_anchor(*, now=None) -> dict:
     """
     if now is None:
         now = timezone.now()
-    local = timezone.localtime(now)
+    # When USE_TZ=False, ``timezone.now()`` can be a naive datetime; calling
+    # ``timezone.localtime`` on a naive datetime raises ValueError.
+    if timezone.is_aware(now):
+        local_date = timezone.localtime(now).date().isoformat()
+    else:
+        # Treat naive "now" as UTC for the purpose of deriving today's date.
+        local_date = now.date().isoformat()
     return {
         FIRST_ASSIGNED_TODAY_AT: now.isoformat(),
-        FIRST_ASSIGNMENT_TODAY_DATE: local.date().isoformat(),
+        FIRST_ASSIGNMENT_TODAY_DATE: local_date,
     }
 
 

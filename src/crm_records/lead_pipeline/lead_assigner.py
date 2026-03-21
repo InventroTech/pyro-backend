@@ -38,6 +38,7 @@ class LeadAssigner:
         user_identifier: str,
         user_uuid,
         now,
+        debug: bool = False,
     ) -> Optional[AssignmentResult]:
         """
         Lock + validate cooldown + mutate Record.data + emit post-assignment actions.
@@ -46,9 +47,24 @@ class LeadAssigner:
         with transaction.atomic():
             candidate_locked = Record.objects.select_for_update(skip_locked=True).filter(pk=candidate_pk).first()
             if not candidate_locked:
+                if debug:
+                    logger.info(
+                        "[LeadAssigner] lock failed (skip_locked) candidate_pk=%s user_identifier=%s",
+                        candidate_pk,
+                        user_identifier,
+                    )
                 return None
 
             if not self.candidate_selector.is_due_for_call(candidate_locked.data, timezone.now()):
+                if debug:
+                    data = candidate_locked.data or {}
+                    logger.info(
+                        "[LeadAssigner] candidate not due after lock candidate_pk=%s call_attempts=%s next_call_at=%s user_identifier=%s",
+                        candidate_pk,
+                        data.get("call_attempts"),
+                        data.get("next_call_at"),
+                        user_identifier,
+                    )
                 return None
 
             data = candidate_locked.data.copy() if candidate_locked.data else {}

@@ -58,16 +58,40 @@ class LeadPipeline:
             )
 
         assignments = self.bucket_resolver.resolve(tenant, resolved_user)
+        if debug:
+            logger.info(
+                "[LeadPipeline] resolved %d bucket assignments for user_identifier=%s tenant=%s",
+                len(assignments),
+                user_identifier,
+                getattr(tenant, "id", None) or getattr(tenant, "slug", None),
+            )
 
         for assignment in assignments:
             fc = dict(assignment.filter_conditions or {})
 
             if fc.get("daily_limit_applies") and limit_status and limit_status.is_reached and not debug:
+                if debug:
+                    logger.info(
+                        "[LeadPipeline] skipping bucket due to daily_limit bucket_slug=%s priority=%s daily_limit_applies=%s",
+                        assignment.bucket_slug,
+                        assignment.priority,
+                        fc.get("daily_limit_applies"),
+                    )
                 continue
 
             scopes = [fc.get("assigned_scope", "unassigned")]
             if fallback := fc.get("fallback_assigned_scope"):
                 scopes.append(fallback)
+
+            if debug:
+                logger.info(
+                    "[LeadPipeline] trying assignment bucket_slug=%s priority=%s pull_strategy=%s filter_conditions=%s scopes=%s",
+                    assignment.bucket_slug,
+                    assignment.priority,
+                    assignment.pull_strategy,
+                    fc,
+                    scopes,
+                )
 
             for scope in scopes:
                 fc_copy = {**fc, "assigned_scope": scope}
@@ -79,6 +103,7 @@ class LeadPipeline:
                     eligible_lead_types=resolved_user.eligible_lead_types,
                     eligible_lead_sources=resolved_user.eligible_lead_sources,
                     eligible_lead_statuses=resolved_user.eligible_lead_statuses,
+                    debug=debug,
                 )
 
                 # qs = self.matrix_filter.apply(
@@ -90,8 +115,35 @@ class LeadPipeline:
 
                 qs = self.strategy_applier.apply(qs=qs, strategy=assignment.pull_strategy, now_iso=now_iso)
 
+                if debug:
+                    try:
+                        logger.info(
+                            "[LeadPipeline] bucket_slug=%s scope=%s qs_count=%s",
+                            assignment.bucket_slug,
+                            scope,
+                            qs.count(),
+                        )
+                    except Exception:
+                        logger.exception("[LeadPipeline] failed qs.count() for bucket debug logging")
+
+                checked = 0
                 for c in qs[:50]:
-                    if self.candidate_selector.is_due_for_call(c.data, now):
+                    due = self.candidate_selector.is_due_for_call(c.data, now)
+                    if debug and checked < 5:
+                        data = c.data or {}
+                        logger.info(
+                            "[LeadPipeline] candidate check bucket_slug=%s scope=%s lead_stage=%s call_attempts=%s next_call_at=%s assigned_to=%s due=%s",
+                            assignment.bucket_slug,
+                            scope,
+                            (data.get("lead_stage") or "").upper(),
+                            data.get("call_attempts"),
+                            data.get("next_call_at"),
+                            data.get("assigned_to"),
+                            due,
+                        )
+                        checked += 1
+
+                    if due:
                         result = self.assigner.assign_main_queue(
                             candidate_pk=c.pk,
                             tenant=tenant,
@@ -102,6 +154,13 @@ class LeadPipeline:
                             now=now,
                         )
                         if result:
+                            if debug:
+                                logger.info(
+                                    "[LeadPipeline] assigned lead record_id=%s from bucket_slug=%s scope=%s",
+                                    result.record.pk,
+                                    assignment.bucket_slug,
+                                    scope,
+                                )
                             return result.record
 
         if limit_status and limit_status.is_reached and not debug:
@@ -115,6 +174,13 @@ class LeadPipeline:
             if retry_candidate:
                 return retry_candidate
 
+        if debug:
+            logger.info(
+                "[LeadPipeline] no lead assigned. assignments_tried=%d limit_status=%s limit_reached=%s",
+                len(assignments),
+                bool(limit_status),
+                getattr(limit_status, "is_reached", None),
+            )
         return None
 
     def _daily_limit_retry_fallback(
