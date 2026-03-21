@@ -1,7 +1,7 @@
 from rest_framework import generics, status, serializers
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import ValidationError, NotFound
 from rest_framework.permissions import AllowAny
 from authz.permissions import IsTenantAuthenticated
 from core.pagination import MetaPageNumberPagination
@@ -35,6 +35,9 @@ from .lead_filters import get_lead_filters_for_user
 import requests
 import uuid
 from authz.models import TenantMembership
+
+from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
+from crm_records.lead_pipeline.pipeline import LeadPipeline
 
 
 def _parse_lead_stage_param(value):
@@ -1544,6 +1547,7 @@ class GetNextLeadView(APIView):
         eligible_lead_statuses = filters.eligible_lead_statuses
         daily_limit = filters.daily_limit
         user_uuid = filters.user_uuid
+        tenant_membership = filters.tenant_membership
 
         logger.info(
             "[GetNextLead] Step 2 done: eligible_lead_types=%s eligible_lead_sources=%s eligible_lead_statuses=%s daily_limit=%s",
@@ -1552,6 +1556,17 @@ class GetNextLeadView(APIView):
             eligible_lead_statuses or "(none)",
             daily_limit,
         )
+
+        # Early re-routing:
+        # - SELF TRIAL RMs keep the legacy monolithic flow unchanged.
+        #   (identified via eligible_lead_statuses containing "SELF TRIAL")
+        # - SALES LEAD / others go through the bucketed LeadPipeline.
+        if "SELF TRIAL" not in (eligible_lead_statuses or []):
+            pipeline = LeadPipeline()
+            record = pipeline.get_next(tenant=tenant, request_user=user, debug=debug_mode)
+            if not record:
+                return Response({}, status=status.HTTP_200_OK)
+            return Response(_flatten_lead_response(record), status=status.HTTP_200_OK)
 
         # If user has no eligible lead types assigned, push all leads to the RM
         # (no filtering by affiliated_party / party type)
@@ -2286,11 +2301,13 @@ class GetNextLeadView(APIView):
             except (TypeError, ValueError):
                 call_attempts_int = 0
             
+            # Use pre-assignment stage/outcome (lead_stage is overwritten to ASSIGNED below).
             last_call_outcome = data.get('last_call_outcome', '').lower()
             lead_stage = data.get('lead_stage', '').upper()
             # Check if this is a retry lead (NOT_CONNECTED only)
             # These leads should NOT set first_assigned_to when reassigned to a new RM
             # last_call_outcome in DB is exactly "not_connected"
+
             is_not_connected_retry = (
                 call_attempts_int > 0 or
                 last_call_outcome == 'not_connected' or
@@ -2308,8 +2325,11 @@ class GetNextLeadView(APIView):
                 logger.info(
                     "[GetNextLead] Skipping first_assigned_to for lead_id=%d (retry lead - call_attempts=%d, "
                     "last_call_outcome=%s, lead_stage=%s, won't count toward daily limit)",
-                    candidate_locked.id, call_attempts_int, last_call_outcome, lead_stage
+                    candidate_locked.id, call_attempts_int, last_call_outcome
                 )
+
+            # if is_fresh_assignment:
+            #     merge_first_assignment_today_anchor(data, now)
 
             candidate_locked.data = data
             candidate_locked.updated_at = timezone.now()

@@ -17,6 +17,7 @@ from django.core.cache import cache
 from django.db.models import Q
 
 from .models import RuleSet, RuleExecutionLog, Record
+from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
 from background_jobs.queue_service import get_queue_service
 from background_jobs.models import JobType
 from object_history.engine import get_request_context
@@ -230,6 +231,13 @@ def action_update_fields(
                 f"last_call_outcome={last_call_outcome}, lead_stage={lead_stage}, won't count toward new RM's daily limit)"
             )
 
+        # 12h NOT_CONNECTED release: anchor from first assignment in this stint (any path, including retry).
+        if is_fresh_assignment and new_assigned_to is not None and str(new_assigned_to).strip() not in ("", "null", "None"):
+            merge_first_assignment_today_anchor(resolved_updates, timezone.now())
+            logger.info(
+                f"[action_update_fields] Set first_assigned_today anchor for lead_id={record.id} (12h rule from assignment)"
+            )
+
     # Call-back-later: if user did not select a time, set next_call_at to now + 1 hour so the lead still has a callback time.
     if is_call_back_later_event:
         next_call_at_val = resolved_updates.get("next_call_at") if "next_call_at" in resolved_updates else None
@@ -251,16 +259,8 @@ def action_update_fields(
             f"(call_back_later, has_time={has_next_call_time}, unassign in {unassign_hours}h)"
         )
 
-    # Not-connected: set not_connected_unassign_at so background job can unassign after 12h (same pattern as snooze_unassign_at).
-    # Only when the rule sets lead_stage to NOT_CONNECTED and the lead has or keeps assigned_to.
-    lead_stage_after = (resolved_updates.get("lead_stage") or record.data.get("lead_stage") or "").strip().upper()
-    assigned_after = resolved_updates.get("assigned_to") if "assigned_to" in resolved_updates else record.data.get("assigned_to")
-    assigned_ok = assigned_after and str(assigned_after).strip() not in ("", "null", "None")
-    if is_not_connected_event and lead_stage_after == "NOT_CONNECTED" and assigned_ok:
-        resolved_updates["not_connected_unassign_at"] = (timezone.now() + timedelta(hours=12)).isoformat()
-        logger.info(
-            f"[action_update_fields] Set not_connected_unassign_at for lead_id={record.id} (not_connected, unassign in 12h)"
-        )
+    # NOT_CONNECTED 12h unassign is driven by first_assigned_today_at (set on any unassigned→assigned
+    # transition via merge_first_assignment_today_anchor), not by not_connected_unassign_at.
 
     # Apply all updates
     for key, value in resolved_updates.items():
