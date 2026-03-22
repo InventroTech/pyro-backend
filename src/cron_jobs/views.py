@@ -152,7 +152,9 @@ class UnassignSnoozedLeadsCronView(APIView):
 class ReleaseLeadsAfter12hCronView(APIView):
     """
     Cron endpoint: enqueue one release_leads_after_12h job.
-    Leads first-assigned 12+ hours ago with 0 call attempts are moved to IN_QUEUE and unassigned; next_call_at set to 1h later.
+
+    NOT_CONNECTED leads still assigned: if ``first_assigned_today_at + 12h`` has passed,
+    clear ``assigned_to`` only (stage stays NOT_CONNECTED); ``next_call_at`` set ~1h later.
     Call periodically (e.g. every 15 min or hourly).
     Allowed: authenticated user OR request with X-Cron-Secret header matching CRON_SECRET env.
     """

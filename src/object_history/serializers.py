@@ -81,15 +81,30 @@ def compute_diff(
     diff = {}
     field_set = set(before.keys()) | set(after.keys())
     redact = set(redact_fields)
+    
     for field in field_set:
         before_val = before.get(field)
         after_val = after.get(field)
+        
         if before_val == after_val:
             continue
+            
+        # 👇 NEW LOGIC: If the field is a nested dictionary (like "data"), look inside it!
+        if isinstance(before_val, dict) and isinstance(after_val, dict):
+            # Recursively compute the diff for the inner dictionary
+            inner_diff = compute_diff(before_val, after_val, redact_fields)
+            
+            # Flatten the result so the frontend gets clean top-level keys
+            for inner_key, inner_val in inner_diff.items():
+                diff[inner_key] = inner_val
+            continue
+        # 👆 END NEW LOGIC
+            
         diff[field] = {
             "from": "[REDACTED]" if field in redact else before_val,
             "to": "[REDACTED]" if field in redact else after_val,
         }
+        
     return diff
 
 

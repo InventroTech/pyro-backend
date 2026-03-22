@@ -21,6 +21,7 @@ from django.utils import timezone
 
 from core.models import Tenant
 from authz.models import TenantMembership
+from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
 from crm_records.models import Record, PartnerEvent
 from crm_records.scoring import calculate_and_update_lead_score
 from crm_records.services import PrajaService
@@ -854,6 +855,8 @@ class PartnerLeadAssignJobHandler(JobHandler):
                 if is_fresh_assignment and "first_assigned_at" not in data and not is_not_connected_retry:
                     data["first_assigned_at"] = timezone.now().isoformat()
                     data["first_assigned_to"] = user_identifier
+                if is_fresh_assignment:
+                    merge_first_assignment_today_anchor(data, timezone.now())
                 record.data = data
                 record.updated_at = timezone.now()
                 record.save(update_fields=["data", "updated_at"])
@@ -947,13 +950,17 @@ class UnassignSnoozedLeadsJobHandler(JobHandler):
 
 class ReleaseLeadsAfter12hJobHandler(JobHandler):
     """
-    Job for NOT_CONNECTED leads only. When not_connected_unassign_at has passed (set by rule engine
-    to now + 12h when lead goes NOT_CONNECTED) and assigned_to is not null, clears assigned_to only
-    (lead_stage stays NOT_CONNECTED). Same pattern as UnassignSnoozedLeadsJobHandler (snooze_unassign_at).
-    Does not remove first_assigned_at or first_assigned_to.
-    Triggers only when: (1) not_connected_unassign_at <= now (12h since NOT_CONNECTED), (2) assigned_to is not null,
-    (3) no other event clicked (lead_stage still NOT_CONNECTED), (4) call_attempts < 6.
-    SNOOZED leads are handled by UnassignSnoozedLeadsJobHandler (48h/12h via snooze_unassign_at).
+    Job for NOT_CONNECTED leads only (segregation bucket).
+
+    Business rule: "Has it been 12 hours since the lead was assigned (this stint)?"
+    We use ``data.first_assigned_today_at`` set on every unassigned→assigned transition.
+    When ``first_assigned_today_at + 12 hours <= now``, clear ``assigned_to`` only; keep
+    ``lead_stage`` = NOT_CONNECTED.
+
+    Legacy: rows with no ``first_assigned_today_at`` still honor ``not_connected_unassign_at``
+    if present (pre-migration data).
+
+    Does not remove ``first_assigned_at`` / ``first_assigned_to`` (daily limit tracking).
     """
 
     def process(self, job: BackgroundJob) -> bool:
@@ -961,18 +968,32 @@ class ReleaseLeadsAfter12hJobHandler(JobHandler):
 
         now = timezone.now()
         one_hour_later = (now + timedelta(hours=1)).isoformat()
-        # NOT_CONNECTED only = no other event clicked; has assigned_to; not_connected_unassign_at passed (12h); attempts not exhausted
         qs = Record.objects.filter(entity_type="lead").extra(
             where=[
                 "UPPER(COALESCE(data->>'lead_stage','')) = 'NOT_CONNECTED'",
                 "data->>'assigned_to' IS NOT NULL",
                 "TRIM(COALESCE(data->>'assigned_to', '')) != ''",
-                "data->>'not_connected_unassign_at' IS NOT NULL",
-                "data->>'not_connected_unassign_at' != ''",
-                "(data->>'not_connected_unassign_at')::timestamptz <= %s",
                 "COALESCE((data->>'call_attempts')::int, 0) < 6",
+                """
+                (
+                    (
+                        data->>'first_assigned_today_at' IS NOT NULL
+                        AND TRIM(COALESCE(data->>'first_assigned_today_at', '')) != ''
+                        AND (data->>'first_assigned_today_at')::timestamptz + interval '12 hours' <= %s
+                    )
+                    OR (
+                        (
+                            data->>'first_assigned_today_at' IS NULL
+                            OR TRIM(COALESCE(data->>'first_assigned_today_at', '')) = ''
+                        )
+                        AND data->>'not_connected_unassign_at' IS NOT NULL
+                        AND TRIM(COALESCE(data->>'not_connected_unassign_at', '')) != ''
+                        AND (data->>'not_connected_unassign_at')::timestamptz <= %s
+                    )
+                )
+                """,
             ],
-            params=[now],
+            params=[now, now],
         )
         released_count = 0
         for record in qs:
@@ -981,12 +1002,14 @@ class ReleaseLeadsAfter12hJobHandler(JobHandler):
             data["assigned_to"] = None
             data["next_call_at"] = one_hour_later
             data.pop("not_connected_unassign_at", None)
+            data.pop("first_assigned_today_at", None)
+            data.pop("first_assignment_today_date", None)
             # Do not change call_attempts on unassign; do not remove first_assigned_at or first_assigned_to.
             record.data = data
             record.save(update_fields=["data", "updated_at"])
             released_count += 1
             logger.info(
-                "[ReleaseLeadsAfter12h] Released lead record_id=%s (NOT_CONNECTED, not_connected_unassign_at passed, had assigned_to): cleared assigned_to only, stage unchanged",
+                "[ReleaseLeadsAfter12h] Released lead record_id=%s (NOT_CONNECTED, 12h since assignment anchor): cleared assigned_to only, stage unchanged",
                 record.id,
             )
         job.result = {
