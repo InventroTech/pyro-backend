@@ -20,7 +20,10 @@ class BucketAssignmentView:
 
 class BucketResolver:
     """
-    Loads per-user bucket assignments ordered by priority.
+    Loads bucket assignments ordered by priority.
+
+    Prefers **tenant-wide** rows (``user`` is NULL). If none exist, falls back to
+    per-``TenantMembership`` rows (legacy).
     """
 
     CACHE_TTL_SECONDS = 300
@@ -30,13 +33,34 @@ class BucketResolver:
         if not membership:
             return []
 
-        # Version suffix: cached views now include filter_conditions (invalidate old pickles).
-        cache_key = f"bucket_assignments:{tenant.id}:{membership.id}:v2"
-        cached = cache.get(cache_key)
+        tenant_key = f"bucket_assignments_tenant:{tenant.id}:v4"
+        legacy_key = f"bucket_assignments:{tenant.id}:{membership.id}:v2"
+
+        cached = cache.get(tenant_key)
         if cached is not None:
             return cached
 
-        assignments = (
+        tenant_qs = (
+            UserBucketAssignment.objects.filter(
+                tenant=tenant,
+                user__isnull=True,
+                is_active=True,
+                bucket__is_active=True,
+            )
+            .select_related("bucket")
+            .order_by("priority")
+        )
+
+        if tenant_qs.exists():
+            result = self._to_views(tenant_qs)
+            cache.set(tenant_key, result, self.CACHE_TTL_SECONDS)
+            return result
+
+        cached_legacy = cache.get(legacy_key)
+        if cached_legacy is not None:
+            return cached_legacy
+
+        legacy_qs = (
             UserBucketAssignment.objects.filter(
                 tenant=tenant,
                 user=membership,
@@ -46,8 +70,13 @@ class BucketResolver:
             .select_related("bucket")
             .order_by("priority")
         )
+        result = self._to_views(legacy_qs)
+        cache.set(legacy_key, result, self.CACHE_TTL_SECONDS)
+        return result
 
-        result: List[BucketAssignmentView] = [
+    @staticmethod
+    def _to_views(assignments) -> List[BucketAssignmentView]:
+        return [
             BucketAssignmentView(
                 pk=a.pk,
                 bucket_slug=a.bucket.slug,
@@ -57,7 +86,4 @@ class BucketResolver:
             )
             for a in assignments
         ]
-
-        cache.set(cache_key, result, self.CACHE_TTL_SECONDS)
-        return result
 

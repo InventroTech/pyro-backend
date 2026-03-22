@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models import Q
 from django.contrib.postgres.fields import ArrayField
 from django.contrib.postgres.indexes import GinIndex
 from django.core.cache import cache
@@ -388,10 +389,19 @@ class Bucket(BaseModel):
 
 class UserBucketAssignment(BaseModel):
     """
-    Assigns a priority-ordered pull bucket to a specific RM (TenantMembership).
+    Assigns a priority-ordered pull bucket.
+
+    - **Tenant-wide** (``user`` is NULL): same bucket order/strategy for every RM in the tenant.
+    - **Per-user** (``user`` set): optional overrides for a specific ``TenantMembership`` (legacy).
     """
 
-    user = models.ForeignKey("authz.TenantMembership", on_delete=models.CASCADE)
+    user = models.ForeignKey(
+        "authz.TenantMembership",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        help_text="If null, this row applies to all RMs in the tenant.",
+    )
     bucket = models.ForeignKey(Bucket, on_delete=models.CASCADE)
 
     priority = models.IntegerField(default=100)
@@ -400,19 +410,35 @@ class UserBucketAssignment(BaseModel):
     is_active = models.BooleanField(default=True)
 
     class Meta:
-        unique_together = [("tenant", "user", "bucket")]
         ordering = ["priority"]
         indexes = [models.Index(fields=["tenant", "user"]), models.Index(fields=["tenant", "bucket", "priority"])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "bucket"],
+                condition=Q(user__isnull=True),
+                name="crm_records_uba_tenant_bucket_tenant_default_uniq",
+            ),
+            models.UniqueConstraint(
+                fields=["tenant", "user", "bucket"],
+                condition=Q(user__isnull=False),
+                name="crm_records_uba_tenant_user_bucket_uniq",
+            ),
+        ]
 
     def __str__(self):
-        return f"{self.tenant_id}:{self.user_id}->{self.bucket_id}({self.priority})"
-    
+        who = f"user={self.user_id}" if self.user_id else "tenant-wide"
+        return f"{self.tenant_id}:{who}->{self.bucket_id}({self.priority})"
+
     def save(self, *args, **kwargs):
         super().save(*args, **kwargs)
         # Keep in sync with `crm_records.lead_pipeline.bucket_resolver.BucketResolver`.
-        cache.delete(f"bucket_assignments:{self.tenant_id}:{self.user_id}:v2")
+        cache.delete(f"bucket_assignments_tenant:{self.tenant_id}:v4")
+        if self.user_id:
+            cache.delete(f"bucket_assignments:{self.tenant_id}:{self.user_id}:v2")
 
     def delete(self, *args, **kwargs):
+        tid, uid = self.tenant_id, self.user_id
         super().delete(*args, **kwargs)
-        # Keep in sync with `crm_records.lead_pipeline.bucket_resolver.BucketResolver`.
-        cache.delete(f"bucket_assignments:{self.tenant_id}:{self.user_id}:v2")
+        cache.delete(f"bucket_assignments_tenant:{tid}:v4")
+        if uid:
+            cache.delete(f"bucket_assignments:{tid}:{uid}:v2")
