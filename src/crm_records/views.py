@@ -38,6 +38,7 @@ from authz.models import TenantMembership
 
 from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
 from crm_records.lead_pipeline.pipeline import LeadPipeline
+from crm_records.lead_pipeline.post_assignment import PostAssignmentActions
 
 
 def _parse_lead_stage_param(value):
@@ -1803,6 +1804,17 @@ class GetNextLeadView(APIView):
                         "record": serialized_data,
                     }
 
+                    retry_candidate.refresh_from_db()
+                    PostAssignmentActions().run(
+                        record=retry_candidate,
+                        tenant=tenant,
+                        user=user,
+                        tenant_membership=tenant_membership,
+                        user_identifier=user_identifier,
+                        user_uuid=user_uuid,
+                        lead_data=retry_candidate.data or {},
+                    )
+
                     attempt_count = flattened_response.get("attempt_count", 0)
                     logger.info(
                         "[GetNextLead] FALLBACK [daily-limit]: Returning not-connected retry lead record_id=%s user=%s call_attempts=%s (attempt %s of max 6).",
@@ -2277,6 +2289,7 @@ class GetNextLeadView(APIView):
 
             # Update the candidate's data
             data = candidate_locked.data.copy() if candidate_locked.data else {}
+            pre_assignment_lead_stage = (data.get("lead_stage") or "").strip().upper()
             previous_assigned_to = data.get('assigned_to')
             is_fresh_assignment = (
                 previous_assigned_to is None 
@@ -2301,9 +2314,8 @@ class GetNextLeadView(APIView):
             except (TypeError, ValueError):
                 call_attempts_int = 0
             
-            # Use pre-assignment stage/outcome (lead_stage is overwritten to ASSIGNED below).
-            last_call_outcome = data.get('last_call_outcome', '').lower()
-            lead_stage = data.get('lead_stage', '').upper()
+            # Use pre-assignment stage (lead_stage was overwritten to ASSIGNED above).
+            last_call_outcome = (data.get("last_call_outcome") or "").lower()
             # Check if this is a retry lead (NOT_CONNECTED only)
             # These leads should NOT set first_assigned_to when reassigned to a new RM
             # last_call_outcome in DB is exactly "not_connected"
@@ -2311,7 +2323,7 @@ class GetNextLeadView(APIView):
             is_not_connected_retry = (
                 call_attempts_int > 0 or
                 last_call_outcome == 'not_connected' or
-                lead_stage == 'NOT_CONNECTED'
+                pre_assignment_lead_stage == 'NOT_CONNECTED'
             )
             
             if is_fresh_assignment and 'first_assigned_at' not in data and not is_not_connected_retry:
@@ -2324,8 +2336,8 @@ class GetNextLeadView(APIView):
             elif is_fresh_assignment and is_not_connected_retry:
                 logger.info(
                     "[GetNextLead] Skipping first_assigned_to for lead_id=%d (retry lead - call_attempts=%d, "
-                    "last_call_outcome=%s, lead_stage=%s, won't count toward daily limit)",
-                    candidate_locked.id, call_attempts_int, last_call_outcome
+                    "last_call_outcome=%s, pre_assignment_lead_stage=%s, won't count toward daily limit)",
+                    candidate_locked.id, call_attempts_int, last_call_outcome, pre_assignment_lead_stage
                 )
 
             # if is_fresh_assignment:
@@ -2335,32 +2347,6 @@ class GetNextLeadView(APIView):
             candidate_locked.updated_at = timezone.now()
             candidate_locked.save(update_fields=['data', 'updated_at'])
 
-            # Log get_next_lead event for analytics
-            try:
-                EventLog.objects.create(
-                    record=candidate_locked,
-                    tenant=tenant,
-                    event='lead.get_next_lead',
-                    payload={
-                        'user_id': str(user_uuid) if user_uuid else user_identifier,
-                        'lead_id': candidate_locked.id,
-                        'record_id': candidate_locked.id,
-                    },
-                    timestamp=timezone.now()
-                )
-                logger.debug(
-                    "[GetNextLead] Logged get_next_lead event: record_id=%s user_id=%s",
-                    candidate_locked.id,
-                    str(user_uuid) if user_uuid else user_identifier
-                )
-            except Exception as e:
-                logger.warning(
-                    "[GetNextLead] Failed to log get_next_lead event: record_id=%s error=%s",
-                    candidate_locked.id,
-                    str(e)
-                )
-                # Don't fail the request if event logging fails
-
             logger.info(
                 "[GetNextLead] Step 5 done: Assigned lead record_id=%s user=%s (fresh=%s). Saving and building response.",
                 candidate_locked.id,
@@ -2368,111 +2354,15 @@ class GetNextLeadView(APIView):
                 is_fresh_assignment,
             )
 
-            # Send both Mixpanel events when lead is assigned
-            # Get lead data first
-            lead_data_dict = candidate_locked.data or {}
-            lead_name = lead_data_dict.get('name', '') if isinstance(lead_data_dict, dict) else ''
-            
-            logger.info("=" * 80)
-            logger.info("🚀 [GetNextLead] Starting Mixpanel event calls for new lead assignment")
-            logger.info(f"   Lead ID: {candidate_locked.id}")
-            logger.info(f"   Lead Name: {lead_name}")
-            logger.info("=" * 80)
-            
-            try:
-                # Get user email for RM assigned Mixpanel
-                rm_email = getattr(user, 'email', None)
-                if not rm_email and tenant_membership:
-                    rm_email = tenant_membership.email
-                
-                # Get praja_id from lead data
-                praja_id = lead_data_dict.get('praja_id')
-                
-                logger.info(f"[GetNextLead] Extracted data - praja_id: {praja_id}, rm_email: {rm_email}")
-                
-                queue_service = get_queue_service()
-                tenant_id = str(tenant.id) if tenant else None
-                
-                # Enqueue Mixpanel event (pyro_crm_rm_assigned_backend)
-                if praja_id:
-                    try:
-                        if isinstance(praja_id, int):
-                            mixpanel_user_id = str(praja_id)
-                        elif isinstance(praja_id, str):
-                            cleaned = praja_id.upper().replace("PRAJA", "").replace("-", "").replace("_", "").strip()
-                            mixpanel_user_id = cleaned if cleaned.isdigit() else praja_id
-                        else:
-                            mixpanel_user_id = str(praja_id)
-                    except (ValueError, TypeError, AttributeError):
-                        mixpanel_user_id = str(praja_id) if praja_id else None
-                    
-                    if mixpanel_user_id:
-                        mixpanel_properties = {
-                            'lead_id': candidate_locked.id,
-                            'lead_name': lead_name,
-                            'lead_status': lead_data_dict.get('lead_stage', 'ASSIGNED'),
-                            'lead_score': lead_data_dict.get('lead_score'),
-                            'lead_type': lead_data_dict.get('affiliated_party'),
-                            'assigned_to': user_identifier,
-                            'praja_id': praja_id,
-                            'rm_email': rm_email,
-                        }
-                        mixpanel_properties.update(lead_data_dict)
-                        
-                        job1 = queue_service.enqueue_job(
-                            job_type=JobType.SEND_MIXPANEL_EVENT,
-                            payload={
-                                'user_id': mixpanel_user_id,
-                                'event_name': 'pyro_crm_rm_assigned_backend',
-                                'properties': mixpanel_properties,
-                            },
-                            tenant_id=tenant_id,
-                        )
-                        logger.info(
-                            "[GetNextLead] Enqueued pyro_crm_rm_assigned_backend job_id=%s lead_id=%s",
-                            job1.id, candidate_locked.id,
-                        )
-                    else:
-                        logger.warning("[GetNextLead] Skipping Mixpanel job - no mixpanel_user_id from praja_id=%s", praja_id)
-                else:
-                    logger.warning("[GetNextLead] Skipping Mixpanel job - no praja_id")
-                
-                # Enqueue RM assigned event (rm_assigned endpoint)
-                if praja_id and rm_email:
-                    try:
-                        praja_id_int = int(praja_id)
-                        job2 = queue_service.enqueue_job(
-                            job_type=JobType.SEND_RM_ASSIGNED_EVENT,
-                            payload={
-                                'praja_id': praja_id_int,
-                                'rm_email': rm_email,
-                            },
-                            tenant_id=tenant_id,
-                        )
-                        logger.info(
-                            "[GetNextLead] Enqueued send_rm_assigned_event job_id=%s lead_id=%s praja_id=%s",
-                            job2.id, candidate_locked.id, praja_id_int,
-                        )
-                    except (ValueError, TypeError) as e:
-                        logger.error(
-                            "[GetNextLead] Could not enqueue RM assigned job - praja_id=%s error=%s",
-                            praja_id, e,
-                        )
-                else:
-                    logger.warning(
-                        "[GetNextLead] Skipping RM assigned job - missing praja_id or rm_email praja_id=%s rm_email=%s",
-                        praja_id, bool(rm_email),
-                    )
-                    
-                logger.info("=" * 80)
-                logger.info("🏁 [GetNextLead] Completed Mixpanel job enqueue")
-                logger.info("=" * 80)
-                    
-            except Exception as mixpanel_error:
-                logger.error("=" * 80)
-                logger.error(f"❌ [GetNextLead] EXCEPTION while enqueueing Mixpanel jobs: {str(mixpanel_error)}")
-                logger.error("=" * 80)
-                logger.error(f"[GetNextLead] Error details:", exc_info=True)
+            PostAssignmentActions().run(
+                record=candidate_locked,
+                tenant=tenant,
+                user=user,
+                tenant_membership=tenant_membership,
+                user_identifier=user_identifier,
+                user_uuid=user_uuid,
+                lead_data=data,
+            )
 
         # Force refresh from database to ensure we have absolute latest data
         # This bypasses any queryset caching and ensures fresh DB read
