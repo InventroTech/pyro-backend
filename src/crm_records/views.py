@@ -87,7 +87,20 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         
         # Dynamic filtering on data JSON field
         # Get all query params except known model fields
-        model_fields = {'entity_type', 'search', 'search_fields', 'page', 'page_size', 'ordering', 'created_at__gte', 'created_at__lte', 'exclude_events'}
+        # Query params that should NOT be treated as JSON `data` field filters.
+        # Anything not in this set becomes `Q(**{f"data__{key}": value})`.
+        model_fields = {
+            'entity_type',
+            'search',
+            'search_fields',
+            'page',
+            'page_size',
+            'ordering',
+            'created_at__gte',
+            'created_at__lte',
+            'exclude_events',
+            'consolidation',
+        }
         data_filters = {k: v for k, v in query_params.items() if k not in model_fields}
         
         # Build Q objects for JSON field filtering
