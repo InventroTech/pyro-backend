@@ -281,7 +281,7 @@ def score_all_records_for_tenant(
         for lead in batch:
             try:
                 with transaction.atomic():
-                    locked_lead = Record.objects.select_for_update(nowait=True).get(
+                    locked_lead = Record.objects.select_for_update(skip_locked=True).get(
                         pk=lead.pk,
                         tenant_id=tenant_id,
                         entity_type=entity_type,
