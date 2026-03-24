@@ -23,7 +23,7 @@ from core.models import Tenant
 from authz.models import TenantMembership
 from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
 from crm_records.models import Record, PartnerEvent
-from crm_records.scoring import calculate_and_update_lead_score
+from crm_records.scoring import score_all_records_for_tenant
 from crm_records.services import PrajaService
 from support_ticket.models import SupportTicket
 from support_ticket.services import MixpanelService, RMAssignedMixpanelService
@@ -507,126 +507,28 @@ class LeadScoringJobHandler(JobHandler):
             f"entity_type={entity_type}, batch_size={batch_size}"
         )
         
-        # Get all leads for this tenant
-        leads = Record.objects.filter(
-            tenant_id=tenant_id,
-            entity_type=entity_type
-        )
-        
-        total_leads = leads.count()
-        updated_count = 0
-        total_score_added = 0.0
-        processed_count = 0
-        
-        # Update job result with initial progress
         job.result = {
-            "total_leads": total_leads,
+            "total_leads": 0,
             "processed_leads": 0,
             "updated_leads": 0,
             "total_score_added": 0.0,
             "progress_percentage": 0,
-            "status": "processing"
+            "status": "processing",
         }
-        job.save(update_fields=['result'])
-        
-        # Process leads in batches
-        for i in range(0, total_leads, batch_size):
-            batch = leads[i:i + batch_size]
-            
-            # Process each lead individually to prevent deadlocks
-            # If one lead fails, others can still be processed
-            for lead in batch:
-                try:
-                    # Use individual transaction per lead to prevent deadlocks
-                    # This ensures that if one lead update fails, others can still proceed
-                    with transaction.atomic():
-                        # Use select_for_update to lock the lead row and prevent concurrent updates
-                        locked_lead = Record.objects.select_for_update(nowait=True).get(
-                            pk=lead.pk,
-                            tenant_id=tenant_id,
-                            entity_type=entity_type
-                        )
-                        
-                        # Use the utility function to calculate and update score
-                        score = calculate_and_update_lead_score(
-                            locked_lead,
-                            tenant_id=tenant_id,
-                            save=True
-                        )
-                        
-                        processed_count += 1
-                        
-                        if score > 0:
-                            updated_count += 1
-                            total_score_added += score
-                    
-                except Record.DoesNotExist:
-                    # Lead was deleted, skip it
-                    logger.warning(f"Lead {lead.id} not found, skipping")
-                    processed_count += 1
-                    continue
-                except OperationalError as e:
-                    # Handle deadlocks and lock timeouts gracefully
-                    if 'deadlock' in str(e).lower() or 'lock' in str(e).lower():
-                        logger.warning(
-                            f"Deadlock detected while processing lead {lead.id} in job {job.id}. "
-                            f"Skipping this lead. Error: {e}"
-                        )
-                        processed_count += 1
-                        continue
-                    else:
-                        raise
-                except Exception as e:
-                    logger.error(f"Error scoring lead {lead.id} in job {job.id}: {e}", exc_info=True)
-                    # Continue with next lead
-                    processed_count += 1
-                    continue
-            
-            # Update job result after each batch (outside the per-lead transaction)
-            try:
-                # Use select_for_update to prevent concurrent job updates
-                with transaction.atomic():
-                    locked_job = BackgroundJob.objects.select_for_update(nowait=True).get(pk=job.pk)
-                    progress = int((processed_count / total_leads) * 100) if total_leads > 0 else 0
-                    locked_job.result = {
-                        "total_leads": total_leads,
-                        "processed_leads": processed_count,
-                        "updated_leads": updated_count,
-                        "total_score_added": total_score_added,
-                        "progress_percentage": progress,
-                        "status": "processing"
-                    }
-                    locked_job.save(update_fields=['result'])
-                    logger.debug(
-                        f"Lead scoring job {job.id} progress: "
-                        f"{processed_count}/{total_leads} ({progress}%)"
-                    )
-            except OperationalError as e:
-                # If we can't update job progress due to deadlock, log and continue
-                if 'deadlock' in str(e).lower() or 'lock' in str(e).lower():
-                    logger.warning(f"Could not update job {job.id} progress due to deadlock. Continuing...")
-                else:
-                    logger.error(f"Error updating job {job.id} progress: {e}")
-            except Exception as e:
-                logger.error(f"Error updating job {job.id} progress: {e}")
-                # Don't fail the entire job if progress update fails
-        
-        # Final update
-        job.result = {
-            "total_leads": total_leads,
-            "processed_leads": processed_count,
-            "updated_leads": updated_count,
-            "total_score_added": total_score_added,
-            "progress_percentage": 100,
-            "status": "completed"
-        }
-        job.save(update_fields=['result'])
-        
-        logger.info(
-            f"Lead scoring job {job.id} completed: {updated_count}/{total_leads} leads updated, "
-            f"total score: {total_score_added}"
+        job.save(update_fields=["result"])
+
+        result = score_all_records_for_tenant(
+            tenant_id, entity_type=entity_type, batch_size=batch_size
         )
-        
+        job.result = result
+        job.save(update_fields=["result"])
+
+        logger.info(
+            f"Lead scoring job {job.id} completed: "
+            f"{result.get('updated_leads', 0)}/{result.get('total_leads', 0)} leads with score > 0, "
+            f"total score: {result.get('total_score_added', 0.0)}"
+        )
+
         return True
     
     def get_retry_delay(self, attempt: int) -> int:
