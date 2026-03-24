@@ -45,10 +45,24 @@ class Record(HistoryTrackedModel, BaseModel):
 
     def save(self, *args, **kwargs):
         """
-        Standard save method - no Mixpanel integration here.
-        Mixpanel events are sent from API views.
+        On first insert, leads get `data.lead_score` from scoring rules (see calculate_and_update_lead_score).
+        Mixpanel and other side effects stay in API views.
         """
-        return super().save(*args, **kwargs)
+        was_adding = self._state.adding
+        super().save(*args, **kwargs)
+        if was_adding and self.entity_type == "lead" and self.tenant_id:
+            try:
+                from crm_records.scoring import calculate_and_update_lead_score
+
+                calculate_and_update_lead_score(
+                    self, tenant_id=self.tenant_id, save=True
+                )
+            except Exception as e:
+                logger.warning(
+                    "Record.save: lead_score not updated for new lead id=%s: %s",
+                    self.pk,
+                    e,
+                )
 
     def __str__(self):
         name = (self.data or {}).get('name', '') if isinstance(self.data, dict) else ''

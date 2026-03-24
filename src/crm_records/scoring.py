@@ -6,6 +6,10 @@ stored in the EntityTypeSchema table. Can be called from anywhere in the codebas
 """
 import logging
 from typing import Dict, Any, Optional, List
+
+from django.db import transaction
+from django.db.utils import OperationalError
+
 from .models import Record, EntityTypeSchema
 
 logger = logging.getLogger(__name__)
@@ -253,6 +257,77 @@ def calculate_and_update_lead_score(lead: Record, tenant_id: Optional[str] = Non
         logger.debug(f"calculate_and_update_lead_score: Updated lead {lead.id} with score {score} (not saved)")
     
     return score
+
+
+def score_all_records_for_tenant(
+    tenant_id: Any,
+    entity_type: str = "lead",
+    batch_size: int = 100,
+) -> Dict[str, Any]:
+    """
+    Recompute data.lead_score for every Record of entity_type for the tenant.
+
+    Mirrors LeadScoringJobHandler logic (per-row atomic transaction, select_for_update).
+    Intended for synchronous HTTP handlers; optional SCORE_LEADS worker still delegates here.
+    """
+    qs = Record.objects.filter(tenant_id=tenant_id, entity_type=entity_type)
+    total_leads = qs.count()
+    updated_count = 0
+    total_score_added = 0.0
+    processed_count = 0
+
+    for i in range(0, total_leads, batch_size):
+        batch = qs[i : i + batch_size]
+        for lead in batch:
+            try:
+                with transaction.atomic():
+                    locked_lead = Record.objects.select_for_update(nowait=True).get(
+                        pk=lead.pk,
+                        tenant_id=tenant_id,
+                        entity_type=entity_type,
+                    )
+                    score = calculate_and_update_lead_score(
+                        locked_lead,
+                        tenant_id=tenant_id,
+                        save=True,
+                    )
+                    processed_count += 1
+                    if score > 0:
+                        updated_count += 1
+                        total_score_added += score
+            except Record.DoesNotExist:
+                logger.warning("score_all_records_for_tenant: record %s missing, skip", lead.pk)
+                processed_count += 1
+                continue
+            except OperationalError as e:
+                err = str(e).lower()
+                if "deadlock" in err or "lock" in err:
+                    logger.warning(
+                        "score_all_records_for_tenant: lock issue record %s: %s",
+                        lead.pk,
+                        e,
+                    )
+                    processed_count += 1
+                    continue
+                raise
+            except Exception as e:
+                logger.error(
+                    "score_all_records_for_tenant: error scoring record %s: %s",
+                    lead.pk,
+                    e,
+                    exc_info=True,
+                )
+                processed_count += 1
+                continue
+
+    return {
+        "total_leads": total_leads,
+        "processed_leads": processed_count,
+        "updated_leads": updated_count,
+        "total_score_added": total_score_added,
+        "progress_percentage": 100,
+        "status": "completed",
+    }
 
 
 def get_scoring_rules(entity_type: str, tenant_id: str) -> List[Dict[str, Any]]:
