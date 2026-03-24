@@ -14,14 +14,23 @@ from django.db.models import Q
 _CACHE: Dict[str, dict] = {}
 _TTL = timedelta(minutes=10)
 
-def _cache_key(user_uuid: str, tenant_id) -> str:
-    return f"{user_uuid}:{tenant_id}"
+def _normalize_tenant_id(tenant_or_id) -> str:
+    """
+    Accept either a tenant object or raw tenant id and return a stable cache key part.
+    This avoids cache key mismatches when callers pass model instances.
+    """
+    if hasattr(tenant_or_id, "id"):
+        return str(getattr(tenant_or_id, "id"))
+    return str(tenant_or_id)
+
+def _cache_key(user_uuid: str, tenant_or_id) -> str:
+    return f"{str(user_uuid)}:{_normalize_tenant_id(tenant_or_id)}"
 
 def drop_permissions_cache(user_uuid: str, tenant_id) -> None:
     _CACHE.pop(_cache_key(user_uuid, tenant_id), None)
 
 def get_effective_permissions(user_uuid: str, tenant) -> dict:
-    key = _cache_key(user_uuid, tenant.id)
+    key = _cache_key(user_uuid, tenant)
     hit = _CACHE.get(key)
     if hit and hit['exp'] > timezone.now():
         return hit['val']
@@ -31,7 +40,8 @@ def get_effective_permissions(user_uuid: str, tenant) -> dict:
     ).select_related('role').first()
     if not member:
         val = {'role_key': None, 'perm_keys': set()}
-        _CACHE[key] = {'val': val, 'exp': timezone.now()+_TTL}
+        # Do not cache "no membership" results for long periods; this can
+        # cause temporary 403s right after signup/link flows.
         return val
 
     role_perm_keys = Permission.objects.filter(
