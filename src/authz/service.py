@@ -14,8 +14,17 @@ from django.db.models import Q
 _CACHE: Dict[str, dict] = {}
 _TTL = timedelta(minutes=10)
 
+def _normalize_tenant_id(tenant_or_id):
+    """
+    Accept either a tenant object or raw tenant id and return a stable cache key part.
+    This prevents cache-miss invalidation bugs when callers pass a tenant instance.
+    """
+    if hasattr(tenant_or_id, "id"):
+        return str(getattr(tenant_or_id, "id"))
+    return str(tenant_or_id)
+
 def _cache_key(user_uuid: str, tenant_id) -> str:
-    return f"{user_uuid}:{tenant_id}"
+    return f"{user_uuid}:{_normalize_tenant_id(tenant_id)}"
 
 def drop_permissions_cache(user_uuid: str, tenant_id) -> None:
     _CACHE.pop(_cache_key(user_uuid, tenant_id), None)
