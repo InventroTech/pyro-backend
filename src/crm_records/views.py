@@ -1507,10 +1507,27 @@ class GetNextLeadView(APIView):
         #   (identified via eligible_lead_statuses containing "SELF TRIAL")
         # - SALES LEAD / others go through the bucketed LeadPipeline.
         if "SELF TRIAL" not in (eligible_lead_statuses or []):
+            logger.info(
+                "[GetNextLead] Step 2b: bucketed LeadPipeline (SALES) user=%s tenant=%s debug=%s — "
+                "see [LeadPipeline] lines for daily_limit, filters, per-bucket qs_count",
+                user_identifier,
+                tenant.id if tenant else None,
+                debug_mode,
+            )
             pipeline = LeadPipeline()
             record = pipeline.get_next(tenant=tenant, request_user=user, debug=debug_mode)
             if not record:
+                logger.info(
+                    "[GetNextLead] Step 2b done: no record assigned (empty {}). "
+                    "Diagnose with [LeadPipeline] start/daily_limit_check/bucket_try/end_empty logs. user=%s",
+                    user_identifier,
+                )
                 return Response({}, status=status.HTTP_200_OK)
+            logger.info(
+                "[GetNextLead] Step 2b done: assigned record_id=%s user=%s",
+                record.pk,
+                user_identifier,
+            )
             return Response(_flatten_lead_response(record), status=status.HTTP_200_OK)
 
         # If user has no eligible lead types assigned, push all leads to the RM
