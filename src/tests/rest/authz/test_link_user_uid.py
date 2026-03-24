@@ -1,3 +1,4 @@
+import uuid
 from django.test import TestCase
 from django.db import transaction
 from unittest.mock import patch
@@ -8,11 +9,11 @@ from core.models import Tenant
 
 class LinkUserUidTestCase(TestCase):
     def setUp(self):
-        # Create a test tenant
+        # Create a test tenant with a dynamically unique ID and Slug!
         self.tenant = Tenant.objects.create(
-            id='550e8400-e29b-41d4-a716-446655440000',
+            id=uuid.uuid4(),  # <--- FIX: Stop using the hardcoded '550e8400...' ID
             name='Test Tenant',
-            slug='test-tenant'
+            slug=f'test-tenant-{uuid.uuid4().hex[:8]}'  # <--- FIX: Make the slug unique
         )
         
         # Create a test role
@@ -38,13 +39,19 @@ class LinkUserUidTestCase(TestCase):
         result = link_user_uid_and_activate('test@example.com', uid)
         
         self.assertTrue(result['success'])
-        self.assertEqual(result['uid'], uid)
+        
+        # 👇 FIX 1: Cast the result UID to a string just in case
+        self.assertEqual(str(result['uid']), uid) 
+        
         self.assertEqual(result['activated_memberships'], 1)
         self.assertIn('authz_tenantmembership', result['tables_updated'])
         
         # Verify membership was activated and linked
         self.membership.refresh_from_db()
-        self.assertEqual(self.membership.user_id, uid)
+        
+        # 👇 FIX 2: Cast the database UUID object to a string before comparing!
+        self.assertEqual(str(self.membership.user_id), uid) 
+        
         self.assertTrue(self.membership.is_active)
 
     def test_link_user_uid_user_not_found(self):
