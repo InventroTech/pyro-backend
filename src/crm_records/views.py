@@ -274,7 +274,6 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         """
         Create record with tenant and entity_type assignment.
         entity_type can come from query params or request body.
-        New leads get lead_score from Record.save() (scoring rules).
         """
         # Get entity_type from query params or request data
         entity_type = self.request.query_params.get('entity_type')
@@ -291,7 +290,6 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
             entity_type=entity_type
         )
         
-        # Lead score on create runs in Record.save() for entity_type lead.
         if entity_type == 'lead':
             try:
                 from support_ticket.services import MixpanelService
@@ -394,19 +392,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         serializer.is_valid(raise_exception=True)
         
         # Preserve tenant (don't allow changing tenant)
-        updated_record = serializer.save(tenant=self.request.tenant)
-        
-        # Calculate and save lead score if entity_type is 'lead'
-        if updated_record.entity_type == 'lead':
-            try:
-                from .scoring import calculate_and_update_lead_score
-                score = calculate_and_update_lead_score(updated_record, tenant_id=self.request.tenant.id, save=True)
-                logger.debug(f"RecordListCreateView: Calculated lead score {score} for updated lead {updated_record.id}")
-                # Refresh serializer data to include updated score
-                serializer = self.get_serializer(updated_record)
-            except Exception as e:
-                logger.error(f"RecordListCreateView: Error calculating lead score for updated lead {updated_record.id}: {e}")
-                # Don't fail the request if scoring fails, just log the error
+        serializer.save(tenant=self.request.tenant)
         
         return Response(serializer.data, status=status.HTTP_200_OK)
     
@@ -462,19 +448,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         serializer.is_valid(raise_exception=True)
         
         # Preserve tenant (don't allow changing tenant)
-        updated_record = serializer.save(tenant=self.request.tenant)
-        
-        # Calculate and save lead score if entity_type is 'lead'
-        if updated_record.entity_type == 'lead':
-            try:
-                from .scoring import calculate_and_update_lead_score
-                score = calculate_and_update_lead_score(updated_record, tenant_id=self.request.tenant.id, save=True)
-                logger.debug(f"RecordListCreateView: Calculated lead score {score} for patched lead {updated_record.id}")
-                # Refresh serializer data to include updated score
-                serializer = self.get_serializer(updated_record)
-            except Exception as e:
-                logger.error(f"RecordListCreateView: Error calculating lead score for patched lead {updated_record.id}: {e}")
-                # Don't fail the request if scoring fails, just log the error
+        serializer.save(tenant=self.request.tenant)
         
         return Response(serializer.data, status=status.HTTP_200_OK)
     
@@ -557,20 +531,9 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
     
     def perform_update(self, serializer):
         """
-        Update record and calculate lead score if entity_type is 'lead'.
-        "Not connected" logic is handled by the rule engine when lead_stage is set to "NOT_CONNECTED".
+        Update record. "Not connected" logic is handled by the rule engine when lead_stage is set to "NOT_CONNECTED".
         """
-        updated_record = serializer.save()
-        
-        # Calculate and save lead score if entity_type is 'lead'
-        if updated_record.entity_type == 'lead':
-            try:
-                from .scoring import calculate_and_update_lead_score
-                score = calculate_and_update_lead_score(updated_record, tenant_id=self.request.tenant.id, save=True)
-                logger.debug(f"RecordDetailView: Calculated lead score {score} for updated lead {updated_record.id}")
-            except Exception as e:
-                logger.error(f"RecordDetailView: Error calculating lead score for updated lead {updated_record.id}: {e}")
-                # Don't fail the request if scoring fails, just log the error
+        serializer.save()
 
     def delete(self, request, *args, **kwargs):
         """
@@ -610,7 +573,7 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
         return queryset
     
     def perform_create(self, serializer):
-        """Create record; lead score on create runs in Record.save() when entity_type is lead."""
+        """Create record for this entity type (e.g. lead)."""
         record = serializer.save(
             tenant=self.request.tenant,
             entity_type=self.entity_type
@@ -3024,7 +2987,7 @@ class PrajaLeadsAPIView(APIView):
     
     Note: praja_id should be stored in the data JSON field when creating leads.
     
-    New leads: lead_score is set in Record.save() from scoring rules. PATCH/PUT still recalculate here.
+    Lead scoring (Praja): POST creates and PATCH/PUT updates recalculate ``data.lead_score`` from rules here only—not on generic Record saves or other CRM APIs.
     
     Requires X-Secret-Pyro header for authentication.
     Automatically uses DEFAULT_TENANT_SLUG from settings (no X-Tenant-Slug header needed).
@@ -3220,7 +3183,11 @@ class PrajaLeadsAPIView(APIView):
                 tenant.slug,
                 record_name
             )
-            # Lead score on create runs in Record.save() when entity_type is lead.
+            self._maybe_recalculate_lead_score(
+                record,
+                tenant,
+                context=f"POST create praja_id={praja_id}",
+            )
             
             # Send to Mixpanel if entity_type is 'lead'
             if entity_type == 'lead':

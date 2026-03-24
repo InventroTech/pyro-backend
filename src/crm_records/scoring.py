@@ -267,8 +267,8 @@ def score_all_records_for_tenant(
     """
     Recompute data.lead_score for every Record of entity_type for the tenant.
 
-    Mirrors LeadScoringJobHandler logic (per-row atomic transaction, select_for_update).
-    Intended for synchronous HTTP handlers; optional SCORE_LEADS worker still delegates here.
+    Per-row atomic transaction with select_for_update. Used by SCORE_LEADS jobs, rule/schema
+    endpoints that enqueue bulk rescoring, and any explicit call sites—not by Record.save().
     """
     qs = Record.objects.filter(tenant_id=tenant_id, entity_type=entity_type)
     total_leads = qs.count()
