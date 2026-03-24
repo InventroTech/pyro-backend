@@ -5,9 +5,6 @@ from django.contrib.postgres.indexes import GinIndex
 from django.core.cache import cache
 from core.models import BaseModel
 from object_history.models import HistoryTrackedModel
-import logging
-
-logger = logging.getLogger(__name__)
 
 
 class Record(HistoryTrackedModel, BaseModel):
@@ -42,13 +39,6 @@ class Record(HistoryTrackedModel, BaseModel):
             # Note: Expression indexes for JSON fields are created via migration
             # See migration file for: lead_stage, assigned_to, affiliated_party, praja_id, next_call_at
         ]
-
-    def save(self, *args, **kwargs):
-        """
-        Standard save method - no Mixpanel integration here.
-        Mixpanel events are sent from API views.
-        """
-        return super().save(*args, **kwargs)
 
     def __str__(self):
         name = (self.data or {}).get('name', '') if isinstance(self.data, dict) else ''

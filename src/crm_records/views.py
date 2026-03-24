@@ -275,7 +275,6 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         """
         Create record with tenant and entity_type assignment.
         entity_type can come from query params or request body.
-        Automatically calculates and saves lead score if entity_type is 'lead'.
         """
         # Get entity_type from query params or request data
         entity_type = self.request.query_params.get('entity_type')
@@ -292,17 +291,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
             entity_type=entity_type
         )
         
-        # Calculate and save lead score if entity_type is 'lead'
         if entity_type == 'lead':
-            try:
-                from .scoring import calculate_and_update_lead_score
-                score = calculate_and_update_lead_score(record, tenant_id=self.request.tenant.id, save=True)
-                logger.debug(f"RecordListCreateView: Calculated lead score {score} for new lead {record.id}")
-            except Exception as e:
-                logger.error(f"RecordListCreateView: Error calculating lead score for new lead {record.id}: {e}")
-                # Don't fail the request if scoring fails, just log the error
-            
-            # Send to Mixpanel
             try:
                 from support_ticket.services import MixpanelService
                 from background_jobs.queue_service import get_queue_service
@@ -404,19 +393,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         serializer.is_valid(raise_exception=True)
         
         # Preserve tenant (don't allow changing tenant)
-        updated_record = serializer.save(tenant=self.request.tenant)
-        
-        # Calculate and save lead score if entity_type is 'lead'
-        if updated_record.entity_type == 'lead':
-            try:
-                from .scoring import calculate_and_update_lead_score
-                score = calculate_and_update_lead_score(updated_record, tenant_id=self.request.tenant.id, save=True)
-                logger.debug(f"RecordListCreateView: Calculated lead score {score} for updated lead {updated_record.id}")
-                # Refresh serializer data to include updated score
-                serializer = self.get_serializer(updated_record)
-            except Exception as e:
-                logger.error(f"RecordListCreateView: Error calculating lead score for updated lead {updated_record.id}: {e}")
-                # Don't fail the request if scoring fails, just log the error
+        serializer.save(tenant=self.request.tenant)
         
         return Response(serializer.data, status=status.HTTP_200_OK)
     
@@ -472,19 +449,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         serializer.is_valid(raise_exception=True)
         
         # Preserve tenant (don't allow changing tenant)
-        updated_record = serializer.save(tenant=self.request.tenant)
-        
-        # Calculate and save lead score if entity_type is 'lead'
-        if updated_record.entity_type == 'lead':
-            try:
-                from .scoring import calculate_and_update_lead_score
-                score = calculate_and_update_lead_score(updated_record, tenant_id=self.request.tenant.id, save=True)
-                logger.debug(f"RecordListCreateView: Calculated lead score {score} for patched lead {updated_record.id}")
-                # Refresh serializer data to include updated score
-                serializer = self.get_serializer(updated_record)
-            except Exception as e:
-                logger.error(f"RecordListCreateView: Error calculating lead score for patched lead {updated_record.id}: {e}")
-                # Don't fail the request if scoring fails, just log the error
+        serializer.save(tenant=self.request.tenant)
         
         return Response(serializer.data, status=status.HTTP_200_OK)
     
@@ -567,20 +532,9 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
     
     def perform_update(self, serializer):
         """
-        Update record and calculate lead score if entity_type is 'lead'.
-        "Not connected" logic is handled by the rule engine when lead_stage is set to "NOT_CONNECTED".
+        Update record. "Not connected" logic is handled by the rule engine when lead_stage is set to "NOT_CONNECTED".
         """
-        updated_record = serializer.save()
-        
-        # Calculate and save lead score if entity_type is 'lead'
-        if updated_record.entity_type == 'lead':
-            try:
-                from .scoring import calculate_and_update_lead_score
-                score = calculate_and_update_lead_score(updated_record, tenant_id=self.request.tenant.id, save=True)
-                logger.debug(f"RecordDetailView: Calculated lead score {score} for updated lead {updated_record.id}")
-            except Exception as e:
-                logger.error(f"RecordDetailView: Error calculating lead score for updated lead {updated_record.id}: {e}")
-                # Don't fail the request if scoring fails, just log the error
+        serializer.save()
 
     def delete(self, request, *args, **kwargs):
         """
@@ -620,23 +574,13 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
         return queryset
     
     def perform_create(self, serializer):
-        """Create record with tenant and the specific entity type. Automatically calculates lead score if entity_type is 'lead'."""
+        """Create record for this entity type (e.g. lead)."""
         record = serializer.save(
             tenant=self.request.tenant,
             entity_type=self.entity_type
         )
         
-        # Calculate and save lead score if entity_type is 'lead'
         if self.entity_type == 'lead':
-            try:
-                from .scoring import calculate_and_update_lead_score
-                score = calculate_and_update_lead_score(record, tenant_id=self.request.tenant.id, save=True)
-                logger.debug(f"EntityProxyView: Calculated lead score {score} for new lead {record.id}")
-            except Exception as e:
-                logger.error(f"EntityProxyView: Error calculating lead score for new lead {record.id}: {e}")
-                # Don't fail the request if scoring fails, just log the error
-            
-            # Send to Mixpanel
             try:
                 from support_ticket.services import MixpanelService
                 from background_jobs.queue_service import get_queue_service
@@ -2933,6 +2877,8 @@ class PrajaLeadsAPIView(APIView):
     
     Note: praja_id should be stored in the data JSON field when creating leads.
     
+    Lead scoring (Praja): POST creates and PATCH/PUT updates recalculate ``data.lead_score`` from rules here only—not on generic Record saves or other CRM APIs.
+    
     Requires X-Secret-Pyro header for authentication.
     Automatically uses DEFAULT_TENANT_SLUG from settings (no X-Tenant-Slug header needed).
     Does NOT require IsTenantAuthenticated - uses HasAPISecret instead.
@@ -2997,6 +2943,27 @@ class PrajaLeadsAPIView(APIView):
                     {'error': 'No tenant found in database'},
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
+
+    def _maybe_recalculate_lead_score(self, record, tenant, *, context: str):
+        """Apply scoring rules synchronously for lead records only (no background job)."""
+        if record.entity_type != "lead":
+            return
+        try:
+            score = calculate_and_update_lead_score(record, tenant_id=tenant.id, save=True)
+            logger.info(
+                "[PrajaLeadsAPI] %s: id=%s tenant=%s score=%s",
+                context,
+                record.id,
+                tenant.slug,
+                score,
+            )
+        except Exception as e:
+            logger.error(
+                "[PrajaLeadsAPI] Error calculating lead score for record %s (%s): %s",
+                record.id,
+                context,
+                e,
+            )
     
     def post(self, request):
         """
@@ -3106,31 +3073,15 @@ class PrajaLeadsAPIView(APIView):
                 tenant.slug,
                 record_name
             )
-            # Calculate and save lead score automatically
-            try:
-                from .scoring import calculate_and_update_lead_score
-                score = calculate_and_update_lead_score(record, tenant_id=tenant.id, save=True)
-                logger.info(
-                    "[PrajaLeadsAPI] Created lead: id=%s tenant=%s name=%s score=%s",
-                    record.id,
-                    tenant.slug,
-                    record_name,
-                    score
-                )
-            except Exception as e:
-                logger.error(f"[PrajaLeadsAPI] Error calculating lead score for lead {record.id}: {e}")
-                # Don't fail the request if scoring fails, just log the error
-                logger.info(
-                    "[PrajaLeadsAPI] Created lead: id=%s tenant=%s name=%s (scoring failed)",
-                    record.id,
-                    tenant.slug,
-                    record_name
-                )
+            self._maybe_recalculate_lead_score(
+                record,
+                tenant,
+                context=f"POST create praja_id={praja_id}",
+            )
             
             # Send to Mixpanel if entity_type is 'lead'
             if entity_type == 'lead':
                 try:
-                    from support_ticket.services import MixpanelService
                     from background_jobs.queue_service import get_queue_service
                     from background_jobs.models import JobType
                     
@@ -3163,7 +3114,7 @@ class PrajaLeadsAPIView(APIView):
                     
                     # Enqueue background job (single send; do not also send sync to avoid duplicate Mixpanel events)
                     queue_service = get_queue_service()
-                    job = queue_service.enqueue_job(
+                    queue_service.enqueue_job(
                         job_type=JobType.SEND_MIXPANEL_EVENT,
                         payload={
                             "user_id": str(user_id),
@@ -3287,6 +3238,8 @@ class PrajaLeadsAPIView(APIView):
         if error_response:
             return error_response
         
+        entity_type = self.get_entity_type(request)
+        
         # Get praja_id from query params or body
         praja_id = request.query_params.get('praja_id') or request.data.get('praja_id')
         if not praja_id:
@@ -3299,16 +3252,16 @@ class PrajaLeadsAPIView(APIView):
             record = Record.objects.get(
                 data__praja_id=praja_id,
                 tenant=tenant,
-                entity_type='lead'
+                entity_type=entity_type
             )
         except Record.DoesNotExist:
             return Response(
-                {'error': f'Lead with praja_id {praja_id} not found'},
+                {'error': f'{entity_type.capitalize()} with praja_id {praja_id} not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         except Record.MultipleObjectsReturned:
             return Response(
-                {'error': f'Multiple leads found with praja_id {praja_id}. Please ensure praja_id is unique.'},
+                {'error': f'Multiple {entity_type}s found with praja_id {praja_id}. Please ensure praja_id is unique.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -3373,28 +3326,11 @@ class PrajaLeadsAPIView(APIView):
             tenant.slug,
             list(request.data.keys())
         )
-        # Recalculate and save lead score automatically (overwrites any manually set score)
-        try:
-            from .scoring import calculate_and_update_lead_score
-            score = calculate_and_update_lead_score(record, tenant_id=tenant.id, save=True)
-            logger.info(
-                "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s score=%s fields=%s",
-                record.id,
-                praja_id,
-                tenant.slug,
-                score,
-                list(request.data.keys())
-            )
-        except Exception as e:
-            logger.error(f"[PrajaLeadsAPI] Error calculating lead score for updated lead {record.id}: {e}")
-            # Don't fail the request if scoring fails, just log the error
-            logger.info(
-                "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s fields=%s (scoring failed)",
-                record.id,
-                praja_id,
-                tenant.slug,
-                list(request.data.keys())
-            )
+        self._maybe_recalculate_lead_score(
+            record,
+            tenant,
+            context=f"PATCH praja_id={praja_id} fields={list(request.data.keys())}",
+        )
         
         # Refresh record from DB to get updated score
         record.refresh_from_db()
@@ -3521,28 +3457,11 @@ class PrajaLeadsAPIView(APIView):
             tenant.slug,
             list(request.data.keys())
         )
-        # Recalculate and save lead score automatically (overwrites any manually set score)
-        try:
-            from .scoring import calculate_and_update_lead_score
-            score = calculate_and_update_lead_score(record, tenant_id=tenant.id, save=True)
-            logger.info(
-                "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s score=%s fields=%s",
-                record.id,
-                praja_id,
-                tenant.slug,
-                score,
-                list(request.data.keys())
-            )
-        except Exception as e:
-            logger.error(f"[PrajaLeadsAPI] Error calculating lead score for updated lead {record.id}: {e}")
-            # Don't fail the request if scoring fails, just log the error
-            logger.info(
-                "[PrajaLeadsAPI] Updated lead: id=%s praja_id=%s tenant=%s fields=%s (scoring failed)",
-                record.id,
-                praja_id,
-                tenant.slug,
-                list(request.data.keys())
-            )
+        self._maybe_recalculate_lead_score(
+            record,
+            tenant,
+            context=f"PUT praja_id={praja_id} fields={list(request.data.keys())}",
+        )
         
         # Refresh record from DB to get updated score
         record.refresh_from_db()
@@ -3812,11 +3731,11 @@ class EntityTypeAttributesView(TenantScopedMixin, APIView):
 
 class LeadScoringView(TenantScopedMixin, APIView):
     """
-    POST endpoint to save scoring rules and apply them to leads.
+    POST endpoint to save scoring rules and queue a background job to score all leads.
     
     POST /crm-records/leads/score/
     
-    Saves the rules to EntityTypeSchema table and applies them to score all leads.
+    Saves the rules to EntityTypeSchema table and enqueues SCORE_LEADS for the worker.
     
     Payload:
     {
@@ -3924,13 +3843,9 @@ class LeadScoringView(TenantScopedMixin, APIView):
     
     def post(self, request):
         """
-        Save scoring rules and queue background job to apply them to all leads.
+        Save scoring rules and enqueue SCORE_LEADS to apply them to all leads in the background.
         Saves/updates the rules in EntityTypeSchema table for the entity_type.
-        Returns immediately with job ID - scoring happens in background.
         """
-        from background_jobs.queue_service import get_queue_service
-        from background_jobs.models import JobType
-        
         entity_type = 'lead'  # Default entity type for lead scoring
         
         # Check if rules exist in ScoringRule table first
@@ -4005,41 +3920,43 @@ class LeadScoringView(TenantScopedMixin, APIView):
             
             logger.info(f"LeadScoringView: Saved {len(rules)} rules to EntityTypeSchema for entity_type '{entity_type}'")
         
-        # Count total leads for the job
         total_leads = Record.objects.filter(
             tenant=request.tenant,
-            entity_type='lead'
+            entity_type='lead',
         ).count()
         
-        # Enqueue background job using the queue service
         queue_service = get_queue_service()
         job = queue_service.enqueue_job(
             job_type=JobType.SCORE_LEADS,
             payload={
                 'entity_type': entity_type,
-                'batch_size': 100  # Process 100 leads per batch
+                'batch_size': 100,
             },
-            priority=0,  # Normal priority
-            tenant_id=str(request.tenant.id)
+            priority=0,
+            tenant_id=str(request.tenant.id),
         )
         
         logger.info(
-            f"LeadScoringView: Enqueued background job {job.id} for {total_leads} leads. "
-            f"Job will be processed by background worker."
+            "LeadScoringView: Enqueued background job %s for %s leads (tenant=%s)",
+            job.id,
+            total_leads,
+            request.tenant.id,
         )
         
-        # Return immediately with job info
-        return Response({
-            'message': f'Rules saved. Background job created to score {total_leads} leads',
-            'job_id': job.id,
-            'status': job.status,
-            'total_leads': total_leads,
-            'progress': 0
-        }, status=status.HTTP_202_ACCEPTED)
+        return Response(
+            {
+                'message': f'Rules saved. Background job created to score {total_leads} leads',
+                'job_id': job.id,
+                'status': job.status,
+                'total_leads': total_leads,
+                'progress': 0,
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
     
     def get(self, request):
         """
-        Get status of lead scoring jobs.
+        Get status of lead scoring (SCORE_LEADS) background jobs.
         
         Query params:
         - job_id: Get specific job status (optional)
@@ -4576,48 +4493,45 @@ class ScoringRuleListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         return queryset.order_by('order', 'created_at')
     
     def perform_create(self, serializer):
-        """Set tenant automatically on create and trigger background job to re-score leads."""
+        """Set tenant automatically on create and enqueue SCORE_LEADS to re-score records."""
         rule = serializer.save(tenant=self.request.tenant)
         logger.info(f"ScoringRuleListCreateView: Created rule {rule.id} ({rule.attribute}) for tenant {self.request.tenant.id}")
-        
-        # Trigger background job to re-score all existing leads with the new rule
         self._trigger_scoring_job(rule.entity_type)
     
     def _trigger_scoring_job(self, entity_type: str):
-        """Helper method to trigger background job for re-scoring leads."""
         try:
-            from background_jobs.queue_service import get_queue_service
-            from background_jobs.models import JobType
-            
-            # Count total leads for the job
             total_leads = Record.objects.filter(
                 tenant=self.request.tenant,
-                entity_type=entity_type
+                entity_type=entity_type,
             ).count()
-            
             if total_leads == 0:
-                logger.debug(f"ScoringRuleListCreateView: No leads to score for entity_type '{entity_type}'")
+                logger.debug(
+                    "ScoringRuleListCreateView: No records to score for entity_type '%s'",
+                    entity_type,
+                )
                 return
-            
-            # Enqueue background job using the queue service
             queue_service = get_queue_service()
             job = queue_service.enqueue_job(
                 job_type=JobType.SCORE_LEADS,
                 payload={
                     'entity_type': entity_type,
-                    'batch_size': 100  # Process 100 leads per batch
+                    'batch_size': 100,
                 },
-                priority=0,  # Normal priority
-                tenant_id=str(self.request.tenant.id)
+                priority=0,
+                tenant_id=str(self.request.tenant.id),
             )
-            
             logger.info(
-                f"ScoringRuleListCreateView: Triggered background job {job.id} to re-score "
-                f"{total_leads} existing leads for entity_type '{entity_type}'"
+                "ScoringRuleListCreateView: Enqueued job %s to re-score %s records (%s)",
+                job.id,
+                total_leads,
+                entity_type,
             )
         except Exception as e:
-            logger.error(f"ScoringRuleListCreateView: Error triggering scoring job: {e}", exc_info=True)
-            # Don't fail the request if job enqueueing fails
+            logger.error(
+                "ScoringRuleListCreateView: Error enqueueing scoring job: %s",
+                e,
+                exc_info=True,
+            )
 
 
 class ScoringRuleDetailView(TenantScopedMixin, generics.RetrieveUpdateDestroyAPIView):
@@ -4670,94 +4584,53 @@ class ScoringRuleDetailView(TenantScopedMixin, generics.RetrieveUpdateDestroyAPI
             )
     
     def perform_update(self, serializer):
-        """Update rule and ensure tenant is preserved. Triggers background job to re-score leads."""
+        """Update rule and ensure tenant is preserved; enqueue SCORE_LEADS to re-score records."""
         rule = serializer.save(tenant=self.request.tenant)
         logger.info(f"ScoringRuleDetailView: Updated rule {rule.id} ({rule.attribute}) for tenant {self.request.tenant.id}")
-        
-        # Trigger background job to re-score all existing leads with the updated rule
         self._trigger_scoring_job(rule.entity_type)
     
-    def _trigger_scoring_job(self, entity_type: str):
-        """Helper method to trigger background job for re-scoring leads."""
-        try:
-            from background_jobs.queue_service import get_queue_service
-            from background_jobs.models import JobType
-            
-            # Count total leads for the job
-            total_leads = Record.objects.filter(
-                tenant=self.request.tenant,
-                entity_type=entity_type
-            ).count()
-            
-            if total_leads == 0:
-                logger.debug(f"ScoringRuleDetailView: No leads to score for entity_type '{entity_type}'")
-                return
-            
-            # Enqueue background job using the queue service
-            queue_service = get_queue_service()
-            job = queue_service.enqueue_job(
-                job_type=JobType.SCORE_LEADS,
-                payload={
-                    'entity_type': entity_type,
-                    'batch_size': 100  # Process 100 leads per batch
-                },
-                priority=0,  # Normal priority
-                tenant_id=str(self.request.tenant.id)
-            )
-            
-            logger.info(
-                f"ScoringRuleDetailView: Triggered background job {job.id} to re-score "
-                f"{total_leads} existing leads for entity_type '{entity_type}'"
-            )
-        except Exception as e:
-            logger.error(f"ScoringRuleDetailView: Error triggering scoring job: {e}", exc_info=True)
-            # Don't fail the request if job enqueueing fails
-    
     def perform_destroy(self, instance):
-        """Delete rule and log the action. Triggers background job to re-score leads."""
+        """Delete rule and enqueue SCORE_LEADS to re-score records."""
         rule_id = instance.id
         rule_attribute = instance.attribute
-        entity_type = instance.entity_type  # Save entity_type before deletion
+        entity_type = instance.entity_type
         instance.delete()
         logger.info(f"ScoringRuleDetailView: Deleted rule {rule_id} ({rule_attribute}) for tenant {self.request.tenant.id}")
-        
-        # Trigger background job to re-score all existing leads after rule deletion
         self._trigger_scoring_job(entity_type)
     
     def _trigger_scoring_job(self, entity_type: str):
-        """Helper method to trigger background job for re-scoring leads."""
         try:
-            from background_jobs.queue_service import get_queue_service
-            from background_jobs.models import JobType
-            
-            # Count total leads for the job
             total_leads = Record.objects.filter(
                 tenant=self.request.tenant,
-                entity_type=entity_type
+                entity_type=entity_type,
             ).count()
-            
             if total_leads == 0:
-                logger.debug(f"ScoringRuleDetailView: No leads to score for entity_type '{entity_type}'")
+                logger.debug(
+                    "ScoringRuleDetailView: No records to score for entity_type '%s'",
+                    entity_type,
+                )
                 return
-            
-            # Enqueue background job using the queue service
             queue_service = get_queue_service()
             job = queue_service.enqueue_job(
                 job_type=JobType.SCORE_LEADS,
                 payload={
                     'entity_type': entity_type,
-                    'batch_size': 100  # Process 100 leads per batch
+                    'batch_size': 100,
                 },
-                priority=0,  # Normal priority
-                tenant_id=str(self.request.tenant.id)
+                priority=0,
+                tenant_id=str(self.request.tenant.id),
             )
-            
             logger.info(
-                f"ScoringRuleDetailView: Triggered background job {job.id} to re-score "
-                f"{total_leads} existing leads for entity_type '{entity_type}'"
+                "ScoringRuleDetailView: Enqueued job %s to re-score %s records (%s)",
+                job.id,
+                total_leads,
+                entity_type,
             )
         except Exception as e:
-            logger.error(f"ScoringRuleDetailView: Error triggering scoring job: {e}", exc_info=True)
-            # Don't fail the request if job enqueueing fails
+            logger.error(
+                "ScoringRuleDetailView: Error enqueueing scoring job: %s",
+                e,
+                exc_info=True,
+            )
 
 
