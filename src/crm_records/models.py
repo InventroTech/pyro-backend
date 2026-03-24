@@ -37,7 +37,8 @@ class Record(HistoryTrackedModel, BaseModel):
             # GIN index on JSONB pyro_data for generic key lookups
             GinIndex(fields=["pyro_data"], name="records_pyro_data_gin_idx"),
             # Note: Expression indexes for JSON fields are created via migration
-            # See migration file for: lead_stage, assigned_to, affiliated_party, praja_id, next_call_at
+            # See migrations: lead_stage, lead_source, lead_status, lead_score (btree on data->>…);
+            # plus assigned_to, affiliated_party, praja_id, next_call_at
         ]
 
     def __str__(self):
