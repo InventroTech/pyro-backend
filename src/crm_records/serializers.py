@@ -1,5 +1,34 @@
 from rest_framework import serializers
 from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule
+from .assignee_display import build_assigned_to_display_map, _is_empty_assigned
+
+
+class RecordListSerializer(serializers.ListSerializer):
+    """
+    One query to resolve all assigned_to identifiers on a page of records.
+    """
+
+    def to_representation(self, data):
+        iterable = data.all() if hasattr(data, "all") else data
+        records = list(iterable)
+        tenant = None
+        if records:
+            tenant = getattr(records[0], "tenant", None)
+        if not tenant:
+            tenant = self.context.get("tenant")
+
+        assigned_ids = []
+        if tenant and records:
+            for r in records:
+                d = r.data if isinstance(r.data, dict) else {}
+                v = d.get("assigned_to")
+                if not _is_empty_assigned(v):
+                    assigned_ids.append(str(v).strip())
+
+        self.child.context["assigned_to_display_map"] = (
+            build_assigned_to_display_map(tenant, assigned_ids) if tenant else {}
+        )
+        return super().to_representation(records)
 
 
 class RecordSerializer(serializers.ModelSerializer):
@@ -7,25 +36,30 @@ class RecordSerializer(serializers.ModelSerializer):
     Serializer for Record model with tenant isolation.
     Prevents tenant spoofing by making tenant_id read-only.
     """
+
     tenant_id = serializers.UUIDField(read_only=True)
-    
+    assigned_to_display = serializers.SerializerMethodField()
+
     class Meta:
         model = Record
         fields = [
-            "id", 
-            "tenant_id", 
-            "entity_type", 
-            "data", 
+            "id",
+            "tenant_id",
+            "entity_type",
+            "data",
             "pyro_data",
-            "created_at", 
-            "updated_at"
+            "assigned_to_display",
+            "created_at",
+            "updated_at",
         ]
         read_only_fields = [
-            "id", 
-            "tenant_id", 
-            "created_at", 
-            "updated_at"
+            "id",
+            "tenant_id",
+            "assigned_to_display",
+            "created_at",
+            "updated_at",
         ]
+        list_serializer_class = RecordListSerializer
     
     def validate_data(self, value):
         """
@@ -54,6 +88,21 @@ class RecordSerializer(serializers.ModelSerializer):
         if len(value) > 100:
             raise serializers.ValidationError("Entity type cannot exceed 100 characters.")
         return value.strip()
+
+    def get_assigned_to_display(self, obj):
+        d = obj.data if isinstance(obj.data, dict) else {}
+        raw = d.get("assigned_to")
+        if _is_empty_assigned(raw):
+            return None
+        key = str(raw).strip()
+        m = self.context.get("assigned_to_display_map")
+        if m is not None and key in m:
+            return m[key]
+        tenant = self.context.get("tenant") or getattr(obj, "tenant", None)
+        if tenant:
+            one = build_assigned_to_display_map(tenant, [key])
+            return one.get(key, key)
+        return key
 
 
 class EventLogSerializer(serializers.ModelSerializer):
