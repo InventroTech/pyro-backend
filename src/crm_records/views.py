@@ -48,6 +48,7 @@ def _parse_lead_stage_param(value):
     return {v.strip().upper() for v in value.split(',') if v.strip()}
 
 from .helper import parse_numeric_lookup, coerce_numeric
+from .assignee_display import build_assigned_to_search_q
 
 
 class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
@@ -69,6 +70,8 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                          Uppercase = exclude by lead_stage (e.g. TRIAL_ACTIVATED). Lowercase = exclude by EventLog event (e.g. trial_activated).
         - resolution_status, affiliated_party: Filter by data JSON (affiliated_party supports comma-separated values)
         - Any other field: Will be searched in the data JSON field
+        - search + search_fields: When search_fields includes assigned_to, search matches raw data.assigned_to
+          and leads whose assignee TenantMembership name/email contains the search term.
         
         Common usage (both pages):
         - My leads (exclude trial activated): ?entity_type=lead&assigned_to={{current_user}}&exclude_events=TRIAL_ACTIVATED
@@ -184,6 +187,11 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                     if field in ['entity_type', 'created_at', 'updated_at']:
                         # Normal model fields
                         q_search |= Q(**{f"{field}__icontains": search_term})
+                    elif field == 'assigned_to':
+                        q_search |= build_assigned_to_search_q(
+                            getattr(self.request, "tenant", None),
+                            search_term,
+                        )
                     else:
                         # JSONB fields in data column (including name)
                         q_search |= Q(**{f"data__{field}__icontains": search_term})
