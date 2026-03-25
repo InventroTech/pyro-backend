@@ -49,3 +49,19 @@ class Page(TimeStampedModel, RoleModel):
 
     def __str__(self):
         return f"{self.name} (tenant={self.tenant_id}, user={self.user_id})"
+
+
+class CustomIcon(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey('core.Tenant', on_delete=models.CASCADE)
+    name = models.CharField(max_length=255)
+    svg_content = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'custom_icons'
+        unique_together = ['tenant', 'name']
+
+    def __str__(self):
+        return f"{self.name} ({self.tenant.slug if self.tenant else 'No Tenant'})"
