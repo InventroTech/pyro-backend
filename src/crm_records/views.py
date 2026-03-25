@@ -3933,16 +3933,38 @@ class LeadScoringView(TenantScopedMixin, APIView):
             entity_type='lead',
         ).count()
         
-        queue_service = get_queue_service()
-        job = queue_service.enqueue_job(
-            job_type=JobType.SCORE_LEADS,
-            payload={
-                'entity_type': entity_type,
-                'batch_size': 100,
-            },
-            priority=0,
-            tenant_id=str(request.tenant.id),
+        from background_jobs.models import BackgroundJob, JobStatus
+
+        existing_job = (
+            BackgroundJob.objects.filter(
+                tenant_id=str(request.tenant.id),
+                job_type=JobType.SCORE_LEADS,
+                status__in=[JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.RETRYING],
+                payload__entity_type=entity_type,
+            )
+            .order_by("-created_at")
+            .first()
         )
+
+        queue_service = get_queue_service()
+        if existing_job:
+            logger.info(
+                "LeadScoringView: SCORE_LEADS already in progress for tenant=%s entity_type=%s (job_id=%s)",
+                request.tenant.id,
+                entity_type,
+                existing_job.id,
+            )
+            job = existing_job
+        else:
+            job = queue_service.enqueue_job(
+                job_type=JobType.SCORE_LEADS,
+                payload={
+                    "entity_type": entity_type,
+                    "batch_size": 100,
+                },
+                priority=0,
+                tenant_id=str(request.tenant.id),
+            )
         
         logger.info(
             "LeadScoringView: Enqueued background job %s for %s leads (tenant=%s)",
@@ -3969,9 +3991,66 @@ class LeadScoringView(TenantScopedMixin, APIView):
         Query params:
         - job_id: Get specific job status (optional)
         """
-        from background_jobs.models import BackgroundJob, JobType
+        from background_jobs.models import BackgroundJob, JobType, JobStatus
         
         job_id = request.query_params.get('job_id')
+
+        def _aggregate_parent_job(parent_job: BackgroundJob) -> dict:
+            """
+            Aggregate progress across SCORE_LEADS_CHUNK jobs when present.
+            Falls back to the parent job.result fields for backward compatibility.
+            """
+            result = parent_job.result or {}
+
+            chunk_job_ids = result.get("chunk_job_ids") or []
+            total_chunks = result.get("total_chunks") or len(chunk_job_ids)
+
+            if not chunk_job_ids:
+                # Backward compatible behavior for older SCORE_LEADS jobs.
+                progress = result.get("progress_percentage", 0)
+                return {
+                    "status": parent_job.status.lower() if isinstance(parent_job.status, str) else parent_job.status,
+                    "progress_percentage": progress,
+                    "total_leads": result.get("total_leads", 0),
+                    "processed_leads": result.get("processed_leads", 0),
+                    "updated_leads": result.get("updated_leads", 0),
+                    "total_score_added": result.get("total_score_added", 0.0),
+                }
+
+            chunk_rows = BackgroundJob.objects.filter(
+                tenant_id=request.tenant.id,
+                job_type=JobType.SCORE_LEADS_CHUNK,
+                id__in=chunk_job_ids,
+            ).values("status", "result")
+
+            completed_chunks = 0
+            processed_sum = 0
+            updated_sum = 0
+            total_score_sum = 0.0
+
+            for row in chunk_rows:
+                if row.get("status") == JobStatus.COMPLETED:
+                    completed_chunks += 1
+                    r = row.get("result") or {}
+                    processed_sum += int(r.get("processed_leads", 0) or 0)
+                    updated_sum += int(r.get("updated_leads", 0) or 0)
+                    total_score_sum += float(r.get("total_score_added", 0.0) or 0.0)
+
+            if total_chunks:
+                progress_percentage = int((completed_chunks / total_chunks) * 100)
+            else:
+                progress_percentage = 100
+
+            overall_status = "completed" if total_chunks and completed_chunks >= total_chunks else "processing"
+
+            return {
+                "status": overall_status,
+                "progress_percentage": progress_percentage,
+                "total_leads": result.get("total_leads", 0),
+                "processed_leads": processed_sum,
+                "updated_leads": updated_sum,
+                "total_score_added": total_score_sum,
+            }
         
         if job_id:
             try:
@@ -3981,24 +4060,24 @@ class LeadScoringView(TenantScopedMixin, APIView):
                     job_type=JobType.SCORE_LEADS
                 )
                 
-                # Extract progress from result
-                result = job.result or {}
-                progress = result.get('progress_percentage', 0)
-                
-                return Response({
-                    'job_id': job.id,
-                    'status': job.status,
-                    'total_leads': result.get('total_leads', 0),
-                    'processed_leads': result.get('processed_leads', 0),
-                    'updated_leads': result.get('updated_leads', 0),
-                    'total_score_added': result.get('total_score_added', 0.0),
-                    'progress_percentage': progress,
-                    'error_message': job.last_error,
-                    'attempts': job.attempts,
-                    'max_attempts': job.max_attempts,
-                    'created_at': job.created_at.isoformat(),
-                    'completed_at': job.completed_at.isoformat() if job.completed_at else None
-                }, status=status.HTTP_200_OK)
+                aggregated = _aggregate_parent_job(job)
+                return Response(
+                    {
+                        "job_id": job.id,
+                        "status": aggregated["status"],
+                        "total_leads": aggregated["total_leads"],
+                        "processed_leads": aggregated["processed_leads"],
+                        "updated_leads": aggregated["updated_leads"],
+                        "total_score_added": aggregated["total_score_added"],
+                        "progress_percentage": aggregated["progress_percentage"],
+                        "error_message": job.last_error,
+                        "attempts": job.attempts,
+                        "max_attempts": job.max_attempts,
+                        "created_at": job.created_at.isoformat(),
+                        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+                    },
+                    status=status.HTTP_200_OK,
+                )
             except BackgroundJob.DoesNotExist:
                 return Response({
                     'error': f'Job with id {job_id} not found'
@@ -4012,14 +4091,14 @@ class LeadScoringView(TenantScopedMixin, APIView):
         
         jobs_data = []
         for job in jobs:
-            result = job.result or {}
+            aggregated = _aggregate_parent_job(job)
             jobs_data.append({
                 'job_id': job.id,
-                'status': job.status,
-                'total_leads': result.get('total_leads', 0),
-                'processed_leads': result.get('processed_leads', 0),
-                'updated_leads': result.get('updated_leads', 0),
-                'progress_percentage': result.get('progress_percentage', 0),
+                'status': aggregated['status'],
+                'total_leads': aggregated['total_leads'],
+                'processed_leads': aggregated['processed_leads'],
+                'updated_leads': aggregated['updated_leads'],
+                'progress_percentage': aggregated['progress_percentage'],
                 'created_at': job.created_at.isoformat(),
                 'completed_at': job.completed_at.isoformat() if job.completed_at else None
             })
@@ -4518,6 +4597,28 @@ class ScoringRuleListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                     entity_type,
                 )
                 return
+
+            from background_jobs.models import BackgroundJob, JobStatus
+
+            existing_job = (
+                BackgroundJob.objects.filter(
+                    tenant_id=str(self.request.tenant.id),
+                    job_type=JobType.SCORE_LEADS,
+                    status__in=[JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.RETRYING],
+                    payload__entity_type=entity_type,
+                )
+                .order_by("-created_at")
+                .first()
+            )
+            if existing_job:
+                logger.info(
+                    "ScoringRuleListCreateView: SCORE_LEADS already in progress for tenant=%s entity_type=%s (job_id=%s)",
+                    self.request.tenant.id,
+                    entity_type,
+                    existing_job.id,
+                )
+                return
+
             queue_service = get_queue_service()
             job = queue_service.enqueue_job(
                 job_type=JobType.SCORE_LEADS,
@@ -4618,6 +4719,28 @@ class ScoringRuleDetailView(TenantScopedMixin, generics.RetrieveUpdateDestroyAPI
                     entity_type,
                 )
                 return
+
+            from background_jobs.models import BackgroundJob, JobStatus
+
+            existing_job = (
+                BackgroundJob.objects.filter(
+                    tenant_id=str(self.request.tenant.id),
+                    job_type=JobType.SCORE_LEADS,
+                    status__in=[JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.RETRYING],
+                    payload__entity_type=entity_type,
+                )
+                .order_by("-created_at")
+                .first()
+            )
+            if existing_job:
+                logger.info(
+                    "ScoringRuleDetailView: SCORE_LEADS already in progress for tenant=%s entity_type=%s (job_id=%s)",
+                    self.request.tenant.id,
+                    entity_type,
+                    existing_job.id,
+                )
+                return
+
             queue_service = get_queue_service()
             job = queue_service.enqueue_job(
                 job_type=JobType.SCORE_LEADS,

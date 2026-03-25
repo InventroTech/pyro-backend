@@ -7,7 +7,7 @@ stored in the EntityTypeSchema table. Can be called from anywhere in the codebas
 import logging
 from typing import Dict, Any, Optional, List
 
-from django.db import transaction
+from django.db import transaction, connection
 from django.db.utils import OperationalError
 
 from .models import Record, EntityTypeSchema
@@ -257,6 +257,175 @@ def calculate_and_update_lead_score(lead: Record, tenant_id: Optional[str] = Non
         logger.debug(f"calculate_and_update_lead_score: Updated lead {lead.id} with score {score} (not saved)")
     
     return score
+
+
+def _build_rule_sql_expression(rule: Dict[str, Any]) -> tuple[str, list]:
+    """
+    Translate a scoring rule into a SQL fragment that returns a numeric weight.
+
+    The fragment is designed to operate on the `data` JSONB column:
+    - string comparisons: use lower() normalization (to match Python logic)
+    - numeric comparisons: cast to float only when the value matches a numeric regex
+
+    Returns:
+        (fragment_sql, params_list)
+
+    Notes:
+        - Only `data.*` attributes are supported. Rules targeting non-JSON fields
+          (id, entity_type, etc.) are treated as non-matching and contribute 0.
+    """
+    attr_path: str = str(rule.get("attr") or "").strip()
+    operator: str = str(rule.get("operator") or "==").strip()
+    expected_value = rule.get("value", "")
+    weight = float(rule.get("weight", 0) or 0)
+
+    if not attr_path:
+        return "0", []
+
+    if attr_path.startswith("data."):
+        attr_path = attr_path[5:]
+
+    # Skip rules that reference model-level columns (not JSONB).
+    direct_fields = {"id", "entity_type", "created_at", "updated_at", "tenant", "tenant_id", "pyro_data"}
+    if attr_path in direct_fields:
+        return "0", []
+
+    keys = [k for k in attr_path.split(".") if k]
+    if not keys:
+        return "0", []
+
+    # Escape JSON path key literals for safe embedding into Postgres string literals.
+    def _escape_key(k: str) -> str:
+        return str(k).replace("'", "''")
+
+    if len(keys) == 1:
+        json_accessor = f"data->>'{_escape_key(keys[0])}'"
+    else:
+        pg_path = ",".join(_escape_key(k) for k in keys)
+        json_accessor = f"data#>>'{{{pg_path}}}'"
+
+    params: list = []
+
+    if operator == "==":
+        condition = f"lower({json_accessor}) = lower(%s)"
+        params = [str(expected_value)]
+    elif operator == "!=":
+        condition = f"lower({json_accessor}) != lower(%s)"
+        params = [str(expected_value)]
+    elif operator == "contains":
+        condition = f"lower({json_accessor}) LIKE '%%' || lower(%s) || '%%'"
+        params = [str(expected_value)]
+    elif operator == "in":
+        if isinstance(expected_value, list):
+            values = [str(v).lower() for v in expected_value]
+        else:
+            values = [v.strip().lower() for v in str(expected_value).split(",")]
+        if not values:
+            return "0", []
+        placeholders = ", ".join(["%s"] * len(values))
+        condition = f"lower({json_accessor}) IN ({placeholders})"
+        params = values
+    elif operator in {">", "<", ">=", "<="}:
+        # Guard against cast errors by checking the numeric pattern first.
+        # This matches Python's behavior: if float conversion fails, treat as non-match.
+        numeric_regex = r"^-?\d+(\.\d+)?$"
+        op = operator
+        condition = (
+            f"CASE WHEN ({json_accessor}) ~ %s "
+            f"THEN (({json_accessor})::float {op} %s) "
+            f"ELSE false END"
+        )
+        try:
+            numeric_value = float(expected_value)
+        except (ValueError, TypeError):
+            return "0", []
+        params = [numeric_regex, numeric_value]
+    else:
+        # Unsupported operator contributes 0.
+        return "0", []
+
+    fragment = f"CASE WHEN {condition} THEN {weight} ELSE 0 END"
+    return fragment, params
+
+
+def score_chunk_sql(
+    tenant_id: Any,
+    entity_type: str,
+    rules: List[Dict[str, Any]],
+    id_gte: int,
+    id_lt: int,
+) -> Dict[str, Any]:
+    """
+    Score a chunk of records (by ID range) using a single set-based SQL UPDATE.
+
+    Updates:
+        records.data->'lead_score' for rows matching tenant/entity_type and id range.
+    Returns:
+        processed_leads, updated_leads, total_score_added, plus id range metadata.
+    """
+    import time as _time
+
+    start = _time.monotonic()
+
+    if id_gte is None or id_lt is None:
+        raise ValueError("score_chunk_sql requires id_gte and id_lt")
+
+    fragments: list[str] = []
+    rule_params: list = []
+    for rule in rules or []:
+        frag, params = _build_rule_sql_expression(rule)
+        fragments.append(frag)
+        rule_params.extend(params)
+
+    score_expr = " + ".join(fragments) if fragments else "0"
+
+    sql = f"""
+        WITH scored AS (
+            UPDATE records
+            SET data = jsonb_set(
+                COALESCE(data, '{{}}'::jsonb),
+                ARRAY['lead_score'],
+                to_jsonb(({score_expr})::float),
+                true
+            ),
+            updated_at = NOW()
+            WHERE tenant_id = %s
+              AND entity_type = %s
+              AND id >= %s
+              AND id < %s
+            RETURNING
+                id,
+                (data->>'lead_score')::float AS new_score
+        )
+        SELECT
+            COUNT(*) AS processed,
+            COUNT(*) FILTER (WHERE new_score > 0) AS updated,
+            COALESCE(SUM(new_score), 0) AS total_score
+        FROM scored;
+    """
+
+    # Placeholder ordering:
+    # - score_expr parameters appear first (rule_params)
+    # - then tenant/entity/range placeholders in the WHERE clause
+    params = rule_params + [str(tenant_id), entity_type, int(id_gte), int(id_lt)]
+
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
+        row = cursor.fetchone()
+
+    processed, updated, total_score = row
+    elapsed = _time.monotonic() - start
+
+    return {
+        "id_gte": int(id_gte),
+        "id_lt": int(id_lt),
+        "processed_leads": int(processed),
+        "updated_leads": int(updated),
+        "total_score_added": float(total_score),
+        "progress_percentage": 100,
+        "status": "completed",
+        "execution_time_seconds": round(elapsed, 3),
+    }
 
 
 def score_all_records_for_tenant(
