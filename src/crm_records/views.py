@@ -1220,6 +1220,17 @@ class GetNextLeadView(APIView):
     # Fresh leads (for RM assignment) are those with lead_stage = FRESH only.
     QUEUEABLE_STATUSES = ('FRESH','IN_QUEUE')
     ASSIGNED_STATUS = 'ASSIGNED'
+
+    # LIFO for get-next-lead: most recent subscription first (same guards as next_call_at-style JSON timestamps).
+    _SUBSCRIPTION_TIME_STAMP_SORT_SQL = """
+        CASE
+            WHEN (data->>'subscription_time_stamp') IS NOT NULL
+                AND TRIM(COALESCE(data->>'subscription_time_stamp', '')) != ''
+                AND LOWER(TRIM(COALESCE(data->>'subscription_time_stamp', ''))) NOT IN ('null', 'none')
+            THEN (data->>'subscription_time_stamp')::timestamptz
+            ELSE NULL
+        END
+    """
     
     def _get_call_attempt_matrix(self, tenant, lead_type: str):
         """
@@ -1321,13 +1332,13 @@ class GetNextLeadView(APIView):
         Order queryset with priority:
         1. Expired snoozed leads first
         2. Then by call_attempts: 0 attempts > 1 attempt > 2 attempt > 3 attempt > 4 attempt > 5 attempt
-        3. Within each attempt level: lead score (descending) first, then LIFO (most recent updated_at)
-        4. Then creation date, id
+        3. Within each attempt level: for lead_status SALES LEAD only, lead score (descending); otherwise score is ignored
+        4. Then LIFO by subscription_time_stamp (most recent first), then updated_at, creation date, id
 
         This ensures:
         - Fresh leads (0 attempts) come first
         - "Not connected" leads ordered by attempts (1, 2, 3, 4, 5)
-        - Higher-scoring leads within each attempt level come before lower-scoring; LIFO as tie-breaker
+        - lead_status SALES LEAD: higher score before lower; other statuses: subscription_time_stamp LIFO after call_attempts
         """
         qs = qs.extra(where=[self._NEXT_CALL_READY_WHERE])
 
@@ -1343,22 +1354,22 @@ class GetNextLeadView(APIView):
                 pass
 
         # Note on ordering:
-        # - For most lead sources (e.g. SALES LEAD) we keep the existing behavior:
-        #   expired snoozed first, then call_attempts, then lead_score, then LIFO.
-        # - For SELF TRIAL leads we want: call_attempts > LIFO, ignoring lead_score.
-        #   We achieve this by defining a derived lead_score_for_sort that is constant
-        #   for SELF TRIAL, so within that subset LIFO decides after call_attempts.
+        # - lead_status = SALES LEAD: expired snoozed, call_attempts, lead_score, then LIFO by subscription_time_stamp.
+        # - Any other lead_status: same through call_attempts, then lead_score_for_sort is constant so
+        #   subscription_time_stamp LIFO decides within the attempt band.
         if now_iso:
             qs = qs.extra(
                 select={
                     'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
                     'call_attempts_int': "COALESCE((data->>'call_attempts')::int, 0)",
                     'lead_score_for_sort': """
-                        CASE 
-                            WHEN data->>'lead_source' = 'SELF TRIAL' THEN 0
-                            ELSE COALESCE((data->>'lead_score')::float, -1)
+                        CASE
+                            WHEN data->>'lead_status' = 'SALES LEAD'
+                            THEN COALESCE((data->>'lead_score')::float, -1)
+                            ELSE 0
                         END
                     """,
+                    'subscription_time_stamp_sort': self._SUBSCRIPTION_TIME_STAMP_SORT_SQL,
                     'is_expired_snoozed': """
                         CASE 
                             WHEN data->>'lead_stage' = 'SNOOZED' 
@@ -1374,8 +1385,9 @@ class GetNextLeadView(APIView):
             ).order_by(
                 'is_expired_snoozed',  # Expired snoozed leads first (0), then others (1)
                 'call_attempts_int',  # Priority: 0 attempts > 1 attempt > 2 attempt > 3 attempt > 4 attempt > 5 attempt
-                F('lead_score_for_sort').desc(nulls_last=True),  # SELF TRIAL ignores score (constant), others use real score
-                '-updated_at',  # LIFO as tie-breaker when scores are equal
+                F('lead_score_for_sort').desc(nulls_last=True),  # Only SALES LEAD uses real score; else constant
+                F('subscription_time_stamp_sort').desc(nulls_last=True),  # LIFO: latest subscription first
+                '-updated_at',
                 'created_at',
                 'id'
             )
@@ -1386,16 +1398,19 @@ class GetNextLeadView(APIView):
                     'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
                     'call_attempts_int': "COALESCE((data->>'call_attempts')::int, 0)",
                     'lead_score_for_sort': """
-                        CASE 
-                            WHEN data->>'lead_source' = 'SELF TRIAL' THEN 0
-                            ELSE COALESCE((data->>'lead_score')::float, -1)
+                        CASE
+                            WHEN data->>'lead_status' = 'SALES LEAD'
+                            THEN COALESCE((data->>'lead_score')::float, -1)
+                            ELSE 0
                         END
                     """,
+                    'subscription_time_stamp_sort': self._SUBSCRIPTION_TIME_STAMP_SORT_SQL,
                 }
             ).order_by(
                 'call_attempts_int',  # Priority: 0 attempts > 1 attempt > 2 attempt > 3 attempt > 4 attempt > 5 attempt
-                F('lead_score_for_sort').desc(nulls_last=True),  # SELF TRIAL ignores score, others use real score
-                '-updated_at',  # LIFO as tie-breaker when scores are equal
+                F('lead_score_for_sort').desc(nulls_last=True),  # Only SALES LEAD uses real score; else constant
+                F('subscription_time_stamp_sort').desc(nulls_last=True),  # LIFO: latest subscription first
+                '-updated_at',
                 'created_at',
                 'id'
             )
@@ -2177,7 +2192,9 @@ class GetNextLeadView(APIView):
 
         # Only build ordered list and pick from fresh queue when we did not already get a snoozed-due candidate in Step 3a
         if candidate is None:
-            logger.info("[GetNextLead] Step 4: Ordering by score (call_attempts asc, score desc, LIFO)...")
+            logger.info(
+                "[GetNextLead] Step 4: Ordering by score (call_attempts asc, score desc, LIFO by subscription_time_stamp)..."
+            )
             ordered = self._order_by_score(unassigned, now_iso)
             candidate = None
             checked = 0
