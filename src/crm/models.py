@@ -1,10 +1,11 @@
 from django.db import models
-from core.models import BaseModel 
+from core.models import BaseModel
 from django.utils import timezone
+from object_history.models import HistoryTrackedModel
 
 TERMINAL_STATUSES = ("won", "lost", "closed")
 
-class Lead(BaseModel):
+class Lead(HistoryTrackedModel, BaseModel):
     id = models.BigAutoField(primary_key=True)
     name = models.TextField()
     phone_no = models.TextField(unique=True)

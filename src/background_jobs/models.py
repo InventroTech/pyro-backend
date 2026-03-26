@@ -1,5 +1,6 @@
 from django.db import models
 from core.models import BaseModel
+from object_history.models import HistoryTrackedModel
 
 
 class JobStatus(models.TextChoices):
@@ -31,7 +32,7 @@ class JobType(models.TextChoices):
     # EXPORT_DATA = "export_data", "Export Data"
 
 
-class BackgroundJob(BaseModel):
+class BackgroundJob(HistoryTrackedModel, BaseModel):
     """
     Database-backed job queue for async task processing.
     Stores jobs that need to be executed asynchronously by background workers.
