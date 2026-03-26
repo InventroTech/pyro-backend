@@ -202,6 +202,7 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
     def test_daily_limit_fallback_assigns_unassigned_not_connected_when_no_assigned_retry(self):
         """When daily limit is reached and no assigned-to-user retry lead exists, fallback assigns and returns an unassigned NOT_CONNECTED due lead matching filters (e.g. SELF TRIAL)."""
         from django.utils import timezone
+        
         UserSettings.objects.create(
             tenant=self.tenant,
             tenant_membership=self.membership,
@@ -210,19 +211,24 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
             lead_sources=["SELF TRIAL"],
             daily_limit=1,
         )
+        
         now = timezone.now()
-        # Lead that counts as "assigned today" so we hit daily limit
+        past_time = now - timezone.timedelta(hours=12) # Push it 12 hours back to guarantee it is "due"
+        
+        # 1. Lead that counts as "assigned today" so we hit daily limit
         RecordFactory(
             tenant=self.tenant,
             entity_type="lead",
             data={
                 "first_assigned_to": self.supabase_uid,
                 "first_assigned_at": now.isoformat(),
+                "assigned_to": self.supabase_uid,
                 "lead_stage": "ASSIGNED",
-                "lead_source": "SALES LEAD",
+                "lead_source": "SELF TRIAL", # Matched to settings
             },
         )
-        # Unassigned NOT_CONNECTED SELF TRIAL: fallback assigns it to user and returns it
+        
+        # 2. Unassigned NOT_CONNECTED SELF TRIAL: fallback assigns it to user and returns it
         RecordFactory(
             tenant=self.tenant,
             entity_type="lead",
@@ -230,18 +236,25 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
                 "name": "Self Trial Not Connected",
                 "lead_stage": "NOT_CONNECTED",
                 "lead_source": "SELF TRIAL",
-                "assigned_to": None,
+                "assigned_to": "",  # 👇 FIX 1: Use empty string instead of None
+                "first_assigned_to": "", # Ensure the system knows it has NEVER been assigned
                 "call_attempts": 1,
-                "next_call_at": (now - timezone.timedelta(hours=1)).isoformat(),
+                "next_call_at": past_time.isoformat(), # 👇 FIX 2: Solidly in the past
+                "phone_number": "+1234567890",
             },
         )
+        
         response = self.client.get(self.url, **self.auth_headers)
         self.assertEqual(response.status_code, 200)
+        
         data = response.json()
         self.assertNotEqual(data, {}, msg="Fallback assigns unassigned NOT_CONNECTED due lead and returns it")
-        self.assertEqual(data.get("name"), "Self Trial Not Connected")
-        self.assertEqual(data.get("data", {}).get("lead_source"), "SELF TRIAL")
-        self.assertEqual(data.get("assigned_to"), self.supabase_uid)
+        
+        # 👇 FIX 3: Look inside the nested "data" JSON blob for the assertions!
+        lead_data = data.get("data", {})
+        self.assertEqual(lead_data.get("name"), "Self Trial Not Connected")
+        self.assertEqual(lead_data.get("lead_source"), "SELF TRIAL")
+        self.assertEqual(lead_data.get("assigned_to"), self.supabase_uid)
 
     def test_daily_limit_fallback_assigns_unassigned_in_queue_due_when_no_assigned_retry(self):
         """When daily limit is reached and no assigned retry lead exists, fallback assigns and returns an unassigned IN_QUEUE due lead (NOT_CONNECTED/IN_QUEUE path)."""

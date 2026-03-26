@@ -175,6 +175,7 @@ class SaveAndContinueView(APIView):
     Updates support tickets with resolution status and sends Mixpanel events.
     """
     authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated] # <--- ADD THIS LINE!
     
     def options(self, request):
         """Handle CORS preflight requests"""
@@ -908,7 +909,6 @@ class SupportTicketUpdateView(APIView):
             # Note: Based on memory, staging environment has fixed assigned_to and tenant_id
             # But this endpoint is for admin assignment, so we'll allow it for production
             
-            # Prepare update data (exclude ticket_id)
             update_data = {k: v for k, v in validated_data.items() if k != 'ticket_id'}
             
             # Update the ticket fields in atomic transaction

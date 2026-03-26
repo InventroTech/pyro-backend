@@ -27,7 +27,7 @@ class InventoryRequestFormBackendTests(TestCase):
         self.tenant = Tenant.objects.create(
             id=uuid.uuid4(),
             name="Test Tenant",
-            slug="test-tenant",
+            slug=f"test-tenant-{uuid.uuid4().hex[:8]}",  # <--- THE FIX
         )
         # Clear tenant middleware cache so this test's tenant is resolved (avoids stale tenant from prior test)
         cache.delete(f"tenant:slug:{self.tenant.slug}")
