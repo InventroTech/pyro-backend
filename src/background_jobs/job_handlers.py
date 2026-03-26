@@ -529,7 +529,12 @@ class LeadScoringJobHandler(JobHandler):
         from .queue_service import get_queue_service
         from crm_records.models import Record
 
-        qs = Record.objects.filter(tenant_id=tenant_id, entity_type=entity_type)
+        # Exclude final stages that should never be rescored.
+        qs = Record.objects.filter(tenant_id=tenant_id, entity_type=entity_type).extra(
+            where=[
+                "UPPER(COALESCE(data->>'lead_stage','')) NOT IN ('CLOSED','TRIAL_ACTIVATED','NOT_INTERESTED')"
+            ]
+        )
         total_leads = qs.count()
 
         if total_leads == 0:

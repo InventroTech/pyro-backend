@@ -393,6 +393,7 @@ def score_chunk_sql(
               AND entity_type = %s
               AND id >= %s
               AND id < %s
+              AND UPPER(COALESCE(data->>'lead_stage','')) NOT IN ('CLOSED','TRIAL_ACTIVATED','NOT_INTERESTED')
             RETURNING
                 id,
                 (data->>'lead_score')::float AS new_score
