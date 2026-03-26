@@ -909,12 +909,7 @@ class SupportTicketUpdateView(APIView):
             # Note: Based on memory, staging environment has fixed assigned_to and tenant_id
             # But this endpoint is for admin assignment, so we'll allow it for production
             
-            # Prepare update data (exclude ticket_id)
             update_data = {k: v for k, v in validated_data.items() if k != 'ticket_id'}
-            
-            # 👇 ADD THESE TWO LINES TO FIX THE BUG 👇
-            if 'assigned_to' in update_data:
-                update_data['assigned_to_id'] = update_data.pop('assigned_to')
             
             # Update the ticket fields in atomic transaction
             with transaction.atomic():

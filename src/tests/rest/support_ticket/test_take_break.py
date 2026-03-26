@@ -10,7 +10,6 @@ from support_ticket.models import SupportTicket
 from tests.factories.user_factory import UserFactory
 from tests.factories.core_factory import TenantFactory
 from tests.factories.support_ticket_factory import SupportTicketFactory
-from tests.factories.authz_factory import TenantMembershipFactory
 
 @pytest.mark.django_db
 class TestTakeBreakView:
@@ -32,7 +31,6 @@ class TestTakeBreakView:
     @pytest.fixture
     def authenticated_client(self):
         from authz.models import Role, TenantMembership
-        client = APIClient()
         
         # 1. Establish the Tenant
         self.test_tenant = TenantFactory.create(slug=f"tenant-{uuid4().hex[:6]}")

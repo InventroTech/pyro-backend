@@ -1,12 +1,14 @@
 import uuid
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from django.test import TestCase
 from django.urls import reverse
 from django.contrib.auth import get_user_model
 from django.http import HttpResponse
+from django.core.cache import cache
+from authz import service as authz_service
+from authz.models import Role, TenantMembership
 from rest_framework.test import APIClient
-from rest_framework.views import APIView
 from core.models import Tenant
 from crm_records.models import Record
 from crm_records.serializers import RecordSerializer
@@ -16,41 +18,33 @@ User = get_user_model()
 
 class RecordApiTests(TestCase):
     def setUp(self):
+        # Clear authz permissions cache
+        authz_service._CACHE.clear()
+
         # Create two tenants
-        self.tenant_a = Tenant.objects.create(id=uuid.uuid4(), name="Tenant A", slug="tenant-a")
-        self.tenant_b = Tenant.objects.create(id=uuid.uuid4(), name="Tenant B", slug="tenant-b")
+        self.tenant_a = Tenant.objects.create(id=uuid.uuid4(), name="Tenant A", slug=f"tenant-a-{uuid.uuid4().hex[:8]}")
+        self.tenant_b = Tenant.objects.create(id=uuid.uuid4(), name="Tenant B", slug=f"tenant-b-{uuid.uuid4().hex[:8]}")
+
+        # Clear tenant middleware cache
+        cache.delete(f"tenant:slug:{self.tenant_a.slug}")
+        cache.delete(f"tenant:id:{self.tenant_a.id}")
+        cache.delete(f"tenant:slug:{self.tenant_b.slug}")
+        cache.delete(f"tenant:id:{self.tenant_b.id}")
 
         # Create users
-        self.user_a = User.objects.create_user(
-            email="a@x.com", 
-            password="pass1234",
-            supabase_uid=str(uuid.uuid4())
-        )
-        self.user_b = User.objects.create_user(
-            email="b@x.com", 
-            password="pass1234",
-            supabase_uid=str(uuid.uuid4())
+        self.user_a = User.objects.create_user(email="a@x.com", password="pass1234", supabase_uid=str(uuid.uuid4()))
+        self.user_b = User.objects.create_user(email="b@x.com", password="pass1234", supabase_uid=str(uuid.uuid4()))
+
+        # 👇 THE FIX: Create official Memberships
+        role_a = Role.objects.create(tenant=self.tenant_a, key="AGENT", name="Agent")
+        TenantMembership.objects.create(
+            tenant=self.tenant_a, user_id=self.user_a.supabase_uid, email=self.user_a.email, role=role_a, is_active=True
         )
 
-        # 👇 VIP Bypass: Disable DRF Permissions and forcefully inject the Tenant 👇
-        def bypass_drf_permissions(view_instance, request):
-            slug = request.META.get('HTTP_X_TENANT_SLUG')
-            if slug:
-                tenant = Tenant.objects.filter(slug=slug).first()
-                request.tenant = tenant
-                request.user.tenant = tenant
-            return None # None means "Permission Granted" in DRF
-
-        def bypass_drf_obj_permissions(view_instance, request, obj):
-            return None
-
-        self.perm_patcher = patch('rest_framework.views.APIView.check_permissions', autospec=True, side_effect=bypass_drf_permissions)
-        self.perm_patcher.start()
-        self.addCleanup(self.perm_patcher.stop)
-        
-        self.obj_perm_patcher = patch('rest_framework.views.APIView.check_object_permissions', autospec=True, side_effect=bypass_drf_obj_permissions)
-        self.obj_perm_patcher.start()
-        self.addCleanup(self.obj_perm_patcher.stop)
+        role_b = Role.objects.create(tenant=self.tenant_b, key="AGENT", name="Agent")
+        TenantMembership.objects.create(
+            tenant=self.tenant_b, user_id=self.user_b.supabase_uid, email=self.user_b.email, role=role_b, is_active=True
+        )
 
         # Create DRF Client
         self.client = APIClient()
@@ -83,7 +77,7 @@ class RecordApiTests(TestCase):
         """Test: Create Record → returns 201"""
         start_time = time.time()
         
-        self.client.force_authenticate(user=self.user_a)
+        self.client.force_login(self.user_a)
         headers = {"HTTP_X_TENANT_SLUG": self.tenant_a.slug}
         
         payload = {
@@ -109,7 +103,7 @@ class RecordApiTests(TestCase):
         """Test: Get Record list → shows only tenant's records"""
         start_time = time.time()
         
-        self.client.force_authenticate(user=self.user_a)
+        self.client.force_login(self.user_a)
         headers = {"HTTP_X_TENANT_SLUG": self.tenant_a.slug}
         
         response = self.client.get(self.list_url, **headers)
@@ -123,7 +117,7 @@ class RecordApiTests(TestCase):
         self.assertIn("Ticket A1", names)
         self.assertNotIn("Lead B1", names)
         
-        self.client.force_authenticate(user=self.user_b)
+        self.client.force_login(self.user_b)
         headers = {"HTTP_X_TENANT_SLUG": self.tenant_b.slug}
         
         response = self.client.get(self.list_url, **headers)
@@ -141,7 +135,7 @@ class RecordApiTests(TestCase):
         """Test: Update Record → JSON field modifies correctly"""
         start_time = time.time()
         
-        self.client.force_authenticate(user=self.user_a)
+        self.client.force_login(self.user_a)
         headers = {"HTTP_X_TENANT_SLUG": self.tenant_a.slug}
         
         detail_url = f"/crm-records/records/{self.rec_a1.id}/"
@@ -173,7 +167,7 @@ class RecordApiTests(TestCase):
         """Test: Tenant B cannot access Tenant A record (404/403)"""
         start_time = time.time()
         
-        self.client.force_authenticate(user=self.user_b)
+        self.client.force_login(self.user_b)
         headers = {"HTTP_X_TENANT_SLUG": self.tenant_b.slug}
         
         detail_url = f"/crm-records/records/{self.rec_a1.id}/"
@@ -228,7 +222,7 @@ class RecordApiTests(TestCase):
             data={"name": "Ticket B2", "priority": "medium"}
         )
         
-        self.client.force_authenticate(user=self.user_a)
+        self.client.force_login(self.user_a)
         headers = {"HTTP_X_TENANT_SLUG": self.tenant_a.slug}
         
         response = self.client.get(self.list_url, **headers)
@@ -242,7 +236,7 @@ class RecordApiTests(TestCase):
         self.assertNotIn("Lead B1", tenant_a_records)
         self.assertNotIn("Ticket B2", tenant_a_records)
         
-        self.client.force_authenticate(user=self.user_b)
+        self.client.force_login(self.user_b)
         headers = {"HTTP_X_TENANT_SLUG": self.tenant_b.slug}
         
         response = self.client.get(self.list_url, **headers)

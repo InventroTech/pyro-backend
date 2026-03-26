@@ -10,7 +10,9 @@ from unittest.mock import patch
 from django.test import TestCase
 from django.urls import reverse
 from django.contrib.auth import get_user_model
-from django.db import transaction
+from django.core.cache import cache
+from authz import service as authz_service
+from authz.models import Role, TenantMembership
 from rest_framework.test import APIClient
 from core.models import Tenant
 from crm_records.models import Record, EventLog
@@ -30,29 +32,36 @@ class DummyResponse:
 
 class EventApiTests(TestCase):
     def setUp(self):
-        # Create two tenants
-        self.tenant_a = Tenant.objects.create(id=uuid.uuid4(), name="Tenant A", slug="tenant-a")
-        self.tenant_b = Tenant.objects.create(id=uuid.uuid4(), name="Tenant B", slug="tenant-b")
+        # Clear authz permissions cache so this test's membership is used
+        authz_service._CACHE.clear()
+
+        # Create two tenants (Using the new slug logic from the reference)
+        self.tenant_a = Tenant.objects.create(id=uuid.uuid4(), name="Tenant A", slug=f"tenant-a-{uuid.uuid4().hex[:8]}")
+        self.tenant_b = Tenant.objects.create(id=uuid.uuid4(), name="Tenant B", slug=f"tenant-b-{uuid.uuid4().hex[:8]}")
+
+        # Clear tenant middleware cache
+        cache.delete(f"tenant:slug:{self.tenant_a.slug}")
+        cache.delete(f"tenant:id:{self.tenant_a.id}")
+        cache.delete(f"tenant:slug:{self.tenant_b.slug}")
+        cache.delete(f"tenant:id:{self.tenant_b.id}")
 
         # Create users
-        self.user_a = User.objects.create_user(
-            email="a@x.com", password="pass1234", supabase_uid=str(uuid.uuid4())
-        )
-        self.user_b = User.objects.create_user(
-            email="b@x.com", password="pass1234", supabase_uid=str(uuid.uuid4())
+        self.user_a = User.objects.create_user(email="a@x.com", password="pass1234", supabase_uid=str(uuid.uuid4()))
+        self.user_b = User.objects.create_user(email="b@x.com", password="pass1234", supabase_uid=str(uuid.uuid4()))
+
+        # 👇 THE FIX: Create official Memberships so they don't get 403 Forbidden
+        role_a = Role.objects.create(tenant=self.tenant_a, key="AGENT", name="Agent")
+        TenantMembership.objects.create(
+            tenant=self.tenant_a, user_id=self.user_a.supabase_uid, email=self.user_a.email, role=role_a, is_active=True
         )
 
-        # VIP Bypass: Disable DRF Permissions
-        def bypass_drf_permissions(view_instance, request):
-            slug = request.META.get('HTTP_X_TENANT_SLUG')
-            if slug:
-                tenant = Tenant.objects.filter(slug=slug).first()
-                request.tenant = tenant
-                if hasattr(request, 'user') and request.user:
-                    request.user.tenant = tenant
-            return None 
+        role_b = Role.objects.create(tenant=self.tenant_b, key="AGENT", name="Agent")
+        TenantMembership.objects.create(
+            tenant=self.tenant_b, user_id=self.user_b.supabase_uid, email=self.user_b.email, role=role_b, is_active=True
+        )
 
-        self.perm_patcher = patch('rest_framework.views.APIView.check_permissions', autospec=True, side_effect=bypass_drf_permissions)
+        # Mock ONLY HasAPISecret (Dinesh's first comment) - No more "Smart Mock" needed!
+        self.perm_patcher = patch('crm_records.permissions.HasAPISecret.has_permission', return_value=True)
         self.perm_patcher.start()
         self.addCleanup(self.perm_patcher.stop)
         
@@ -78,8 +87,16 @@ class EventApiTests(TestCase):
         self.events_list_url = "/crm-records/events/"
 
     def authenticate_and_set_tenant(self, user, tenant):
-        self.client.force_authenticate(user=user)
-        return {"HTTP_X_TENANT_SLUG": tenant.slug}
+        """Helper to authenticate user and set tenant header"""
+        
+        # Use force_login instead of force_authenticate (Dinesh's second comment)
+        self.client.force_login(user)
+
+        # Return both headers needed for GET (Tenant) and POST (API Secret)
+        return {
+            "HTTP_X_TENANT_SLUG": tenant.slug,
+            "HTTP_X_API_SECRET": "test_secret_123" 
+        }
 
     def safely_parse_response(self, response):
         """Safely parses a DRF or standard Django response to prevent JSONDecodeErrors on HTML 404s"""
@@ -103,7 +120,7 @@ class EventApiTests(TestCase):
             try:
                 record_id = parts[parts.index("records") + 1]
             except IndexError:
-                pass
+                record_id = None
 
         if not record_id:
             return DummyResponse({"error": "Record not found"}, 404)
@@ -246,7 +263,7 @@ class EventApiTests(TestCase):
         """Test: Event dispatcher stub works correctly"""
         dispatch_event("test_event", self.rec_a1, {"test": "data"})
         EventLog.objects.create(record=self.rec_a1, tenant=self.tenant_a, event="test_event_1", payload={})
-        self.assertTrue(len(get_event_history(self.rec_a1)) > 0)
+        self.assertGreater(len(get_event_history(self.rec_a1)) , 0)
 
     def test_workflow_simulation_works(self):
         """Test: Workflow simulation works correctly"""
