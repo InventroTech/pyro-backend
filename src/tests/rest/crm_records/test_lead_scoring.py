@@ -9,11 +9,25 @@ import pytest
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from background_jobs.job_handlers import LeadScoringJobHandler
+from background_jobs.job_handlers import LeadScoringJobHandler, LeadScoringChunkJobHandler
 from background_jobs.models import BackgroundJob, JobType, JobStatus
 from crm_records.models import Record, ScoringRule
 from crm_records.scoring import score_all_records_for_tenant
 from tests.factories import RecordFactory, TenantFactory
+
+
+def _process_parent_chunk_jobs(parent_job: BackgroundJob):
+    """
+    Unit tests call handlers directly (without JobProcessor), so we need to
+    explicitly run the enqueued chunk handlers to update lead_score.
+    """
+    chunk_job_ids = (parent_job.result or {}).get("chunk_job_ids") or []
+    chunk_jobs = BackgroundJob.objects.filter(
+        id__in=chunk_job_ids,
+        job_type=JobType.SCORE_LEADS_CHUNK,
+    )
+    for chunk_job in chunk_jobs:
+        LeadScoringChunkJobHandler().process(chunk_job)
 
 
 def _poster_free_rule(tenant, weight=42.0):
@@ -185,6 +199,8 @@ class LeadScoringJobHandlerTests(TestCase):
         job.refresh_from_db()
         self.assertEqual(job.result.get("status"), "completed")
         self.assertEqual(job.result.get("total_leads"), 1)
+
+        _process_parent_chunk_jobs(job)
         lead = Record.objects.get(data__praja_id="JOB1")
         self.assertEqual(lead.data.get("lead_score"), 7.0)
 
@@ -212,6 +228,10 @@ class LeadScoringJobHandlerTests(TestCase):
         job.refresh_from_db()
         self.assertEqual(job.result.get("status"), "completed")
         self.assertEqual(job.result.get("total_leads"), 1)
+
+        _process_parent_chunk_jobs(job)
+        lead = Record.objects.get(data__praja_id="JOB1")
+        self.assertEqual(lead.data.get("lead_score"), 7.0)
 
     def test_process_persists_processing_then_completed_on_job_result(self):
         job = BackgroundJob.objects.create(
