@@ -18,6 +18,7 @@ class JobType(models.TextChoices):
     SEND_WEBHOOK = "send_webhook", "Send Webhook"
     EXECUTE_FUNCTION = "execute_function", "Execute Function"
     SCORE_LEADS = "score_leads", "Score Leads"
+    SCORE_LEADS_CHUNK = "score_leads_chunk", "Score Leads Chunk"
     SEND_TO_PRAJA = "send_to_praja", "Send to Praja Server"
     PARTNER_LEAD_ASSIGN = "partner_lead_assign", "Partner Lead Assign"
     UNASSIGN_SNOOZED_LEADS = "unassign_snoozed_leads", "Unassign Snoozed Leads"

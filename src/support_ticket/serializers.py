@@ -172,7 +172,7 @@ class SupportTicketUpdateSerializer(serializers.Serializer):
     Serializer for updating support tickets - specifically for admin assignment
     """
     ticket_id = serializers.IntegerField(required=True)
-    assigned_to = serializers.UUIDField(required=False, allow_null=True)
+    assigned_to = serializers.UUIDField(source='assigned_to_id', required=False, allow_null=True)
     resolution_status = serializers.CharField(max_length=255, required=False, allow_blank=True)
     layout_status = serializers.CharField(max_length=255, required=False, allow_blank=True)
     cse_name = serializers.CharField(max_length=255, required=False, allow_blank=True)

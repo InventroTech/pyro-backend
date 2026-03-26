@@ -23,7 +23,7 @@ from core.models import Tenant
 from authz.models import TenantMembership
 from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
 from crm_records.models import Record, PartnerEvent
-from crm_records.scoring import score_all_records_for_tenant
+from crm_records.scoring import get_scoring_rules, score_chunk_sql
 from crm_records.services import PrajaService
 from support_ticket.models import SupportTicket
 from support_ticket.services import MixpanelService, RMAssignedMixpanelService
@@ -492,10 +492,10 @@ class LeadScoringJobHandler(JobHandler):
             "batch_size": 100       # Optional, defaults to 100
         }
         """
-        payload = job.payload
+        payload = job.payload or {}
         entity_type = payload.get("entity_type", "lead")
-        batch_size = payload.get("batch_size", 100)
         tenant_id = job.tenant_id
+        chunk_size = 10_000
         
         if not tenant_id:
             error_msg = "Lead scoring job requires tenant_id"
@@ -503,34 +503,122 @@ class LeadScoringJobHandler(JobHandler):
             raise ValueError(error_msg)
         
         logger.info(
-            f"Starting lead scoring job {job.id} for tenant {tenant_id}, "
-            f"entity_type={entity_type}, batch_size={batch_size}"
+            "Starting lead scoring job %s for tenant=%s entity_type=%s chunk_size=%s",
+            job.id,
+            tenant_id,
+            entity_type,
+            chunk_size,
         )
         
         job.result = {
             "total_leads": 0,
-            "processed_leads": 0,
-            "updated_leads": 0,
-            "total_score_added": 0.0,
+            "processed_leads": 0,  # filled by aggregating completed chunk jobs
+            "updated_leads": 0,  # filled by aggregating completed chunk jobs
+            "total_score_added": 0.0,  # filled by aggregating completed chunk jobs
+            "chunk_job_ids": [],
+            "total_chunks": 0,
             "progress_percentage": 0,
             "status": "processing",
         }
         job.save(update_fields=["result"])
 
-        result = score_all_records_for_tenant(
-            tenant_id, entity_type=entity_type, batch_size=batch_size
+        # Fetch scoring rules once (fan-out time), then reuse for all chunk jobs.
+        rules = get_scoring_rules(entity_type, str(tenant_id))
+
+        from django.db.models import Min, Max
+        from .queue_service import get_queue_service
+        from crm_records.models import Record
+
+        # Exclude final stages that should never be rescored.
+        qs = Record.objects.filter(tenant_id=tenant_id, entity_type=entity_type).extra(
+            where=[
+                "UPPER(COALESCE(data->>'lead_stage','')) NOT IN ('CLOSED','TRIAL_ACTIVATED','NOT_INTERESTED')"
+            ]
         )
-        job.result = result
+        total_leads = qs.count()
+
+        if total_leads == 0:
+            job.result = {
+                "total_leads": 0,
+                "processed_leads": 0,
+                "updated_leads": 0,
+                "total_score_added": 0.0,
+                "chunk_job_ids": [],
+                "total_chunks": 0,
+                "progress_percentage": 100,
+                "status": "completed",
+            }
+            job.save(update_fields=["result"])
+            return True
+
+        agg = qs.aggregate(min_id=Min("id"), max_id=Max("id"))
+        min_id = agg.get("min_id")
+        max_id = agg.get("max_id")
+
+        # Defensive: should not be None because total_leads > 0.
+        if min_id is None or max_id is None:
+            job.result = {
+                "total_leads": total_leads,
+                "processed_leads": 0,
+                "updated_leads": 0,
+                "total_score_added": 0.0,
+                "chunk_job_ids": [],
+                "total_chunks": 0,
+                "progress_percentage": 100,
+                "status": "completed",
+                "error": "could not compute id range",
+            }
+            job.save(update_fields=["result"])
+            return True
+
+        queue_service = get_queue_service()
+
+        chunk_job_ids = []
+        ranges = list(range(int(min_id), int(max_id) + 1, chunk_size))
+        total_chunks = len(ranges)
+
+        for idx, start_id in enumerate(ranges):
+            end_id = min(start_id + chunk_size, int(max_id) + 1)
+
+            chunk_job = queue_service.enqueue_job(
+                job_type=JobType.SCORE_LEADS_CHUNK,
+                payload={
+                    "entity_type": entity_type,
+                    "id_gte": int(start_id),
+                    "id_lt": int(end_id),
+                    "rules": rules,
+                    "parent_job_id": job.id,
+                    "chunk_index": idx,
+                    "total_chunks": total_chunks,
+                },
+                priority=0,
+                tenant_id=str(tenant_id),
+            )
+            chunk_job_ids.append(chunk_job.id)
+
+        job.result = {
+            "total_leads": int(total_leads),
+            "processed_leads": 0,
+            "updated_leads": 0,
+            "total_score_added": 0.0,
+            "chunk_job_ids": chunk_job_ids,
+            "total_chunks": total_chunks,
+            "progress_percentage": 0,
+            "status": "completed",
+        }
         job.save(update_fields=["result"])
 
         logger.info(
             f"Lead scoring job {job.id} completed: "
-            f"{result.get('updated_leads', 0)}/{result.get('total_leads', 0)} leads with score > 0, "
-            f"total score: {result.get('total_score_added', 0.0)}"
+            "enqueued %s chunk jobs (tenant=%s, entity_type=%s)",
+            total_chunks,
+            tenant_id,
+            entity_type,
         )
 
         return True
-    
+
+
     def get_retry_delay(self, attempt: int) -> int:
         """
         Exponential backoff: 10s, 60s, 300s (5 minutes)
@@ -538,10 +626,59 @@ class LeadScoringJobHandler(JobHandler):
         """
         delays = [10, 60, 300]
         return delays[min(attempt - 1, len(delays) - 1)]
-    
+
     def validate_payload(self, payload: Dict[str, Any]) -> bool:
-        """Validate lead scoring job payload"""
         # entity_type and batch_size are optional with defaults
+        return True
+
+
+class LeadScoringChunkJobHandler(JobHandler):
+    """
+    Handler for scoring a single chunk of lead records (by ID range).
+    Runs a set-based SQL UPDATE to compute data.lead_score for all rows in the chunk.
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        payload = job.payload or {}
+        tenant_id = job.tenant_id
+
+        if not tenant_id:
+            error_msg = "Lead scoring chunk job requires tenant_id"
+            logger.error("Invalid lead scoring chunk job %s: %s", job.id, error_msg)
+            raise ValueError(error_msg)
+
+        entity_type = payload.get("entity_type", "lead")
+        id_gte = payload.get("id_gte")
+        id_lt = payload.get("id_lt")
+        rules = payload.get("rules", []) or []
+
+        if id_gte is None or id_lt is None:
+            raise ValueError(f"Lead scoring chunk job {job.id} requires id_gte and id_lt")
+
+        result = score_chunk_sql(
+            tenant_id=str(tenant_id),
+            entity_type=entity_type,
+            rules=rules,
+            id_gte=int(id_gte),
+            id_lt=int(id_lt),
+        )
+
+        job.result = {
+            **result,
+            "parent_job_id": payload.get("parent_job_id"),
+            "chunk_index": payload.get("chunk_index"),
+            "total_chunks": payload.get("total_chunks"),
+        }
+        job.save(update_fields=["result"])
+
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        # Chunk scoring is still DB-heavy, but retries can be shorter than full fan-out.
+        delays = [5, 30, 180]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+    def validate_payload(self, payload: Dict[str, Any]) -> bool:
         return True
 
 
@@ -944,6 +1081,7 @@ class JobHandlerRegistry:
         self.register_handler(JobType.SEND_WEBHOOK, WebhookJobHandler())
         self.register_handler(JobType.EXECUTE_FUNCTION, FunctionJobHandler())
         self.register_handler(JobType.SCORE_LEADS, LeadScoringJobHandler())
+        self.register_handler(JobType.SCORE_LEADS_CHUNK, LeadScoringChunkJobHandler())
         self.register_handler(JobType.PARTNER_LEAD_ASSIGN, PartnerLeadAssignJobHandler())
         self.register_handler(JobType.UNASSIGN_SNOOZED_LEADS, UnassignSnoozedLeadsJobHandler())
         self.register_handler(JobType.RELEASE_LEADS_AFTER_12H, ReleaseLeadsAfter12hJobHandler())

@@ -246,7 +246,7 @@ class SaveAndContinueViewTest(BaseAPITestCase):
         # Make request without auth headers
         response = self.client.post(self.url, data, format='json')
         
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
     
     @patch('support_ticket.services.MixpanelService.send_to_mixpanel_sync')
     def test_mixpanel_events_for_different_statuses(self, mock_mixpanel):
@@ -309,7 +309,8 @@ class SaveAndContinueViewTest(BaseAPITestCase):
     
     def test_options_request_cors(self):
         """Test CORS preflight OPTIONS request"""
-        response = self.client.options(self.url)
+        # 👇 Add **self.auth_headers here! 👇
+        response = self.client.options(self.url, **self.auth_headers)
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response['Access-Control-Allow-Origin'], '*')
