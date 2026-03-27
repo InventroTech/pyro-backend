@@ -46,7 +46,7 @@ class Record(HistoryTrackedModel, BaseModel):
         return f"{self.entity_type}: {name or 'Unnamed'}"
 
 
-class EventLog(BaseModel):
+class EventLog(HistoryTrackedModel, BaseModel):
     """
     Event logging model for tracking all record-related events.
     Stores events triggered by user actions or system processes.
@@ -66,7 +66,7 @@ class EventLog(BaseModel):
         return f"{self.event} for {self.record} at {self.timestamp}"
 
 
-class RuleSet(BaseModel):
+class RuleSet(HistoryTrackedModel, BaseModel):
     """
     Rule configuration model for declarative event-driven workflows.
     Allows tenants to define rules that trigger actions when specific events occur.
@@ -87,7 +87,7 @@ class RuleSet(BaseModel):
         return f"Rule: {self.event_name} ({'enabled' if self.enabled else 'disabled'})"
 
 
-class RuleExecutionLog(BaseModel):
+class RuleExecutionLog(HistoryTrackedModel, BaseModel):
     """
     Execution logging model for tracking rule executions.
     Stores every time a rule is evaluated and executed for debugging and auditing.
@@ -110,7 +110,7 @@ class RuleExecutionLog(BaseModel):
         return f"Rule execution: {self.event_name} ({'matched' if self.matched else 'no match'}) at {self.created_at}"
 
 
-class PartnerEvent(BaseModel):
+class PartnerEvent(HistoryTrackedModel, BaseModel):
     """
     Stores every incoming partner webhook event (e.g. Halocom work_on_lead) with full payload.
     Gives a durable audit trail and debugging source independent of background_jobs.
@@ -153,7 +153,7 @@ class PartnerEvent(BaseModel):
         return f"{self.partner_slug} {self.event} ({self.status}) at {self.created_at}"
 
 
-class EntityTypeSchema(BaseModel):
+class EntityTypeSchema(HistoryTrackedModel, BaseModel):
     """
     Schema definition for entity types - stores the list of attributes for each entity type.
     This allows defining the structure/schema of each entity type.
@@ -183,7 +183,7 @@ class EntityTypeSchema(BaseModel):
         return f"{self.entity_type} ({len(self.attributes)} attributes, {len(self.rules)} rules)"
 
 
-class ScoringRule(BaseModel):
+class ScoringRule(HistoryTrackedModel, BaseModel):
     """
     Individual scoring rule model for managing lead scoring rules.
     Each rule can be created, edited, and deleted independently.
@@ -237,7 +237,7 @@ class ScoringRule(BaseModel):
         return f"{self.entity_type}: {self.attribute} {operator} {value} (weight: {self.weight})"
 
 
-class ApiSecretKey(BaseModel):
+class ApiSecretKey(HistoryTrackedModel, BaseModel):
     """
     Model to store API secret keys and their associated tenants.
     Secret is stored plainly; lookup is simple equality match (no hashing).
@@ -298,7 +298,7 @@ class ApiSecretKey(BaseModel):
         return f"****{last4} -> {self.tenant.slug if self.tenant else 'No Tenant'}"
 
 
-class CallAttemptMatrix(BaseModel):
+class CallAttemptMatrix(HistoryTrackedModel, BaseModel):
     """
     Stores call attempt configuration per lead type.
     Defines max call attempts, SLA in days, and minimum time difference between calls.
@@ -334,7 +334,7 @@ class CallAttemptMatrix(BaseModel):
         return f"{self.lead_type}: {self.max_call_attempts} attempts, {self.sla_days} days SLA, {self.min_time_between_calls_hours}h min interval"
 
 
-class Bucket(BaseModel):
+class Bucket(HistoryTrackedModel, BaseModel):
     """
     A named, filterable slice of the lead pool for routing/assignment.
 
@@ -378,7 +378,7 @@ class Bucket(BaseModel):
         return f"{self.tenant_id}:{self.slug}"
 
 
-class UserBucketAssignment(BaseModel):
+class UserBucketAssignment(HistoryTrackedModel, BaseModel):
     """
     Assigns a priority-ordered pull bucket.
 
