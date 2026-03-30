@@ -4,6 +4,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.utils import timezone
 from django.core.validators import MinValueValidator
 from core.models import BaseModel
+from object_history.models import HistoryTrackedModel
 
 
 
@@ -27,7 +28,7 @@ class AttemptOutcome(models.TextChoices):
     CALLBACK_REQUESTED = "CALLBACK_REQUESTED"
     INVALID_NUMBER = "INVALID_NUMBER"
 
-class TaskPolicy(BaseModel):
+class TaskPolicy(HistoryTrackedModel, BaseModel):
     """
     Declarative policy. :
     Example key='lead.call.v1', intervals=['30m','3h','10h','24h','72h'], max_attempts=5
@@ -41,7 +42,7 @@ class TaskPolicy(BaseModel):
     def __str__(self):
         return self.key
     
-class ScheduledTask(BaseModel):
+class ScheduledTask(HistoryTrackedModel, BaseModel):
     """
     A scheduled action for any model instance via Generic FK.
     """

@@ -1,2 +1,0 @@
-CALL_POLICY_INTERVALS = ["30m", "3h", "10h", "24h", "72h"]
-MAX_ATTEMPTS = 5
