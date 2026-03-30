@@ -1,8 +1,9 @@
 from django.db import models
 from core.models import BaseModel
+from object_history.models import HistoryTrackedModel
 
 
-class WhatsAppTemplate(BaseModel):
+class WhatsAppTemplate(HistoryTrackedModel, BaseModel):
     """
     WhatsApp template model to store tenant-wise WhatsApp templates.
     Each template has a title and description.
