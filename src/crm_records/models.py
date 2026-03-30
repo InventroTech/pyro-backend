@@ -3,7 +3,7 @@ from django.db.models import Q
 from django.contrib.postgres.fields import ArrayField
 from django.contrib.postgres.indexes import GinIndex
 from django.core.cache import cache
-from core.models import BaseModel
+from core.models import BaseModel, TenantModel
 from object_history.models import HistoryTrackedModel
 
 
@@ -434,7 +434,7 @@ class UserBucketAssignment(BaseModel):
         if uid:
             cache.delete(f"bucket_assignments:{tid}:{uid}:v2")
 
-class Entity(models.Model):
+class Entity(TenantModel):
     """
     Stores the schema/blueprint of record types (e.g., 'lead', 'ticket') 
     for a specific tenant, and tracks the last processed record for the background sync job.

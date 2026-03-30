@@ -1,6 +1,7 @@
 import logging
 from core.models import Tenant
 from crm_records.services import sync_entity_schema
+from crm_records.models import Record
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ def run_entity_sync():
     
     # 2. Define which record types we want to track schemas for
     # (Check with your team if there are others besides 'lead' and 'ticket')
-    entity_types_to_track = ['lead', 'ticket'] 
+    entity_types_to_track = Record.objects.values_list('entity_type', flat=True).distinct()
     
     total_records_processed = 0
     

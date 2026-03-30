@@ -1078,7 +1078,7 @@ class SyncEntitySchemasHandler(JobHandler):
             print(f"\n🚀 [ENTITY SYNC JOB] Processing job {job.id}...")
             
             tenants = Tenant.objects.all()
-            entity_types_to_track = ['lead', 'ticket']
+            entity_types_to_track = Record.objects.values_list('entity_type', flat=True).distinct()
             total_records_processed = 0
             
             for tenant in tenants:
