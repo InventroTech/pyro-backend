@@ -7,8 +7,12 @@ Provides worker loop, job locking, processing, and retry logic.
 import logging
 import time
 import threading
-from typing import Optional, Dict, Any
+from datetime import datetime
 from datetime import timedelta
+from typing import Optional, Dict, Any
+from zoneinfo import ZoneInfo
+
+from django.conf import settings
 
 from django.utils import timezone
 from django.db import transaction, close_old_connections, connections
@@ -40,6 +44,8 @@ class JobProcessor:
         self._handler_registry = get_handler_registry()
         # Last time we enqueued lead cron jobs (unassign snoozed, release after 12h)
         self._last_lead_cron_enqueue_at = None
+        # Local calendar date (in SNOOZED_RESET_TIMEZONE) we last enqueued snoozed→NOT_CONNECTED job
+        self._last_snoozed_midnight_enqueue_date = None
         # Circuit breaker state for connection errors
         self._connection_error_count = 0
         self._last_connection_error_time = None
@@ -373,8 +379,9 @@ class JobProcessor:
 
     def _maybe_enqueue_lead_cron_jobs(self):
         """
-        Every LEAD_CRON_ENQUEUE_INTERVAL seconds, enqueue unassign_snoozed_leads and
-        release_leads_after_12h so the worker runs them without needing external cron.
+        Every LEAD_CRON_ENQUEUE_INTERVAL seconds, enqueue unassign_snoozed_leads,
+        release_leads_after_12h, and close_stale_subscription_leads so the worker runs them
+        without needing external cron.
         """
         now = timezone.now()
         if self._last_lead_cron_enqueue_at is not None:
@@ -385,16 +392,63 @@ class JobProcessor:
             queue = get_queue_service()
             queue.enqueue_job(job_type=JobType.UNASSIGN_SNOOZED_LEADS, payload={}, priority=0)
             queue.enqueue_job(job_type=JobType.RELEASE_LEADS_AFTER_12H, payload={}, priority=0)
+            queue.enqueue_job(
+                job_type=JobType.CLOSE_STALE_SUBSCRIPTION_LEADS,
+                payload={"days": 15},
+                priority=0,
+            )
             self._last_lead_cron_enqueue_at = now
             logger.debug(
-                f"[Worker {self.worker_id}] Enqueued lead cron jobs (unassign_snoozed_leads, release_leads_after_12h)"
+                f"[Worker {self.worker_id}] Enqueued lead maintenance jobs "
+                f"(unassign_snoozed_leads, release_leads_after_12h, close_stale_subscription_leads)"
             )
         except Exception as e:
             logger.warning(
                 f"[Worker {self.worker_id}] Failed to enqueue lead cron jobs: {e}",
                 exc_info=True,
             )
-    
+
+    def _maybe_enqueue_snoozed_to_not_connected_midnight(self):
+        """
+        Once per local calendar day during hour 00:00–00:59, enqueue snoozed_to_not_connected_midnight.
+
+        "Midnight" uses ``SNOOZED_RESET_TIMEZONE`` if set, else ``TIME_ZONE`` (see settings).
+        """
+        tz_name = getattr(settings, "SNOOZED_RESET_TIMEZONE", settings.TIME_ZONE)
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception as e:
+            logger.warning(
+                f"[Worker {self.worker_id}] Invalid SNOOZED_RESET_TIMEZONE/TIME_ZONE={tz_name!r}: {e}"
+            )
+            return
+
+        local_now = datetime.now(tz)
+        if local_now.hour != 0:
+            return
+
+        today = local_now.date()
+        if self._last_snoozed_midnight_enqueue_date == today:
+            return
+
+        try:
+            queue = get_queue_service()
+            queue.enqueue_job(
+                job_type=JobType.SNOOZED_TO_NOT_CONNECTED_MIDNIGHT,
+                payload={},
+                priority=0,
+            )
+            self._last_snoozed_midnight_enqueue_date = today
+            logger.info(
+                f"[Worker {self.worker_id}] Enqueued snoozed_to_not_connected_midnight "
+                f"(local_date={today}, tz={tz_name})"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[Worker {self.worker_id}] Failed to enqueue snoozed_to_not_connected_midnight: {e}",
+                exc_info=True,
+            )
+
     def process_next_job(self, tenant_id: Optional[str] = None) -> bool:
         """
         Process the next available job.
@@ -488,6 +542,8 @@ class JobProcessor:
 
                 # Periodically enqueue lead cron jobs (unassign snoozed, release after 12h) so no external cron is needed
                 self._maybe_enqueue_lead_cron_jobs()
+                # Daily at local midnight: SNOOZED → NOT_CONNECTED
+                self._maybe_enqueue_snoozed_to_not_connected_midnight()
 
                 if jobs_processed > 0:
                     logger.debug(

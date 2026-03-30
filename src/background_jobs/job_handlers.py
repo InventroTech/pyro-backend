@@ -12,10 +12,12 @@ import os
 import pickle
 import time
 from abc import ABC, abstractmethod
-from typing import Dict, Any
+from datetime import timedelta
+from typing import Any, Dict, Tuple, Union
+from uuid import UUID
 
 import requests
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.utils import OperationalError
 from django.utils import timezone
 
@@ -987,6 +989,172 @@ class UnassignSnoozedLeadsJobHandler(JobHandler):
         return delays[min(attempt - 1, len(delays) - 1)]
 
 
+# Same CASE body as GetNextLeadView subscription_time_stamp sort SQL.
+_CLOSE_STALE_SUBSCRIPTION_TS_CASE = """
+CASE
+    WHEN (data->>'subscription_time_stamp') IS NOT NULL
+        AND TRIM(COALESCE(data->>'subscription_time_stamp', '')) != ''
+        AND LOWER(TRIM(COALESCE(data->>'subscription_time_stamp', ''))) NOT IN ('null', 'none')
+    THEN (data->>'subscription_time_stamp')::timestamptz
+    ELSE NULL
+END
+"""
+
+_CLOSE_STALE_SELF_TRIAL_PREDICATE = """COALESCE(data->>'lead_status', '') = 'SELF TRIAL'"""
+
+_CLOSE_STALE_UPDATE_SQL = f"""
+    UPDATE records
+    SET data = jsonb_set(
+            COALESCE(data, '{{}}'::jsonb),
+            '{{lead_stage}}',
+            to_jsonb('CLOSED'::text),
+            true
+        ),
+        updated_at = %s
+    WHERE tenant_id = %s
+      AND entity_type = 'lead'
+      AND ({_CLOSE_STALE_SELF_TRIAL_PREDICATE})
+      AND UPPER(COALESCE(data->>'lead_stage','')) <> 'CLOSED'
+      AND ({_CLOSE_STALE_SUBSCRIPTION_TS_CASE}) IS NOT NULL
+      AND ({_CLOSE_STALE_SUBSCRIPTION_TS_CASE}) <= %s
+"""
+
+
+def _close_stale_subscription_leads_for_tenant(
+    tenant_id: Union[str, UUID], days: int
+) -> Tuple[int, str]:
+    if days < 1:
+        raise ValueError("days must be >= 1")
+    cutoff = timezone.now() - timedelta(days=days)
+    now = timezone.now()
+    tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
+    with connection.cursor() as cursor:
+        cursor.execute(_CLOSE_STALE_UPDATE_SQL, [now, tid, cutoff])
+        updated = cursor.rowcount
+    return updated, cutoff.isoformat()
+
+
+def _close_stale_subscription_leads_all_tenants(days: int) -> Tuple[int, int, str]:
+    if days < 1:
+        raise ValueError("days must be >= 1")
+    cutoff = timezone.now() - timedelta(days=days)
+    now = timezone.now()
+    total = 0
+    tenants = list(Tenant.objects.all())
+    for tenant in tenants:
+        with connection.cursor() as cursor:
+            cursor.execute(_CLOSE_STALE_UPDATE_SQL, [now, tenant.id, cutoff])
+            total += cursor.rowcount
+    return total, len(tenants), cutoff.isoformat()
+
+
+class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
+    """
+    Set ``data.lead_stage`` to CLOSED for **SELF TRIAL** leads (``lead_status``) whose
+    ``subscription_time_stamp`` is at least ``days`` (default 15) in the past.
+
+    Payload:
+    - ``days`` (int, optional, default 15): minimum age of subscription timestamp in days.
+    - ``tenant_id`` (str UUID, optional): if set, only that tenant; if omitted, all tenants
+      (periodic worker enqueue uses no tenant_id).
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        payload = job.payload or {}
+        days = int(payload.get("days") or 15)
+        if days < 1:
+            raise ValueError("days must be >= 1")
+
+        tid = payload.get("tenant_id")
+        if tid:
+            updated, cutoff = _close_stale_subscription_leads_for_tenant(tid, days)
+            job.result = {
+                "success": True,
+                "updated": updated,
+                "days": days,
+                "cutoff": cutoff,
+                "tenant_id": str(tid),
+                "tenant_scope": "single",
+            }
+            logger.info(
+                "[CloseStaleSubscriptionLeads] tenant=%s updated=%s days=%s",
+                tid,
+                updated,
+                days,
+            )
+        else:
+            total, n_tenants, cutoff = _close_stale_subscription_leads_all_tenants(days)
+            job.result = {
+                "success": True,
+                "updated": total,
+                "days": days,
+                "cutoff": cutoff,
+                "tenants_processed": n_tenants,
+                "tenant_scope": "all",
+            }
+            logger.info(
+                "[CloseStaleSubscriptionLeads] all tenants updated=%s tenants=%s days=%s",
+                total,
+                n_tenants,
+                days,
+            )
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+    def validate_payload(self, payload: Dict[str, Any]) -> bool:
+        try:
+            days = int((payload or {}).get("days") or 15)
+        except (TypeError, ValueError):
+            return False
+        return days >= 1
+
+
+class SnoozedToNotConnectedMidnightJobHandler(JobHandler):
+    """
+    For **SALES LEAD** leads in **SNOOZED**: set ``lead_stage`` to NOT_CONNECTED and apply the
+    same unassignment as ``UnassignSnoozedLeadsJobHandler`` — clear ``assigned_to``, drop
+    ``snooze_unassign_at`` (call_attempts unchanged). Does not modify ``next_call_at``.
+
+    Runs once per local calendar day at 00:00 (see job processor + ``SNOOZED_RESET_TIMEZONE``).
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        qs = Record.objects.filter(
+            entity_type="lead",
+            data__lead_stage="SNOOZED",
+            data__lead_status="SALES LEAD",
+        )
+        updated = 0
+        for record in qs.iterator(chunk_size=500):
+            data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
+            if data.get("lead_stage") != "SNOOZED" or data.get("lead_status") != "SALES LEAD":
+                continue
+            data["lead_stage"] = "NOT_CONNECTED"
+            data["assigned_to"] = None
+            data.pop("snooze_unassign_at", None)
+            record.data = data
+            record.save(update_fields=["data", "updated_at"])
+            updated += 1
+            logger.debug(
+                "[SnoozedToNotConnectedMidnight] record_id=%s: NOT_CONNECTED + unassigned (SALES LEAD)",
+                record.id,
+            )
+        job.result = {
+            "success": True,
+            "updated": updated,
+            "timestamp": timezone.now().isoformat(),
+        }
+        logger.info("[SnoozedToNotConnectedMidnight] completed updated=%s rows", updated)
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+
 class ReleaseLeadsAfter12hJobHandler(JobHandler):
     """
     Job for NOT_CONNECTED leads only (segregation bucket).
@@ -1085,6 +1253,13 @@ class JobHandlerRegistry:
         self.register_handler(JobType.PARTNER_LEAD_ASSIGN, PartnerLeadAssignJobHandler())
         self.register_handler(JobType.UNASSIGN_SNOOZED_LEADS, UnassignSnoozedLeadsJobHandler())
         self.register_handler(JobType.RELEASE_LEADS_AFTER_12H, ReleaseLeadsAfter12hJobHandler())
+        self.register_handler(
+            JobType.CLOSE_STALE_SUBSCRIPTION_LEADS, CloseStaleSubscriptionLeadsJobHandler()
+        )
+        self.register_handler(
+            JobType.SNOOZED_TO_NOT_CONNECTED_MIDNIGHT,
+            SnoozedToNotConnectedMidnightJobHandler(),
+        )
         # Praja handler removed - now using MixpanelService instead
         # self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
     
