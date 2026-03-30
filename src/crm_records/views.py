@@ -737,7 +737,7 @@ class RecordEventView(TenantScopedMixin, APIView):
         )
         # Find the record, ensuring it belongs to the current tenant
         try:
-            record = Record.objects.select_related('tenant').get(id=record_id, tenant=tenant)
+            record = Record.objects.get(id=record_id, tenant=tenant)
             logger.debug("[EventAPI] Found record id=%s entity_type=%s", record.id, record.entity_type)
         except Record.DoesNotExist:
             logger.warning(
