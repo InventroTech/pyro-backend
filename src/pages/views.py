@@ -1,12 +1,13 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework import status, generics
 from django.shortcuts import get_object_or_404
 from uuid import UUID
+from yaml import serializer
 
 from authz.permissions import IsTenantAuthenticated
-from .models import Page
-from .serializers import PageSerializer, PageCreateUpdateSerializer
+from .models import Page, CustomIcon
+from .serializers import PageSerializer, PageCreateUpdateSerializer, CustomIconSerializer
 
 
 def _current_user_id(request):
@@ -100,3 +101,24 @@ class PageDetailView(APIView):
             return err
         page.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+    
+
+class CustomIconListCreateView(generics.ListCreateAPIView):
+    """List all custom icons for the tenant and upload a new one."""
+    permission_classes = [IsTenantAuthenticated]
+    serializer_class = CustomIconSerializer
+
+    def get_queryset(self):
+        return CustomIcon.objects.filter(tenant=self.request.tenant)
+
+    def perform_create(self, serializer):
+        serializer.save(tenant=self.request.tenant)
+
+
+class CustomIconDetailView(generics.DestroyAPIView):
+    """Delete a custom icon."""
+    permission_classes = [IsTenantAuthenticated]
+    serializer_class = CustomIconSerializer
+
+    def get_queryset(self):
+        return CustomIcon.objects.filter(tenant=self.request.tenant)
