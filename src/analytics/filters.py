@@ -24,11 +24,6 @@ def get_multi_values(query_params, key, alt_key):
             out.append(v)
     return out
 
-POSTER_CHOICES = {
-    "paid","in_trial","trial_expired","free","in_premium_extension",
-    "auto_pay_not_set_up","premium_expired","autopay_setup_no_layout",
-    "in_grace_period","in_trial_extension"
-}
 RESOLUTION_CHOICES = {"WIP","Resolved","Can't Resolve", "Closed", "Snoozed"}
 
 def build_nullable_in_q(field_name, values, allowed):
