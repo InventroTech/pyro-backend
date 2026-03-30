@@ -35,11 +35,10 @@ def schedule_call_for(obj, policy_key: str, due_at=None, payload=None):
 @transaction.atomic
 def record_call_outcome(task_id: int, outcome: str, notes: str = ""):
     """
-    Log the attempt, update Lead mirrors, and schedule the next attempt if needed.
+    Log the attempt, update the target object (if it has attempt fields), and schedule
+    the next attempt if needed.
     Returns: ('terminal' | 'rescheduled', next_due_at | None)
     """
-    from crm.models import Lead  # avoid circulars
-
     task = ScheduledTask.objects.select_for_update().get(id=task_id)
     obj = task.target
 

@@ -1,5 +1,4 @@
 from background_jobs.models import BackgroundJob
-from crm.models import Lead
 from crm_records.models import (
     ApiSecretKey,
     Bucket,
@@ -139,36 +138,6 @@ register(
         "event",
         "payload",
         "timestamp",
-        "tenant_id",
-        "created_at",
-        "updated_at",
-    ],
-    redact_fields=set(),
-    snapshot_strategy="minimal",
-)
-
-register(
-    Lead,
-    track_fields=[
-        "name",
-        "phone_no",
-        "user_id",
-        "lead_description",
-        "other_description",
-        "badge",
-        "lead_creation_date",
-        "praja_dashboard_user_link",
-        "lead_score",
-        "atleast_paid_once",
-        "reason",
-        "display_pic_url",
-        "assigned_to_id",
-        "lead_status",
-        "attempt_count",
-        "last_call_outcome",
-        "next_call_at",
-        "do_not_call",
-        "resolved_at",
         "tenant_id",
         "created_at",
         "updated_at",
