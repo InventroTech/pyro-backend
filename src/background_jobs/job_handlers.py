@@ -24,7 +24,7 @@ from authz.models import TenantMembership
 from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
 from crm_records.models import Record, PartnerEvent
 from crm_records.scoring import get_scoring_rules, score_chunk_sql
-from crm_records.services import PrajaService
+from crm_records.services import PrajaService, sync_entity_schema
 from support_ticket.models import SupportTicket
 from support_ticket.services import MixpanelService, RMAssignedMixpanelService
 
@@ -1063,6 +1063,62 @@ class ReleaseLeadsAfter12hJobHandler(JobHandler):
         delays = [60, 300, 900]
         return delays[min(attempt - 1, len(delays) - 1)]
 
+class SyncEntitySchemasHandler(JobHandler):
+    """
+    Handler for syncing entity schemas across all active tenants.
+    """
+    
+    def process(self, job: BackgroundJob) -> bool:
+        """
+        Process the sync_entity_schemas job.
+        Loops through all tenants and updates their entity definitions based on new records.
+        """
+        try:
+            start_time = time.time()
+            print(f"\n🚀 [ENTITY SYNC JOB] Processing job {job.id}...")
+            
+            tenants = Tenant.objects.all()
+            entity_types_to_track = ['lead', 'ticket']
+            total_records_processed = 0
+            
+            for tenant in tenants:
+                for entity_type in entity_types_to_track:
+                    try:
+                        # Call the "Brain" logic we built earlier!
+                        processed_count = sync_entity_schema(tenant, entity_type)
+                        total_records_processed += processed_count
+                        
+                        if processed_count > 0:
+                            print(f"📋 [ENTITY SYNC JOB] Synced {processed_count} {entity_type}s for {tenant.slug}")
+                            
+                    except Exception as e:
+                        logger.error(f"Failed to sync {entity_type} for tenant {tenant.id}: {str(e)}")
+                        # We don't raise here so one broken tenant doesn't crash the whole job
+            
+            execution_time = time.time() - start_time
+            
+            # Store result with debugging information
+            job.result = {
+                "success": True,
+                "total_records_processed": total_records_processed,
+                "execution_time_seconds": round(execution_time, 3),
+                "timestamp": timezone.now().isoformat()
+            }
+            
+            print(f"✅ [ENTITY SYNC JOB] Job {job.id} completed. Processed {total_records_processed} records in {round(execution_time, 3)}s")
+            return True
+            
+        except Exception as e:
+            error_msg = f"Entity Schema Sync failed: {str(e)}"
+            print(f"❌ [ENTITY SYNC JOB] Job {job.id} failed: {error_msg}")
+            logger.error(f"Entity sync job {job.id} failed: {error_msg}")
+            raise Exception(error_msg) from e
+
+    def get_retry_delay(self, attempt: int) -> int:
+        """Retry after 1 min, 5 mins, and 15 mins if it fails"""
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
 
 class JobHandlerRegistry:
     """
@@ -1085,6 +1141,7 @@ class JobHandlerRegistry:
         self.register_handler(JobType.PARTNER_LEAD_ASSIGN, PartnerLeadAssignJobHandler())
         self.register_handler(JobType.UNASSIGN_SNOOZED_LEADS, UnassignSnoozedLeadsJobHandler())
         self.register_handler(JobType.RELEASE_LEADS_AFTER_12H, ReleaseLeadsAfter12hJobHandler())
+        self.register_handler(JobType.SYNC_ENTITY_SCHEMAS, SyncEntitySchemasHandler())
         # Praja handler removed - now using MixpanelService instead
         # self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
     
@@ -1128,5 +1185,4 @@ _handler_registry = JobHandlerRegistry()
 def get_handler_registry() -> JobHandlerRegistry:
     """Get the global handler registry"""
     return _handler_registry
-
 

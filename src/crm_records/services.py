@@ -1,9 +1,11 @@
 import os
 import requests
 import logging
+import json
 from typing import Dict, Any, Optional
 from django.conf import settings
 from pathlib import Path
+from crm_records.models import Record, EntityTypeSchema
 import environ
 
 logger = logging.getLogger(__name__)
@@ -267,3 +269,46 @@ class PrajaService:
             )
             return False
 
+
+logger = logging.getLogger(__name__)
+
+def sync_entity_schema(tenant, entity_type, chunk_size=1000):
+    """
+    Scans new records and updates the EntityTypeSchema attributes (ArrayField) 
+    with a list of all unique field names discovered.
+    """
+    entity_obj, created = EntityTypeSchema.objects.get_or_create(
+        tenant=tenant,
+        entity_type=entity_type
+    )
+
+    new_records = Record.objects.filter(
+        tenant=tenant,
+        entity_type=entity_type,
+    ).order_by('-id')[:chunk_size]
+
+    if not new_records.exists():
+        return 0
+
+    # 1. READ: Get the existing list of fields from the ArrayField (or start empty)
+    # If the column is null, default to an empty list
+    current_fields_list = entity_obj.attributes or []
+
+    # Convert it to a Python 'set' for super fast duplicate checking
+    unique_fields = set(current_fields_list)
+
+    # 2. PROCESS: Add any brand new keys we find in the records
+    for record in new_records:
+        record_data = record.data or {}
+        
+        # We only care about the keys (field names), not the values or data types anymore!
+        for key in record_data.keys():
+            unique_fields.add(key)
+
+    # 3. SAVE: Convert the set back to a standard Python list and save
+    entity_obj.attributes = list(unique_fields)
+    entity_obj.save()
+    
+    logger.info(f"Synced {len(new_records)} {entity_type} records for tenant {tenant.id}")
+    
+    return len(new_records)
