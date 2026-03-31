@@ -2,12 +2,14 @@
 Tests for lead unassignment background jobs:
 
 - UnassignSnoozedLeadsJobHandler: unassigns SNOOZED leads when snooze_unassign_at has passed
+- CloseStaleSubscriptionLeadsJobHandler: sets lead_stage CLOSED for stale SELF TRIAL leads
+- SnoozedToNotConnectedMidnightJobHandler: SNOOZED SALES LEAD with next_call_at today (UTC) → NOT_CONNECTED
 - ReleaseLeadsAfter12hJobHandler: clears assigned_to on NOT_CONNECTED leads when
   first_assigned_today_at + 12h has passed (or legacy not_connected_unassign_at)
 
-Run:
+Run (from repo root):
   pytest src/tests/rest/background_jobs/test_unassign_lead_jobs.py -v
-  python manage.py test tests.rest.background_jobs.test_unassign_lead_jobs -v 2
+  pytest src/tests/rest/background_jobs/test_unassign_lead_jobs.py::SnoozedToNotConnectedMidnightJobHandlerTests -v
 """
 
 from datetime import datetime, timedelta
@@ -41,6 +43,7 @@ def _assert_next_call_at_about_one_hour_later(test_case, next_call_at_str, toler
 from crm_records.models import Record
 from background_jobs.models import BackgroundJob, JobType
 from background_jobs.job_handlers import (
+    CloseStaleSubscriptionLeadsJobHandler,
     ReleaseLeadsAfter12hJobHandler,
     SnoozedToNotConnectedMidnightJobHandler,
     UnassignSnoozedLeadsJobHandler,
@@ -164,7 +167,7 @@ class UnassignSnoozedLeadsJobHandlerTests(TestCase):
 
 
 class SnoozedToNotConnectedMidnightJobHandlerTests(TestCase):
-    """SnoozedToNotConnectedMidnight: only SNOOZED + SALES LEAD where next_call_at is today's date (reset TZ)."""
+    """SnoozedToNotConnectedMidnight: only SNOOZED + SALES LEAD where next_call_at is today's date (UTC)."""
 
     def setUp(self):
         super().setUp()
@@ -226,6 +229,240 @@ class SnoozedToNotConnectedMidnightJobHandlerTests(TestCase):
         self.assertEqual(lead.data.get("next_call_at"), tomorrow_ts.isoformat())
         self.assertEqual(job.result["updated"], 0)
 
+    def test_skips_when_next_call_at_missing(self):
+        """Leads without a usable next_call_at are not selected."""
+        lead = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_stage": "SNOOZED",
+                "lead_status": "SALES LEAD",
+                "assigned_to": "rm-x",
+                "call_attempts": 1,
+            },
+        )
+        job = self._make_job()
+        self.assertTrue(self.handler.process(job))
+        lead.refresh_from_db()
+        self.assertEqual(lead.data.get("lead_stage"), "SNOOZED")
+        self.assertEqual(job.result["updated"], 0)
+
+    def test_skips_when_lead_status_not_sales_lead(self):
+        """Only SALES LEAD snoozed leads are in scope; SELF TRIAL SNOOZED is unchanged."""
+        now = timezone.now()
+        today_ts = now.replace(hour=12, minute=0, second=0, microsecond=0)
+        lead = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_stage": "SNOOZED",
+                "lead_status": "SELF TRIAL",
+                "assigned_to": "rm-y",
+                "next_call_at": today_ts.isoformat(),
+                "call_attempts": 1,
+            },
+        )
+        job = self._make_job()
+        self.assertTrue(self.handler.process(job))
+        lead.refresh_from_db()
+        self.assertEqual(lead.data.get("lead_stage"), "SNOOZED")
+        self.assertEqual(job.result["updated"], 0)
+
+    def test_skips_when_next_call_at_calendar_day_is_yesterday(self):
+        """Only today's date (UTC) matches; overdue snooze from a prior calendar day is not updated here."""
+        now = timezone.now()
+        yesterday_ts = (now - timedelta(days=1)).replace(hour=14, minute=0, second=0, microsecond=0)
+        lead = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_stage": "SNOOZED",
+                "lead_status": "SALES LEAD",
+                "assigned_to": "rm-z",
+                "next_call_at": yesterday_ts.isoformat(),
+                "call_attempts": 1,
+            },
+        )
+        job = self._make_job()
+        self.assertTrue(self.handler.process(job))
+        lead.refresh_from_db()
+        self.assertEqual(lead.data.get("lead_stage"), "SNOOZED")
+        self.assertEqual(job.result["updated"], 0)
+
+    def test_transitions_multiple_eligible_leads_same_run(self):
+        """All SNOOZED + SALES LEAD + next_call_at today rows are updated."""
+        now = timezone.now()
+        today_ts = now.replace(hour=11, minute=30, second=0, microsecond=0)
+        for i in range(2):
+            RecordFactory(
+                tenant=self.tenant,
+                entity_type="lead",
+                data={
+                    "lead_stage": "SNOOZED",
+                    "lead_status": "SALES LEAD",
+                    "assigned_to": f"rm-{i}",
+                    "next_call_at": today_ts.isoformat(),
+                    "call_attempts": i,
+                },
+            )
+        job = self._make_job()
+        self.assertTrue(self.handler.process(job))
+        self.assertEqual(job.result["updated"], 2)
+        for lead in Record.objects.filter(tenant=self.tenant, entity_type="lead", data__lead_stage="NOT_CONNECTED"):
+            self.assertIsNone(lead.data.get("assigned_to"))
+
+    def test_process_sets_result_payload(self):
+        """Job result includes success, updated count, and timestamp."""
+        now = timezone.now()
+        today_ts = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_stage": "SNOOZED",
+                "lead_status": "SALES LEAD",
+                "next_call_at": today_ts.isoformat(),
+                "call_attempts": 0,
+            },
+        )
+        job = self._make_job()
+        self.assertTrue(self.handler.process(job))
+        self.assertTrue(job.result.get("success"))
+        self.assertEqual(job.result.get("updated"), 1)
+        self.assertIn("timestamp", job.result)
+
+    def test_get_retry_delay_returns_expected_delays(self):
+        self.assertEqual(self.handler.get_retry_delay(1), 60)
+        self.assertEqual(self.handler.get_retry_delay(2), 300)
+        self.assertEqual(self.handler.get_retry_delay(3), 900)
+
+
+class CloseStaleSubscriptionLeadsJobHandlerTests(TestCase):
+    """CloseStaleSubscriptionLeadsJobHandler: CLOSED for SELF TRIAL leads past subscription_time_stamp cutoff."""
+
+    def setUp(self):
+        super().setUp()
+        self.handler = CloseStaleSubscriptionLeadsJobHandler()
+        self.tenant = TenantFactory()
+
+    def _make_job(self, payload=None):
+        return BackgroundJobFactory(
+            tenant=self.tenant,
+            job_type=JobType.CLOSE_STALE_SUBSCRIPTION_LEADS,
+            payload=payload if payload is not None else {},
+        )
+
+    def test_sets_closed_when_self_trial_subscription_stale(self):
+        """SELF TRIAL lead with subscription_time_stamp older than default days becomes CLOSED."""
+        sub_ts = (timezone.now() - timedelta(days=20)).isoformat()
+        lead = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_status": "SELF TRIAL",
+                "lead_stage": "FRESH",
+                "subscription_time_stamp": sub_ts,
+            },
+        )
+        job = self._make_job()
+        self.assertTrue(self.handler.process(job))
+        lead.refresh_from_db()
+        self.assertEqual(lead.data.get("lead_stage"), "CLOSED")
+        self.assertEqual(job.result["updated"], 1)
+        self.assertEqual(job.result["tenant_scope"], "all")
+        self.assertIn("cutoff", job.result)
+
+    def test_skips_when_subscription_not_old_enough(self):
+        """Lead with subscription_time_stamp within the window is unchanged."""
+        sub_ts = (timezone.now() - timedelta(days=10)).isoformat()
+        lead = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_status": "SELF TRIAL",
+                "lead_stage": "FRESH",
+                "subscription_time_stamp": sub_ts,
+            },
+        )
+        job = self._make_job({"days": 15})
+        self.assertTrue(self.handler.process(job))
+        lead.refresh_from_db()
+        self.assertEqual(lead.data.get("lead_stage"), "FRESH")
+        self.assertEqual(job.result["updated"], 0)
+
+    def test_skips_when_lead_status_not_self_trial(self):
+        """SALES LEAD rows are not closed by this job."""
+        sub_ts = (timezone.now() - timedelta(days=20)).isoformat()
+        lead = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_status": "SALES LEAD",
+                "lead_stage": "FRESH",
+                "subscription_time_stamp": sub_ts,
+            },
+        )
+        job = self._make_job()
+        self.assertTrue(self.handler.process(job))
+        lead.refresh_from_db()
+        self.assertEqual(lead.data.get("lead_stage"), "FRESH")
+        self.assertEqual(job.result["updated"], 0)
+
+    def test_skips_when_already_closed(self):
+        """Already CLOSED SELF TRIAL leads are excluded."""
+        sub_ts = (timezone.now() - timedelta(days=20)).isoformat()
+        lead = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_status": "SELF TRIAL",
+                "lead_stage": "CLOSED",
+                "subscription_time_stamp": sub_ts,
+            },
+        )
+        job = self._make_job()
+        self.assertTrue(self.handler.process(job))
+        lead.refresh_from_db()
+        self.assertEqual(lead.data.get("lead_stage"), "CLOSED")
+        self.assertEqual(job.result["updated"], 0)
+
+    def test_single_tenant_payload_only_updates_that_tenant(self):
+        """With tenant_id in payload, only matching tenant's leads are updated."""
+        other = TenantFactory()
+        old_sub = (timezone.now() - timedelta(days=20)).isoformat()
+        ours = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_status": "SELF TRIAL",
+                "lead_stage": "FRESH",
+                "subscription_time_stamp": old_sub,
+            },
+        )
+        theirs = RecordFactory(
+            tenant=other,
+            entity_type="lead",
+            data={
+                "lead_status": "SELF TRIAL",
+                "lead_stage": "FRESH",
+                "subscription_time_stamp": old_sub,
+            },
+        )
+        job = self._make_job({"tenant_id": str(self.tenant.id), "days": 15})
+        self.assertTrue(self.handler.process(job))
+        ours.refresh_from_db()
+        theirs.refresh_from_db()
+        self.assertEqual(ours.data.get("lead_stage"), "CLOSED")
+        self.assertEqual(theirs.data.get("lead_stage"), "FRESH")
+        self.assertEqual(job.result["updated"], 1)
+        self.assertEqual(job.result["tenant_scope"], "single")
+        self.assertEqual(job.result["tenant_id"], str(self.tenant.id))
+
+    def test_validate_payload_rejects_non_positive_days(self):
+        self.assertFalse(self.handler.validate_payload({"days": 0}))
+        self.assertTrue(self.handler.validate_payload({"days": 1}))
+        self.assertTrue(self.handler.validate_payload({}))
+
 
 class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
     """Tests for ReleaseLeadsAfter12hJobHandler: NOT_CONNECTED + 12h since first_assigned_today_at."""
@@ -253,7 +490,7 @@ class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
                 "lead_stage": "NOT_CONNECTED",
                 "assigned_to": "rm-uuid-456",
                 "first_assigned_today_at": anchor,
-                "first_assignment_today_date": timezone.localtime(now).date().isoformat(),
+                "first_assignment_today_date": now.date().isoformat(),
                 "call_attempts": 2,
                 "first_assigned_to": "rm-uuid-456",
                 "first_assigned_at": (now - timedelta(hours=24)).isoformat(),

@@ -1082,7 +1082,10 @@ class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
 
     def process(self, job: BackgroundJob) -> bool:
         payload = job.payload or {}
-        days = int(payload.get("days") or 15)
+        if "days" in payload:
+            days = int(payload["days"])
+        else:
+            days = 15
         if days < 1:
             raise ValueError("days must be >= 1")
 
@@ -1127,7 +1130,11 @@ class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
 
     def validate_payload(self, payload: Dict[str, Any]) -> bool:
         try:
-            days = int((payload or {}).get("days") or 15)
+            p = payload or {}
+            if "days" in p:
+                days = int(p["days"])
+            else:
+                days = 15
         except (TypeError, ValueError):
             return False
         return days >= 1
@@ -1140,14 +1147,14 @@ class SnoozedToNotConnectedMidnightJobHandler(JobHandler):
     ``snooze_unassign_at`` (call_attempts unchanged). Does not modify ``next_call_at``.
 
     Only considers leads whose callback time ``next_call_at`` falls on **today's calendar date**
-    in ``SNOOZED_RESET_TIMEZONE`` (same wall-clock as the midnight enqueue). Leads snoozed until a
+    in ``TIME_ZONE`` (UTC; same as the midnight enqueue in the job processor). Leads snoozed until a
     **future** calendar day (e.g. tomorrow) are left unchanged.
 
-    Runs once per local calendar day at 00:00 (see job processor + ``SNOOZED_RESET_TIMEZONE``).
+    Runs once per UTC calendar day at 00:00 (see ``TIME_ZONE`` and job processor).
     """
 
     def process(self, job: BackgroundJob) -> bool:
-        tz_name = getattr(settings, "SNOOZED_RESET_TIMEZONE", settings.TIME_ZONE)
+        tz_name = settings.TIME_ZONE
         qs = Record.objects.filter(
             entity_type="lead",
             data__lead_stage="SNOOZED",

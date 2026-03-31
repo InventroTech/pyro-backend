@@ -237,10 +237,6 @@ LANGUAGE_CODE = 'en-us'
 
 TIME_ZONE = 'UTC'
 
-# Wall-clock used by the job worker to enqueue ``snoozed_to_not_connected_midnight`` at 00:00 local time.
-# Defaults to TIME_ZONE. Example for India: 'Asia/Kolkata'
-SNOOZED_RESET_TIMEZONE = os.environ.get('SNOOZED_RESET_TIMEZONE') or TIME_ZONE
-
 USE_I18N = True
 
 USE_TZ = False

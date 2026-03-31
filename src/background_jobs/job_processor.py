@@ -44,7 +44,7 @@ class JobProcessor:
         self._handler_registry = get_handler_registry()
         # Last time we enqueued lead cron jobs (unassign snoozed, release after 12h)
         self._last_lead_cron_enqueue_at = None
-        # Local calendar date (in SNOOZED_RESET_TIMEZONE) we last enqueued snoozed→NOT_CONNECTED job
+        # UTC calendar date we last enqueued snoozed→NOT_CONNECTED job (see TIME_ZONE)
         self._last_snoozed_midnight_enqueue_date = None
         # Circuit breaker state for connection errors
         self._connection_error_count = 0
@@ -410,16 +410,16 @@ class JobProcessor:
 
     def _maybe_enqueue_snoozed_to_not_connected_midnight(self):
         """
-        Once per local calendar day during hour 00:00–00:59, enqueue snoozed_to_not_connected_midnight.
+        Once per UTC calendar day during hour 00:00–00:59, enqueue snoozed_to_not_connected_midnight.
 
-        "Midnight" uses ``SNOOZED_RESET_TIMEZONE`` if set, else ``TIME_ZONE`` (see settings).
+        Uses ``TIME_ZONE`` (UTC) for wall-clock, consistent with stored datetimes.
         """
-        tz_name = getattr(settings, "SNOOZED_RESET_TIMEZONE", settings.TIME_ZONE)
+        tz_name = settings.TIME_ZONE
         try:
             tz = ZoneInfo(tz_name)
         except Exception as e:
             logger.warning(
-                f"[Worker {self.worker_id}] Invalid SNOOZED_RESET_TIMEZONE/TIME_ZONE={tz_name!r}: {e}"
+                f"[Worker {self.worker_id}] Invalid TIME_ZONE={tz_name!r}: {e}"
             )
             return
 
