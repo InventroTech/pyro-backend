@@ -10,6 +10,11 @@ middleware/tenant resolution.
 Run from project root (where pytest.ini is):
   pytest src/tests/rest/crm_records/test_get_next_lead_api.py -v
   pytest -k get_next_lead -v
+
+Legacy SELF TRIAL path (``lead_statuses`` includes ``"SELF TRIAL"``): main queue is
+fresh-only; Step 5a assigns due not-connected retries when under daily limit (same
+rules as the daily-limit not-connected fallback). ``NOT_CONNECTED`` with
+``call_attempts=0`` still returns empty (retry path requires attempts 1–6).
 """
 
 from datetime import datetime, timedelta, timezone
@@ -299,21 +304,113 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
         self.assertEqual(data.get("data", {}).get("assigned_to"), self.supabase_uid)
 
     def test_only_not_connected_leads_without_daily_limit_returns_empty(self):
-        """When no daily limit, NOT_CONNECTED-only leads are not in main queue so Get Next Lead returns empty."""
+        """NOT_CONNECTED with call_attempts=0 is not in the main queue and does not match Step 5a retry (needs attempts 1–6)."""
+        UserSettings.objects.create(
+            tenant=self.tenant,
+            tenant_membership=self.membership,
+            key="LEAD_TYPE_ASSIGNMENT",
+            value=[],
+            lead_statuses=["SELF TRIAL"],
+        )
         RecordFactory(
             tenant=self.tenant,
             entity_type="lead",
             data={
                 "name": "Only Not Connected",
                 "lead_stage": "NOT_CONNECTED",
-                "lead_source": "SELF TRIAL",
+                "lead_status": "SELF TRIAL",
+                "lead_source": "SIGNUP_AT_SINGLE_PARTY",
                 "call_attempts": 0,
                 "assigned_to": None,
             },
         )
         response = self.client.get(self.url, **self.auth_headers)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {}, msg="NOT_CONNECTED is not in main queue; expect empty")
+        self.assertEqual(
+            response.json(),
+            {},
+            msg="NOT_CONNECTED with 0 attempts: not main queue, not Step 5a retry",
+        )
+
+    def test_self_trial_legacy_step_5a_assigns_unassigned_not_connected_due_when_no_fresh_under_daily_limit(self):
+        """Legacy SELF TRIAL: under daily limit, no fresh queueable leads — Step 5a returns due unassigned NOT_CONNECTED retry."""
+        now = django_timezone.now()
+        past = (now - timedelta(hours=3)).isoformat()
+        UserSettings.objects.create(
+            tenant=self.tenant,
+            tenant_membership=self.membership,
+            key="LEAD_TYPE_ASSIGNMENT",
+            value=[],
+            lead_sources=[],
+            lead_statuses=["SELF TRIAL"],
+            daily_limit=50,
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Step 5a NC Retry",
+                "lead_stage": "NOT_CONNECTED",
+                "lead_status": "SELF TRIAL",
+                "lead_source": "SIGNUP_AT_SINGLE_PARTY",
+                "assigned_to": "",
+                "call_attempts": 1,
+                "next_call_at": past,
+                "phone_number": "+19990000001",
+            },
+        )
+        response = self.client.get(self.url, **self.auth_headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertNotEqual(data, {}, msg="Step 5a should assign unassigned NOT_CONNECTED due lead")
+        lead_blob = data.get("data", {})
+        self.assertEqual(lead_blob.get("name"), "Step 5a NC Retry")
+        self.assertEqual(lead_blob.get("lead_status"), "SELF TRIAL")
+        self.assertEqual(data.get("lead_status"), "ASSIGNED")
+        self.assertEqual(lead_blob.get("assigned_to"), self.supabase_uid)
+
+    def test_self_trial_legacy_step_5a_prefers_assigned_to_me_not_connected_before_unassigned(self):
+        """Legacy SELF TRIAL: assigned-to-me due NOT_CONNECTED (lower call_attempts) wins over unassigned retry."""
+        now = django_timezone.now()
+        past = (now - timedelta(hours=1)).isoformat()
+        UserSettings.objects.create(
+            tenant=self.tenant,
+            tenant_membership=self.membership,
+            key="LEAD_TYPE_ASSIGNMENT",
+            value=[],
+            lead_statuses=["SELF TRIAL"],
+            daily_limit=50,
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Unassigned NC",
+                "lead_stage": "NOT_CONNECTED",
+                "lead_status": "SELF TRIAL",
+                "assigned_to": "",
+                "call_attempts": 1,
+                "next_call_at": past,
+            },
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Mine NC First",
+                "lead_stage": "NOT_CONNECTED",
+                "lead_status": "SELF TRIAL",
+                "assigned_to": self.supabase_uid,
+                "call_attempts": 1,
+                "next_call_at": past,
+            },
+        )
+        response = self.client.get(self.url, **self.auth_headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertNotEqual(data, {})
+        self.assertEqual(data.get("name"), "Mine NC First")
+        self.assertEqual(data.get("data", {}).get("assigned_to"), self.supabase_uid)
 
 
 class RecordListNotConnectedIncludesUnassignedTests(BaseAPITestCase):

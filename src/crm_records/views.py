@@ -1326,7 +1326,185 @@ class GetNextLeadView(APIView):
             return next_call_at <= now
         except Exception:
             return False
-    
+
+    def _not_connected_retry_candidate_legacy(
+        self,
+        *,
+        tenant,
+        user_identifier,
+        user_uuid,
+        eligible_lead_types,
+        eligible_lead_sources,
+        eligible_lead_statuses,
+    ):
+        """
+        Due not-connected retries: assigned-to-me first (min call_attempts), then unassigned
+        with party/source/status filters and routing. Matches daily-limit fallback semantics.
+        """
+        from django.db import transaction
+        from django.utils import timezone as django_timezone
+
+        retry_candidate = (
+            Record.objects.filter(
+                tenant=tenant,
+                entity_type="lead",
+                data__assigned_to=user_identifier,
+            )
+            .extra(
+                select={
+                    "call_attempts_int": "COALESCE((data->>'call_attempts')::int, 0)",
+                    "lead_stage_norm": "UPPER(COALESCE(data->>'lead_stage',''))",
+                    "last_call_outcome_norm": "LOWER(COALESCE(data->>'last_call_outcome',''))",
+                },
+                where=[
+                    """
+                    COALESCE((data->>'call_attempts')::int, 0) >= 1
+                    AND COALESCE((data->>'call_attempts')::int, 0) <= 6
+                    AND UPPER(COALESCE(data->>'lead_stage','')) IN ('NOT_CONNECTED', 'IN_QUEUE')
+                    AND (data->>'next_call_at') IS NOT NULL
+                    AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
+                    AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
+                    AND (data->>'next_call_at')::timestamptz <= NOW()
+                    """
+                ],
+            )
+            .order_by(
+                "call_attempts_int",
+                "updated_at",
+                "id",
+            )
+            .first()
+        )
+
+        if retry_candidate:
+            return retry_candidate
+
+        _unassigned_not_connected_where = """
+            (
+                (data->>'assigned_to') IS NULL
+                OR TRIM(COALESCE(data->>'assigned_to', '')) = ''
+                OR LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) IN ('null', 'none')
+            )
+            AND COALESCE((data->>'call_attempts')::int, 0) >= 1
+            AND COALESCE((data->>'call_attempts')::int, 0) <= 6
+            AND UPPER(COALESCE(data->>'lead_stage','')) IN ('NOT_CONNECTED', 'IN_QUEUE')
+            AND (data->>'next_call_at') IS NOT NULL
+            AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
+            AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
+            AND (data->>'next_call_at')::timestamptz <= NOW()
+            """
+        unassigned_retry_qs = Record.objects.filter(
+            tenant=tenant,
+            entity_type="lead",
+        ).extra(
+            select={
+                "call_attempts_int": "COALESCE((data->>'call_attempts')::int, 0)",
+            },
+            where=[_unassigned_not_connected_where],
+        )
+        if eligible_lead_types:
+            unassigned_retry_qs = unassigned_retry_qs.filter(data__affiliated_party__in=eligible_lead_types)
+        if eligible_lead_sources:
+            unassigned_retry_qs = unassigned_retry_qs.filter(data__lead_source__in=eligible_lead_sources)
+        if eligible_lead_statuses:
+            unassigned_retry_qs = unassigned_retry_qs.filter(data__lead_status__in=eligible_lead_statuses)
+        if user_uuid:
+            unassigned_retry_qs = apply_routing_rule_to_queryset(
+                unassigned_retry_qs,
+                tenant=tenant,
+                user_id=user_uuid,
+                queue_type="lead",
+            )
+        unassigned_retry_candidate = unassigned_retry_qs.order_by(
+            "call_attempts_int",
+            "updated_at",
+            "id",
+        ).first()
+        if not unassigned_retry_candidate:
+            return None
+
+        with transaction.atomic():
+            candidate_locked = Record.objects.select_for_update(skip_locked=True).filter(
+                pk=unassigned_retry_candidate.pk
+            ).first()
+            if not candidate_locked:
+                return None
+            data = (candidate_locked.data or {}).copy()
+            data["assigned_to"] = user_identifier
+            data["lead_stage"] = self.ASSIGNED_STATUS
+            if "call_attempts" not in data or data.get("call_attempts") in (None, "", "null"):
+                data["call_attempts"] = 0
+            candidate_locked.data = data
+            candidate_locked.updated_at = django_timezone.now()
+            candidate_locked.save(update_fields=["data", "updated_at"])
+            return candidate_locked
+
+    def _response_after_not_connected_retry_pick(
+        self,
+        *,
+        retry_candidate,
+        user,
+        tenant,
+        tenant_membership,
+        user_identifier,
+        user_uuid,
+        log_label: str,
+    ):
+        """Serialize, PostAssignmentActions, and return the same shape as daily-limit not-connected fallback."""
+        serialized_data = RecordSerializer(retry_candidate).data
+        lead_data = retry_candidate.data or {}
+        flattened_response = {
+            "id": retry_candidate.id,
+            "name": (retry_candidate.data or {}).get("name", "") if isinstance(retry_candidate.data, dict) else "",
+            "phone_no": lead_data.get("phone_number", ""),
+            "praja_id": lead_data.get("praja_id"),
+            "lead_status": lead_data.get("lead_stage") or "",
+            "lead_score": lead_data.get("lead_score"),
+            "lead_type": lead_data.get("affiliated_party") or lead_data.get("poster"),
+            "assigned_to": lead_data.get("assigned_to"),
+            "attempt_count": lead_data.get("call_attempts", 0),
+            "last_call_outcome": lead_data.get("last_call_outcome"),
+            "next_call_at": lead_data.get("next_call_at"),
+            "do_not_call": lead_data.get("do_not_call", False),
+            "resolved_at": lead_data.get("closure_time"),
+            "premium_poster_count": lead_data.get("premium_poster_count"),
+            "package_to_pitch": lead_data.get("package_to_pitch"),
+            "last_active_date_time": lead_data.get("last_active_date_time"),
+            "latest_remarks": lead_data.get("latest_remarks"),
+            "lead_description": lead_data.get("lead_description"),
+            "affiliated_party": lead_data.get("affiliated_party"),
+            "rm_dashboard": lead_data.get("rm_dashboard"),
+            "user_profile_link": lead_data.get("user_profile_link"),
+            "whatsapp_link": lead_data.get("whatsapp_link"),
+            "lead_source": lead_data.get("lead_source"),
+            "created_at": serialized_data.get("created_at"),
+            "updated_at": serialized_data.get("updated_at"),
+            "data": lead_data,
+            "record": serialized_data,
+        }
+
+        retry_candidate.refresh_from_db()
+        PostAssignmentActions().run(
+            record=retry_candidate,
+            tenant=tenant,
+            user=user,
+            tenant_membership=tenant_membership,
+            user_identifier=user_identifier,
+            user_uuid=user_uuid,
+            lead_data=retry_candidate.data or {},
+        )
+
+        attempt_count = flattened_response.get("attempt_count", 0)
+        logger.info(
+            "%s Returning not-connected retry lead record_id=%s user=%s call_attempts=%s (attempt %s of max 6).",
+            log_label,
+            retry_candidate.id,
+            user_identifier,
+            attempt_count,
+            attempt_count,
+        )
+        return Response(flattened_response, status=status.HTTP_200_OK)
+
     def _order_by_score(self, qs, now_iso=None):
         """
         Order queryset with priority:
@@ -1636,34 +1814,14 @@ class GetNextLeadView(APIView):
                         "[GetNextLead] FALLBACK [daily-limit]: Using not-connected-retry path (not main queue). "
                         "Assigned-to-user not-connected leads only: due (next_call_at <= now), minimum call_attempts (1 first, then 2..6).",
                     )
-                    # Fallback [daily-limit]: only not-connected retry leads assigned to this user, due (next_call_at in the past).
-                    # Return the one with minimum call_attempts so attempt=1 is served before attempt=2.
-                    retry_candidate = Record.objects.filter(
+                    retry_candidate = self._not_connected_retry_candidate_legacy(
                         tenant=tenant,
-                        entity_type="lead",
-                        data__assigned_to=user_identifier,
-                    ).extra(
-                        select={
-                            "call_attempts_int": "COALESCE((data->>'call_attempts')::int, 0)",
-                            "lead_stage_norm": "UPPER(COALESCE(data->>'lead_stage',''))",
-                            "last_call_outcome_norm": "LOWER(COALESCE(data->>'last_call_outcome',''))",
-                        },
-                        where=[
-                            """
-                            COALESCE((data->>'call_attempts')::int, 0) >= 1
-                            AND COALESCE((data->>'call_attempts')::int, 0) <= 6
-                            AND UPPER(COALESCE(data->>'lead_stage','')) IN ('NOT_CONNECTED', 'IN_QUEUE')
-                            AND (data->>'next_call_at') IS NOT NULL
-                            AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
-                            AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
-                            AND (data->>'next_call_at')::timestamptz <= NOW()
-                            """
-                        ],
-                    ).order_by(
-                        "call_attempts_int",
-                        "updated_at",
-                        "id",
-                    ).first()
+                        user_identifier=user_identifier,
+                        user_uuid=user_uuid,
+                        eligible_lead_types=eligible_lead_types,
+                        eligible_lead_sources=eligible_lead_sources,
+                        eligible_lead_statuses=eligible_lead_statuses,
+                    )
 
                     if retry_candidate:
                         attempt_count = (retry_candidate.data or {}).get("call_attempts", 0)
@@ -1677,137 +1835,26 @@ class GetNextLeadView(APIView):
                             last_outcome,
                             (retry_candidate.data or {}).get("next_call_at"),
                         )
-                    else:
-                        logger.info(
-                            "[GetNextLead] FALLBACK [daily-limit]: No due not-connected retry leads for user=%s "
-                            "(assigned_to=user, call_attempts 1–6, next_call_at <= now, lead_stage=NOT_CONNECTED/IN_QUEUE only).",
-                            user_identifier,
-                        )
-
-                    # If no assigned retry lead found, try unassigned NOT_CONNECTED due leads (e.g. SELF TRIAL where assigned_to is set to null on "not connected")
-                    if not retry_candidate and not debug_mode:
-                        _unassigned_not_connected_where = """
-                            (
-                                (data->>'assigned_to') IS NULL
-                                OR TRIM(COALESCE(data->>'assigned_to', '')) = ''
-                                OR LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) IN ('null', 'none')
-                            )
-                            AND COALESCE((data->>'call_attempts')::int, 0) >= 1
-                            AND COALESCE((data->>'call_attempts')::int, 0) <= 6
-                            AND UPPER(COALESCE(data->>'lead_stage','')) IN ('NOT_CONNECTED', 'IN_QUEUE')
-                            AND (data->>'next_call_at') IS NOT NULL
-                            AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
-                            AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
-                            AND (data->>'next_call_at')::timestamptz <= NOW()
-                            """
-                        unassigned_retry_qs = Record.objects.filter(
+                        return self._response_after_not_connected_retry_pick(
+                            retry_candidate=retry_candidate,
+                            user=user,
                             tenant=tenant,
-                            entity_type="lead",
-                        ).extra(
-                            select={
-                                "call_attempts_int": "COALESCE((data->>'call_attempts')::int, 0)",
-                            },
-                            where=[_unassigned_not_connected_where],
+                            tenant_membership=tenant_membership,
+                            user_identifier=user_identifier,
+                            user_uuid=user_uuid,
+                            log_label="[GetNextLead] FALLBACK [daily-limit]:",
                         )
-                        if eligible_lead_types:
-                            unassigned_retry_qs = unassigned_retry_qs.filter(data__affiliated_party__in=eligible_lead_types)
-                        if eligible_lead_sources:
-                            unassigned_retry_qs = unassigned_retry_qs.filter(data__lead_source__in=eligible_lead_sources)
-                        if eligible_lead_statuses:
-                            unassigned_retry_qs = unassigned_retry_qs.filter(data__lead_status__in=eligible_lead_statuses)
-                        if user_uuid:
-                            unassigned_retry_qs = apply_routing_rule_to_queryset(
-                                unassigned_retry_qs,
-                                tenant=tenant,
-                                user_id=user_uuid,
-                                queue_type="lead",
-                            )
-                        unassigned_retry_candidate = unassigned_retry_qs.order_by(
-                            "call_attempts_int",
-                            "updated_at",
-                            "id",
-                        ).first()
-                        if unassigned_retry_candidate:
-                            with transaction.atomic():
-                                candidate_locked = Record.objects.select_for_update(skip_locked=True).filter(
-                                    pk=unassigned_retry_candidate.pk
-                                ).first()
-                                if candidate_locked:
-                                    data = (candidate_locked.data or {}).copy()
-                                    data["assigned_to"] = user_identifier
-                                    data["lead_stage"] = self.ASSIGNED_STATUS
-                                    if "call_attempts" not in data or data.get("call_attempts") in (None, "", "null"):
-                                        data["call_attempts"] = 0
-                                    candidate_locked.data = data
-                                    candidate_locked.updated_at = timezone.now()
-                                    candidate_locked.save(update_fields=["data", "updated_at"])
-                                    retry_candidate = candidate_locked
-                                    logger.info(
-                                        "[GetNextLead] FALLBACK [daily-limit]: Assigned unassigned not-connected retry lead (e.g. SELF TRIAL) lead_id=%s to user=%s.",
-                                        retry_candidate.id,
-                                        user_identifier,
-                                    )
-                        if not retry_candidate:
-                            logger.info(
-                                "[GetNextLead] FALLBACK [daily-limit]: No due not-connected retry leads (next_call_at <= now, call_attempts 1–6).",
-                            )
-                            logger.info("[GetNextLead] END EMPTY: daily limit reached, no due retry leads.")
-                            return Response({}, status=status.HTTP_200_OK)
 
-                    # Candidate is already due (filtered in query by next_call_at <= NOW()) and has minimum call_attempts.
-                    # Serialize and flatten for frontend compatibility (same format as normal GetNextLead)
-                    serialized_data = RecordSerializer(retry_candidate).data
-                    lead_data = retry_candidate.data or {}
-                    flattened_response = {
-                        "id": retry_candidate.id,
-                        "name": (retry_candidate.data or {}).get('name', '') if isinstance(retry_candidate.data, dict) else '',
-                        "phone_no": lead_data.get('phone_number', ''),
-                        "praja_id": lead_data.get('praja_id'),
-                        "lead_status": lead_data.get('lead_stage') or '',
-                        "lead_score": lead_data.get('lead_score'),
-                        "lead_type": lead_data.get('affiliated_party') or lead_data.get('poster'),
-                        "assigned_to": lead_data.get('assigned_to'),
-                        "attempt_count": lead_data.get('call_attempts', 0),
-                        "last_call_outcome": lead_data.get('last_call_outcome'),
-                        "next_call_at": lead_data.get('next_call_at'),
-                        "do_not_call": lead_data.get('do_not_call', False),
-                        "resolved_at": lead_data.get('closure_time'),
-                        "premium_poster_count": lead_data.get('premium_poster_count'),
-                        "package_to_pitch": lead_data.get('package_to_pitch'),
-                        "last_active_date_time": lead_data.get('last_active_date_time'),
-                        "latest_remarks": lead_data.get('latest_remarks'),
-                        "lead_description": lead_data.get('lead_description'),
-                        "affiliated_party": lead_data.get('affiliated_party'),
-                        "rm_dashboard": lead_data.get('rm_dashboard'),
-                        "user_profile_link": lead_data.get('user_profile_link'),
-                        "whatsapp_link": lead_data.get('whatsapp_link'),
-                        "lead_source": lead_data.get('lead_source'),
-                        "created_at": serialized_data.get('created_at'),
-                        "updated_at": serialized_data.get('updated_at'),
-                        "data": lead_data,
-                        "record": serialized_data,
-                    }
-
-                    retry_candidate.refresh_from_db()
-                    PostAssignmentActions().run(
-                        record=retry_candidate,
-                        tenant=tenant,
-                        user=user,
-                        tenant_membership=tenant_membership,
-                        user_identifier=user_identifier,
-                        user_uuid=user_uuid,
-                        lead_data=retry_candidate.data or {},
-                    )
-
-                    attempt_count = flattened_response.get("attempt_count", 0)
                     logger.info(
-                        "[GetNextLead] FALLBACK [daily-limit]: Returning not-connected retry lead record_id=%s user=%s call_attempts=%s (attempt %s of max 6).",
-                        retry_candidate.id,
+                        "[GetNextLead] FALLBACK [daily-limit]: No due not-connected retry leads for user=%s "
+                        "(assigned_to=user, call_attempts 1–6, next_call_at <= now, lead_stage=NOT_CONNECTED/IN_QUEUE only).",
                         user_identifier,
-                        attempt_count,
-                        attempt_count,
                     )
-                    return Response(flattened_response, status=status.HTTP_200_OK)
+                    logger.info(
+                        "[GetNextLead] FALLBACK [daily-limit]: No due not-connected retry leads (next_call_at <= now, call_attempts 1–6).",
+                    )
+                    logger.info("[GetNextLead] END EMPTY: daily limit reached, no due retry leads.")
+                    return Response({}, status=status.HTTP_200_OK)
                 else:
                     logger.info(
                         "[GetNextLead] Step 2.5: Under daily limit (assigned_today=%d < daily_limit=%d) or debug_mode - not using fallback.",
@@ -2235,6 +2282,37 @@ class GetNextLeadView(APIView):
         logger.info("[GetNextLead] Step 5: Lock and assign (candidate=%s)...", candidate.id if candidate else None)
 
         if not candidate:
+            logger.info(
+                "[GetNextLead] Step 5: No candidate from main queue — trying not-connected retry (SELF TRIAL). "
+                "unassigned_cnt=%d total_unassigned_cnt=%d",
+                unassigned_cnt,
+                total_unassigned_cnt,
+            )
+            if not debug_mode:
+                retry_candidate = self._not_connected_retry_candidate_legacy(
+                    tenant=tenant,
+                    user_identifier=user_identifier,
+                    user_uuid=user_uuid,
+                    eligible_lead_types=eligible_lead_types,
+                    eligible_lead_sources=eligible_lead_sources,
+                    eligible_lead_statuses=eligible_lead_statuses,
+                )
+            else:
+                retry_candidate = None
+            if retry_candidate:
+                logger.info(
+                    "[GetNextLead] Step 5a: Serving due not-connected retry lead_id=%s (same rules as daily-limit fallback).",
+                    retry_candidate.id,
+                )
+                return self._response_after_not_connected_retry_pick(
+                    retry_candidate=retry_candidate,
+                    user=user,
+                    tenant=tenant,
+                    tenant_membership=tenant_membership,
+                    user_identifier=user_identifier,
+                    user_uuid=user_uuid,
+                    log_label="[GetNextLead] Step 5a:",
+                )
             logger.info(
                 "[GetNextLead] Step 5: No candidate - returning empty. unassigned_cnt=%d total_unassigned_cnt=%d",
                 unassigned_cnt, total_unassigned_cnt,
