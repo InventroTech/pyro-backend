@@ -272,40 +272,37 @@ class PrajaService:
 logger = logging.getLogger(__name__)
 
 def sync_entity_schema(tenant, entity_type, chunk_size=1000):
-    """
-    Scans new records and updates the Entity schema (ArrayField) 
-    with a list of all unique field names discovered.
-    """
-    # FIX 1: Use the new 'Entity' model and the 'name' column
     entity_obj, created = Entity.objects.get_or_create(
         tenant=tenant,
         name=entity_type
     )
 
+    # 1. READ THE BOOKMARK
+    last_id = entity_obj.last_processed_record_id or 0
+
+    # 2. FILTER USING THE BOOKMARK (id__gt) AND SORT ASCENDING ('id')
     new_records = Record.objects.filter(
         tenant=tenant,
         entity_type=entity_type,
-    ).order_by('-id')[:chunk_size]
+        id__gt=last_id  # Only grab records we haven't processed yet!
+    ).order_by('id')[:chunk_size]  # Process oldest to newest
 
     if not new_records.exists():
         return 0
 
-    # FIX 2: Check the 'schema' column instead of 'attributes'
     current_fields_list = entity_obj.schema or []
-
-    # Convert it to a Python 'set' for super fast duplicate checking
     unique_fields = set(current_fields_list)
 
-    # PROCESS: Add any brand new keys we find in the records
     for record in new_records:
         record_data = record.data or {}
-        
-        # We only care about the keys (field names), not the values
         for key in record_data.keys():
             unique_fields.add(key)
 
-    # FIX 3: Save the list back to the 'schema' column
     entity_obj.schema = list(unique_fields)
+    
+    # 3. UPDATE THE BOOKMARK TO THE HIGHEST ID WE JUST PROCESSED
+    entity_obj.last_processed_record_id = new_records.last().id
+    
     entity_obj.save()
     
     logger.info(f"Synced {len(new_records)} {entity_type} records for tenant {tenant.id}")
