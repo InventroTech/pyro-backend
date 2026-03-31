@@ -13,11 +13,14 @@ import pickle
 import time
 from abc import ABC, abstractmethod
 from datetime import timedelta
-from typing import Any, Dict, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 from uuid import UUID
 
 import requests
-from django.db import connection, transaction
+from django.conf import settings
+from django.db import transaction
+from django.db.models import DateTimeField, F, Func, JSONField
+from django.db.models.expressions import RawSQL
 from django.db.utils import OperationalError
 from django.utils import timezone
 
@@ -1000,24 +1003,40 @@ CASE
 END
 """
 
-_CLOSE_STALE_SELF_TRIAL_PREDICATE = """COALESCE(data->>'lead_status', '') = 'SELF TRIAL'"""
 
-_CLOSE_STALE_UPDATE_SQL = f"""
-    UPDATE records
-    SET data = jsonb_set(
-            COALESCE(data, '{{}}'::jsonb),
-            '{{lead_stage}}',
-            to_jsonb('CLOSED'::text),
-            true
-        ),
-        updated_at = %s
-    WHERE tenant_id = %s
-      AND entity_type = 'lead'
-      AND ({_CLOSE_STALE_SELF_TRIAL_PREDICATE})
-      AND UPPER(COALESCE(data->>'lead_stage','')) <> 'CLOSED'
-      AND ({_CLOSE_STALE_SUBSCRIPTION_TS_CASE}) IS NOT NULL
-      AND ({_CLOSE_STALE_SUBSCRIPTION_TS_CASE}) <= %s
-"""
+class JsonbSetLeadStageClosed(Func):
+    """PostgreSQL jsonb_set: set ``data.lead_stage`` to CLOSED."""
+
+    function = "jsonb_set"
+    template = (
+        "jsonb_set(COALESCE(%(expressions)s, '{}'::jsonb), '{lead_stage}', "
+        "to_jsonb('CLOSED'::text), true)"
+    )
+    output_field = JSONField()
+
+
+def _close_stale_subscription_leads_queryset(
+    tenant_id: Optional[Union[str, UUID]] = None,
+):
+    """
+    Base queryset: SELF TRIAL leads, not CLOSED, with ``subscription_ts`` from
+    ``subscription_time_stamp`` (same rules as the CASE SQL).
+    """
+    qs = (
+        Record.objects.annotate(
+            subscription_ts=RawSQL(
+                f"({_CLOSE_STALE_SUBSCRIPTION_TS_CASE.strip()})",
+                [],
+                output_field=DateTimeField(),
+            )
+        )
+        .filter(entity_type="lead", data__lead_status="SELF TRIAL")
+        .exclude(data__lead_stage__iexact="CLOSED")
+    )
+    if tenant_id is not None:
+        tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
+        qs = qs.filter(tenant_id=tid)
+    return qs
 
 
 def _close_stale_subscription_leads_for_tenant(
@@ -1028,9 +1047,11 @@ def _close_stale_subscription_leads_for_tenant(
     cutoff = timezone.now() - timedelta(days=days)
     now = timezone.now()
     tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
-    with connection.cursor() as cursor:
-        cursor.execute(_CLOSE_STALE_UPDATE_SQL, [now, tid, cutoff])
-        updated = cursor.rowcount
+    updated = (
+        _close_stale_subscription_leads_queryset(tid)
+        .filter(subscription_ts__lte=cutoff)
+        .update(data=JsonbSetLeadStageClosed(F("data")), updated_at=now)
+    )
     return updated, cutoff.isoformat()
 
 
@@ -1039,13 +1060,13 @@ def _close_stale_subscription_leads_all_tenants(days: int) -> Tuple[int, int, st
         raise ValueError("days must be >= 1")
     cutoff = timezone.now() - timedelta(days=days)
     now = timezone.now()
-    total = 0
-    tenants = list(Tenant.objects.all())
-    for tenant in tenants:
-        with connection.cursor() as cursor:
-            cursor.execute(_CLOSE_STALE_UPDATE_SQL, [now, tenant.id, cutoff])
-            total += cursor.rowcount
-    return total, len(tenants), cutoff.isoformat()
+    n_tenants = Tenant.objects.count()
+    total = (
+        _close_stale_subscription_leads_queryset(None)
+        .filter(subscription_ts__lte=cutoff)
+        .update(data=JsonbSetLeadStageClosed(F("data")), updated_at=now)
+    )
+    return total, n_tenants, cutoff.isoformat()
 
 
 class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
@@ -1118,14 +1139,30 @@ class SnoozedToNotConnectedMidnightJobHandler(JobHandler):
     same unassignment as ``UnassignSnoozedLeadsJobHandler`` — clear ``assigned_to``, drop
     ``snooze_unassign_at`` (call_attempts unchanged). Does not modify ``next_call_at``.
 
+    Only considers leads whose callback time ``next_call_at`` falls on **today's calendar date**
+    in ``SNOOZED_RESET_TIMEZONE`` (same wall-clock as the midnight enqueue). Leads snoozed until a
+    **future** calendar day (e.g. tomorrow) are left unchanged.
+
     Runs once per local calendar day at 00:00 (see job processor + ``SNOOZED_RESET_TIMEZONE``).
     """
 
     def process(self, job: BackgroundJob) -> bool:
+        tz_name = getattr(settings, "SNOOZED_RESET_TIMEZONE", settings.TIME_ZONE)
         qs = Record.objects.filter(
             entity_type="lead",
             data__lead_stage="SNOOZED",
             data__lead_status="SALES LEAD",
+        ).extra(
+            where=[
+                """
+                (data->>'next_call_at') IS NOT NULL
+                AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
+                AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
+                AND (timezone(%s, (data->>'next_call_at')::timestamptz))::date
+                    = (timezone(%s, NOW()))::date
+                """,
+            ],
+            params=[tz_name, tz_name],
         )
         updated = 0
         for record in qs.iterator(chunk_size=500):

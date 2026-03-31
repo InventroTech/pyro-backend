@@ -40,7 +40,11 @@ def _assert_next_call_at_about_one_hour_later(test_case, next_call_at_str, toler
 
 from crm_records.models import Record
 from background_jobs.models import BackgroundJob, JobType
-from background_jobs.job_handlers import UnassignSnoozedLeadsJobHandler, ReleaseLeadsAfter12hJobHandler
+from background_jobs.job_handlers import (
+    ReleaseLeadsAfter12hJobHandler,
+    SnoozedToNotConnectedMidnightJobHandler,
+    UnassignSnoozedLeadsJobHandler,
+)
 
 from tests.factories import TenantFactory, RecordFactory, BackgroundJobFactory
 
@@ -157,6 +161,70 @@ class UnassignSnoozedLeadsJobHandlerTests(TestCase):
         self.assertEqual(self.handler.get_retry_delay(2), 300)
         self.assertEqual(self.handler.get_retry_delay(3), 900)
         self.assertEqual(self.handler.get_retry_delay(5), 900)
+
+
+class SnoozedToNotConnectedMidnightJobHandlerTests(TestCase):
+    """SnoozedToNotConnectedMidnight: only SNOOZED + SALES LEAD where next_call_at is today's date (reset TZ)."""
+
+    def setUp(self):
+        super().setUp()
+        self.handler = SnoozedToNotConnectedMidnightJobHandler()
+        self.tenant = TenantFactory()
+
+    def _make_job(self):
+        return BackgroundJobFactory(
+            tenant=self.tenant,
+            job_type=JobType.SNOOZED_TO_NOT_CONNECTED_MIDNIGHT,
+            payload={},
+        )
+
+    def test_transitions_when_next_call_at_is_today(self):
+        """Lead with next_call_at on today's calendar date (UTC) becomes NOT_CONNECTED."""
+        now = timezone.now()
+        today_ts = now.replace(hour=15, minute=0, second=0, microsecond=0)
+        lead = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_stage": "SNOOZED",
+                "lead_status": "SALES LEAD",
+                "assigned_to": "rm-1",
+                "snooze_unassign_at": (now - timedelta(hours=1)).isoformat(),
+                "next_call_at": today_ts.isoformat(),
+                "call_attempts": 1,
+            },
+        )
+        job = self._make_job()
+        self.assertTrue(self.handler.process(job))
+        lead.refresh_from_db()
+        self.assertEqual(lead.data.get("lead_stage"), "NOT_CONNECTED")
+        self.assertIsNone(lead.data.get("assigned_to"))
+        self.assertNotIn("snooze_unassign_at", lead.data)
+        self.assertEqual(lead.data.get("next_call_at"), today_ts.isoformat())
+        self.assertEqual(job.result["updated"], 1)
+
+    def test_skips_when_next_call_at_is_tomorrow(self):
+        """Lead snoozed until tomorrow (next_call_at next calendar day) stays SNOOZED."""
+        now = timezone.now()
+        tomorrow_ts = (now + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
+        lead = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_stage": "SNOOZED",
+                "lead_status": "SALES LEAD",
+                "assigned_to": "rm-2",
+                "next_call_at": tomorrow_ts.isoformat(),
+                "call_attempts": 1,
+            },
+        )
+        job = self._make_job()
+        self.assertTrue(self.handler.process(job))
+        lead.refresh_from_db()
+        self.assertEqual(lead.data.get("lead_stage"), "SNOOZED")
+        self.assertEqual(lead.data.get("assigned_to"), "rm-2")
+        self.assertEqual(lead.data.get("next_call_at"), tomorrow_ts.isoformat())
+        self.assertEqual(job.result["updated"], 0)
 
 
 class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
