@@ -179,3 +179,35 @@ class ReleaseLeadsAfter12hCronView(APIView):
                 {"ok": False, "error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             ) 
+
+class SyncEntitySchemasCronView(APIView):
+    """
+    Cron endpoint: enqueue one sync_entity_schemas job.
+    
+    Reads all new records for active tenants and updates the Entity schema 
+    snapshots so the system knows what fields exist in the dynamic JSON data.
+    Call periodically (e.g. every 10 min or hourly).
+    Allowed: authenticated user OR request with X-Cron-Secret header matching CRON_SECRET env.
+    """
+    permission_classes = [IsAuthenticatedOrCronSecret]
+
+    def post(self, request):
+        try:
+            queue = get_queue_service()
+            job = queue.enqueue_job(
+                # MAKE SURE you add SYNC_ENTITY_SCHEMAS to your JobType class!
+                job_type=JobType.SYNC_ENTITY_SCHEMAS, 
+                payload={},
+                priority=0,
+            )
+            logger.info(f"[Cron] Enqueued sync_entity_schemas job id={job.id}")
+            return Response(
+                {"ok": True, "job_id": job.id, "message": "Sync entity schemas job enqueued"},
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            logger.exception(f"[Cron] Failed to enqueue sync_entity_schemas job: {e}")
+            return Response(
+                {"ok": False, "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
