@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 # Interval (seconds) between enqueueing lead cron jobs from the worker (no external cron needed)
 LEAD_CRON_ENQUEUE_INTERVAL = 900  # 15 minutes
 
+# Enqueue ``snoozed_to_not_connected_midnight`` at exactly this clock minute in ``TIME_ZONE`` (UTC).
+# 23:55 keeps ``NOW()`` on the same calendar date as same-day ``next_call_at`` (e.g. 31 Mar snoozes
+# flip on 31 Mar, not after midnight when the date rolls to the next day).
+SNOOZED_TO_NOT_CONNECTED_ENQUEUE_HOUR = 23
+SNOOZED_TO_NOT_CONNECTED_ENQUEUE_MINUTE = 55
+
 
 class JobProcessor:
     """Processes jobs from the BackgroundJob queue"""
@@ -410,9 +416,10 @@ class JobProcessor:
 
     def _maybe_enqueue_snoozed_to_not_connected_midnight(self):
         """
-        Once per UTC calendar day during hour 00:00–00:59, enqueue snoozed_to_not_connected_midnight.
+        Once per calendar day (in ``TIME_ZONE``), enqueue snoozed_to_not_connected_midnight
+        only when local time is exactly the configured hour:minute (e.g. 23:55).
 
-        Uses ``TIME_ZONE`` (UTC) for wall-clock, consistent with stored datetimes.
+        End-of-day enqueue aligns ``NOW()`` date with same-calendar-day ``next_call_at`` in the handler.
         """
         tz_name = settings.TIME_ZONE
         try:
@@ -424,7 +431,10 @@ class JobProcessor:
             return
 
         local_now = datetime.now(tz)
-        if local_now.hour != 0:
+        if (
+            local_now.hour != SNOOZED_TO_NOT_CONNECTED_ENQUEUE_HOUR
+            or local_now.minute != SNOOZED_TO_NOT_CONNECTED_ENQUEUE_MINUTE
+        ):
             return
 
         today = local_now.date()
@@ -441,7 +451,8 @@ class JobProcessor:
             self._last_snoozed_midnight_enqueue_date = today
             logger.info(
                 f"[Worker {self.worker_id}] Enqueued snoozed_to_not_connected_midnight "
-                f"(local_date={today}, tz={tz_name})"
+                f"(local_date={today}, tz={tz_name}, at={SNOOZED_TO_NOT_CONNECTED_ENQUEUE_HOUR:02d}:"
+                f"{SNOOZED_TO_NOT_CONNECTED_ENQUEUE_MINUTE:02d})"
             )
         except Exception as e:
             logger.warning(
@@ -542,7 +553,7 @@ class JobProcessor:
 
                 # Periodically enqueue lead cron jobs (unassign snoozed, release after 12h) so no external cron is needed
                 self._maybe_enqueue_lead_cron_jobs()
-                # Daily at local midnight: SNOOZED → NOT_CONNECTED
+                # Daily at 23:55 exact minute (TIME_ZONE): SNOOZED → NOT_CONNECTED
                 self._maybe_enqueue_snoozed_to_not_connected_midnight()
 
                 if jobs_processed > 0:
