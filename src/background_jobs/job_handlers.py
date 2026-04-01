@@ -1147,10 +1147,11 @@ class SnoozedToNotConnectedMidnightJobHandler(JobHandler):
     ``snooze_unassign_at`` (call_attempts unchanged). Does not modify ``next_call_at``.
 
     Only considers leads whose callback time ``next_call_at`` falls on **today's calendar date**
-    in ``TIME_ZONE`` (UTC; same as the midnight enqueue in the job processor). Leads snoozed until a
+    in ``TIME_ZONE`` (UTC; same wall time as the job processor enqueue). Leads snoozed until a
     **future** calendar day (e.g. tomorrow) are left unchanged.
 
-    Runs once per UTC calendar day at 00:00 (see ``TIME_ZONE`` and job processor).
+    Runs once per UTC calendar day after 23:55 (see job processor; aligns ``NOW()`` date with
+    same-day ``next_call_at``).
     """
 
     def process(self, job: BackgroundJob) -> bool:
