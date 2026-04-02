@@ -27,7 +27,10 @@ def _tenant_label(tenant) -> str:
 
 class LeadPipeline:
     """
-    Sales-lead lead retrieval + assignment flow, in bucket priority order.
+    Lead retrieval + assignment in ``UserBucketAssignment`` priority order (all RMs, including SELF TRIAL).
+
+    Applies ``CallAttemptMatrix`` exclusions on the built queryset, then ``PullStrategyApplier``
+    (default seeds use ``order_by: call_attempts_asc`` — no ``lead_score`` in sort), due checks, and ``LeadAssigner``.
     """
 
     def __init__(self):
@@ -157,12 +160,12 @@ class LeadPipeline:
                     debug=debug,
                 )
 
-                # qs = self.matrix_filter.apply(
-                #     qs=qs,
-                #     tenant=tenant,
-                #     eligible_lead_types=resolved_user.eligible_lead_types,
-                #     now=now,
-                # )
+                qs = self.matrix_filter.apply(
+                    qs=qs,
+                    tenant=tenant,
+                    eligible_lead_types=resolved_user.eligible_lead_types,
+                    now=now,
+                )
 
                 qs = self.strategy_applier.apply(qs=qs, strategy=assignment.pull_strategy, now_iso=now_iso)
 
@@ -334,13 +337,9 @@ class LeadPipeline:
         eligible_lead_sources = resolved_user.eligible_lead_sources
         eligible_lead_statuses = resolved_user.eligible_lead_statuses
 
-        # Retry ordering for sales leads:
-        # min call_attempts -> max lead_score -> LIFO (updated_at desc).
         retry_strategy = {
-            "order_by": "score_desc",
+            "order_by": "call_attempts_asc",
             "include_snoozed_due": False,
-            "ignore_score_for_sources": [],
-            "tiebreaker": "lifo",
         }
 
         # 1) Assigned-to-me retry candidate (legacy code does NOT apply lead filters here).

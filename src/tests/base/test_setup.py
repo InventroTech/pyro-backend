@@ -12,6 +12,7 @@ from tests.factories import (
     RoleFactory,
     TenantMembershipFactory,
 )
+from tests.rest.crm_records.bucket_seed import seed_default_lead_buckets
 from .assertions import (
     DRFResponseAssertionsMixin,
     StatusCodeAssertionsMixin,
@@ -96,6 +97,8 @@ class BaseAPITestCase(
             "HTTP_X_TENANT_ID": self.tenant_id,
         }
 
+        seed_default_lead_buckets(self.tenant)
+
     # ------------------------------------------------------------------
     # Helpers for creating secondary users / auth contexts
     # ------------------------------------------------------------------
@@ -144,3 +147,4 @@ class MultiTenantAPITestCase(BaseAPITestCase):
             email="tenantb@example.com",
             tenant=self.tenant_b,
         )
+        seed_default_lead_buckets(self.tenant_b)

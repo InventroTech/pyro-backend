@@ -11,10 +11,10 @@ Run from project root (where pytest.ini is):
   pytest src/tests/rest/crm_records/test_get_next_lead_api.py -v
   pytest -k get_next_lead -v
 
-Legacy SELF TRIAL path (``lead_statuses`` includes ``"SELF TRIAL"``): main queue is
-fresh-only; Step 5a assigns due not-connected retries when under daily limit (same
-rules as the daily-limit not-connected fallback). ``NOT_CONNECTED`` with
-``call_attempts=0`` still returns empty (retry path requires attempts 1–6).
+Get Next Lead uses ``LeadPipeline`` for every RM (including SELF TRIAL): tenant buckets,
+routing, call-attempt matrices, daily limit, and not-connected fallback match the
+pipeline implementation. ``NOT_CONNECTED`` with ``call_attempts=0`` does not match
+retry buckets (attempts 1–6 required).
 """
 
 from datetime import datetime, timedelta, timezone
