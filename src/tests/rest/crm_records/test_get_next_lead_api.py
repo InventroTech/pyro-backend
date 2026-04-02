@@ -17,7 +17,9 @@ rules as the daily-limit not-connected fallback). ``NOT_CONNECTED`` with
 ``call_attempts=0`` still returns empty (retry path requires attempts 1–6).
 """
 
+import uuid
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import jwt
 from django.conf import settings
@@ -25,6 +27,10 @@ from django.test import TestCase
 from django.utils import timezone as django_timezone
 
 from crm_records.models import Record
+from crm_records.views import (
+    _legacy_get_next_lead_assignee_is_unassigned,
+    _legacy_get_next_lead_assignees_match,
+)
 from authz import service as authz_service
 from user_settings.models import UserSettings
 
@@ -52,6 +58,25 @@ def _should_exclude_lead(lead_data: dict, current_user_id: str) -> bool:
     if not assigned_to or assigned_to in ("", "null", "None"):
         return False
     return assigned_to != current_user_id
+
+
+class LegacyGetNextLeadAssigneeHelpersTests(TestCase):
+    """Unit tests for legacy GetNextLeadView assignee guards (no lead_pipeline import)."""
+
+    def test_legacy_assignee_is_unassigned(self):
+        self.assertTrue(_legacy_get_next_lead_assignee_is_unassigned(None))
+        self.assertTrue(_legacy_get_next_lead_assignee_is_unassigned(""))
+        self.assertTrue(_legacy_get_next_lead_assignee_is_unassigned("  "))
+        self.assertTrue(_legacy_get_next_lead_assignee_is_unassigned("null"))
+        self.assertTrue(_legacy_get_next_lead_assignee_is_unassigned("NONE"))
+        self.assertFalse(_legacy_get_next_lead_assignee_is_unassigned("uuid-here"))
+
+    def test_legacy_assignees_match_case_insensitive(self):
+        uid = str(uuid.uuid4())
+        self.assertTrue(_legacy_get_next_lead_assignees_match(uid, uid.upper()))
+        self.assertTrue(_legacy_get_next_lead_assignees_match(f"  {uid}  ", uid))
+        self.assertFalse(_legacy_get_next_lead_assignees_match(uid, str(uuid.uuid4())))
+        self.assertFalse(_legacy_get_next_lead_assignees_match(None, uid))
 
 
 class GetNextLeadExcludeLogicTests(TestCase):
@@ -764,3 +789,110 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
         self.assertNotEqual(data, {}, msg="Should return one lead")
         self.assertEqual(data["data"].get("lead_source"), "SALES LEAD")
         self.assertEqual(data.get("name"), "Snoozed Sales")
+
+
+class LegacyGetNextLeadRaceConditionTests(BaseAPITestCase):
+    """
+    Legacy SELF TRIAL path: after row lock, assignment must not overwrite another RM.
+    Simulates lost race by mocking select_for_update().first() to return in-memory data
+    with assigned_to already set to another user (as if another request committed first).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.url = "/crm-records/leads/next/"
+        authz_service._CACHE.clear()
+        self.client.force_authenticate(user=self.user)
+
+    def _make_fake_select_for_update(self, lead, other_uid: str):
+        """
+        Mimic post-lock read: row appears already assigned to ``other_uid`` (in-memory only).
+        ``.calls`` counts how many times the lock path ran.
+        """
+
+        class _FakeQS:
+            def filter(self, *args, **kwargs):
+                return self
+
+            def first(self):
+                r = Record.objects.get(pk=lead.pk)
+                d = dict(r.data) if isinstance(r.data, dict) else {}
+                d["assigned_to"] = other_uid
+                r.data = d
+                return r
+
+        def _fake(*args, **kwargs):
+            _fake.calls += 1
+            return _FakeQS()
+
+        _fake.calls = 0
+        return _fake
+
+    def test_legacy_step5_main_queue_lost_race_returns_empty(self):
+        """Step 5: if lock sees lead already assigned to another RM, return empty and do not save."""
+        UserSettings.objects.create(
+            tenant=self.tenant,
+            tenant_membership=self.membership,
+            key="LEAD_TYPE_ASSIGNMENT",
+            value=[],
+            lead_sources=[],
+            lead_statuses=["SELF TRIAL"],
+        )
+        lead = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Race Main Queue",
+                "lead_stage": "IN_QUEUE",
+                "lead_status": "SELF TRIAL",
+                "lead_source": "SIGNUP_AT_SINGLE_PARTY",
+                "call_attempts": 0,
+                "assigned_to": None,
+            },
+        )
+        other_uid = str(uuid.uuid4())
+        fake_sf = self._make_fake_select_for_update(lead, other_uid)
+        with patch("crm_records.views.Record.objects.select_for_update", fake_sf):
+            response = self.client.get(self.url, **self.auth_headers)
+        self.assertGreaterEqual(fake_sf.calls, 1, "Step 5 lock path should run")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {}, msg="Lost race: must not assign to current user")
+        lead.refresh_from_db()
+        self.assertIsNone((lead.data or {}).get("assigned_to"))
+
+    def test_legacy_step5a_unassigned_nc_retry_lost_race_returns_empty(self):
+        """Step 5a unassigned NOT_CONNECTED retry: lost race after lock returns empty; DB unchanged."""
+        now = django_timezone.now()
+        past = (now - timedelta(hours=3)).isoformat()
+        UserSettings.objects.create(
+            tenant=self.tenant,
+            tenant_membership=self.membership,
+            key="LEAD_TYPE_ASSIGNMENT",
+            value=[],
+            lead_sources=[],
+            lead_statuses=["SELF TRIAL"],
+            daily_limit=50,
+        )
+        lead = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "Race Step 5a NC",
+                "lead_stage": "NOT_CONNECTED",
+                "lead_status": "SELF TRIAL",
+                "lead_source": "SIGNUP_AT_SINGLE_PARTY",
+                "assigned_to": "",
+                "call_attempts": 1,
+                "next_call_at": past,
+                "phone_number": "+19990000002",
+            },
+        )
+        other_uid = str(uuid.uuid4())
+        fake_sf = self._make_fake_select_for_update(lead, other_uid)
+        with patch("crm_records.views.Record.objects.select_for_update", fake_sf):
+            response = self.client.get(self.url, **self.auth_headers)
+        self.assertGreaterEqual(fake_sf.calls, 1, "Step 5a lock path should run")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {}, msg="Step 5a lost race: must not steal assignment")
+        lead.refresh_from_db()
+        self.assertEqual((lead.data or {}).get("assigned_to") or "", "")
