@@ -4587,7 +4587,7 @@ class ScoringRuleListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
     """
     permission_classes = [IsTenantAuthenticated]
     serializer_class = ScoringRuleModelSerializer
-    pagination_class = MetaPageNumberPagination
+    # pagination_class = MetaPageNumberPagination
     
     def get_queryset(self):
         """Return rules filtered by tenant and optionally by entity_type."""
