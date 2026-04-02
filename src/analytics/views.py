@@ -39,7 +39,7 @@ from .serializers import SupportTicketSerializer
 from core.pagination import MetaPageNumberPagination
 from .filters import (
     get_multi_values, build_nullable_in_q,
-    POSTER_CHOICES, RESOLUTION_CHOICES,
+    RESOLUTION_CHOICES,
     SafeSearchFilter, SafeOrderingFilter
 )
 from .utils import tenant_scoped_qs
@@ -768,9 +768,6 @@ class SupportTicketListView(ListAPIView):
         if poster_vals:
             include_null = any(v.lower() == "null" for v in poster_vals)
             vals = [v for v in poster_vals if v.lower() != "null"]
-            bad = [v for v in vals if v not in POSTER_CHOICES]
-            if bad:
-                raise ValidationError({"poster": f"Invalid values: {bad}"})
             q = Q()
             if vals: q |= Q(poster__in=vals)
             if include_null: q |= Q(poster__isnull=True)
