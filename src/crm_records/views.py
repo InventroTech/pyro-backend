@@ -47,6 +47,23 @@ def _parse_lead_stage_param(value):
         return set()
     return {v.strip().upper() for v in value.split(',') if v.strip()}
 
+
+def _legacy_get_next_lead_assignee_is_unassigned(value):
+    """GetNextLeadView (SELF TRIAL legacy path): True when ``data.assigned_to`` is still empty / null."""
+    if value is None:
+        return True
+    s = str(value).strip()
+    if s == "":
+        return True
+    return s.lower() in ("null", "none")
+
+
+def _legacy_get_next_lead_assignees_match(stored, requester: str) -> bool:
+    """True when ``assigned_to`` in DB matches the requesting RM (trimmed, case-insensitive)."""
+    if _legacy_get_next_lead_assignee_is_unassigned(stored):
+        return False
+    return str(stored).strip().lower() == str(requester).strip().lower()
+
 from .helper import parse_numeric_lookup, coerce_numeric
 from .assignee_display import build_assigned_to_search_q
 
@@ -1387,6 +1404,15 @@ class GetNextLeadView(APIView):
                 if not locked:
                     return None
                 data = (locked.data or {}).copy()
+                if not _legacy_get_next_lead_assignee_is_unassigned(data.get("assigned_to")):
+                    logger.info(
+                        "%s Unassigned NC retry lost race record_id=%s assigned_to=%s user=%s",
+                        log_label,
+                        locked.pk,
+                        data.get("assigned_to"),
+                        user_identifier,
+                    )
+                    return None
                 data["assigned_to"] = user_identifier
                 data["lead_stage"] = self.ASSIGNED_STATUS
                 if "call_attempts" not in data or data.get("call_attempts") in (None, "", "null"):
@@ -2270,13 +2296,21 @@ class GetNextLeadView(APIView):
             data = candidate_locked.data.copy() if candidate_locked.data else {}
             pre_assignment_lead_stage = (data.get("lead_stage") or "").strip().upper()
             previous_assigned_to = data.get('assigned_to')
-            is_fresh_assignment = (
-                previous_assigned_to is None 
-                or previous_assigned_to == '' 
-                or previous_assigned_to == 'null'
-                or previous_assigned_to == 'None'
-            )
-            
+            is_fresh_assignment = _legacy_get_next_lead_assignee_is_unassigned(previous_assigned_to)
+
+            if not is_fresh_assignment and not _legacy_get_next_lead_assignees_match(
+                previous_assigned_to, user_identifier
+            ):
+                logger.info(
+                    "[GetNextLead] Step 5: Lost race — lead already assigned to another user "
+                    "lead_id=%s previous_assigned_to=%s requester=%s",
+                    candidate_locked.id,
+                    previous_assigned_to,
+                    user_identifier,
+                )
+                logger.info("[GetNextLead] END EMPTY: lead claimed by another RM before assign.")
+                return Response({}, status=status.HTTP_200_OK)
+
             data['assigned_to'] = user_identifier
             data['lead_stage'] = self.ASSIGNED_STATUS
             # Ensure call_attempts is always present for downstream logic/UI
