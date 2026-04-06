@@ -22,7 +22,7 @@ from drf_spectacular.views import (
     SpectacularRedocView,
     SpectacularSwaggerView,
 )
-from crm_records.views import PrajaLeadsAPIView
+from crm_records.views import PrajaLeadsAPIView, PrajaLeadEntityBackfillAPIView
 
 def trigger_error(request):
     division_by_zero = 1 / 0
@@ -46,6 +46,7 @@ urlpatterns = [
     
     # Top-level entity endpoint (from crm_records)
     path('entity/', PrajaLeadsAPIView.as_view(), name='entity-api'),
+    path('entity/backfill/', PrajaLeadEntityBackfillAPIView.as_view(), name='entity-backfill-api'),
     
     # OpenAPI schema
     path("api/schema/", SpectacularAPIView.as_view(
