@@ -11,6 +11,8 @@ Business semantics (aligned with production data + code):
   values use e.g. `PREMIUM_REFERRAL` for source and ``SALES LEAD`` for status).
 - **Bucket priority** (tenant-wide): follow-up (snoozed) → **fresh** → not-connected retry.
   So when both a fresh **and** a due NOT_CONNECTED retry exist, **fresh is tried first** and wins.
+- **Pull tiebreaker:** ``lifo`` / default → newest ``created_at`` first among ties; ``fifo`` → oldest ``created_at``.
+  Secondary sort is ``-updated_at`` then ``id``.
 
 Run (venv activated):
 
@@ -379,6 +381,156 @@ def test_pull_strategy_expired_snoozed_before_fresh_in_sort_order():
     assert first.id == snoozed.id
 
 
+@pytest.mark.django_db
+def test_pull_strategy_fifo_tiebreaker_older_created_at_wins():
+    """Same score and attempts: fifo tiebreaker prefers smaller created_at (oldest created first)."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    older = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="Older", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    newer = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="Newer", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    Record.objects.filter(pk=older.pk).update(created_at=now - timedelta(hours=2))
+    Record.objects.filter(pk=newer.pk).update(created_at=now)
+
+    qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[older.id, newer.id])
+    applier = PullStrategyApplier()
+    ordered = applier.apply(
+        qs=qs,
+        strategy={
+            "order_by": "score_desc",
+            "include_snoozed_due": False,
+            "ignore_score_for_sources": [],
+            "tiebreaker": "fifo",
+        },
+        now_iso=now.isoformat(),
+    )
+    first = ordered.first()
+    assert first is not None
+    assert first.id == older.id
+
+
+@pytest.mark.django_db
+def test_pull_strategy_lifo_tiebreaker_newer_created_at_wins():
+    """Same score and attempts: lifo tiebreaker prefers larger created_at (newest created first)."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    older = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="Older", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    newer = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="Newer", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    Record.objects.filter(pk=older.pk).update(created_at=now - timedelta(hours=2))
+    Record.objects.filter(pk=newer.pk).update(created_at=now)
+
+    qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[older.id, newer.id])
+    applier = PullStrategyApplier()
+    ordered = applier.apply(
+        qs=qs,
+        strategy={
+            "order_by": "score_desc",
+            "include_snoozed_due": False,
+            "ignore_score_for_sources": [],
+            "tiebreaker": "lifo",
+        },
+        now_iso=now.isoformat(),
+    )
+    first = ordered.first()
+    assert first is not None
+    assert first.id == newer.id
+
+
+@pytest.mark.django_db
+def test_pull_strategy_lifo_uses_created_at_not_updated_at_for_ties():
+    """Larger created_at wins even when that row has smaller updated_at (secondary sort is updated_at)."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    older_created = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="OldCreate", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    newer_created = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="NewCreate", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    # Older row was touched recently; newer row has stale updated_at.
+    Record.objects.filter(pk=older_created.pk).update(
+        created_at=now - timedelta(hours=3),
+        updated_at=now,
+    )
+    Record.objects.filter(pk=newer_created.pk).update(
+        created_at=now - timedelta(hours=1),
+        updated_at=now - timedelta(hours=2),
+    )
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[older_created.id, newer_created.id]
+    )
+    applier = PullStrategyApplier()
+    ordered = applier.apply(
+        qs=qs,
+        strategy={
+            "order_by": "score_desc",
+            "include_snoozed_due": False,
+            "ignore_score_for_sources": [],
+            "tiebreaker": "lifo",
+        },
+        now_iso=now.isoformat(),
+    )
+    first = ordered.first()
+    assert first is not None
+    assert first.id == newer_created.id
+
+
+@pytest.mark.django_db
+def test_pull_strategy_default_tiebreaker_is_lifo_on_created_at():
+    """Omitted tiebreaker defaults to newest created_at first (same as explicit lifo)."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    older = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="Older", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    newer = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="Newer", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    Record.objects.filter(pk=older.pk).update(created_at=now - timedelta(hours=2))
+    Record.objects.filter(pk=newer.pk).update(created_at=now)
+
+    qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[older.id, newer.id])
+    applier = PullStrategyApplier()
+    ordered = applier.apply(
+        qs=qs,
+        strategy={
+            "order_by": "score_desc",
+            "include_snoozed_due": False,
+            "ignore_score_for_sources": [],
+        },
+        now_iso=now.isoformat(),
+    )
+    assert ordered.first().id == newer.id
+
+
 # ===================================================================
 # INTEGRATION — LeadPipeline
 # ===================================================================
@@ -571,8 +723,8 @@ def test_pipeline_fresh_bucket_returns_higher_score_first():
 
 
 @pytest.mark.django_db
-def test_pipeline_lifo_tiebreaker_newer_updated_at_wins():
-    """Same score: newer updated_at wins (LIFO tiebreaker)."""
+def test_pipeline_lifo_tiebreaker_newer_created_at_wins():
+    """Same score: newer created_at wins (LIFO tiebreaker on created_at)."""
     tenant = TenantFactory()
     _seed_tenant_buckets(tenant)
     user, _, _ = _make_rm_user(tenant, lead_sources=[], lead_statuses=["SALES LEAD"])
@@ -583,21 +735,51 @@ def test_pipeline_lifo_tiebreaker_newer_updated_at_wins():
         entity_type="lead",
         data=_sales_lead_row(name="Older", lead_stage="IN_QUEUE", lead_score=100),
     )
-    older.updated_at = now - timedelta(hours=2)
-    older.save(update_fields=["updated_at"])
-
     newer = RecordFactory(
         tenant=tenant,
         entity_type="lead",
         data=_sales_lead_row(name="Newer", lead_stage="IN_QUEUE", lead_score=100),
     )
-    newer.updated_at = now
-    newer.save(update_fields=["updated_at"])
+    Record.objects.filter(pk=older.pk).update(created_at=now - timedelta(hours=2))
+    Record.objects.filter(pk=newer.pk).update(created_at=now)
 
     pipeline = LeadPipeline()
     result = pipeline.get_next(tenant=tenant, request_user=user)
     assert result is not None
     assert result.pk == newer.pk
+
+
+@pytest.mark.django_db
+def test_pipeline_lifo_on_created_at_not_latest_updated_at():
+    """End-to-end: tiebreak is created_at (lifo), not which row was updated most recently."""
+    tenant = TenantFactory()
+    _seed_tenant_buckets(tenant)
+    user, _, _ = _make_rm_user(tenant, lead_sources=[], lead_statuses=["SALES LEAD"])
+    now = timezone.now()
+
+    older_created = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="OldCreate", lead_stage="IN_QUEUE", lead_score=100),
+    )
+    newer_created = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="NewCreate", lead_stage="IN_QUEUE", lead_score=100),
+    )
+    Record.objects.filter(pk=older_created.pk).update(
+        created_at=now - timedelta(hours=3),
+        updated_at=now,
+    )
+    Record.objects.filter(pk=newer_created.pk).update(
+        created_at=now - timedelta(hours=1),
+        updated_at=now - timedelta(hours=2),
+    )
+
+    pipeline = LeadPipeline()
+    result = pipeline.get_next(tenant=tenant, request_user=user)
+    assert result is not None
+    assert result.pk == newer_created.pk
 
 
 @pytest.mark.django_db

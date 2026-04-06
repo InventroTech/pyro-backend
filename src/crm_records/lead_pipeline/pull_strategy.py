@@ -10,6 +10,17 @@ class PullStrategyApplier:
     Applies ordering and cooldown pre-filtering based on pull_strategy.
     """
 
+    @staticmethod
+    def _created_at_tiebreaker_key(strategy: dict) -> str:
+        """Tiebreaker after call_attempts / score: lifo = newest created first, fifo = oldest first."""
+        raw = strategy.get("tiebreaker")
+        if raw is None:
+            return "-created_at"
+        tb = str(raw).strip().lower()
+        if tb == "fifo":
+            return "created_at"
+        return "-created_at"
+
     _NEXT_CALL_READY_WHERE = """
         (
             COALESCE((data->>'call_attempts')::int, 0) = 0
@@ -32,6 +43,7 @@ class PullStrategyApplier:
         call_attempts_expr = "COALESCE((data->>'call_attempts')::int, 0)"
 
         lead_score_for_sort = self._build_score_expr(ignore_score_sources)
+        created_at_key = self._created_at_tiebreaker_key(strategy)
 
         if include_snoozed_due:
             is_expired_snoozed_expr = """
@@ -55,8 +67,8 @@ class PullStrategyApplier:
                 "is_expired_snoozed",
                 "call_attempts_int",
                 F("lead_score_for_sort").desc(nulls_last=True),
+                created_at_key,
                 "-updated_at",
-                "created_at",
                 "id",
             )
         else:
@@ -70,16 +82,16 @@ class PullStrategyApplier:
             if order_by == "call_attempts_asc":
                 qs = qs.order_by(
                     "call_attempts_int",
+                    created_at_key,
                     "-updated_at",
-                    "created_at",
                     "id",
                 )
             else:
                 qs = qs.order_by(
                     "call_attempts_int",
                     F("lead_score_for_sort").desc(nulls_last=True),
+                    created_at_key,
                     "-updated_at",
-                    "created_at",
                     "id",
                 )
 

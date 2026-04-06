@@ -335,7 +335,7 @@ class LeadPipeline:
         eligible_lead_statuses = resolved_user.eligible_lead_statuses
 
         # Retry ordering for sales leads:
-        # min call_attempts -> max lead_score -> LIFO (updated_at desc).
+        # min call_attempts -> max lead_score -> LIFO (created_at desc).
         retry_strategy = {
             "order_by": "score_desc",
             "include_snoozed_due": False,
