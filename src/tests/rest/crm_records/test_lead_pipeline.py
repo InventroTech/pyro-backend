@@ -11,8 +11,9 @@ Business semantics (aligned with production data + code):
   values use e.g. `PREMIUM_REFERRAL` for source and ``SALES LEAD`` for status).
 - **Bucket priority** (tenant-wide): follow-up (snoozed) → **fresh** → not-connected retry.
   So when both a fresh **and** a due NOT_CONNECTED retry exist, **fresh is tried first** and wins.
-- **Pull tiebreaker:** ``lifo`` / default → newest ``created_at`` first among ties; ``fifo`` → oldest ``created_at``.
-  Secondary sort is ``-updated_at`` then ``id``.
+- **Pull tiebreaker:** ``tiebreaker`` is ``asc`` or ``desc`` on ``tiebreaker_field`` (default ``desc`` if omitted).
+  Legacy ``lifo`` / ``fifo`` are accepted as aliases for ``desc`` / ``asc``. ``tiebreaker_field``: ``created_at`` or ``updated_at`` (default ``created_at``).
+  Secondary sort is the other timestamp descending, then ``id``.
 
 Run (venv activated):
 
@@ -144,13 +145,15 @@ def _seed_tenant_buckets(tenant) -> dict:
 
     strategy_snoozed = {
         "order_by": "score_desc",
-        "tiebreaker": "lifo",
+        "tiebreaker": "desc",
+        "tiebreaker_field": "created_at",
         "include_snoozed_due": True,
         "ignore_score_for_sources": [],
     }
     strategy_plain = {
         "order_by": "score_desc",
-        "tiebreaker": "lifo",
+        "tiebreaker": "desc",
+        "tiebreaker_field": "created_at",
         "include_snoozed_due": False,
         "ignore_score_for_sources": [],
     }
@@ -372,7 +375,7 @@ def test_pull_strategy_expired_snoozed_before_fresh_in_sort_order():
             "order_by": "score_desc",
             "include_snoozed_due": True,
             "ignore_score_for_sources": [],
-            "tiebreaker": "lifo",
+            "tiebreaker": "desc",
         },
         now_iso=now.isoformat(),
     )
@@ -382,8 +385,8 @@ def test_pull_strategy_expired_snoozed_before_fresh_in_sort_order():
 
 
 @pytest.mark.django_db
-def test_pull_strategy_fifo_tiebreaker_older_created_at_wins():
-    """Same score and attempts: fifo tiebreaker prefers smaller created_at (oldest created first)."""
+def test_pull_strategy_asc_tiebreaker_older_created_at_wins():
+    """Same score and attempts: asc tiebreaker prefers smaller created_at (oldest created first)."""
     tenant = TenantFactory()
     now = timezone.now()
 
@@ -408,7 +411,7 @@ def test_pull_strategy_fifo_tiebreaker_older_created_at_wins():
             "order_by": "score_desc",
             "include_snoozed_due": False,
             "ignore_score_for_sources": [],
-            "tiebreaker": "fifo",
+            "tiebreaker": "asc",
         },
         now_iso=now.isoformat(),
     )
@@ -418,8 +421,8 @@ def test_pull_strategy_fifo_tiebreaker_older_created_at_wins():
 
 
 @pytest.mark.django_db
-def test_pull_strategy_lifo_tiebreaker_newer_created_at_wins():
-    """Same score and attempts: lifo tiebreaker prefers larger created_at (newest created first)."""
+def test_pull_strategy_desc_tiebreaker_newer_created_at_wins():
+    """Same score and attempts: desc tiebreaker prefers larger created_at (newest created first)."""
     tenant = TenantFactory()
     now = timezone.now()
 
@@ -444,7 +447,7 @@ def test_pull_strategy_lifo_tiebreaker_newer_created_at_wins():
             "order_by": "score_desc",
             "include_snoozed_due": False,
             "ignore_score_for_sources": [],
-            "tiebreaker": "lifo",
+            "tiebreaker": "desc",
         },
         now_iso=now.isoformat(),
     )
@@ -454,7 +457,7 @@ def test_pull_strategy_lifo_tiebreaker_newer_created_at_wins():
 
 
 @pytest.mark.django_db
-def test_pull_strategy_lifo_uses_created_at_not_updated_at_for_ties():
+def test_pull_strategy_desc_uses_created_at_not_updated_at_for_ties():
     """Larger created_at wins even when that row has smaller updated_at (secondary sort is updated_at)."""
     tenant = TenantFactory()
     now = timezone.now()
@@ -489,7 +492,7 @@ def test_pull_strategy_lifo_uses_created_at_not_updated_at_for_ties():
             "order_by": "score_desc",
             "include_snoozed_due": False,
             "ignore_score_for_sources": [],
-            "tiebreaker": "lifo",
+            "tiebreaker": "desc",
         },
         now_iso=now.isoformat(),
     )
@@ -499,8 +502,8 @@ def test_pull_strategy_lifo_uses_created_at_not_updated_at_for_ties():
 
 
 @pytest.mark.django_db
-def test_pull_strategy_default_tiebreaker_is_lifo_on_created_at():
-    """Omitted tiebreaker defaults to newest created_at first (same as explicit lifo)."""
+def test_pull_strategy_default_tiebreaker_desc_on_created_at():
+    """Omitted tiebreaker defaults to desc (newest created_at first)."""
     tenant = TenantFactory()
     now = timezone.now()
 
@@ -525,6 +528,135 @@ def test_pull_strategy_default_tiebreaker_is_lifo_on_created_at():
             "order_by": "score_desc",
             "include_snoozed_due": False,
             "ignore_score_for_sources": [],
+        },
+        now_iso=now.isoformat(),
+    )
+    assert ordered.first().id == newer.id
+
+
+@pytest.mark.django_db
+def test_pull_strategy_legacy_lifo_fifo_aliases():
+    """Stored JSON may still use lifo/fifo; they map to desc/asc."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    older = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="Older", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    newer = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="Newer", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    Record.objects.filter(pk=older.pk).update(created_at=now - timedelta(hours=2))
+    Record.objects.filter(pk=newer.pk).update(created_at=now)
+
+    qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[older.id, newer.id])
+    applier = PullStrategyApplier()
+    desc_like = applier.apply(
+        qs=qs,
+        strategy={
+            "order_by": "score_desc",
+            "include_snoozed_due": False,
+            "ignore_score_for_sources": [],
+            "tiebreaker": "lifo",
+            "tiebreaker_field": "created_at",
+        },
+        now_iso=now.isoformat(),
+    )
+    assert desc_like.first().id == newer.id
+
+    asc_like = applier.apply(
+        qs=qs,
+        strategy={
+            "order_by": "score_desc",
+            "include_snoozed_due": False,
+            "ignore_score_for_sources": [],
+            "tiebreaker": "fifo",
+            "tiebreaker_field": "created_at",
+        },
+        now_iso=now.isoformat(),
+    )
+    assert asc_like.first().id == older.id
+
+
+@pytest.mark.django_db
+def test_pull_strategy_desc_on_updated_at_when_tiebreaker_field_set():
+    """``tiebreaker_field: updated_at`` + ``desc`` — newer ``updated_at`` wins among same score (same ``created_at``)."""
+    tenant = TenantFactory()
+    now = timezone.now()
+    same_created = now - timedelta(days=1)
+
+    older_touch = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="StaleTouch", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    newer_touch = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="FreshTouch", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    Record.objects.filter(pk=older_touch.pk).update(
+        created_at=same_created,
+        updated_at=now - timedelta(hours=2),
+    )
+    Record.objects.filter(pk=newer_touch.pk).update(
+        created_at=same_created,
+        updated_at=now,
+    )
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[older_touch.id, newer_touch.id]
+    )
+    applier = PullStrategyApplier()
+    ordered = applier.apply(
+        qs=qs,
+        strategy={
+            "order_by": "score_desc",
+            "include_snoozed_due": False,
+            "ignore_score_for_sources": [],
+            "tiebreaker": "desc",
+            "tiebreaker_field": "updated_at",
+        },
+        now_iso=now.isoformat(),
+    )
+    assert ordered.first().id == newer_touch.id
+
+
+@pytest.mark.django_db
+def test_pull_strategy_unknown_tiebreaker_field_defaults_to_created_at():
+    """Invalid ``tiebreaker_field`` values are ignored; ordering matches ``created_at`` tiebreak."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    older = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="Older", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    newer = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="Newer", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    Record.objects.filter(pk=older.pk).update(created_at=now - timedelta(hours=2))
+    Record.objects.filter(pk=newer.pk).update(created_at=now)
+    # Same updated_at so secondary does not flip order.
+    Record.objects.filter(pk__in=[older.pk, newer.pk]).update(updated_at=now - timedelta(hours=5))
+
+    qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[older.id, newer.id])
+    applier = PullStrategyApplier()
+    ordered = applier.apply(
+        qs=qs,
+        strategy={
+            "order_by": "score_desc",
+            "include_snoozed_due": False,
+            "ignore_score_for_sources": [],
+            "tiebreaker": "desc",
+            "tiebreaker_field": "not_a_column",
         },
         now_iso=now.isoformat(),
     )
@@ -723,8 +855,8 @@ def test_pipeline_fresh_bucket_returns_higher_score_first():
 
 
 @pytest.mark.django_db
-def test_pipeline_lifo_tiebreaker_newer_created_at_wins():
-    """Same score: newer created_at wins (LIFO tiebreaker on created_at)."""
+def test_pipeline_desc_tiebreaker_newer_created_at_wins():
+    """Same score: newer created_at wins (desc on created_at)."""
     tenant = TenantFactory()
     _seed_tenant_buckets(tenant)
     user, _, _ = _make_rm_user(tenant, lead_sources=[], lead_statuses=["SALES LEAD"])
@@ -750,8 +882,8 @@ def test_pipeline_lifo_tiebreaker_newer_created_at_wins():
 
 
 @pytest.mark.django_db
-def test_pipeline_lifo_on_created_at_not_latest_updated_at():
-    """End-to-end: tiebreak is created_at (lifo), not which row was updated most recently."""
+def test_pipeline_desc_on_created_at_not_latest_updated_at():
+    """End-to-end: tiebreak is created_at desc, not which row was updated most recently."""
     tenant = TenantFactory()
     _seed_tenant_buckets(tenant)
     user, _, _ = _make_rm_user(tenant, lead_sources=[], lead_statuses=["SALES LEAD"])

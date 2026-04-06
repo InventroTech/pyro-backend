@@ -129,13 +129,15 @@ def _seed_default_buckets(tenant) -> None:
 
     strategy_snoozed = {
         "order_by": "score_desc",
-        "tiebreaker": "lifo",
+        "tiebreaker": "desc",
+        "tiebreaker_field": "created_at",
         "include_snoozed_due": True,
         "ignore_score_for_sources": [],
     }
     strategy_no_snooze_boost = {
         "order_by": "score_desc",
-        "tiebreaker": "lifo",
+        "tiebreaker": "desc",
+        "tiebreaker_field": "created_at",
         "include_snoozed_due": False,
         "ignore_score_for_sources": [],
     }
