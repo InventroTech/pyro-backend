@@ -99,9 +99,9 @@ SELECT
         ELSE 100
     END,
     CASE b.slug
-        WHEN 'fresh_leads' THEN '{"order_by": "score_desc", "include_snoozed_due": true, "ignore_score_for_sources": [], "tiebreaker": "lifo"}'::jsonb
-        WHEN 'followup_callback' THEN '{"order_by": "score_desc", "include_snoozed_due": true, "ignore_score_for_sources": [], "tiebreaker": "lifo"}'::jsonb
-        WHEN 'not_connected_retry' THEN '{"order_by": "score_desc", "include_snoozed_due": false, "ignore_score_for_sources": [], "tiebreaker": "lifo"}'::jsonb
+        WHEN 'fresh_leads' THEN '{"order_by": "score_desc", "include_snoozed_due": true, "ignore_score_for_sources": [], "tiebreaker": "desc", "tiebreaker_field": "created_at"}'::jsonb
+        WHEN 'followup_callback' THEN '{"order_by": "score_desc", "include_snoozed_due": true, "ignore_score_for_sources": [], "tiebreaker": "desc", "tiebreaker_field": "created_at"}'::jsonb
+        WHEN 'not_connected_retry' THEN '{"order_by": "score_desc", "include_snoozed_due": false, "ignore_score_for_sources": [], "tiebreaker": "desc", "tiebreaker_field": "created_at"}'::jsonb
         ELSE '{}'::jsonb
     END,
     TRUE
