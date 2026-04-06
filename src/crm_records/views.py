@@ -3033,49 +3033,27 @@ class PrajaLeadsAPIView(APIView):
                 context,
                 e,
             )
-    
-    def post(self, request):
+
+    def _prepare_entity_create_request(self, request):
         """
-        CREATE - Create a new lead record.
-        
-        Body:
-        {
-            "name": "Customer Name",
-            "tenant_id": "optional-tenant-uuid",  # Optional: if provided, uses this tenant; otherwise uses default tenant
-            "data": {
-                "praja_id": "PRAJA123",  # Required: unique identifier for Praja system
-                "phone_number": "+1234567890",
-                "lead_score": 85,
-                "lead_stage": "FRESH",   # Optional: defaults to FRESH if not provided
-                "poster": "free"
-            }
-        }
-        
-        Defaults for new leads: lead_stage=FRESH, call_attempts=0 (when not provided).
-        Note: praja_id in the data field is required for UPDATE and DELETE operations.
-        Note: tenant_id is optional. If not provided, uses DEFAULT_TENANT_SLUG from settings.
+        Normalize POST body like CREATE on /entity/. Returns a dict with tenant, entity_type,
+        request_data, praja_id; or a Response on tenant resolution failure.
         """
         tenant, error_response = self._get_tenant(request)
         if error_response:
             return error_response
-        
+
         entity_type = self.get_entity_type(request)
-        
-        # Move name from root level to data if provided (root level takes precedence over data.name)
-        # Also remove tenant_id from request_data since it's read-only in serializer and handled separately
+
         request_data = request.data.copy()
-        request_data.pop('tenant_id', None)  # Remove tenant_id if present, handled separately
+        request_data.pop('tenant_id', None)
         if 'name' in request_data:
-            # Ensure data is a dict
             if 'data' not in request_data:
                 request_data['data'] = {}
             elif not isinstance(request_data['data'], dict):
                 request_data['data'] = {}
-            # Move name from root to data (overwrites if name already exists in data)
             request_data['data']['name'] = request_data.pop('name')
 
-        # Normalize defaults for leads
-        # lead_stage and call_attempts live inside data JSON; set defaults for new leads.
         if entity_type == "lead":
             if 'data' not in request_data or not isinstance(request_data.get('data'), dict):
                 request_data['data'] = {}
@@ -3083,8 +3061,7 @@ class PrajaLeadsAPIView(APIView):
                 request_data['data']['lead_stage'] = 'FRESH'
             if 'call_attempts' not in request_data['data'] or request_data['data'].get('call_attempts') in (None, '', 'null'):
                 request_data['data']['call_attempts'] = 0
-        
-        # RecordSerializer expects entity_type in input for validation
+
         request_data['entity_type'] = entity_type
 
         request_lead_data = request_data.get('data') if isinstance(request_data.get('data'), dict) else {}
@@ -3093,18 +3070,29 @@ class PrajaLeadsAPIView(APIView):
             "[PrajaLeadsAPI] Incoming CREATE: tenant=%s entity_type=%s praja_id=%s",
             getattr(tenant, "slug", None), entity_type, praja_id,
         )
+        return {
+            "tenant": tenant,
+            "entity_type": entity_type,
+            "request_data": request_data,
+            "praja_id": praja_id,
+        }
+
+    def _execute_entity_create(self, prepared):
+        """Persist entity from output of _prepare_entity_create_request (same as POST /entity/)."""
+        tenant = prepared["tenant"]
+        entity_type = prepared["entity_type"]
+        request_data = prepared["request_data"]
+        praja_id = prepared["praja_id"]
 
         serializer = RecordSerializer(data=request_data)
         if serializer.is_valid():
             try:
-                record = serializer.save(
-                    tenant=tenant,
-                    entity_type=entity_type
-                )
+                with transaction.atomic():
+                    record = serializer.save(
+                        tenant=tenant,
+                        entity_type=entity_type
+                    )
             except IntegrityError:
-                # Unique constraint (tenant_id, praja_id) - duplicate or race.
-                # Roll back so we can query for existing_record (DB connection is broken until we roll back).
-                transaction.rollback()
                 existing_record = (
                     Record.objects.filter(
                         data__praja_id=praja_id,
@@ -3131,10 +3119,9 @@ class PrajaLeadsAPIView(APIView):
                     {'error': 'Duplicate (conflict on praja_id)'},
                     status=status.HTTP_409_CONFLICT,
                 )
-            
-            # Get name from data for logging
+
             record_name = (record.data or {}).get('name', '')
-            
+
             logger.info(
                 "[PrajaLeadsAPI] Created %s: id=%s tenant=%s name=%s",
                 entity_type,
@@ -3147,17 +3134,16 @@ class PrajaLeadsAPIView(APIView):
                 tenant,
                 context=f"POST create praja_id={praja_id}",
             )
-            
-            # Send to Mixpanel if entity_type is 'lead'
+
             if entity_type == 'lead':
                 try:
                     from background_jobs.queue_service import get_queue_service
                     from background_jobs.models import JobType
-                    
+
                     lead_data = record.data or {}
                     user_id = lead_data.get('praja_id') or lead_data.get('user_id') or str(record.id)
                     event_name = 'pyro_crm_lead_created'
-                    
+
                     logger.info("=" * 80)
                     logger.info(f"🚀 [Mixpanel] Creating lead {record.id} via PrajaLeadsAPI, sending to Mixpanel")
                     logger.info(f"   Lead ID: {record.id}")
@@ -3169,7 +3155,7 @@ class PrajaLeadsAPIView(APIView):
                     logger.info(f"   Lead Stage: {lead_data.get('lead_stage', 'N/A')}")
                     logger.info(f"   Lead Score: {lead_data.get('lead_score', 'N/A')}")
                     logger.info("=" * 80)
-                    
+
                     properties = {
                         'lead_id': record.id,
                         'tenant_id': str(record.tenant.id) if record.tenant else None,
@@ -3180,8 +3166,7 @@ class PrajaLeadsAPIView(APIView):
                     properties.update(lead_data)
                     if record.pyro_data:
                         properties.update(record.pyro_data)
-                    
-                    # Enqueue background job (single send; do not also send sync to avoid duplicate Mixpanel events)
+
                     queue_service = get_queue_service()
                     queue_service.enqueue_job(
                         job_type=JobType.SEND_MIXPANEL_EVENT,
@@ -3196,19 +3181,44 @@ class PrajaLeadsAPIView(APIView):
                     )
                 except Exception as e:
                     logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
-            
-            # Refresh record from DB to get updated score
+
             record.refresh_from_db()
-            
+
             return Response(
                 RecordSerializer(record).data,
                 status=status.HTTP_201_CREATED
             )
-        
+
         return Response(
             serializer.errors,
             status=status.HTTP_400_BAD_REQUEST
         )
+
+    def post(self, request):
+        """
+        CREATE - Create a new lead record.
+        
+        Body:
+        {
+            "name": "Customer Name",
+            "tenant_id": "optional-tenant-uuid",  # Optional: if provided, uses this tenant; otherwise uses default tenant
+            "data": {
+                "praja_id": "PRAJA123",  # Required: unique identifier for Praja system
+                "phone_number": "+1234567890",
+                "lead_score": 85,
+                "lead_stage": "FRESH",   # Optional: defaults to FRESH if not provided
+                "poster": "free"
+            }
+        }
+        
+        Defaults for new leads: lead_stage=FRESH, call_attempts=0 (when not provided).
+        Note: praja_id in the data field is required for UPDATE and DELETE operations.
+        Note: tenant_id is optional. If not provided, uses DEFAULT_TENANT_SLUG from settings.
+        """
+        prepared = self._prepare_entity_create_request(request)
+        if isinstance(prepared, Response):
+            return prepared
+        return self._execute_entity_create(prepared)
     
     def get(self, request):
         """
@@ -3598,6 +3608,63 @@ class PrajaLeadsAPIView(APIView):
             {'message': f'{entity_type.capitalize()} with praja_id {praja_id} deleted successfully'},
             status=status.HTTP_200_OK
         )
+
+
+class PrajaLeadEntityBackfillAPIView(PrajaLeadsAPIView):
+    """
+    Idempotent CREATE for Praja entity payloads: same auth and body as POST /entity/, but if a record
+    already exists for (tenant, entity_type, data.praja_id), returns 200 with that record and does not
+    create or enqueue Mixpanel. Otherwise creates exactly like POST /entity/.
+    """
+
+    http_method_names = ["post", "options"]
+
+    def post(self, request):
+        prepared = self._prepare_entity_create_request(request)
+        if isinstance(prepared, Response):
+            return prepared
+
+        tenant = prepared["tenant"]
+        entity_type = prepared["entity_type"]
+        praja_id = prepared["praja_id"]
+        if isinstance(praja_id, str):
+            praja_id = praja_id.strip() or None
+        if not praja_id:
+            return Response(
+                {"error": "praja_id is required in data for entity backfill"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        matching_ids = list(
+            Record.objects.filter(
+                data__praja_id=praja_id,
+                tenant=tenant,
+                entity_type=entity_type,
+            ).values_list("id", flat=True)[:2]
+        )
+        if len(matching_ids) > 1:
+            return Response(
+                {
+                    "error": (
+                        f"Multiple {entity_type}s found with praja_id {praja_id}. "
+                        "Please ensure praja_id is unique."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(matching_ids) == 1:
+            record = Record.objects.get(pk=matching_ids[0])
+            logger.info(
+                "[PrajaLeadsAPI] Backfill skip (already exists): id=%s praja_id=%s tenant=%s",
+                record.id,
+                praja_id,
+                tenant.slug,
+            )
+            payload = dict(RecordSerializer(record).data)
+            payload["backfill_skipped"] = True
+            return Response(payload, status=status.HTTP_200_OK)
+
+        return self._execute_entity_create(prepared)
 
 
 class EntityTypeSchemaListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
