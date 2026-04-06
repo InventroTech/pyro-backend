@@ -4,11 +4,60 @@ from typing import List
 
 from django.db.models import F, QuerySet
 
+_ALLOWED_TIEBREAKER_FIELDS = frozenset({"created_at", "updated_at"})
+
 
 class PullStrategyApplier:
     """
     Applies ordering and cooldown pre-filtering based on pull_strategy.
     """
+
+    @staticmethod
+    def _normalize_tiebreaker_field(strategy: dict) -> str:
+        """From ``pull_strategy.tiebreaker_field``; invalid or missing → ``created_at``."""
+        raw = strategy.get("tiebreaker_field")
+        if isinstance(raw, str):
+            name = raw.strip().lower()
+            if name in _ALLOWED_TIEBREAKER_FIELDS:
+                return name
+        return "created_at"
+
+    @staticmethod
+    def _tiebreaker_is_ascending(strategy: dict) -> bool:
+        """
+        ``pull_strategy.tiebreaker``: ``asc`` / ``desc`` (legacy ``fifo`` / ``lifo``).
+        Missing or unknown → ``desc`` (newest first on ``tiebreaker_field``).
+        """
+        raw = strategy.get("tiebreaker")
+        if raw is None:
+            return False
+        if not isinstance(raw, str):
+            return False
+        t = raw.strip().lower()
+        if t == "asc":
+            return True
+        if t == "desc":
+            return False
+        if t == "fifo":
+            return True
+        if t == "lifo":
+            return False
+        return False
+
+    @staticmethod
+    def _tiebreaker_primary_order_key(strategy: dict) -> str:
+        """Primary ORDER BY fragment for ``tiebreaker_field`` (asc vs desc)."""
+        field = PullStrategyApplier._normalize_tiebreaker_field(strategy)
+        if PullStrategyApplier._tiebreaker_is_ascending(strategy):
+            return field
+        return f"-{field}"
+
+    @staticmethod
+    def _tiebreaker_secondary_order_key(strategy: dict) -> str:
+        """The other model timestamp, descending, when the primary tiebreak column ties."""
+        field = PullStrategyApplier._normalize_tiebreaker_field(strategy)
+        other = "updated_at" if field == "created_at" else "created_at"
+        return f"-{other}"
 
     _NEXT_CALL_READY_WHERE = """
         (
@@ -32,6 +81,8 @@ class PullStrategyApplier:
         call_attempts_expr = "COALESCE((data->>'call_attempts')::int, 0)"
 
         lead_score_for_sort = self._build_score_expr(ignore_score_sources)
+        tiebreaker_key = self._tiebreaker_primary_order_key(strategy)
+        secondary_ts_key = self._tiebreaker_secondary_order_key(strategy)
 
         if include_snoozed_due:
             is_expired_snoozed_expr = """
@@ -55,8 +106,8 @@ class PullStrategyApplier:
                 "is_expired_snoozed",
                 "call_attempts_int",
                 F("lead_score_for_sort").desc(nulls_last=True),
-                "-updated_at",
-                "created_at",
+                tiebreaker_key,
+                secondary_ts_key,
                 "id",
             )
         else:
@@ -70,16 +121,16 @@ class PullStrategyApplier:
             if order_by == "call_attempts_asc":
                 qs = qs.order_by(
                     "call_attempts_int",
-                    "-updated_at",
-                    "created_at",
+                    tiebreaker_key,
+                    secondary_ts_key,
                     "id",
                 )
             else:
                 qs = qs.order_by(
                     "call_attempts_int",
                     F("lead_score_for_sort").desc(nulls_last=True),
-                    "-updated_at",
-                    "created_at",
+                    tiebreaker_key,
+                    secondary_ts_key,
                     "id",
                 )
 
