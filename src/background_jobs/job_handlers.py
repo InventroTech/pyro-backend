@@ -1044,12 +1044,14 @@ def _close_stale_subscription_leads_for_tenant(
 ) -> Tuple[int, str]:
     if days < 1:
         raise ValueError("days must be >= 1")
-    cutoff = timezone.now() - timedelta(days=days)
+    # <--- CHANGED: Added .date() to strip away the clock time
+    cutoff = (timezone.now() - timedelta(days=days)).date()
     now = timezone.now()
     tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
     updated = (
         _close_stale_subscription_leads_queryset(tid)
-        .filter(subscription_ts__lte=cutoff)
+        # <--- CHANGED: Using __date__lte instead of __lte
+        .filter(subscription_ts__date__lte=cutoff)
         .update(data=JsonbSetLeadStageClosed(F("data")), updated_at=now)
     )
     return updated, cutoff.isoformat()
@@ -1058,12 +1060,12 @@ def _close_stale_subscription_leads_for_tenant(
 def _close_stale_subscription_leads_all_tenants(days: int) -> Tuple[int, int, str]:
     if days < 1:
         raise ValueError("days must be >= 1")
-    cutoff = timezone.now() - timedelta(days=days)
+    cutoff = (timezone.now() - timedelta(days=days)).date()
     now = timezone.now()
     n_tenants = Tenant.objects.count()
     total = (
         _close_stale_subscription_leads_queryset(None)
-        .filter(subscription_ts__lte=cutoff)
+        .filter(subscription_ts__date__lte=cutoff)
         .update(data=JsonbSetLeadStageClosed(F("data")), updated_at=now)
     )
     return total, n_tenants, cutoff.isoformat()
@@ -1085,7 +1087,8 @@ class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
         if "days" in payload:
             days = int(payload["days"])
         else:
-            days = 15
+            # <--- CHANGED: Default is now 14 to include Day 1
+            days = 14
         if days < 1:
             raise ValueError("days must be >= 1")
 
@@ -1134,7 +1137,7 @@ class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
             if "days" in p:
                 days = int(p["days"])
             else:
-                days = 15
+                days = 14
         except (TypeError, ValueError):
             return False
         return days >= 1
