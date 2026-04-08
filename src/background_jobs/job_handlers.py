@@ -1044,13 +1044,11 @@ def _close_stale_subscription_leads_for_tenant(
 ) -> Tuple[int, str]:
     if days < 1:
         raise ValueError("days must be >= 1")
-    # <--- CHANGED: Added .date() to strip away the clock time
     cutoff = (timezone.now() - timedelta(days=days)).date()
     now = timezone.now()
     tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
     updated = (
         _close_stale_subscription_leads_queryset(tid)
-        # <--- CHANGED: Using __date__lte instead of __lte
         .filter(subscription_ts__date__lte=cutoff)
         .update(data=JsonbSetLeadStageClosed(F("data")), updated_at=now)
     )
@@ -1087,7 +1085,6 @@ class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
         if "days" in payload:
             days = int(payload["days"])
         else:
-            # <--- CHANGED: Default is now 14 to include Day 1
             days = 14
         if days < 1:
             raise ValueError("days must be >= 1")
