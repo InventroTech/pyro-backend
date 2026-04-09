@@ -47,6 +47,23 @@ def _parse_lead_stage_param(value):
         return set()
     return {v.strip().upper() for v in value.split(',') if v.strip()}
 
+
+def _legacy_get_next_lead_assignee_is_unassigned(value):
+    """GetNextLeadView (SELF TRIAL legacy path): True when ``data.assigned_to`` is still empty / null."""
+    if value is None:
+        return True
+    s = str(value).strip()
+    if s == "":
+        return True
+    return s.lower() in ("null", "none")
+
+
+def _legacy_get_next_lead_assignees_match(stored, requester: str) -> bool:
+    """True when ``assigned_to`` in DB matches the requesting RM (trimmed, case-insensitive)."""
+    if _legacy_get_next_lead_assignee_is_unassigned(stored):
+        return False
+    return str(stored).strip().lower() == str(requester).strip().lower()
+
 from .helper import parse_numeric_lookup, coerce_numeric
 from .assignee_display import build_assigned_to_search_q
 
@@ -1326,7 +1343,137 @@ class GetNextLeadView(APIView):
             return next_call_at <= now
         except Exception:
             return False
-    
+
+    def _not_connected_retry_response(
+        self,
+        *,
+        tenant,
+        user,
+        tenant_membership,
+        user_identifier,
+        user_uuid,
+        eligible_lead_types,
+        eligible_lead_sources,
+        eligible_lead_statuses,
+        log_label: str,
+    ):
+        """
+        When the main queue has no suitable lead: due NOT_CONNECTED/IN_QUEUE retries — assigned-to-me first,
+        else unassigned (filters + routing), lock-assign, then same JSON shape as a normal assign.
+        Returns Response 200 or None.
+        """
+        due_nc = """
+            COALESCE((data->>'call_attempts')::int, 0) BETWEEN 1 AND 6
+            AND UPPER(COALESCE(data->>'lead_stage','')) IN ('NOT_CONNECTED', 'IN_QUEUE')
+            AND (data->>'next_call_at') IS NOT NULL AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
+            AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
+            AND (data->>'next_call_at')::timestamptz <= NOW()
+        """
+        retry_candidate = (
+            Record.objects.filter(tenant=tenant, entity_type="lead", data__assigned_to=user_identifier)
+            .extra(select={"call_attempts_int": "COALESCE((data->>'call_attempts')::int, 0)"}, where=[due_nc])
+            .order_by("call_attempts_int", "updated_at", "id")
+            .first()
+        )
+        if not retry_candidate:
+            unassigned_where = f"""
+                (
+                    (data->>'assigned_to') IS NULL
+                    OR TRIM(COALESCE(data->>'assigned_to', '')) = ''
+                    OR LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) IN ('null', 'none')
+                )
+                AND {due_nc}
+            """
+            qs = Record.objects.filter(tenant=tenant, entity_type="lead").extra(
+                select={"call_attempts_int": "COALESCE((data->>'call_attempts')::int, 0)"},
+                where=[unassigned_where],
+            )
+            if eligible_lead_types:
+                qs = qs.filter(data__affiliated_party__in=eligible_lead_types)
+            if eligible_lead_sources:
+                qs = qs.filter(data__lead_source__in=eligible_lead_sources)
+            if eligible_lead_statuses:
+                qs = qs.filter(data__lead_status__in=eligible_lead_statuses)
+            if user_uuid:
+                qs = apply_routing_rule_to_queryset(qs, tenant=tenant, user_id=user_uuid, queue_type="lead")
+            picked = qs.order_by("call_attempts_int", "updated_at", "id").first()
+            if not picked:
+                return None
+            with transaction.atomic():
+                locked = Record.objects.select_for_update(skip_locked=True).filter(pk=picked.pk).first()
+                if not locked:
+                    return None
+                data = (locked.data or {}).copy()
+                if not _legacy_get_next_lead_assignee_is_unassigned(data.get("assigned_to")):
+                    logger.info(
+                        "%s Unassigned NC retry lost race record_id=%s assigned_to=%s user=%s",
+                        log_label,
+                        locked.pk,
+                        data.get("assigned_to"),
+                        user_identifier,
+                    )
+                    return None
+                data["assigned_to"] = user_identifier
+                data["lead_stage"] = self.ASSIGNED_STATUS
+                if "call_attempts" not in data or data.get("call_attempts") in (None, "", "null"):
+                    data["call_attempts"] = 0
+                locked.data = data
+                locked.updated_at = timezone.now()
+                locked.save(update_fields=["data", "updated_at"])
+                retry_candidate = locked
+
+        serialized_data = RecordSerializer(retry_candidate).data
+        lead_data = retry_candidate.data or {}
+        body = {
+            "id": retry_candidate.id,
+            "name": (retry_candidate.data or {}).get("name", "") if isinstance(retry_candidate.data, dict) else "",
+            "phone_no": lead_data.get("phone_number", ""),
+            "praja_id": lead_data.get("praja_id"),
+            "lead_status": lead_data.get("lead_stage") or "",
+            "lead_score": lead_data.get("lead_score"),
+            "lead_type": lead_data.get("affiliated_party") or lead_data.get("poster"),
+            "assigned_to": lead_data.get("assigned_to"),
+            "attempt_count": lead_data.get("call_attempts", 0),
+            "last_call_outcome": lead_data.get("last_call_outcome"),
+            "next_call_at": lead_data.get("next_call_at"),
+            "do_not_call": lead_data.get("do_not_call", False),
+            "resolved_at": lead_data.get("closure_time"),
+            "premium_poster_count": lead_data.get("premium_poster_count"),
+            "package_to_pitch": lead_data.get("package_to_pitch"),
+            "last_active_date_time": lead_data.get("last_active_date_time"),
+            "latest_remarks": lead_data.get("latest_remarks"),
+            "lead_description": lead_data.get("lead_description"),
+            "affiliated_party": lead_data.get("affiliated_party"),
+            "rm_dashboard": lead_data.get("rm_dashboard"),
+            "user_profile_link": lead_data.get("user_profile_link"),
+            "whatsapp_link": lead_data.get("whatsapp_link"),
+            "lead_source": lead_data.get("lead_source"),
+            "created_at": serialized_data.get("created_at"),
+            "updated_at": serialized_data.get("updated_at"),
+            "data": lead_data,
+            "record": serialized_data,
+        }
+        retry_candidate.refresh_from_db()
+        PostAssignmentActions().run(
+            record=retry_candidate,
+            tenant=tenant,
+            user=user,
+            tenant_membership=tenant_membership,
+            user_identifier=user_identifier,
+            user_uuid=user_uuid,
+            lead_data=retry_candidate.data or {},
+        )
+        ac = body.get("attempt_count", 0)
+        logger.info(
+            "%s Returning not-connected retry lead record_id=%s user=%s call_attempts=%s (attempt %s of max 6).",
+            log_label,
+            retry_candidate.id,
+            user_identifier,
+            ac,
+            ac,
+        )
+        return Response(body, status=status.HTTP_200_OK)
+
     def _order_by_score(self, qs, now_iso=None):
         """
         Order queryset with priority:
@@ -1636,178 +1783,30 @@ class GetNextLeadView(APIView):
                         "[GetNextLead] FALLBACK [daily-limit]: Using not-connected-retry path (not main queue). "
                         "Assigned-to-user not-connected leads only: due (next_call_at <= now), minimum call_attempts (1 first, then 2..6).",
                     )
-                    # Fallback [daily-limit]: only not-connected retry leads assigned to this user, due (next_call_at in the past).
-                    # Return the one with minimum call_attempts so attempt=1 is served before attempt=2.
-                    retry_candidate = Record.objects.filter(
-                        tenant=tenant,
-                        entity_type="lead",
-                        data__assigned_to=user_identifier,
-                    ).extra(
-                        select={
-                            "call_attempts_int": "COALESCE((data->>'call_attempts')::int, 0)",
-                            "lead_stage_norm": "UPPER(COALESCE(data->>'lead_stage',''))",
-                            "last_call_outcome_norm": "LOWER(COALESCE(data->>'last_call_outcome',''))",
-                        },
-                        where=[
-                            """
-                            COALESCE((data->>'call_attempts')::int, 0) >= 1
-                            AND COALESCE((data->>'call_attempts')::int, 0) <= 6
-                            AND UPPER(COALESCE(data->>'lead_stage','')) IN ('NOT_CONNECTED', 'IN_QUEUE')
-                            AND (data->>'next_call_at') IS NOT NULL
-                            AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
-                            AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
-                            AND (data->>'next_call_at')::timestamptz <= NOW()
-                            """
-                        ],
-                    ).order_by(
-                        "call_attempts_int",
-                        "updated_at",
-                        "id",
-                    ).first()
-
-                    if retry_candidate:
-                        attempt_count = (retry_candidate.data or {}).get("call_attempts", 0)
-                        lead_stage = (retry_candidate.data or {}).get("lead_stage", "")
-                        last_outcome = (retry_candidate.data or {}).get("last_call_outcome", "")
-                        logger.info(
-                            "[GetNextLead] FALLBACK [daily-limit]: Found due not-connected retry lead (min call_attempts) lead_id=%s call_attempts=%s lead_stage=%s last_call_outcome=%s next_call_at=%s.",
-                            retry_candidate.id,
-                            attempt_count,
-                            lead_stage,
-                            last_outcome,
-                            (retry_candidate.data or {}).get("next_call_at"),
-                        )
-                    else:
-                        logger.info(
-                            "[GetNextLead] FALLBACK [daily-limit]: No due not-connected retry leads for user=%s "
-                            "(assigned_to=user, call_attempts 1–6, next_call_at <= now, lead_stage=NOT_CONNECTED/IN_QUEUE only).",
-                            user_identifier,
-                        )
-
-                    # If no assigned retry lead found, try unassigned NOT_CONNECTED due leads (e.g. SELF TRIAL where assigned_to is set to null on "not connected")
-                    if not retry_candidate and not debug_mode:
-                        _unassigned_not_connected_where = """
-                            (
-                                (data->>'assigned_to') IS NULL
-                                OR TRIM(COALESCE(data->>'assigned_to', '')) = ''
-                                OR LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) IN ('null', 'none')
-                            )
-                            AND COALESCE((data->>'call_attempts')::int, 0) >= 1
-                            AND COALESCE((data->>'call_attempts')::int, 0) <= 6
-                            AND UPPER(COALESCE(data->>'lead_stage','')) IN ('NOT_CONNECTED', 'IN_QUEUE')
-                            AND (data->>'next_call_at') IS NOT NULL
-                            AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
-                            AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
-                            AND (data->>'next_call_at')::timestamptz <= NOW()
-                            """
-                        unassigned_retry_qs = Record.objects.filter(
-                            tenant=tenant,
-                            entity_type="lead",
-                        ).extra(
-                            select={
-                                "call_attempts_int": "COALESCE((data->>'call_attempts')::int, 0)",
-                            },
-                            where=[_unassigned_not_connected_where],
-                        )
-                        if eligible_lead_types:
-                            unassigned_retry_qs = unassigned_retry_qs.filter(data__affiliated_party__in=eligible_lead_types)
-                        if eligible_lead_sources:
-                            unassigned_retry_qs = unassigned_retry_qs.filter(data__lead_source__in=eligible_lead_sources)
-                        if eligible_lead_statuses:
-                            unassigned_retry_qs = unassigned_retry_qs.filter(data__lead_status__in=eligible_lead_statuses)
-                        if user_uuid:
-                            unassigned_retry_qs = apply_routing_rule_to_queryset(
-                                unassigned_retry_qs,
-                                tenant=tenant,
-                                user_id=user_uuid,
-                                queue_type="lead",
-                            )
-                        unassigned_retry_candidate = unassigned_retry_qs.order_by(
-                            "call_attempts_int",
-                            "updated_at",
-                            "id",
-                        ).first()
-                        if unassigned_retry_candidate:
-                            with transaction.atomic():
-                                candidate_locked = Record.objects.select_for_update(skip_locked=True).filter(
-                                    pk=unassigned_retry_candidate.pk
-                                ).first()
-                                if candidate_locked:
-                                    data = (candidate_locked.data or {}).copy()
-                                    data["assigned_to"] = user_identifier
-                                    data["lead_stage"] = self.ASSIGNED_STATUS
-                                    if "call_attempts" not in data or data.get("call_attempts") in (None, "", "null"):
-                                        data["call_attempts"] = 0
-                                    candidate_locked.data = data
-                                    candidate_locked.updated_at = timezone.now()
-                                    candidate_locked.save(update_fields=["data", "updated_at"])
-                                    retry_candidate = candidate_locked
-                                    logger.info(
-                                        "[GetNextLead] FALLBACK [daily-limit]: Assigned unassigned not-connected retry lead (e.g. SELF TRIAL) lead_id=%s to user=%s.",
-                                        retry_candidate.id,
-                                        user_identifier,
-                                    )
-                        if not retry_candidate:
-                            logger.info(
-                                "[GetNextLead] FALLBACK [daily-limit]: No due not-connected retry leads (next_call_at <= now, call_attempts 1–6).",
-                            )
-                            logger.info("[GetNextLead] END EMPTY: daily limit reached, no due retry leads.")
-                            return Response({}, status=status.HTTP_200_OK)
-
-                    # Candidate is already due (filtered in query by next_call_at <= NOW()) and has minimum call_attempts.
-                    # Serialize and flatten for frontend compatibility (same format as normal GetNextLead)
-                    serialized_data = RecordSerializer(retry_candidate).data
-                    lead_data = retry_candidate.data or {}
-                    flattened_response = {
-                        "id": retry_candidate.id,
-                        "name": (retry_candidate.data or {}).get('name', '') if isinstance(retry_candidate.data, dict) else '',
-                        "phone_no": lead_data.get('phone_number', ''),
-                        "praja_id": lead_data.get('praja_id'),
-                        "lead_status": lead_data.get('lead_stage') or '',
-                        "lead_score": lead_data.get('lead_score'),
-                        "lead_type": lead_data.get('affiliated_party') or lead_data.get('poster'),
-                        "assigned_to": lead_data.get('assigned_to'),
-                        "attempt_count": lead_data.get('call_attempts', 0),
-                        "last_call_outcome": lead_data.get('last_call_outcome'),
-                        "next_call_at": lead_data.get('next_call_at'),
-                        "do_not_call": lead_data.get('do_not_call', False),
-                        "resolved_at": lead_data.get('closure_time'),
-                        "premium_poster_count": lead_data.get('premium_poster_count'),
-                        "package_to_pitch": lead_data.get('package_to_pitch'),
-                        "last_active_date_time": lead_data.get('last_active_date_time'),
-                        "latest_remarks": lead_data.get('latest_remarks'),
-                        "lead_description": lead_data.get('lead_description'),
-                        "affiliated_party": lead_data.get('affiliated_party'),
-                        "rm_dashboard": lead_data.get('rm_dashboard'),
-                        "user_profile_link": lead_data.get('user_profile_link'),
-                        "whatsapp_link": lead_data.get('whatsapp_link'),
-                        "lead_source": lead_data.get('lead_source'),
-                        "created_at": serialized_data.get('created_at'),
-                        "updated_at": serialized_data.get('updated_at'),
-                        "data": lead_data,
-                        "record": serialized_data,
-                    }
-
-                    retry_candidate.refresh_from_db()
-                    PostAssignmentActions().run(
-                        record=retry_candidate,
+                    resp = self._not_connected_retry_response(
                         tenant=tenant,
                         user=user,
                         tenant_membership=tenant_membership,
                         user_identifier=user_identifier,
                         user_uuid=user_uuid,
-                        lead_data=retry_candidate.data or {},
+                        eligible_lead_types=eligible_lead_types,
+                        eligible_lead_sources=eligible_lead_sources,
+                        eligible_lead_statuses=eligible_lead_statuses,
+                        log_label="[GetNextLead] FALLBACK [daily-limit]:",
                     )
+                    if resp:
+                        return resp
 
-                    attempt_count = flattened_response.get("attempt_count", 0)
                     logger.info(
-                        "[GetNextLead] FALLBACK [daily-limit]: Returning not-connected retry lead record_id=%s user=%s call_attempts=%s (attempt %s of max 6).",
-                        retry_candidate.id,
+                        "[GetNextLead] FALLBACK [daily-limit]: No due not-connected retry leads for user=%s "
+                        "(assigned_to=user, call_attempts 1–6, next_call_at <= now, lead_stage=NOT_CONNECTED/IN_QUEUE only).",
                         user_identifier,
-                        attempt_count,
-                        attempt_count,
                     )
-                    return Response(flattened_response, status=status.HTTP_200_OK)
+                    logger.info(
+                        "[GetNextLead] FALLBACK [daily-limit]: No due not-connected retry leads (next_call_at <= now, call_attempts 1–6).",
+                    )
+                    logger.info("[GetNextLead] END EMPTY: daily limit reached, no due retry leads.")
+                    return Response({}, status=status.HTTP_200_OK)
                 else:
                     logger.info(
                         "[GetNextLead] Step 2.5: Under daily limit (assigned_today=%d < daily_limit=%d) or debug_mode - not using fallback.",
@@ -2236,6 +2235,26 @@ class GetNextLeadView(APIView):
 
         if not candidate:
             logger.info(
+                "[GetNextLead] Step 5: No candidate from main queue — trying not-connected retry (SELF TRIAL). "
+                "unassigned_cnt=%d total_unassigned_cnt=%d",
+                unassigned_cnt,
+                total_unassigned_cnt,
+            )
+            if not debug_mode:
+                resp = self._not_connected_retry_response(
+                    tenant=tenant,
+                    user=user,
+                    tenant_membership=tenant_membership,
+                    user_identifier=user_identifier,
+                    user_uuid=user_uuid,
+                    eligible_lead_types=eligible_lead_types,
+                    eligible_lead_sources=eligible_lead_sources,
+                    eligible_lead_statuses=eligible_lead_statuses,
+                    log_label="[GetNextLead] Step 5a:",
+                )
+                if resp:
+                    return resp
+            logger.info(
                 "[GetNextLead] Step 5: No candidate - returning empty. unassigned_cnt=%d total_unassigned_cnt=%d",
                 unassigned_cnt, total_unassigned_cnt,
             )
@@ -2277,13 +2296,21 @@ class GetNextLeadView(APIView):
             data = candidate_locked.data.copy() if candidate_locked.data else {}
             pre_assignment_lead_stage = (data.get("lead_stage") or "").strip().upper()
             previous_assigned_to = data.get('assigned_to')
-            is_fresh_assignment = (
-                previous_assigned_to is None 
-                or previous_assigned_to == '' 
-                or previous_assigned_to == 'null'
-                or previous_assigned_to == 'None'
-            )
-            
+            is_fresh_assignment = _legacy_get_next_lead_assignee_is_unassigned(previous_assigned_to)
+
+            if not is_fresh_assignment and not _legacy_get_next_lead_assignees_match(
+                previous_assigned_to, user_identifier
+            ):
+                logger.info(
+                    "[GetNextLead] Step 5: Lost race — lead already assigned to another user "
+                    "lead_id=%s previous_assigned_to=%s requester=%s",
+                    candidate_locked.id,
+                    previous_assigned_to,
+                    user_identifier,
+                )
+                logger.info("[GetNextLead] END EMPTY: lead claimed by another RM before assign.")
+                return Response({}, status=status.HTTP_200_OK)
+
             data['assigned_to'] = user_identifier
             data['lead_stage'] = self.ASSIGNED_STATUS
             # Ensure call_attempts is always present for downstream logic/UI
@@ -3006,49 +3033,27 @@ class PrajaLeadsAPIView(APIView):
                 context,
                 e,
             )
-    
-    def post(self, request):
+
+    def _prepare_entity_create_request(self, request):
         """
-        CREATE - Create a new lead record.
-        
-        Body:
-        {
-            "name": "Customer Name",
-            "tenant_id": "optional-tenant-uuid",  # Optional: if provided, uses this tenant; otherwise uses default tenant
-            "data": {
-                "praja_id": "PRAJA123",  # Required: unique identifier for Praja system
-                "phone_number": "+1234567890",
-                "lead_score": 85,
-                "lead_stage": "FRESH",   # Optional: defaults to FRESH if not provided
-                "poster": "free"
-            }
-        }
-        
-        Defaults for new leads: lead_stage=FRESH, call_attempts=0 (when not provided).
-        Note: praja_id in the data field is required for UPDATE and DELETE operations.
-        Note: tenant_id is optional. If not provided, uses DEFAULT_TENANT_SLUG from settings.
+        Normalize POST body like CREATE on /entity/. Returns a dict with tenant, entity_type,
+        request_data, praja_id; or a Response on tenant resolution failure.
         """
         tenant, error_response = self._get_tenant(request)
         if error_response:
             return error_response
-        
+
         entity_type = self.get_entity_type(request)
-        
-        # Move name from root level to data if provided (root level takes precedence over data.name)
-        # Also remove tenant_id from request_data since it's read-only in serializer and handled separately
+
         request_data = request.data.copy()
-        request_data.pop('tenant_id', None)  # Remove tenant_id if present, handled separately
+        request_data.pop('tenant_id', None)
         if 'name' in request_data:
-            # Ensure data is a dict
             if 'data' not in request_data:
                 request_data['data'] = {}
             elif not isinstance(request_data['data'], dict):
                 request_data['data'] = {}
-            # Move name from root to data (overwrites if name already exists in data)
             request_data['data']['name'] = request_data.pop('name')
 
-        # Normalize defaults for leads
-        # lead_stage and call_attempts live inside data JSON; set defaults for new leads.
         if entity_type == "lead":
             if 'data' not in request_data or not isinstance(request_data.get('data'), dict):
                 request_data['data'] = {}
@@ -3056,8 +3061,7 @@ class PrajaLeadsAPIView(APIView):
                 request_data['data']['lead_stage'] = 'FRESH'
             if 'call_attempts' not in request_data['data'] or request_data['data'].get('call_attempts') in (None, '', 'null'):
                 request_data['data']['call_attempts'] = 0
-        
-        # RecordSerializer expects entity_type in input for validation
+
         request_data['entity_type'] = entity_type
 
         request_lead_data = request_data.get('data') if isinstance(request_data.get('data'), dict) else {}
@@ -3066,18 +3070,29 @@ class PrajaLeadsAPIView(APIView):
             "[PrajaLeadsAPI] Incoming CREATE: tenant=%s entity_type=%s praja_id=%s",
             getattr(tenant, "slug", None), entity_type, praja_id,
         )
+        return {
+            "tenant": tenant,
+            "entity_type": entity_type,
+            "request_data": request_data,
+            "praja_id": praja_id,
+        }
+
+    def _execute_entity_create(self, prepared):
+        """Persist entity from output of _prepare_entity_create_request (same as POST /entity/)."""
+        tenant = prepared["tenant"]
+        entity_type = prepared["entity_type"]
+        request_data = prepared["request_data"]
+        praja_id = prepared["praja_id"]
 
         serializer = RecordSerializer(data=request_data)
         if serializer.is_valid():
             try:
-                record = serializer.save(
-                    tenant=tenant,
-                    entity_type=entity_type
-                )
+                with transaction.atomic():
+                    record = serializer.save(
+                        tenant=tenant,
+                        entity_type=entity_type
+                    )
             except IntegrityError:
-                # Unique constraint (tenant_id, praja_id) - duplicate or race.
-                # Roll back so we can query for existing_record (DB connection is broken until we roll back).
-                transaction.rollback()
                 existing_record = (
                     Record.objects.filter(
                         data__praja_id=praja_id,
@@ -3104,10 +3119,9 @@ class PrajaLeadsAPIView(APIView):
                     {'error': 'Duplicate (conflict on praja_id)'},
                     status=status.HTTP_409_CONFLICT,
                 )
-            
-            # Get name from data for logging
+
             record_name = (record.data or {}).get('name', '')
-            
+
             logger.info(
                 "[PrajaLeadsAPI] Created %s: id=%s tenant=%s name=%s",
                 entity_type,
@@ -3120,17 +3134,16 @@ class PrajaLeadsAPIView(APIView):
                 tenant,
                 context=f"POST create praja_id={praja_id}",
             )
-            
-            # Send to Mixpanel if entity_type is 'lead'
+
             if entity_type == 'lead':
                 try:
                     from background_jobs.queue_service import get_queue_service
                     from background_jobs.models import JobType
-                    
+
                     lead_data = record.data or {}
                     user_id = lead_data.get('praja_id') or lead_data.get('user_id') or str(record.id)
                     event_name = 'pyro_crm_lead_created'
-                    
+
                     logger.info("=" * 80)
                     logger.info(f"🚀 [Mixpanel] Creating lead {record.id} via PrajaLeadsAPI, sending to Mixpanel")
                     logger.info(f"   Lead ID: {record.id}")
@@ -3142,7 +3155,7 @@ class PrajaLeadsAPIView(APIView):
                     logger.info(f"   Lead Stage: {lead_data.get('lead_stage', 'N/A')}")
                     logger.info(f"   Lead Score: {lead_data.get('lead_score', 'N/A')}")
                     logger.info("=" * 80)
-                    
+
                     properties = {
                         'lead_id': record.id,
                         'tenant_id': str(record.tenant.id) if record.tenant else None,
@@ -3153,8 +3166,7 @@ class PrajaLeadsAPIView(APIView):
                     properties.update(lead_data)
                     if record.pyro_data:
                         properties.update(record.pyro_data)
-                    
-                    # Enqueue background job (single send; do not also send sync to avoid duplicate Mixpanel events)
+
                     queue_service = get_queue_service()
                     queue_service.enqueue_job(
                         job_type=JobType.SEND_MIXPANEL_EVENT,
@@ -3169,19 +3181,44 @@ class PrajaLeadsAPIView(APIView):
                     )
                 except Exception as e:
                     logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
-            
-            # Refresh record from DB to get updated score
+
             record.refresh_from_db()
-            
+
             return Response(
                 RecordSerializer(record).data,
                 status=status.HTTP_201_CREATED
             )
-        
+
         return Response(
             serializer.errors,
             status=status.HTTP_400_BAD_REQUEST
         )
+
+    def post(self, request):
+        """
+        CREATE - Create a new lead record.
+        
+        Body:
+        {
+            "name": "Customer Name",
+            "tenant_id": "optional-tenant-uuid",  # Optional: if provided, uses this tenant; otherwise uses default tenant
+            "data": {
+                "praja_id": "PRAJA123",  # Required: unique identifier for Praja system
+                "phone_number": "+1234567890",
+                "lead_score": 85,
+                "lead_stage": "FRESH",   # Optional: defaults to FRESH if not provided
+                "poster": "free"
+            }
+        }
+        
+        Defaults for new leads: lead_stage=FRESH, call_attempts=0 (when not provided).
+        Note: praja_id in the data field is required for UPDATE and DELETE operations.
+        Note: tenant_id is optional. If not provided, uses DEFAULT_TENANT_SLUG from settings.
+        """
+        prepared = self._prepare_entity_create_request(request)
+        if isinstance(prepared, Response):
+            return prepared
+        return self._execute_entity_create(prepared)
     
     def get(self, request):
         """
@@ -3571,6 +3608,63 @@ class PrajaLeadsAPIView(APIView):
             {'message': f'{entity_type.capitalize()} with praja_id {praja_id} deleted successfully'},
             status=status.HTTP_200_OK
         )
+
+
+class PrajaLeadEntityBackfillAPIView(PrajaLeadsAPIView):
+    """
+    Idempotent CREATE for Praja entity payloads: same auth and body as POST /entity/, but if a record
+    already exists for (tenant, entity_type, data.praja_id), returns 200 with that record and does not
+    create or enqueue Mixpanel. Otherwise creates exactly like POST /entity/.
+    """
+
+    http_method_names = ["post", "options"]
+
+    def post(self, request):
+        prepared = self._prepare_entity_create_request(request)
+        if isinstance(prepared, Response):
+            return prepared
+
+        tenant = prepared["tenant"]
+        entity_type = prepared["entity_type"]
+        praja_id = prepared["praja_id"]
+        if isinstance(praja_id, str):
+            praja_id = praja_id.strip() or None
+        if not praja_id:
+            return Response(
+                {"error": "praja_id is required in data for entity backfill"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        matching_ids = list(
+            Record.objects.filter(
+                data__praja_id=praja_id,
+                tenant=tenant,
+                entity_type=entity_type,
+            ).values_list("id", flat=True)[:2]
+        )
+        if len(matching_ids) > 1:
+            return Response(
+                {
+                    "error": (
+                        f"Multiple {entity_type}s found with praja_id {praja_id}. "
+                        "Please ensure praja_id is unique."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(matching_ids) == 1:
+            record = Record.objects.get(pk=matching_ids[0])
+            logger.info(
+                "[PrajaLeadsAPI] Backfill skip (already exists): id=%s praja_id=%s tenant=%s",
+                record.id,
+                praja_id,
+                tenant.slug,
+            )
+            payload = dict(RecordSerializer(record).data)
+            payload["backfill_skipped"] = True
+            return Response(payload, status=status.HTTP_200_OK)
+
+        return self._execute_entity_create(prepared)
 
 
 class EntityTypeSchemaListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
@@ -4594,7 +4688,7 @@ class ScoringRuleListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
     """
     permission_classes = [IsTenantAuthenticated]
     serializer_class = ScoringRuleModelSerializer
-    pagination_class = MetaPageNumberPagination
+    # pagination_class = MetaPageNumberPagination
     
     def get_queryset(self):
         """Return rules filtered by tenant and optionally by entity_type."""

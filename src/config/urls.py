@@ -22,7 +22,7 @@ from drf_spectacular.views import (
     SpectacularRedocView,
     SpectacularSwaggerView,
 )
-from crm_records.views import PrajaLeadsAPIView
+from crm_records.views import PrajaLeadsAPIView, PrajaLeadEntityBackfillAPIView
 
 def trigger_error(request):
     division_by_zero = 1 / 0
@@ -34,7 +34,6 @@ urlpatterns = [
     path('auth/', include('authentication.urls')),
     path('membership/', include('authz.urls')),
     path('cron-jobs/',include('cron_jobs.urls')),
-    path('crm/', include('crm.urls')),
     path('crm-records/', include('crm_records.urls')),
     path('jobs/', include('background_jobs.urls')),
     path('accounts/', include('accounts.urls')),
@@ -47,6 +46,7 @@ urlpatterns = [
     
     # Top-level entity endpoint (from crm_records)
     path('entity/', PrajaLeadsAPIView.as_view(), name='entity-api'),
+    path('entity/backfill/', PrajaLeadEntityBackfillAPIView.as_view(), name='entity-backfill-api'),
     
     # OpenAPI schema
     path("api/schema/", SpectacularAPIView.as_view(

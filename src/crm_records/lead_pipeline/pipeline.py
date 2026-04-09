@@ -335,12 +335,13 @@ class LeadPipeline:
         eligible_lead_statuses = resolved_user.eligible_lead_statuses
 
         # Retry ordering for sales leads:
-        # min call_attempts -> max lead_score -> LIFO (updated_at desc).
+        # min call_attempts -> max lead_score -> tiebreak created_at desc.
         retry_strategy = {
             "order_by": "score_desc",
             "include_snoozed_due": False,
             "ignore_score_for_sources": [],
-            "tiebreaker": "lifo",
+            "tiebreaker": "desc",
+            "tiebreaker_field": "created_at",
         }
 
         # 1) Assigned-to-me retry candidate (legacy code does NOT apply lead filters here).

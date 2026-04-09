@@ -1,5 +1,20 @@
+from background_jobs.models import BackgroundJob
+from crm_records.models import (
+    ApiSecretKey,
+    Bucket,
+    CallAttemptMatrix,
+    EntityTypeSchema,
+    EventLog,
+    PartnerEvent,
+    Record,
+    RuleExecutionLog,
+    RuleSet,
+    ScoringRule,
+    UserBucketAssignment,
+)
+from scheduler.models import ScheduledTask, TaskPolicy
 from support_ticket.models import SupportTicket
-from crm_records.models import Record
+from whatsapp.models import WhatsAppTemplate
 
 from .registry import register
 
@@ -30,3 +45,242 @@ register(
     snapshot_strategy="minimal",
 )
 
+register(
+    ApiSecretKey,
+    track_fields=[
+        "secret",
+        "secret_key_last4",
+        "tenant_id",
+        "description",
+        "is_active",
+        "last_used_at",
+        "created_at",
+        "updated_at",
+    ],
+    redact_fields={"secret"},
+    snapshot_strategy="minimal",
+)
+
+register(
+    BackgroundJob,
+    track_fields=[
+        "job_type",
+        "status",
+        "priority",
+        "payload",
+        "attempts",
+        "max_attempts",
+        "last_error",
+        "scheduled_at",
+        "locked_by",
+        "locked_at",
+        "completed_at",
+        "result",
+        "tenant_id",
+        "created_at",
+        "updated_at",
+    ],
+    redact_fields=set(),
+    snapshot_strategy="minimal",
+)
+
+register(
+    Bucket,
+    track_fields=[
+        "name",
+        "slug",
+        "description",
+        "filter_conditions",
+        "is_system",
+        "is_active",
+        "tenant_id",
+        "created_at",
+        "updated_at",
+    ],
+    redact_fields=set(),
+    snapshot_strategy="minimal",
+)
+
+register(
+    CallAttemptMatrix,
+    track_fields=[
+        "lead_type",
+        "max_call_attempts",
+        "sla_days",
+        "min_time_between_calls_hours",
+        "tenant_id",
+        "created_at",
+        "updated_at",
+    ],
+    redact_fields=set(),
+    snapshot_strategy="minimal",
+)
+
+register(
+    EntityTypeSchema,
+    track_fields=[
+        "entity_type",
+        "attributes",
+        "rules",
+        "description",
+        "tenant_id",
+        "created_at",
+        "updated_at",
+    ],
+    redact_fields=set(),
+    snapshot_strategy="minimal",
+)
+
+register(
+    EventLog,
+    track_fields=[
+        "record_id",
+        "event",
+        "payload",
+        "timestamp",
+        "tenant_id",
+        "created_at",
+        "updated_at",
+    ],
+    redact_fields=set(),
+    snapshot_strategy="minimal",
+)
+
+register(
+    PartnerEvent,
+    track_fields=[
+        "partner_slug",
+        "event",
+        "payload",
+        "status",
+        "record_id",
+        "job_id",
+        "processed_at",
+        "error_message",
+        "tenant_id",
+        "created_at",
+        "updated_at",
+    ],
+    redact_fields=set(),
+    snapshot_strategy="minimal",
+)
+
+register(
+    RuleExecutionLog,
+    track_fields=[
+        "record_id",
+        "rule_id",
+        "event_name",
+        "matched",
+        "actions",
+        "errors",
+        "duration_ms",
+        "tenant_id",
+        "created_at",
+        "updated_at",
+    ],
+    redact_fields=set(),
+    snapshot_strategy="minimal",
+)
+
+register(
+    RuleSet,
+    track_fields=[
+        "event_name",
+        "condition",
+        "actions",
+        "enabled",
+        "description",
+        "tenant_id",
+        "created_at",
+        "updated_at",
+    ],
+    redact_fields=set(),
+    snapshot_strategy="minimal",
+)
+
+register(
+    ScheduledTask,
+    track_fields=[
+        "content_type_id",
+        "object_id",
+        "action",
+        "policy_id",
+        "status",
+        "due_at",
+        "priority",
+        "attempts",
+        "max_attempts",
+        "locked_by",
+        "locked_at",
+        "payload",
+        "tenant_id",
+        "created_at",
+        "updated_at",
+    ],
+    redact_fields=set(),
+    snapshot_strategy="minimal",
+)
+
+register(
+    ScoringRule,
+    track_fields=[
+        "entity_type",
+        "attribute",
+        "data",
+        "weight",
+        "order",
+        "is_active",
+        "description",
+        "tenant_id",
+        "created_at",
+        "updated_at",
+    ],
+    redact_fields=set(),
+    snapshot_strategy="minimal",
+)
+
+register(
+    TaskPolicy,
+    track_fields=[
+        "key",
+        "intervals",
+        "max_attempts",
+        "business_hours_only",
+        "timezone",
+        "tenant_id",
+        "created_at",
+        "updated_at",
+    ],
+    redact_fields=set(),
+    snapshot_strategy="minimal",
+)
+
+register(
+    UserBucketAssignment,
+    track_fields=[
+        "user_id",
+        "bucket_id",
+        "priority",
+        "pull_strategy",
+        "is_active",
+        "tenant_id",
+        "created_at",
+        "updated_at",
+    ],
+    redact_fields=set(),
+    snapshot_strategy="minimal",
+)
+
+register(
+    WhatsAppTemplate,
+    track_fields=[
+        "title",
+        "description",
+        "tenant_id",
+        "created_at",
+        "updated_at",
+    ],
+    redact_fields=set(),
+    snapshot_strategy="minimal",
+)

@@ -1,7 +1,6 @@
 from .core_factory import TenantFactory
 from .user_factory import UserFactory, SupabaseAuthUserFactory
 from .authz_factory import RoleFactory, TenantMembershipFactory
-from .crm_factory import LeadFactory
 from .crm_records_factory import (
     RecordFactory,
     EventLogFactory,
@@ -27,7 +26,6 @@ __all__ = [
     "SupabaseAuthUserFactory",
     "RoleFactory",
     "TenantMembershipFactory",
-    "LeadFactory",
     "RecordFactory",
     "EventLogFactory",
     "EntityTypeSchemaFactory",
