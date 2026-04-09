@@ -1354,9 +1354,7 @@ class JobHandlerRegistry:
         self.register_handler(JobType.PARTNER_LEAD_ASSIGN, PartnerLeadAssignJobHandler())
         self.register_handler(JobType.UNASSIGN_SNOOZED_LEADS, UnassignSnoozedLeadsJobHandler())
         self.register_handler(JobType.RELEASE_LEADS_AFTER_12H, ReleaseLeadsAfter12hJobHandler())
-<<<<<<< HEAD
         self.register_handler(JobType.SYNC_ENTITY_SCHEMAS, SyncEntitySchemasHandler())
-=======
         self.register_handler(
             JobType.CLOSE_STALE_SUBSCRIPTION_LEADS, CloseStaleSubscriptionLeadsJobHandler()
         )
@@ -1364,7 +1362,6 @@ class JobHandlerRegistry:
             JobType.SNOOZED_TO_NOT_CONNECTED_MIDNIGHT,
             SnoozedToNotConnectedMidnightJobHandler(),
         )
->>>>>>> 44caae5c238de77ef6ba51ec19bd0a168032e8e3
         # Praja handler removed - now using MixpanelService instead
         # self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
     
