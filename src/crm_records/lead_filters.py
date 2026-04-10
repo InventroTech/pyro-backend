@@ -86,8 +86,12 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
                 key__in=[USER_KV_DAILY_LIMIT_KEY, USER_KV_GROUP_ID_KEY],
             )
             kv_map = {row.key: row.value for row in kv_settings}
-            if isinstance(kv_map.get(USER_KV_DAILY_LIMIT_KEY), int):
-                daily_limit = kv_map.get(USER_KV_DAILY_LIMIT_KEY)
+            _dl = kv_map.get(USER_KV_DAILY_LIMIT_KEY)
+            if _dl is not None and not isinstance(_dl, bool):
+                try:
+                    daily_limit = int(_dl)
+                except (TypeError, ValueError):
+                    pass
 
             group = None
             group_id = kv_map.get(USER_KV_GROUP_ID_KEY)
