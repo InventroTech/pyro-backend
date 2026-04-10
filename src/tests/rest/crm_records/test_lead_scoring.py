@@ -12,7 +12,7 @@ from rest_framework.test import APIClient
 from background_jobs.job_handlers import LeadScoringJobHandler, LeadScoringChunkJobHandler
 from background_jobs.models import BackgroundJob, JobType, JobStatus
 from crm_records.models import Record, ScoringRule
-from crm_records.scoring import score_all_records_for_tenant
+from crm_records.scoring import calculate_lead_score, score_all_records_for_tenant
 from tests.factories import RecordFactory, TenantFactory
 
 
@@ -40,6 +40,128 @@ def _poster_free_rule(tenant, weight=42.0):
         order=0,
         is_active=True,
     )
+
+
+@pytest.mark.django_db
+class ScoringNullOperatorTests(TestCase):
+    """isNull / isNotNull and == with literal null/none string (not JSON null)."""
+
+    def setUp(self):
+        self.tenant = TenantFactory(slug="score-tenant-null-op")
+
+    def test_is_null_matches_missing_field(self):
+        ScoringRule.objects.create(
+            tenant=self.tenant,
+            entity_type="lead",
+            attribute="data.optional_tag",
+            data={"operator": "isNull", "value": ""},
+            weight=3.0,
+            order=0,
+            is_active=True,
+        )
+        lead = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "name": "A",
+                "praja_id": "NULL1",
+                "lead_stage": "FRESH",
+            },
+        )
+        self.assertEqual(calculate_lead_score(lead), 3.0)
+
+    def test_is_null_no_match_when_field_present(self):
+        ScoringRule.objects.create(
+            tenant=self.tenant,
+            entity_type="lead",
+            attribute="data.poster",
+            data={"operator": "isNull", "value": ""},
+            weight=9.0,
+            order=0,
+            is_active=True,
+        )
+        lead = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "poster": "free",
+                "praja_id": "NULL2",
+                "lead_stage": "FRESH",
+            },
+        )
+        self.assertEqual(calculate_lead_score(lead), 0.0)
+
+    def test_is_not_null_matches_present_field(self):
+        ScoringRule.objects.create(
+            tenant=self.tenant,
+            entity_type="lead",
+            attribute="data.poster",
+            data={"operator": "isNotNull", "value": ""},
+            weight=4.0,
+            order=0,
+            is_active=True,
+        )
+        lead = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "poster": "x",
+                "praja_id": "NULL3",
+                "lead_stage": "FRESH",
+            },
+        )
+        self.assertEqual(calculate_lead_score(lead), 4.0)
+
+    def test_equals_null_string_matches_missing_not_literal(self):
+        """Typing 'null' in value with == now matches missing/JSON-null, not the word 'null'."""
+        ScoringRule.objects.create(
+            tenant=self.tenant,
+            entity_type="lead",
+            attribute="data.optional_tag",
+            data={"operator": "==", "value": "null"},
+            weight=2.0,
+            order=0,
+            is_active=True,
+        )
+        missing = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={"name": "B", "praja_id": "NULL4", "lead_stage": "FRESH"},
+        )
+        literal = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "optional_tag": "null",
+                "praja_id": "NULL5",
+                "lead_stage": "FRESH",
+            },
+        )
+        self.assertEqual(calculate_lead_score(missing), 2.0)
+        self.assertEqual(calculate_lead_score(literal), 0.0)
+
+    def test_sql_batch_is_null_matches_python(self):
+        ScoringRule.objects.create(
+            tenant=self.tenant,
+            entity_type="lead",
+            attribute="data.optional_tag",
+            data={"operator": "isNull", "value": ""},
+            weight=5.0,
+            order=0,
+            is_active=True,
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={"name": "C", "praja_id": "NULL6", "lead_stage": "FRESH"},
+        )
+        result = score_all_records_for_tenant(
+            self.tenant.id, entity_type="lead", batch_size=10
+        )
+        self.assertEqual(result["total_leads"], 1)
+        self.assertEqual(result["total_score_added"], 5.0)
+        lead = Record.objects.get(data__praja_id="NULL6")
+        self.assertEqual(lead.data.get("lead_score"), 5.0)
 
 
 @pytest.mark.django_db
