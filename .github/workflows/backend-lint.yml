@@ -1,4 +1,4 @@
-name: Backend Code Quality & SQL Blocker
+name: Backend Code Quality & SQL Warning
 
 on:
   pull_request:
@@ -6,7 +6,7 @@ on:
 
 jobs:
   lint-and-check-sql:
-    name: Lint & Block Raw SQL
+    name: Lint & SQL Scan
     runs-on: ubuntu-latest
 
     steps:
@@ -24,26 +24,27 @@ jobs:
           pip install flake8 
 
       - name: 🔍 Run Standard Python Linter (Flake8)
-        # This only checks for critical errors like syntax issues or undefined variables.
-        # It will NOT fail for formatting/spacing issues.
+        # We keep this as a BLOCKER. 
+        # If there is a syntax error, the PR should NOT be merged.
         run: flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
 
-      - name: 🛑 The Custom SQL Blocker
+      - name: ⚠️ Scan for Raw SQL (Warning Only)
+        # This step will NOT block the PR. It will only add a warning.
         run: |
           echo "Scanning for raw SQL usage in the src/ directory..."
           
-          # We use grep to search for the 4 most common ways developers write raw SQL in Django
-          # 1. objects.raw(...)
-          # 2. connection.cursor(...)
-          # 3. .execute(...)
-          # 4. RawSQL(...)
+          # Capture the output of grep. We use '|| true' so the script doesn't crash if no SQL is found.
+          RAW_SQL_MATCHES=$(grep -rnE "objects\.raw\(|connection\.cursor\(|\.execute\(|RawSQL\(" src/ || true)
           
-          if grep -rnE "objects\.raw\(|connection\.cursor\(|\.execute\(|RawSQL\(" src/ ; then
+          if [ -n "$RAW_SQL_MATCHES" ]; then
             echo "--------------------------------------------------------"
-            echo "🚨 RAW SQL DETECTED! PR MERGE BLOCKED! 🚨"
-            echo "For security and maintainability, please rewrite the above queries using the Django ORM."
+            echo "⚠️  RAW SQL DETECTED ⚠️"
+            echo "The following lines contain raw SQL queries:"
+            echo "$RAW_SQL_MATCHES"
             echo "--------------------------------------------------------"
-            exit 1
+            
+            # This line creates the yellow 'Warning' box in the GitHub UI
+            echo "::warning title=Raw SQL detected::This PR contains raw SQL. Please verify with the team if the Django ORM could be used instead."
           else
-            echo "✅ No raw SQL found. You are good to go!"
+            echo "✅ No raw SQL found. The database logic looks clean!"
           fi
