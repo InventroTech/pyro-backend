@@ -105,10 +105,13 @@ def _evaluate_rule(record: Record, rule: Dict[str, Any]) -> bool:
     # Get the actual value from record (checks both direct fields and data JSONB)
     actual_value = _get_attribute_value(record, attr_path)
 
+
     if operator == "isNull":
         return actual_value is None
     if operator == "isNotNull":
         return actual_value is not None
+
+    
 
     if actual_value is None:
         return False
@@ -549,7 +552,11 @@ def get_scoring_rules(entity_type: str, tenant_id: str) -> List[Dict[str, Any]]:
             for rule in scoring_rules:
                 rule_dict = {
                     'attr': rule.attribute,
-                    'operator': rule.data.get('operator', '==') if isinstance(rule.data, dict) else '==',
+                    'operator': (
+                        str(rule.data.get('operator') or '==')
+                        if isinstance(rule.data, dict)
+                        else '=='
+                    ),
                     'value': rule.data.get('value', '') if isinstance(rule.data, dict) else '',
                     'weight': rule.weight,
                 }
