@@ -24,15 +24,12 @@ class JobType(models.TextChoices):
     PARTNER_LEAD_ASSIGN = "partner_lead_assign", "Partner Lead Assign"
     UNASSIGN_SNOOZED_LEADS = "unassign_snoozed_leads", "Unassign Snoozed Leads"
     RELEASE_LEADS_AFTER_12H = "release_leads_after_12h", "Release Leads After 12h"
-<<<<<<< HEAD
     SYNC_ENTITY_SCHEMAS = "sync_entity_schemas", "Sync Entity Schemas"
-=======
     CLOSE_STALE_SUBSCRIPTION_LEADS = "close_stale_subscription_leads", "Close Stale Subscription Leads"
     SNOOZED_TO_NOT_CONNECTED_MIDNIGHT = (
         "snoozed_to_not_connected_midnight",
         "Snoozed To Not Connected (midnight)",
     )
->>>>>>> 44caae5c238de77ef6ba51ec19bd0a168032e8e3
     # Future job types can be added here:
     # SEND_EMAIL = "send_email", "Send Email"
     # GENERATE_REPORT = "generate_report", "Generate Report"
