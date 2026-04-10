@@ -9,13 +9,14 @@ import uuid
 from authz.permissions import IsTenantAuthenticated
 
 from authz.models import TenantMembership
-from .models import UserSettings, RoutingRule
+from .models import UserSettings, RoutingRule, Group
 
 from .serializers import (
     UserSettingsSerializer,
     UserSettingsCreateSerializer,
     LeadTypeAssignmentSerializer,
     RoutingRuleSerializer,
+    GroupSerializer,
 )
 from crm_records.models import Record
 from django.db.models import Q
@@ -246,13 +247,28 @@ class LeadTypeAssignmentView(APIView):
             
             # Get UserSettings if exists, otherwise use defaults (lead_sources and lead_statuses from same row's column)
             setting = user_settings_map.get(tm.id)
-            lead_types = setting.value if setting and isinstance(setting.value, list) else []
+            value_obj = setting.value if setting and isinstance(setting.value, dict) else {}
+            lead_types = []
+            if setting and isinstance(setting.value, list):
+                lead_types = setting.value
+            elif isinstance(value_obj.get("lead_types"), list):
+                lead_types = value_obj.get("lead_types") or []
             daily_target = setting.daily_target if setting else None
             daily_limit = setting.daily_limit if setting else None
-            lead_sources = setting.lead_sources if setting and isinstance(getattr(setting, 'lead_sources', None), list) else []
+            if isinstance(value_obj.get("daily_target"), int):
+                daily_target = value_obj.get("daily_target")
+            if isinstance(value_obj.get("daily_limit"), int):
+                daily_limit = value_obj.get("daily_limit")
+            lead_sources = []
+            if isinstance(value_obj.get("lead_sources"), list):
+                lead_sources = value_obj.get("lead_sources") or []
+            elif setting and isinstance(getattr(setting, 'lead_sources', None), list):
+                lead_sources = setting.lead_sources
             # Safely access lead_statuses - wrap in try-except in case migration hasn't been run yet
             lead_statuses = []
-            if setting:
+            if isinstance(value_obj.get("lead_statuses"), list):
+                lead_statuses = value_obj.get("lead_statuses") or []
+            elif setting:
                 try:
                     lead_statuses_value = setting.lead_statuses
                     if isinstance(lead_statuses_value, list):
@@ -327,6 +343,13 @@ class LeadTypeAssignmentView(APIView):
             lead_statuses = serializer.validated_data.get('lead_statuses') or []
             daily_target = serializer.validated_data.get('daily_target', None)
             daily_limit = serializer.validated_data.get('daily_limit', None)
+            assignment_value = {
+                "lead_types": lead_types,
+                "lead_sources": lead_sources,
+                "lead_statuses": lead_statuses,
+                "daily_target": daily_target,
+                "daily_limit": daily_limit,
+            }
 
             logger.info(f"LeadTypeAssignmentView.post - daily_target={daily_target}, daily_limit={daily_limit}, lead_sources={lead_sources}, lead_statuses={lead_statuses}")
             
@@ -366,19 +389,16 @@ class LeadTypeAssignmentView(APIView):
                 tenant_membership=tenant_membership,
                 key='LEAD_TYPE_ASSIGNMENT',
                 defaults={
-                    'value': lead_types,
+                    'value': assignment_value,
                     'daily_target': daily_target,
                     'daily_limit': daily_limit,
-                    'lead_sources': lead_sources,
-                    **({'lead_statuses': lead_statuses} if hasattr(UserSettings, 'lead_statuses') else {}),
                 }
             )
             if not created:
-                setting.value = lead_types
-                setting.lead_sources = lead_sources
-                # Only set lead_statuses if the field exists (migration has been run)
+                setting.value = assignment_value
+                setting.lead_sources = None
                 if hasattr(setting, 'lead_statuses'):
-                    setting.lead_statuses = lead_statuses
+                    setting.lead_statuses = None
                 if 'daily_target' in serializer.validated_data:
                     setting.daily_target = daily_target
                     logger.info(f"Updating daily_target to {daily_target} for setting id={setting.id}")
@@ -448,7 +468,10 @@ class UserLeadTypesView(APIView):
                 tenant_membership=tenant_membership,
                 key='LEAD_TYPE_ASSIGNMENT'
             )
-            lead_types = setting.value if isinstance(setting.value, list) else []
+            if isinstance(setting.value, dict):
+                lead_types = setting.value.get("lead_types") if isinstance(setting.value.get("lead_types"), list) else []
+            else:
+                lead_types = setting.value if isinstance(setting.value, list) else []
         except UserSettings.DoesNotExist:
             lead_types = []
         
@@ -586,6 +609,52 @@ class LeadStatusesListView(APIView):
         return Response({
             'lead_statuses': lead_statuses_list
         }, status=status.HTTP_200_OK)
+
+
+class LeadStatesListView(APIView):
+    """Get all unique lead states (data.state values) from records for the current tenant"""
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        tenant = request.tenant
+
+        if not tenant:
+            return Response({
+                'lead_states': []
+            }, status=status.HTTP_200_OK)
+
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT DISTINCT data->>'state' as state
+                FROM records
+                WHERE tenant_id = %s
+                  AND entity_type = 'lead'
+                  AND data->>'state' IS NOT NULL
+                  AND data->>'state' != ''
+                  AND data->>'state' != 'null'
+                ORDER BY state
+            """, [tenant.id])
+
+            lead_states_list = [row[0].strip() for row in cursor.fetchall() if row[0] and row[0].strip()]
+
+        return Response({
+            'lead_states': lead_states_list
+        }, status=status.HTTP_200_OK)
+
+
+class QueueTypesListView(APIView):
+    """Get supported queue types for tenant routing/grouping."""
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        return Response(
+            {
+                "queue_types": ["lead", "ticket"]
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class RoutingRuleListCreateView(APIView):
@@ -727,4 +796,53 @@ class RoutingRuleDetailView(APIView):
         tenant = request.tenant
         rule = self.get_object(tenant, pk)
         rule.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class GroupListCreateView(APIView):
+    """List and create tenant groups."""
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        tenant = request.tenant
+        groups = Group.objects.filter(tenant=tenant).order_by("-created_at")
+        serializer = GroupSerializer(groups, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        tenant = request.tenant
+        serializer = GroupSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        group = serializer.save(tenant=tenant)
+        return Response(GroupSerializer(group).data, status=status.HTTP_201_CREATED)
+
+
+class GroupDetailView(APIView):
+    """Retrieve/update/delete a tenant group."""
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def get_object(self, tenant, pk: int) -> Group:
+        return get_object_or_404(Group, tenant=tenant, pk=pk)
+
+    def get(self, request, pk: int):
+        tenant = request.tenant
+        group = self.get_object(tenant, pk)
+        return Response(GroupSerializer(group).data, status=status.HTTP_200_OK)
+
+    def put(self, request, pk: int):
+        tenant = request.tenant
+        group = self.get_object(tenant, pk)
+        serializer = GroupSerializer(group, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk: int):
+        tenant = request.tenant
+        group = self.get_object(tenant, pk)
+        group.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)

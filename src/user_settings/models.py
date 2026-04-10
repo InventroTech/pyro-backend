@@ -36,6 +36,11 @@ class UserSettings(models.Model):
         blank=True,
         help_text="Daily lead pull limit for the user (max leads they can fetch per day)"
     )
+    group_id = models.BigIntegerField(
+        null=True,
+        blank=True,
+        help_text="Assigned Group id for this user's lead assignment"
+    )
     lead_sources = models.JSONField(
         null=True,
         blank=True,
@@ -133,3 +138,35 @@ class RoutingRule(models.Model):
             f"RoutingRule(tenant={self.tenant_id}, tenant_membership={self.tenant_membership_id}, "
             f"queue_type={self.queue_type}, active={self.is_active})"
         )
+
+
+class Group(models.Model):
+    """Tenant-scoped lead assignment group configuration."""
+
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        db_column="tenant_id",
+        help_text="The tenant this group belongs to",
+    )
+    name = models.CharField(
+        max_length=255,
+        help_text="Human-readable group name",
+    )
+    group_data = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Arbitrary group payload (party, lead sources, statuses, limits, etc.)",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "groups"
+        unique_together = [["tenant", "name"]]
+        indexes = [
+            models.Index(fields=["tenant", "name"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Group(tenant={self.tenant_id}, name={self.name})"

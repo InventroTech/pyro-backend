@@ -13,7 +13,7 @@ from typing import List, Optional
 import uuid as uuid_module
 
 from authz.models import TenantMembership
-from user_settings.models import UserSettings
+from user_settings.models import UserSettings, Group
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ class LeadFilters:
     eligible_lead_types: List[str]  # party / affiliated_party values
     eligible_lead_sources: List[str]
     eligible_lead_statuses: List[str]
+    eligible_states: List[str]
     daily_limit: Optional[int]
     user_uuid: Optional[uuid_module.UUID]
     tenant_membership: Optional[TenantMembership]
@@ -39,6 +40,7 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
     eligible_lead_types: List[str] = []
     eligible_lead_sources: List[str] = []
     eligible_lead_statuses: List[str] = []
+    eligible_states: List[str] = []
     daily_limit: Optional[int] = None
     user_uuid = None
     tenant_membership = None
@@ -48,6 +50,7 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
             eligible_lead_types=eligible_lead_types,
             eligible_lead_sources=eligible_lead_sources,
             eligible_lead_statuses=eligible_lead_statuses,
+            eligible_states=eligible_states,
             daily_limit=daily_limit,
             user_uuid=user_uuid,
             tenant_membership=tenant_membership,
@@ -78,38 +81,89 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
             ).first()
             daily_limit = getattr(any_setting, "daily_limit", None) if any_setting else None
 
-            try:
-                setting = UserSettings.objects.get(
-                    tenant=tenant,
-                    tenant_membership=tenant_membership,
-                    key="LEAD_TYPE_ASSIGNMENT",
-                )
-                eligible_lead_types = setting.value if isinstance(setting.value, list) else []
-                eligible_lead_sources = (
-                    setting.lead_sources
-                    if isinstance(getattr(setting, "lead_sources", None), list)
-                    else []
-                )
-                try:
-                    eligible_lead_statuses = (
-                        setting.lead_statuses
-                        if isinstance(getattr(setting, "lead_statuses", None), list)
-                        else []
-                    )
-                except (AttributeError, Exception):
-                    eligible_lead_statuses = []
+            group = None
+            setting_for_group = UserSettings.objects.filter(
+                tenant=tenant,
+                tenant_membership=tenant_membership,
+                key="LEAD_TYPE_ASSIGNMENT",
+            ).first()
+            group_id = getattr(setting_for_group, "group_id", None)
+            if group_id:
+                group = Group.objects.filter(tenant=tenant, id=group_id).first()
+            if group:
+                group_data = group.group_data if isinstance(group.group_data, dict) else {}
+                eligible_lead_types = group_data.get("party") if isinstance(group_data.get("party"), list) else []
+                eligible_lead_sources = group_data.get("lead_sources") if isinstance(group_data.get("lead_sources"), list) else []
+                eligible_lead_statuses = group_data.get("lead_statuses") if isinstance(group_data.get("lead_statuses"), list) else []
+                eligible_states = group_data.get("states") if isinstance(group_data.get("states"), list) else []
                 logger.info(
-                    "[LeadFilters] From DB: lead_types=%s lead_sources=%s lead_statuses=%s daily_limit=%s",
+                    "[LeadFilters] From Group(%s): lead_types=%s lead_sources=%s lead_statuses=%s states=%s daily_limit=%s",
+                    group.name,
                     eligible_lead_types,
                     eligible_lead_sources or "(none)",
                     eligible_lead_statuses or "(none)",
+                    eligible_states or "(none)",
                     daily_limit,
                 )
-            except UserSettings.DoesNotExist:
-                logger.info(
-                    "[LeadFilters] No LEAD_TYPE_ASSIGNMENT for user %s - all queueable leads eligible",
-                    user_identifier,
-                )
+            else:
+                try:
+                    setting = UserSettings.objects.get(
+                        tenant=tenant,
+                        tenant_membership=tenant_membership,
+                        key="LEAD_TYPE_ASSIGNMENT",
+                    )
+                    if isinstance(setting.value, dict):
+                        if isinstance(setting.value.get("daily_limit"), int):
+                            daily_limit = setting.value.get("daily_limit")
+                        eligible_lead_types = (
+                            setting.value.get("lead_types")
+                            if isinstance(setting.value.get("lead_types"), list)
+                            else []
+                        )
+                        eligible_lead_sources = (
+                            setting.value.get("lead_sources")
+                            if isinstance(setting.value.get("lead_sources"), list)
+                            else []
+                        )
+                        eligible_states = (
+                            setting.value.get("states")
+                            if isinstance(setting.value.get("states"), list)
+                            else []
+                        )
+                    else:
+                        eligible_lead_types = setting.value if isinstance(setting.value, list) else []
+                        eligible_lead_sources = (
+                            setting.lead_sources
+                            if isinstance(getattr(setting, "lead_sources", None), list)
+                            else []
+                        )
+                    try:
+                        if isinstance(setting.value, dict):
+                            eligible_lead_statuses = (
+                                setting.value.get("lead_statuses")
+                                if isinstance(setting.value.get("lead_statuses"), list)
+                                else []
+                            )
+                        else:
+                            eligible_lead_statuses = (
+                                setting.lead_statuses
+                                if isinstance(getattr(setting, "lead_statuses", None), list)
+                                else []
+                            )
+                    except (AttributeError, Exception):
+                        eligible_lead_statuses = []
+                    logger.info(
+                        "[LeadFilters] From UserSettings: lead_types=%s lead_sources=%s lead_statuses=%s daily_limit=%s",
+                        eligible_lead_types,
+                        eligible_lead_sources or "(none)",
+                        eligible_lead_statuses or "(none)",
+                        daily_limit,
+                    )
+                except UserSettings.DoesNotExist:
+                    logger.info(
+                        "[LeadFilters] No LEAD_TYPE_ASSIGNMENT for user %s - all queueable leads eligible",
+                        user_identifier,
+                    )
         else:
             logger.warning("[LeadFilters] No TenantMembership for user_identifier=%s", user_identifier)
     except Exception as e:
@@ -119,6 +173,7 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
         eligible_lead_types=eligible_lead_types,
         eligible_lead_sources=eligible_lead_sources,
         eligible_lead_statuses=eligible_lead_statuses,
+        eligible_states=eligible_states,
         daily_limit=daily_limit,
         user_uuid=user_uuid,
         tenant_membership=tenant_membership,

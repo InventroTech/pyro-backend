@@ -8,8 +8,12 @@ from .views import (
     LeadTypesListView,
     LeadSourcesListView,
     LeadStatusesListView,
+    LeadStatesListView,
+    QueueTypesListView,
     RoutingRuleListCreateView,
     RoutingRuleDetailView,
+    GroupListCreateView,
+    GroupDetailView,
 )
 
 urlpatterns = [
@@ -39,6 +43,8 @@ urlpatterns = [
     path("lead-types/", LeadTypesListView.as_view(), name="lead-types-list"),
     path("lead-sources/", LeadSourcesListView.as_view(), name="lead-sources-list"),
     path("lead-statuses/", LeadStatusesListView.as_view(), name="lead-statuses-list"),
+    path("lead-states/", LeadStatesListView.as_view(), name="lead-states-list"),
+    path("queue-types/", QueueTypesListView.as_view(), name="queue-types-list"),
     # Routing rules endpoints (GM / tenant admin)
     path(
         "routing-rules/",
@@ -50,5 +56,7 @@ urlpatterns = [
         RoutingRuleDetailView.as_view(),
         name="routing-rules-detail",
     ),
+    path("groups/", GroupListCreateView.as_view(), name="groups-list-create"),
+    path("groups/<int:pk>/", GroupDetailView.as_view(), name="groups-detail"),
 ]
 

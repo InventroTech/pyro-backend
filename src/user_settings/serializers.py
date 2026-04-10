@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import UserSettings, RoutingRule
+from .models import UserSettings, RoutingRule, Group
 
 
 class UserSettingsSerializer(serializers.ModelSerializer):
@@ -176,4 +176,26 @@ class RoutingRuleSerializer(serializers.ModelSerializer):
         if "conditions" not in attrs or attrs.get("conditions") is None:
             attrs["conditions"] = {}
         return attrs
+
+
+class GroupSerializer(serializers.ModelSerializer):
+    """Serializer for tenant groups."""
+
+    class Meta:
+        model = Group
+        fields = ["id", "tenant", "name", "group_data", "created_at", "updated_at"]
+        read_only_fields = ["id", "tenant", "created_at", "updated_at"]
+
+    def validate_name(self, value: str) -> str:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            raise serializers.ValidationError("Group name is required")
+        return cleaned
+
+    def validate_group_data(self, value):
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("group_data must be a JSON object")
+        return value
 
