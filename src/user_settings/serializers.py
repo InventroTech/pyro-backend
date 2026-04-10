@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import UserSettings, RoutingRule, Group
+from .models import UserSettings, RoutingRule, Group, UserKVSetting
 
 
 class UserSettingsSerializer(serializers.ModelSerializer):
@@ -43,6 +43,15 @@ class UserSettingsCreateSerializer(serializers.ModelSerializer):
         return value
 
 
+class UserKVSettingSerializer(serializers.ModelSerializer):
+    """Serializer for dedicated per-user key/value settings table."""
+
+    class Meta:
+        model = UserKVSetting
+        fields = ["id", "tenant", "tenant_membership", "key", "value", "created_at", "updated_at"]
+        read_only_fields = ["id", "tenant", "created_at", "updated_at"]
+
+
 class LeadTypeAssignmentSerializer(serializers.Serializer):
     """Serializer specifically for lead type assignments"""
     user_id = serializers.CharField()  # Accept both UUID and integer ID
@@ -77,7 +86,6 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
         min_value=0,
         help_text="Daily lead pull limit for the user (max leads they can fetch per day)"
     )
-    
     def validate_user_id(self, value):
         """Validate and normalize user_id - can be UUID string or integer string"""
         # Try to parse as UUID first

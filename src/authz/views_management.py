@@ -10,7 +10,8 @@ from authz.permissions import IsTenantAuthenticated, HasPermissionKey
 from authz.models import Role, TenantMembership
 from .serializers import RoleListSerializer, CreateSyncedRoleSerializer, TenantMembershipUserSerializer
 from .service import create_or_sync_role
-from user_settings.models import Group, UserSettings
+from user_settings.models import Group, UserKVSetting
+from user_settings.services import USER_KV_GROUP_ID_KEY
 
 
 class RolesView(APIView):
@@ -88,10 +89,10 @@ class ListTenantUsersView(APIView):
         data = TenantMembershipUserSerializer(qs, many=True).data
         memberships = list(qs)
         setting_map = {
-            s.tenant_membership_id: s.group_id
-            for s in UserSettings.objects.filter(
+            s.tenant_membership_id: s.value
+            for s in UserKVSetting.objects.filter(
                 tenant=request.tenant,
-                key="LEAD_TYPE_ASSIGNMENT",
+                key=USER_KV_GROUP_ID_KEY,
                 tenant_membership_id__in=[m.id for m in memberships],
             )
         }

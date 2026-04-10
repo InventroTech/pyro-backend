@@ -170,3 +170,40 @@ class Group(models.Model):
 
     def __str__(self) -> str:
         return f"Group(tenant={self.tenant_id}, name={self.name})"
+
+
+class UserKVSetting(models.Model):
+    """
+    Dedicated key/value table for core per-user settings like:
+      - GROUP (group id)
+      - DAILY_LIMIT
+      - DAILY_TARGET
+    """
+
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        db_column="tenant_id",
+        help_text="The tenant this setting belongs to",
+    )
+    tenant_membership = models.ForeignKey(
+        "authz.TenantMembership",
+        on_delete=models.CASCADE,
+        db_column="tenant_membership_id",
+        help_text="The tenant membership this setting belongs to",
+    )
+    key = models.CharField(max_length=100, help_text="Setting key (e.g., 'GROUP', 'DAILY_LIMIT')")
+    value = models.JSONField(null=True, blank=True, help_text="Setting value (JSON)")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "user_kv_settings"
+        unique_together = ["tenant", "tenant_membership", "key"]
+        indexes = [
+            models.Index(fields=["tenant", "tenant_membership", "key"]),
+            models.Index(fields=["tenant", "key"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.tenant_id} - {self.tenant_membership_id} - {self.key}: {self.value}"

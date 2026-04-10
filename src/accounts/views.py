@@ -12,6 +12,7 @@ from authz.permissions import IsTenantAuthenticated, HasTenantRole
 from authz.service import get_authz_role_from_legacy_role  # DEPRECATED: Will be removed
 from authz.models import TenantMembership, Role
 from user_settings.models import Group, UserSettings
+from user_settings.services import upsert_user_kv_settings
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from core.models import Tenant
 
@@ -53,7 +54,6 @@ def _apply_group_and_assignment(
         "daily_target": daily_target,
         "daily_limit": daily_limit,
     }
-
     setting, _ = UserSettings.objects.get_or_create(
         tenant=tenant,
         tenant_membership=membership,
@@ -74,6 +74,15 @@ def _apply_group_and_assignment(
     if daily_limit is not None:
         setting.daily_limit = daily_limit
     setting.save()
+
+    # Maintain simple per-user key/value rows for easy reporting/UI tables.
+    upsert_user_kv_settings(
+        tenant=tenant,
+        tenant_membership=membership,
+        group_id=group.id if group else None,
+        daily_target=setting.daily_target,
+        daily_limit=setting.daily_limit,
+    )
 
     return group
 
