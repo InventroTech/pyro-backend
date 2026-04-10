@@ -1022,7 +1022,7 @@ def execute_rules(event_name: str, record: Record, payload: Dict[str, Any], tena
         RuleExecutionLog.objects.create(
             tenant_id=tenant_id,
             record=record,
-            rule=rule,
+            rule_id=rule.id,
             event_name=event_name,
             matched=log_data["matched"],
             actions=log_data["actions"],
