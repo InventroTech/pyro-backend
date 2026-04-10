@@ -1,15 +1,18 @@
 import re
 import uuid
+from typing import Optional
 from django.db import transaction, connection
 from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, serializers
 from django.conf import settings
-from accounts.serializers import LegacyUserCreateSerializer
+from accounts.serializers import TenantMembershipCreateSerializer, TenantMembershipUpdateSerializer
 from authz.permissions import IsTenantAuthenticated, HasTenantRole
 from authz.service import get_authz_role_from_legacy_role  # DEPRECATED: Will be removed
 from authz.models import TenantMembership, Role
+from user_settings.models import Group, UserSettings
+from user_settings.services import upsert_user_kv_settings
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from core.models import Tenant
 
@@ -21,7 +24,69 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-class LegacyUserCreateView(APIView):
+
+def _apply_group_and_assignment(
+    tenant,
+    membership: TenantMembership,
+    lead_group_name: Optional[str],
+    daily_target,
+    daily_limit,
+):
+    """Bind user setting to group and sync LEAD_TYPE_ASSIGNMENT filters."""
+    group = None
+    normalized_group_name = (lead_group_name or "").strip()
+    if normalized_group_name:
+        group = Group.objects.filter(tenant=tenant, name__iexact=normalized_group_name).first()
+        if not group:
+            raise serializers.ValidationError({"lead_group_name": "Lead group not found for this tenant."})
+    group_data = group.group_data if group else {}
+    lead_types = group_data.get("party") if isinstance(group_data.get("party"), list) else []
+    lead_sources = group_data.get("lead_sources") if isinstance(group_data.get("lead_sources"), list) else []
+    lead_statuses = group_data.get("lead_statuses") if isinstance(group_data.get("lead_statuses"), list) else []
+    states = group_data.get("states") if isinstance(group_data.get("states"), list) else []
+    queue_type = group_data.get("queue_type") if isinstance(group_data.get("queue_type"), str) else None
+    assignment_value = {
+        "lead_types": lead_types,
+        "lead_sources": lead_sources,
+        "lead_statuses": lead_statuses,
+        "states": states,
+        "queue_type": queue_type,
+        "daily_target": daily_target,
+        "daily_limit": daily_limit,
+    }
+    setting, _ = UserSettings.objects.get_or_create(
+        tenant=tenant,
+        tenant_membership=membership,
+        key="LEAD_TYPE_ASSIGNMENT",
+        defaults={
+            "value": assignment_value,
+            "daily_target": daily_target,
+            "daily_limit": daily_limit,
+        },
+    )
+    setting.value = assignment_value
+    setting.lead_sources = None
+    setting.group_id = group.id if group else None
+    if hasattr(setting, "lead_statuses"):
+        setting.lead_statuses = None
+    if daily_target is not None:
+        setting.daily_target = daily_target
+    if daily_limit is not None:
+        setting.daily_limit = daily_limit
+    setting.save()
+
+    # Maintain simple per-user key/value rows for easy reporting/UI tables.
+    upsert_user_kv_settings(
+        tenant=tenant,
+        tenant_membership=membership,
+        group_id=group.id if group else None,
+        daily_target=setting.daily_target,
+        daily_limit=setting.daily_limit,
+    )
+
+    return group
+
+class TenantMembershipCreateView(APIView):
     """
     NEW: Creates TenantMembership directly (no longer creates LegacyUser).
     Body: { name, email, [company_name], [department], [role_id], [uid] }
@@ -31,7 +96,7 @@ class LegacyUserCreateView(APIView):
     # permission_classes = [IsTenantAuthenticated, HasTenantRole("GM")]
     permission_classes = [IsTenantAuthenticated]
     def post(self, request):
-        ser = LegacyUserCreateSerializer(data = request.data, context={'request':request})
+        ser = TenantMembershipCreateSerializer(data = request.data, context={'request':request})
         ser.is_valid(raise_exception=True)
         tenant = request.tenant
         name = ser.validated_data["name"].strip()
@@ -40,6 +105,9 @@ class LegacyUserCreateView(APIView):
         department = (ser.validated_data.get("department") or "").strip() or None
         role_id = ser.validated_data.get("role_id")
         uid = ser.validated_data.get("uid")
+        lead_group_name = ser.validated_data.get("lead_group_name")
+        daily_target = ser.validated_data.get("daily_target")
+        daily_limit = ser.validated_data.get("daily_limit")
 
         if not role_id:
             return Response({
@@ -88,6 +156,14 @@ class LegacyUserCreateView(APIView):
                         membership.user_id = uid
                         membership.is_active = True
                     membership.save()
+
+                group = _apply_group_and_assignment(
+                    tenant=tenant,
+                    membership=membership,
+                    lead_group_name=lead_group_name,
+                    daily_target=daily_target,
+                    daily_limit=daily_limit,
+                )
                 
                 # Invalidate permissions cache so newly updated role (e.g. GM) is seen immediately
                 # without user having to re-login (permission checks use cached role with 10min TTL)
@@ -104,6 +180,8 @@ class LegacyUserCreateView(APIView):
                     'role_id': str(membership.role.id),
                     'uid': str(membership.user_id) if membership.user_id else None,
                     'is_active': membership.is_active,
+                    'lead_group_id': group.id if group else None,
+                    'lead_group_name': group.name if group else None,
                     'created': created
                 }, status=status.HTTP_201_CREATED)
                         
@@ -111,6 +189,77 @@ class LegacyUserCreateView(APIView):
                 logger.error(f"Failed to create TenantMembership for user {email}: {str(e)}", exc_info=True)
                 return Response({
                     'error': f'Failed to create user: {str(e)}'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class TenantMembershipUpdateView(APIView):
+    """
+    Update existing TenantMembership identified by original_email + original_role_id.
+    Body: { name, email, department, role_id, original_email, original_role_id }
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    def post(self, request):
+        ser = TenantMembershipUpdateSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+
+        tenant = request.tenant
+        membership = ser.validated_data["_membership"]
+        name = ser.validated_data["name"].strip()
+        email = ser.validated_data["email"]
+        department = (ser.validated_data.get("department") or "").strip() or None
+        role_id = ser.validated_data["role_id"]
+        lead_group_name = ser.validated_data.get("lead_group_name")
+        daily_target = ser.validated_data.get("daily_target")
+        daily_limit = ser.validated_data.get("daily_limit")
+
+        with transaction.atomic():
+            try:
+                try:
+                    authz_role = Role.objects.get(id=role_id, tenant=tenant)
+                except Role.DoesNotExist:
+                    try:
+                        authz_role = get_authz_role_from_legacy_role(role_id, tenant)
+                    except Exception as e:
+                        logger.error(f"Failed to find role {role_id} for tenant {tenant.id}: {e}")
+                        return Response({
+                            "error": f"Role with ID {role_id} not found for this tenant"
+                        }, status=status.HTTP_400_BAD_REQUEST)
+
+                membership.name = name
+                membership.email = email
+                membership.department = department
+                membership.role = authz_role
+                membership.save()
+
+                group = _apply_group_and_assignment(
+                    tenant=tenant,
+                    membership=membership,
+                    lead_group_name=lead_group_name,
+                    daily_target=daily_target,
+                    daily_limit=daily_limit,
+                )
+
+                if membership.user_id:
+                    drop_permissions_cache(str(membership.user_id), membership.tenant)
+
+                return Response({
+                    "id": str(membership.id),
+                    "name": membership.name,
+                    "email": membership.email,
+                    "tenant_id": str(tenant.id),
+                    "department": membership.department,
+                    "role_id": str(membership.role.id),
+                    "uid": str(membership.user_id) if membership.user_id else None,
+                    "is_active": membership.is_active,
+                    "lead_group_id": group.id if group else None,
+                    "lead_group_name": group.name if group else None,
+                    "updated": True
+                }, status=status.HTTP_200_OK)
+            except Exception as e:
+                logger.error(f"Failed to update TenantMembership {membership.id}: {str(e)}", exc_info=True)
+                return Response({
+                    "error": f"Failed to update user: {str(e)}"
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
 

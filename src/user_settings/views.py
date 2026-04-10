@@ -9,13 +9,21 @@ import uuid
 from authz.permissions import IsTenantAuthenticated
 
 from authz.models import TenantMembership
-from .models import UserSettings, RoutingRule
+from .models import UserSettings, RoutingRule, Group, TenantMemberSetting
 
 from .serializers import (
     UserSettingsSerializer,
     UserSettingsCreateSerializer,
+    TenantMemberSettingSerializer,
     LeadTypeAssignmentSerializer,
     RoutingRuleSerializer,
+    GroupSerializer,
+)
+from .services import (
+    upsert_user_kv_settings,
+    USER_KV_GROUP_ID_KEY,
+    USER_KV_DAILY_LIMIT_KEY,
+    USER_KV_DAILY_TARGET_KEY,
 )
 from crm_records.models import Record
 from django.db.models import Q
@@ -184,45 +192,28 @@ class LeadTypeAssignmentView(APIView):
             role=rm_role
         ).select_related('role')
         
-        # Fetch UserSettings for LEAD_TYPE_ASSIGNMENT (lead_sources stored in same row's lead_sources column)
+        # Fetch per-user KV rows for core settings and resolve group filters from Group table
         tenant_membership_ids = [tm.id for tm in tenant_memberships]
-        user_settings_map = {}
+        core_kv_map = {}
+        groups_by_id = {}
         if tenant_membership_ids:
-            # Check if lead_statuses column exists in database schema
-            from django.db import connection
-            column_exists = False
-            try:
-                with connection.cursor() as cursor:
-                    cursor.execute("""
-                        SELECT column_name 
-                        FROM information_schema.columns 
-                        WHERE table_name='user_settings' AND column_name='lead_statuses'
-                    """)
-                    column_exists = cursor.fetchone() is not None
-            except Exception:
-                column_exists = False
-            
-            # Query based on whether column exists
-            if column_exists:
-                # Column exists, query normally
-                user_settings = UserSettings.objects.filter(
-                    tenant=tenant,
-                    tenant_membership_id__in=tenant_membership_ids,
-                    key='LEAD_TYPE_ASSIGNMENT'
-                )
-            else:
-                # Column doesn't exist, use only() to select only existing fields
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.warning("lead_statuses column doesn't exist in database yet, querying without it")
-                user_settings = UserSettings.objects.filter(
-                    tenant=tenant,
-                    tenant_membership_id__in=tenant_membership_ids,
-                    key='LEAD_TYPE_ASSIGNMENT'
-                ).only('id', 'tenant_id', 'tenant_membership_id', 'key', 'value', 'daily_target', 'daily_limit', 'lead_sources', 'created_at', 'updated_at')
-            
-            for setting in user_settings:
-                user_settings_map[setting.tenant_membership_id] = setting
+            kv_rows = TenantMemberSetting.objects.filter(
+                tenant=tenant,
+                tenant_membership_id__in=tenant_membership_ids,
+                key__in=[USER_KV_GROUP_ID_KEY, USER_KV_DAILY_TARGET_KEY, USER_KV_DAILY_LIMIT_KEY],
+            )
+            for row in kv_rows:
+                core_kv_map.setdefault(row.tenant_membership_id, {})[row.key] = row.value
+            group_ids = {
+                kv.get(USER_KV_GROUP_ID_KEY)
+                for kv in core_kv_map.values()
+                if isinstance(kv.get(USER_KV_GROUP_ID_KEY), int)
+            }
+            if group_ids:
+                groups_by_id = {
+                    g.id: g
+                    for g in Group.objects.filter(tenant=tenant, id__in=group_ids)
+                }
         
         assignments = []
         user_identifiers = []  # For counting leads
@@ -244,22 +235,14 @@ class LeadTypeAssignmentView(APIView):
             # Store mapping: TenantMembership ID -> list of identifiers (UUID and/or email)
             tm_identifier_map[tm.id] = tm_identifiers
             
-            # Get UserSettings if exists, otherwise use defaults (lead_sources and lead_statuses from same row's column)
-            setting = user_settings_map.get(tm.id)
-            lead_types = setting.value if setting and isinstance(setting.value, list) else []
-            daily_target = setting.daily_target if setting else None
-            daily_limit = setting.daily_limit if setting else None
-            lead_sources = setting.lead_sources if setting and isinstance(getattr(setting, 'lead_sources', None), list) else []
-            # Safely access lead_statuses - wrap in try-except in case migration hasn't been run yet
-            lead_statuses = []
-            if setting:
-                try:
-                    lead_statuses_value = setting.lead_statuses
-                    if isinstance(lead_statuses_value, list):
-                        lead_statuses = lead_statuses_value
-                except (AttributeError, Exception):
-                    # Field doesn't exist in database yet (migration not run)
-                    lead_statuses = []
+            tm_core = core_kv_map.get(tm.id, {})
+            group = groups_by_id.get(tm_core.get(USER_KV_GROUP_ID_KEY))
+            group_data = group.group_data if group and isinstance(group.group_data, dict) else {}
+            lead_types = group_data.get("party") if isinstance(group_data.get("party"), list) else []
+            lead_sources = group_data.get("lead_sources") if isinstance(group_data.get("lead_sources"), list) else []
+            lead_statuses = group_data.get("lead_statuses") if isinstance(group_data.get("lead_statuses"), list) else []
+            daily_target = tm_core.get(USER_KV_DAILY_TARGET_KEY) if isinstance(tm_core.get(USER_KV_DAILY_TARGET_KEY), int) else None
+            daily_limit = tm_core.get(USER_KV_DAILY_LIMIT_KEY) if isinstance(tm_core.get(USER_KV_DAILY_LIMIT_KEY), int) else None
 
             # Use TenantMembership id as the primary identifier
             user_id_value = str(tm.id)
@@ -327,6 +310,13 @@ class LeadTypeAssignmentView(APIView):
             lead_statuses = serializer.validated_data.get('lead_statuses') or []
             daily_target = serializer.validated_data.get('daily_target', None)
             daily_limit = serializer.validated_data.get('daily_limit', None)
+            assignment_value = {
+                "lead_types": lead_types,
+                "lead_sources": lead_sources,
+                "lead_statuses": lead_statuses,
+                "daily_target": daily_target,
+                "daily_limit": daily_limit,
+            }
 
             logger.info(f"LeadTypeAssignmentView.post - daily_target={daily_target}, daily_limit={daily_limit}, lead_sources={lead_sources}, lead_statuses={lead_statuses}")
             
@@ -360,53 +350,45 @@ class LeadTypeAssignmentView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            # Create or update the setting (lead_types in value, lead_sources and lead_statuses in their columns)
+            # Create or update the setting in UserSettings
             setting, created = UserSettings.objects.get_or_create(
                 tenant=tenant,
                 tenant_membership=tenant_membership,
                 key='LEAD_TYPE_ASSIGNMENT',
                 defaults={
-                    'value': lead_types,
+                    'value': assignment_value,
                     'daily_target': daily_target,
                     'daily_limit': daily_limit,
-                    'lead_sources': lead_sources,
-                    **({'lead_statuses': lead_statuses} if hasattr(UserSettings, 'lead_statuses') else {}),
                 }
             )
             if not created:
-                setting.value = lead_types
-                setting.lead_sources = lead_sources
-                # Only set lead_statuses if the field exists (migration has been run)
+                setting.value = assignment_value
+                setting.lead_sources = None
                 if hasattr(setting, 'lead_statuses'):
-                    setting.lead_statuses = lead_statuses
+                    setting.lead_statuses = None
                 if 'daily_target' in serializer.validated_data:
                     setting.daily_target = daily_target
-                    logger.info(f"Updating daily_target to {daily_target} for setting id={setting.id}")
                 if 'daily_limit' in serializer.validated_data:
                     setting.daily_limit = daily_limit
-                    logger.info(f"Updating daily_limit to {daily_limit} for setting id={setting.id}")
                 setting.save()
-                lead_statuses_log = getattr(setting, 'lead_statuses', 'N/A (migration not run)')
-                logger.info(f"Saved setting id={setting.id}, daily_target={setting.daily_target}, daily_limit={setting.daily_limit}, lead_sources={setting.lead_sources}, lead_statuses={lead_statuses_log}")
-            
-            # Update daily_target across all user settings (since it's user-level, not key-specific)
-            # Use 'in' check to handle both None and explicit values (including 0)
+
             if 'daily_target' in serializer.validated_data:
                 UserSettings.objects.filter(
                     tenant=tenant,
                     tenant_membership=tenant_membership
                 ).exclude(id=setting.id).update(daily_target=daily_target)
-
-            # Update daily_limit across all user settings (since it's user-level, not key-specific)
             if 'daily_limit' in serializer.validated_data:
                 UserSettings.objects.filter(
                     tenant=tenant,
                     tenant_membership=tenant_membership
                 ).exclude(id=setting.id).update(daily_limit=daily_limit)
-            
-            # Refresh setting from DB to ensure we have the latest values
-            setting.refresh_from_db()
-            
+            upsert_user_kv_settings(
+                tenant=tenant,
+                tenant_membership=tenant_membership,
+                group_id=getattr(setting, "group_id", None),
+                daily_target=setting.daily_target,
+                daily_limit=setting.daily_limit,
+            )
             logger.info(f"LeadTypeAssignmentView.post - Returning response: daily_target={setting.daily_target}, daily_limit={setting.daily_limit}")
             
             # Return TenantMembership id as user_id (consistent with GET response)
@@ -418,8 +400,8 @@ class LeadTypeAssignmentView(APIView):
                 'lead_types': lead_types,
                 'lead_sources': lead_sources,
                 'lead_statuses': lead_statuses,
-                'daily_target': setting.daily_target,  # Return the saved value
-                'daily_limit': setting.daily_limit,  # Return the saved value
+                'daily_target': setting.daily_target,
+                'daily_limit': setting.daily_limit,
                 'created': created
             }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
         
@@ -442,20 +424,56 @@ class UserLeadTypesView(APIView):
                 'lead_types': []
             })
         
-        try:
-            setting = UserSettings.objects.get(
-                tenant=tenant,
-                tenant_membership=tenant_membership,
-                key='LEAD_TYPE_ASSIGNMENT'
-            )
-            lead_types = setting.value if isinstance(setting.value, list) else []
-        except UserSettings.DoesNotExist:
-            lead_types = []
+        kv_rows = TenantMemberSetting.objects.filter(
+            tenant=tenant,
+            tenant_membership=tenant_membership,
+            key__in=[USER_KV_GROUP_ID_KEY],
+        )
+        kv_map = {row.key: row.value for row in kv_rows}
+        group = None
+        group_id = kv_map.get(USER_KV_GROUP_ID_KEY)
+        if isinstance(group_id, int):
+            group = Group.objects.filter(tenant=tenant, id=group_id).first()
+        group_data = group.group_data if group and isinstance(group.group_data, dict) else {}
+        lead_types = group_data.get("party") if isinstance(group_data.get("party"), list) else []
         
         return Response({
             'user_id': str(user_id),
             'lead_types': lead_types
         })
+
+
+class UserCoreKVSettingsView(APIView):
+    """
+    Returns per-user key/value settings for core fields:
+    - GROUP
+    - DAILY_TARGET
+    - DAILY_LIMIT
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request, user_id):
+        tenant = request.tenant
+
+        tenant_membership = None
+        try:
+            tenant_membership = TenantMembership.objects.filter(tenant=tenant, id=int(user_id)).first()
+        except (ValueError, TypeError):
+            tenant_membership = get_tenant_membership_by_user_id(tenant, user_id)
+
+        if not tenant_membership:
+            return Response(
+                {"error": f"TenantMembership not found for user_id={user_id}"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        qs = TenantMemberSetting.objects.filter(
+            tenant=tenant,
+            tenant_membership=tenant_membership,
+            key__in=[USER_KV_GROUP_ID_KEY, USER_KV_DAILY_TARGET_KEY, USER_KV_DAILY_LIMIT_KEY],
+        ).order_by("key")
+        return Response(TenantMemberSettingSerializer(qs, many=True).data, status=status.HTTP_200_OK)
 
 
 class UserLeadsCountView(APIView):
@@ -586,6 +604,52 @@ class LeadStatusesListView(APIView):
         return Response({
             'lead_statuses': lead_statuses_list
         }, status=status.HTTP_200_OK)
+
+
+class LeadStatesListView(APIView):
+    """Get all unique lead states (data.state values) from records for the current tenant"""
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        tenant = request.tenant
+
+        if not tenant:
+            return Response({
+                'lead_states': []
+            }, status=status.HTTP_200_OK)
+
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT DISTINCT data->>'state' as state
+                FROM records
+                WHERE tenant_id = %s
+                  AND entity_type = 'lead'
+                  AND data->>'state' IS NOT NULL
+                  AND data->>'state' != ''
+                  AND data->>'state' != 'null'
+                ORDER BY state
+            """, [tenant.id])
+
+            lead_states_list = [row[0].strip() for row in cursor.fetchall() if row[0] and row[0].strip()]
+
+        return Response({
+            'lead_states': lead_states_list
+        }, status=status.HTTP_200_OK)
+
+
+class QueueTypesListView(APIView):
+    """Get supported queue types for tenant routing/grouping."""
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        return Response(
+            {
+                "queue_types": ["lead", "ticket"]
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class RoutingRuleListCreateView(APIView):
@@ -727,4 +791,53 @@ class RoutingRuleDetailView(APIView):
         tenant = request.tenant
         rule = self.get_object(tenant, pk)
         rule.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class GroupListCreateView(APIView):
+    """List and create tenant groups."""
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        tenant = request.tenant
+        groups = Group.objects.filter(tenant=tenant).order_by("-created_at")
+        serializer = GroupSerializer(groups, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        tenant = request.tenant
+        serializer = GroupSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        group = serializer.save(tenant=tenant)
+        return Response(GroupSerializer(group).data, status=status.HTTP_201_CREATED)
+
+
+class GroupDetailView(APIView):
+    """Retrieve/update/delete a tenant group."""
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def get_object(self, tenant, pk: int) -> Group:
+        return get_object_or_404(Group, tenant=tenant, pk=pk)
+
+    def get(self, request, pk: int):
+        tenant = request.tenant
+        group = self.get_object(tenant, pk)
+        return Response(GroupSerializer(group).data, status=status.HTTP_200_OK)
+
+    def put(self, request, pk: int):
+        tenant = request.tenant
+        group = self.get_object(tenant, pk)
+        serializer = GroupSerializer(group, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk: int):
+        tenant = request.tenant
+        group = self.get_object(tenant, pk)
+        group.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)

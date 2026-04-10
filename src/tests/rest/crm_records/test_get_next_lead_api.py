@@ -11,6 +11,9 @@ Run from project root (where pytest.ini is):
   pytest src/tests/rest/crm_records/test_get_next_lead_api.py -v
   pytest -k get_next_lead -v
 
+Lead filters come from ``Group`` + ``TenantMemberSetting`` KV (see ``get_lead_filters_for_user``),
+not ``UserSettings``. Helpers: ``_seed_sales_pipeline`` (buckets + SALES group), ``_seed_self_trial_legacy``.
+
 Legacy SELF TRIAL path (``lead_statuses`` includes ``"SELF TRIAL"``): main queue is
 fresh-only; Step 5a assigns due not-connected retries when under daily limit (same
 rules as the daily-limit not-connected fallback). ``NOT_CONNECTED`` with
@@ -32,10 +35,161 @@ from crm_records.views import (
     _legacy_get_next_lead_assignees_match,
 )
 from authz import service as authz_service
-from user_settings.models import UserSettings
+from django.core.cache import cache
+from crm_records.models import Bucket, UserBucketAssignment
+from user_settings.models import Group, TenantMemberSetting
+from user_settings.services import USER_KV_DAILY_LIMIT_KEY, USER_KV_GROUP_ID_KEY
 
 from tests.base.test_setup import BaseAPITestCase
 from tests.factories import RecordFactory
+
+
+def _link_membership_to_group(tenant, membership, group, *, daily_limit=None):
+    """Point membership at a Group via KV; optional DAILY_LIMIT int for legacy daily-limit paths."""
+    TenantMemberSetting.objects.update_or_create(
+        tenant=tenant,
+        tenant_membership=membership,
+        key=USER_KV_GROUP_ID_KEY,
+        defaults={"value": group.id},
+    )
+    if daily_limit is not None:
+        TenantMemberSetting.objects.update_or_create(
+            tenant=tenant,
+            tenant_membership=membership,
+            key=USER_KV_DAILY_LIMIT_KEY,
+            defaults={"value": int(daily_limit)},
+        )
+
+
+def _seed_tenant_buckets_for_pipeline(tenant):
+    """
+    Tenant-wide buckets for LeadPipeline (aligned with test_lead_pipeline._seed_tenant_buckets).
+    Required when eligible_lead_statuses does not include SELF TRIAL (SALES / pipeline path).
+    """
+    cache.clear()
+
+    followup = Bucket.objects.create(
+        tenant=tenant,
+        name="Followup Callback",
+        slug="followup_callback",
+        filter_conditions={
+            "lead_stage": ["SNOOZED", "IN_QUEUE"],
+            "call_attempts": {"lt": 6},
+            "next_call_due": True,
+            "assigned_scope": "me",
+            "apply_routing_rule": True,
+            "fallback_assigned_scope": "unassigned",
+        },
+    )
+    fresh = Bucket.objects.create(
+        tenant=tenant,
+        name="Fresh Leads",
+        slug="fresh_leads",
+        filter_conditions={
+            "lead_stage": ["FRESH", "IN_QUEUE"],
+            "call_attempts": {"lte": 0},
+            "next_call_due": False,
+            "assigned_scope": "unassigned",
+            "apply_routing_rule": True,
+            "daily_limit_applies": True,
+        },
+    )
+    not_connected = Bucket.objects.create(
+        tenant=tenant,
+        name="Not Connected Retry",
+        slug="not_connected_retry",
+        filter_conditions={
+            "lead_stage": ["NOT_CONNECTED", "IN_QUEUE"],
+            "call_attempts": {"lt": 6, "gte": 1},
+            "next_call_due": True,
+            "assigned_scope": "me",
+            "apply_routing_rule": True,
+            "fallback_assigned_scope": "unassigned",
+        },
+    )
+
+    strategy_snoozed = {
+        "order_by": "score_desc",
+        "tiebreaker": "desc",
+        "tiebreaker_field": "created_at",
+        "include_snoozed_due": True,
+        "ignore_score_for_sources": [],
+    }
+    strategy_plain = {
+        "order_by": "score_desc",
+        "tiebreaker": "desc",
+        "tiebreaker_field": "created_at",
+        "include_snoozed_due": False,
+        "ignore_score_for_sources": [],
+    }
+
+    UserBucketAssignment.objects.create(
+        tenant=tenant,
+        user=None,
+        bucket=followup,
+        priority=1,
+        pull_strategy=strategy_snoozed,
+    )
+    UserBucketAssignment.objects.create(
+        tenant=tenant,
+        user=None,
+        bucket=fresh,
+        priority=2,
+        pull_strategy=strategy_snoozed,
+    )
+    UserBucketAssignment.objects.create(
+        tenant=tenant,
+        user=None,
+        bucket=not_connected,
+        priority=3,
+        pull_strategy=strategy_plain,
+    )
+    return {"followup": followup, "fresh": fresh, "not_connected": not_connected}
+
+
+def _make_group(tenant, *, name="Test group", party=None, lead_sources=None, lead_statuses=None, states=None):
+    """group_data keys match lead_filters / Group: party, lead_sources, lead_statuses, states."""
+    gd = {}
+    if party is not None:
+        gd["party"] = party
+    if lead_sources is not None:
+        gd["lead_sources"] = lead_sources
+    if lead_statuses is not None:
+        gd["lead_statuses"] = lead_statuses
+    if states is not None:
+        gd["states"] = states
+    return Group.objects.create(tenant=tenant, name=name, group_data=gd)
+
+
+def _seed_self_trial_legacy(tenant, membership, *, lead_sources=None, lead_statuses=None, daily_limit=None):
+    """Legacy GetNextLead path: group must include SELF TRIAL in lead_statuses (not pipeline)."""
+    ls = lead_statuses if lead_statuses is not None else ["SELF TRIAL"]
+    src = lead_sources if lead_sources is not None else []
+    group = _make_group(
+        tenant,
+        name="Self trial legacy",
+        party=[],
+        lead_sources=src,
+        lead_statuses=ls,
+    )
+    _link_membership_to_group(tenant, membership, group, daily_limit=daily_limit)
+    return group
+
+
+def _seed_sales_pipeline(tenant, membership, *, lead_sources=None, lead_statuses=None):
+    """LeadPipeline path: group without SELF TRIAL as sole status + tenant buckets."""
+    ls = lead_statuses if lead_statuses is not None else ["SALES LEAD"]
+    src = lead_sources if lead_sources is not None else []
+    group = _make_group(
+        tenant,
+        name="Sales pipeline",
+        party=[],
+        lead_sources=src,
+        lead_statuses=ls,
+    )
+    _link_membership_to_group(tenant, membership, group)
+    _seed_tenant_buckets_for_pipeline(tenant)
+    return group
 
 
 def _make_jwt_no_tenant(sub: str, email: str) -> str:
@@ -141,6 +295,7 @@ class GetNextLeadAPITests(BaseAPITestCase):
 
     def test_authenticated_with_queueable_lead_returns_lead_and_assigns(self):
         """GET with auth and one queueable unassigned lead returns 200 with lead and assigns it to user."""
+        _seed_sales_pipeline(self.tenant, self.membership)
         RecordFactory(
             tenant=self.tenant,
             entity_type="lead",
@@ -149,6 +304,7 @@ class GetNextLeadAPITests(BaseAPITestCase):
                 "phone_number": "+1234567890",
                 "lead_stage": "IN_QUEUE",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "call_attempts": 0,
             },
         )
@@ -186,7 +342,7 @@ class GetNextLeadAPITests(BaseAPITestCase):
 
 
 class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
-    """Get Next Lead with UserSettings (eligible_lead_sources, daily_limit). RecordFactory + force_authenticate."""
+    """Get Next Lead with Group + TenantMemberSetting KV (replaces UserSettings for lead filters)."""
 
     def setUp(self):
         super().setUp()
@@ -196,12 +352,11 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
 
     def test_with_eligible_lead_sources_only_matching_source_returned(self):
         """When user has eligible_lead_sources, only leads with matching lead_source are returned."""
-        UserSettings.objects.create(
-            tenant=self.tenant,
-            tenant_membership=self.membership,
-            key="LEAD_TYPE_ASSIGNMENT",
-            value=[],  # value is NOT NULL; we filter by lead_sources here
+        _seed_sales_pipeline(
+            self.tenant,
+            self.membership,
             lead_sources=["SALES LEAD"],
+            lead_statuses=["SALES LEAD"],
         )
         RecordFactory(
             tenant=self.tenant,
@@ -210,6 +365,7 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
                 "name": "Sales Lead",
                 "lead_stage": "IN_QUEUE",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "call_attempts": 0,
             },
         )
@@ -220,6 +376,7 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
                 "name": "Self Trial Lead",
                 "lead_stage": "IN_QUEUE",
                 "lead_source": "SELF TRIAL",
+                "lead_status": "SELF TRIAL",
                 "call_attempts": 0,
             },
         )
@@ -232,12 +389,10 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
     def test_daily_limit_fallback_assigns_unassigned_not_connected_when_no_assigned_retry(self):
         """When daily limit is reached and no assigned-to-user retry lead exists, fallback assigns and returns an unassigned NOT_CONNECTED due lead matching filters (e.g. SELF TRIAL)."""
         from django.utils import timezone
-        
-        UserSettings.objects.create(
-            tenant=self.tenant,
-            tenant_membership=self.membership,
-            key="LEAD_TYPE_ASSIGNMENT",
-            value=[],  # value is NOT NULL; we use lead_sources and daily_limit here
+
+        _seed_self_trial_legacy(
+            self.tenant,
+            self.membership,
             lead_sources=["SELF TRIAL"],
             daily_limit=1,
         )
@@ -254,10 +409,11 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
                 "first_assigned_at": now.isoformat(),
                 "assigned_to": self.supabase_uid,
                 "lead_stage": "ASSIGNED",
-                "lead_source": "SELF TRIAL", # Matched to settings
+                "lead_source": "SELF TRIAL",
+                "lead_status": "SELF TRIAL",
             },
         )
-        
+
         # 2. Unassigned NOT_CONNECTED SELF TRIAL: fallback assigns it to user and returns it
         RecordFactory(
             tenant=self.tenant,
@@ -266,10 +422,11 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
                 "name": "Self Trial Not Connected",
                 "lead_stage": "NOT_CONNECTED",
                 "lead_source": "SELF TRIAL",
-                "assigned_to": "",  # 👇 FIX 1: Use empty string instead of None
-                "first_assigned_to": "", # Ensure the system knows it has NEVER been assigned
+                "lead_status": "SELF TRIAL",
+                "assigned_to": "",
+                "first_assigned_to": "",
                 "call_attempts": 1,
-                "next_call_at": past_time.isoformat(), # 👇 FIX 2: Solidly in the past
+                "next_call_at": past_time.isoformat(),
                 "phone_number": "+1234567890",
             },
         )
@@ -289,11 +446,10 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
     def test_daily_limit_fallback_assigns_unassigned_in_queue_due_when_no_assigned_retry(self):
         """When daily limit is reached and no assigned retry lead exists, fallback assigns and returns an unassigned IN_QUEUE due lead (NOT_CONNECTED/IN_QUEUE path)."""
         from django.utils import timezone
-        UserSettings.objects.create(
-            tenant=self.tenant,
-            tenant_membership=self.membership,
-            key="LEAD_TYPE_ASSIGNMENT",
-            value=[],
+
+        _seed_self_trial_legacy(
+            self.tenant,
+            self.membership,
             lead_sources=["SELF TRIAL"],
             daily_limit=1,
         )
@@ -304,8 +460,10 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
             data={
                 "first_assigned_to": self.supabase_uid,
                 "first_assigned_at": now.isoformat(),
+                "assigned_to": self.supabase_uid,
                 "lead_stage": "ASSIGNED",
-                "lead_source": "SALES LEAD",
+                "lead_source": "SELF TRIAL",
+                "lead_status": "SELF TRIAL",
             },
         )
         RecordFactory(
@@ -315,6 +473,7 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
                 "name": "Self Trial IN_QUEUE Due",
                 "lead_stage": "IN_QUEUE",
                 "lead_source": "SELF TRIAL",
+                "lead_status": "SELF TRIAL",
                 "assigned_to": None,
                 "call_attempts": 1,
                 "next_call_at": (now - timezone.timedelta(hours=1)).isoformat(),
@@ -330,13 +489,7 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
 
     def test_only_not_connected_leads_without_daily_limit_returns_empty(self):
         """NOT_CONNECTED with call_attempts=0 is not in the main queue and does not match Step 5a retry (needs attempts 1–6)."""
-        UserSettings.objects.create(
-            tenant=self.tenant,
-            tenant_membership=self.membership,
-            key="LEAD_TYPE_ASSIGNMENT",
-            value=[],
-            lead_statuses=["SELF TRIAL"],
-        )
+        _seed_self_trial_legacy(self.tenant, self.membership)
         RecordFactory(
             tenant=self.tenant,
             entity_type="lead",
@@ -361,15 +514,7 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
         """Legacy SELF TRIAL: under daily limit, no fresh queueable leads — Step 5a returns due unassigned NOT_CONNECTED retry."""
         now = django_timezone.now()
         past = (now - timedelta(hours=3)).isoformat()
-        UserSettings.objects.create(
-            tenant=self.tenant,
-            tenant_membership=self.membership,
-            key="LEAD_TYPE_ASSIGNMENT",
-            value=[],
-            lead_sources=[],
-            lead_statuses=["SELF TRIAL"],
-            daily_limit=50,
-        )
+        _seed_self_trial_legacy(self.tenant, self.membership, daily_limit=50)
         RecordFactory(
             tenant=self.tenant,
             entity_type="lead",
@@ -398,14 +543,7 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
         """Legacy SELF TRIAL: assigned-to-me due NOT_CONNECTED (lower call_attempts) wins over unassigned retry."""
         now = django_timezone.now()
         past = (now - timedelta(hours=1)).isoformat()
-        UserSettings.objects.create(
-            tenant=self.tenant,
-            tenant_membership=self.membership,
-            key="LEAD_TYPE_ASSIGNMENT",
-            value=[],
-            lead_statuses=["SELF TRIAL"],
-            daily_limit=50,
-        )
+        _seed_self_trial_legacy(self.tenant, self.membership, daily_limit=50)
         RecordFactory(
             tenant=self.tenant,
             entity_type="lead",
@@ -494,6 +632,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
         self.url = "/crm-records/leads/next/"
         authz_service._CACHE.clear()
         self.client.force_authenticate(user=self.user)
+        _seed_sales_pipeline(self.tenant, self.membership)
 
     def test_step_3a_i_returns_assigned_snoozed_due_before_fresh(self):
         """Step 3a(i): SNOOZED lead assigned to current user with next_call_at due is returned first (before any fresh lead)."""
@@ -506,6 +645,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "My Snoozed Due",
                 "lead_stage": "SNOOZED",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "assigned_to": self.supabase_uid,
                 "next_call_at": past,
                 "call_attempts": 1,
@@ -518,6 +658,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "Fresh Lead",
                 "lead_stage": "IN_QUEUE",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "call_attempts": 0,
             },
         )
@@ -540,6 +681,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "My IN_QUEUE Due",
                 "lead_stage": "IN_QUEUE",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "assigned_to": self.supabase_uid,
                 "next_call_at": past,
                 "call_attempts": 1,
@@ -552,6 +694,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "Fresh Lead",
                 "lead_stage": "IN_QUEUE",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "call_attempts": 0,
             },
         )
@@ -574,6 +717,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "Unassigned Snoozed Due",
                 "lead_stage": "SNOOZED",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "assigned_to": None,
                 "next_call_at": past,
                 "call_attempts": 1,
@@ -586,6 +730,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "Fresh Lead",
                 "lead_stage": "IN_QUEUE",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "call_attempts": 0,
             },
         )
@@ -608,6 +753,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "Unassigned IN_QUEUE Due",
                 "lead_stage": "IN_QUEUE",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "assigned_to": None,
                 "next_call_at": past,
                 "call_attempts": 1,
@@ -620,6 +766,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "Fresh Lead",
                 "lead_stage": "IN_QUEUE",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "call_attempts": 0,
             },
         )
@@ -642,6 +789,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "Unassigned Snoozed",
                 "lead_stage": "SNOOZED",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "assigned_to": None,
                 "next_call_at": past,
                 "call_attempts": 1,
@@ -654,6 +802,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "My Snoozed Due",
                 "lead_stage": "SNOOZED",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "assigned_to": self.supabase_uid,
                 "next_call_at": past,
                 "call_attempts": 1,
@@ -676,6 +825,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "Snoozed Future",
                 "lead_stage": "SNOOZED",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "assigned_to": self.supabase_uid,
                 "next_call_at": future,
                 "call_attempts": 1,
@@ -688,6 +838,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "Fresh Lead",
                 "lead_stage": "IN_QUEUE",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "call_attempts": 0,
             },
         )
@@ -708,6 +859,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "Snoozed Exhausted",
                 "lead_stage": "SNOOZED",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "assigned_to": None,
                 "next_call_at": past,
                 "call_attempts": 6,
@@ -720,6 +872,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "Fresh Lead",
                 "lead_stage": "IN_QUEUE",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "call_attempts": 0,
             },
         )
@@ -738,6 +891,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "Fresh Only",
                 "lead_stage": "IN_QUEUE",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "call_attempts": 0,
             },
         )
@@ -749,14 +903,10 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
         self.assertEqual(data["data"].get("lead_stage"), "ASSIGNED")
 
     def test_snoozed_due_respects_eligible_lead_sources(self):
-        """Step 3a only returns snoozed leads that match user's eligible_lead_sources (e.g. SALES LEAD)."""
-        UserSettings.objects.create(
-            tenant=self.tenant,
-            tenant_membership=self.membership,
-            key="LEAD_TYPE_ASSIGNMENT",
-            value=[],
-            lead_sources=["SALES LEAD"],
-        )
+        """Pipeline only returns snoozed leads that match group's eligible lead_sources (e.g. SALES LEAD)."""
+        g = Group.objects.get(tenant=self.tenant)
+        g.group_data = {"party": [], "lead_sources": ["SALES LEAD"], "lead_statuses": ["SALES LEAD"]}
+        g.save()
         now = django_timezone.now()
         past = (now - timedelta(hours=1)).isoformat()
         RecordFactory(
@@ -766,6 +916,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "Snoozed Sales",
                 "lead_stage": "SNOOZED",
                 "lead_source": "SALES LEAD",
+                "lead_status": "SALES LEAD",
                 "assigned_to": None,
                 "next_call_at": past,
                 "call_attempts": 1,
@@ -778,6 +929,7 @@ class GetNextLeadSnoozedPriorityTests(BaseAPITestCase):
                 "name": "Snoozed Self Trial",
                 "lead_stage": "SNOOZED",
                 "lead_source": "SELF TRIAL",
+                "lead_status": "SELF TRIAL",
                 "assigned_to": None,
                 "next_call_at": past,
                 "call_attempts": 1,
@@ -830,14 +982,7 @@ class LegacyGetNextLeadRaceConditionTests(BaseAPITestCase):
 
     def test_legacy_step5_main_queue_lost_race_returns_empty(self):
         """Step 5: if lock sees lead already assigned to another RM, return empty and do not save."""
-        UserSettings.objects.create(
-            tenant=self.tenant,
-            tenant_membership=self.membership,
-            key="LEAD_TYPE_ASSIGNMENT",
-            value=[],
-            lead_sources=[],
-            lead_statuses=["SELF TRIAL"],
-        )
+        _seed_self_trial_legacy(self.tenant, self.membership)
         lead = RecordFactory(
             tenant=self.tenant,
             entity_type="lead",
@@ -864,15 +1009,7 @@ class LegacyGetNextLeadRaceConditionTests(BaseAPITestCase):
         """Step 5a unassigned NOT_CONNECTED retry: lost race after lock returns empty; DB unchanged."""
         now = django_timezone.now()
         past = (now - timedelta(hours=3)).isoformat()
-        UserSettings.objects.create(
-            tenant=self.tenant,
-            tenant_membership=self.membership,
-            key="LEAD_TYPE_ASSIGNMENT",
-            value=[],
-            lead_sources=[],
-            lead_statuses=["SELF TRIAL"],
-            daily_limit=50,
-        )
+        _seed_self_trial_legacy(self.tenant, self.membership, daily_limit=50)
         lead = RecordFactory(
             tenant=self.tenant,
             entity_type="lead",

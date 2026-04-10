@@ -22,6 +22,7 @@ class ResolvedUser:
     eligible_lead_types: List[str]
     eligible_lead_sources: List[str]
     eligible_lead_statuses: List[str]
+    eligible_states: List[str]
     daily_limit: Optional[int]
 
 
@@ -43,6 +44,7 @@ class UserResolver:
             eligible_lead_types=filters.eligible_lead_types,
             eligible_lead_sources=filters.eligible_lead_sources,
             eligible_lead_statuses=filters.eligible_lead_statuses,
+            eligible_states=filters.eligible_states,
             daily_limit=filters.daily_limit,
         )
 

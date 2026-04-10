@@ -1,14 +1,16 @@
 from django.urls import path
 from .views import (
     LinkUserUidView,
-    LegacyUserCreateView,
+    TenantMembershipCreateView,
+    TenantMembershipUpdateView,
     AssigneesByRoleView,
     DeleteUserEverywhereView,
     SetupNewTenantView,
 )
 
 urlpatterns = [
-    path("users/legacy/create/", LegacyUserCreateView.as_view(), name="legacy-user-create"),
+    path("users/create/", TenantMembershipCreateView.as_view(), name="tenant-membership-create"),
+    path("users/update/", TenantMembershipUpdateView.as_view(), name="tenant-membership-update"),
     path("users/assignees-by-role/", AssigneesByRoleView.as_view(), name="assignees-by-role"),
     path("link-user-uid/", LinkUserUidView.as_view(), name="link_user_uid"),
     path("delete-user/", DeleteUserEverywhereView.as_view(), name="delete-user-everywhere"),
