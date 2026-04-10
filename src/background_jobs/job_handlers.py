@@ -1282,35 +1282,30 @@ class SyncEntitySchemasHandler(JobHandler):
     """
     
     def process(self, job: BackgroundJob) -> bool:
-        """
-        Process the sync_entity_schemas job.
-        Loops through all tenants and updates their entity definitions based on new records.
-        """
         try:
             start_time = time.time()
             print(f"\n🚀 [ENTITY SYNC JOB] Processing job {job.id}...")
-            
-            tenants = Tenant.objects.all()
-            entity_types_to_track = Record.objects.values_list('entity_type', flat=True).distinct()
+
+            active_pairs = Record.objects.values('tenant_id', 'entity_type').distinct()
+            print(f"🕵️ DEBUG: The worker found {active_pairs.count()} pairs. Logic is running!")
             total_records_processed = 0
             
-            for tenant in tenants:
-                for entity_type in entity_types_to_track:
-                    try:
-                        # Call the "Brain" logic we built earlier!
-                        processed_count = sync_entity_schema(tenant, entity_type)
-                        total_records_processed += processed_count
-                        
-                        if processed_count > 0:
-                            print(f"📋 [ENTITY SYNC JOB] Synced {processed_count} {entity_type}s for {tenant.slug}")
+            for pair in active_pairs:
+                try:
+                    tenant = Tenant.objects.get(id=pair['tenant_id'])
+                    entity_type = pair['entity_type']
+                    
+                    # Now it only runs for combinations that HAVE data
+                    processed_count = sync_entity_schema(tenant, entity_type)
+                    total_records_processed += processed_count
+                    
+                    if processed_count > 0:
+                        print(f"📋 [ENTITY SYNC JOB] Synced {processed_count} {entity_type}s for {tenant.slug}")
                             
-                    except Exception as e:
-                        logger.error(f"Failed to sync {entity_type} for tenant {tenant.id}: {str(e)}")
-                        # We don't raise here so one broken tenant doesn't crash the whole job
+                except Exception as e:
+                    logger.error(f"Failed to sync {pair['entity_type']} for tenant {pair['tenant_id']}: {str(e)}")
             
             execution_time = time.time() - start_time
-            
-            # Store result with debugging information
             job.result = {
                 "success": True,
                 "total_records_processed": total_records_processed,
@@ -1321,7 +1316,7 @@ class SyncEntitySchemasHandler(JobHandler):
             print(f"✅ [ENTITY SYNC JOB] Job {job.id} completed. Processed {total_records_processed} records in {round(execution_time, 3)}s")
             return True
             
-        except Exception as e:
+        except Exception as e:        
             error_msg = f"Entity Schema Sync failed: {str(e)}"
             print(f"❌ [ENTITY SYNC JOB] Job {job.id} failed: {error_msg}")
             logger.error(f"Entity sync job {job.id} failed: {error_msg}")

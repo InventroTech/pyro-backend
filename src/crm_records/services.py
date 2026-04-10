@@ -277,31 +277,30 @@ def sync_entity_schema(tenant, entity_type, chunk_size=1000):
         name=entity_type
     )
 
-    # 1. READ THE BOOKMARK
     last_id = entity_obj.last_processed_record_id or 0
 
-    # 2. FILTER USING THE BOOKMARK (id__gt) AND SORT ASCENDING ('id')
     new_records = Record.objects.filter(
         tenant=tenant,
         entity_type=entity_type,
-        id__gt=last_id  # Only grab records we haven't processed yet!
-    ).order_by('id')[:chunk_size]  # Process oldest to newest
+        id__gt=last_id
+    ).order_by('id')[:chunk_size]
 
     if not new_records.exists():
         return 0
 
     current_fields_list = entity_obj.schema or []
     unique_fields = set(current_fields_list)
+    
+    current_last_id = last_id 
 
     for record in new_records:
         record_data = record.data or {}
         for key in record_data.keys():
             unique_fields.add(key)
+        current_last_id = record.id
 
     entity_obj.schema = list(unique_fields)
-    
-    # 3. UPDATE THE BOOKMARK TO THE HIGHEST ID WE JUST PROCESSED
-    entity_obj.last_processed_record_id = new_records.last().id
+    entity_obj.last_processed_record_id = current_last_id
     
     entity_obj.save()
     
