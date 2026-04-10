@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 
-class LegacyUserCreateSerializer(serializers.Serializer):
+class TenantMembershipCreateSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255)
     email = serializers.EmailField()
     company_name = serializers.CharField(required=False, allow_blank=True)
@@ -48,7 +48,7 @@ class LegacyUserCreateSerializer(serializers.Serializer):
         return attrs
 
 
-class LegacyUserUpdateSerializer(serializers.Serializer):
+class TenantMembershipUpdateSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255)
     email = serializers.EmailField()
     department = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)

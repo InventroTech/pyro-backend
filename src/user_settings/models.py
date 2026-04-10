@@ -172,7 +172,7 @@ class Group(models.Model):
         return f"Group(tenant={self.tenant_id}, name={self.name})"
 
 
-class UserKVSetting(models.Model):
+class TenantMemberSetting(models.Model):
     """
     Dedicated key/value table for core per-user settings like:
       - GROUP (group id)

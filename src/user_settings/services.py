@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from user_settings.models import UserKVSetting
+from user_settings.models import TenantMemberSetting
 
 
 USER_KV_GROUP_ID_KEY = "GROUP"
@@ -26,19 +26,19 @@ def upsert_user_kv_settings(
     but gives a simple 'key' -> 'value' table for quick UI and reporting use cases.
     """
 
-    UserKVSetting.objects.update_or_create(
+    TenantMemberSetting.objects.update_or_create(
         tenant=tenant,
         tenant_membership=tenant_membership,
         key=USER_KV_GROUP_ID_KEY,
         defaults={"value": group_id},
     )
-    UserKVSetting.objects.update_or_create(
+    TenantMemberSetting.objects.update_or_create(
         tenant=tenant,
         tenant_membership=tenant_membership,
         key=USER_KV_DAILY_TARGET_KEY,
         defaults={"value": daily_target},
     )
-    UserKVSetting.objects.update_or_create(
+    TenantMemberSetting.objects.update_or_create(
         tenant=tenant,
         tenant_membership=tenant_membership,
         key=USER_KV_DAILY_LIMIT_KEY,
@@ -52,7 +52,7 @@ def upsert_user_lead_assignment_kv(
     tenant_membership,
     assignment_value,
 ) -> None:
-    UserKVSetting.objects.update_or_create(
+    TenantMemberSetting.objects.update_or_create(
         tenant=tenant,
         tenant_membership=tenant_membership,
         key=USER_KV_LEAD_ASSIGNMENT_KEY,

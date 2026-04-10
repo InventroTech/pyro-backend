@@ -7,7 +7,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, serializers
 from django.conf import settings
-from accounts.serializers import LegacyUserCreateSerializer, LegacyUserUpdateSerializer
+from accounts.serializers import TenantMembershipCreateSerializer, TenantMembershipUpdateSerializer
 from authz.permissions import IsTenantAuthenticated, HasTenantRole
 from authz.service import get_authz_role_from_legacy_role  # DEPRECATED: Will be removed
 from authz.models import TenantMembership, Role
@@ -86,7 +86,7 @@ def _apply_group_and_assignment(
 
     return group
 
-class LegacyUserCreateView(APIView):
+class TenantMembershipCreateView(APIView):
     """
     NEW: Creates TenantMembership directly (no longer creates LegacyUser).
     Body: { name, email, [company_name], [department], [role_id], [uid] }
@@ -96,7 +96,7 @@ class LegacyUserCreateView(APIView):
     # permission_classes = [IsTenantAuthenticated, HasTenantRole("GM")]
     permission_classes = [IsTenantAuthenticated]
     def post(self, request):
-        ser = LegacyUserCreateSerializer(data = request.data, context={'request':request})
+        ser = TenantMembershipCreateSerializer(data = request.data, context={'request':request})
         ser.is_valid(raise_exception=True)
         tenant = request.tenant
         name = ser.validated_data["name"].strip()
@@ -192,7 +192,7 @@ class LegacyUserCreateView(APIView):
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class LegacyUserUpdateView(APIView):
+class TenantMembershipUpdateView(APIView):
     """
     Update existing TenantMembership identified by original_email + original_role_id.
     Body: { name, email, department, role_id, original_email, original_role_id }
@@ -200,7 +200,7 @@ class LegacyUserUpdateView(APIView):
     permission_classes = [IsTenantAuthenticated]
 
     def post(self, request):
-        ser = LegacyUserUpdateSerializer(data=request.data, context={"request": request})
+        ser = TenantMembershipUpdateSerializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
 
         tenant = request.tenant

@@ -9,12 +9,12 @@ import uuid
 from authz.permissions import IsTenantAuthenticated
 
 from authz.models import TenantMembership
-from .models import UserSettings, RoutingRule, Group, UserKVSetting
+from .models import UserSettings, RoutingRule, Group, TenantMemberSetting
 
 from .serializers import (
     UserSettingsSerializer,
     UserSettingsCreateSerializer,
-    UserKVSettingSerializer,
+    TenantMemberSettingSerializer,
     LeadTypeAssignmentSerializer,
     RoutingRuleSerializer,
     GroupSerializer,
@@ -197,7 +197,7 @@ class LeadTypeAssignmentView(APIView):
         core_kv_map = {}
         groups_by_id = {}
         if tenant_membership_ids:
-            kv_rows = UserKVSetting.objects.filter(
+            kv_rows = TenantMemberSetting.objects.filter(
                 tenant=tenant,
                 tenant_membership_id__in=tenant_membership_ids,
                 key__in=[USER_KV_GROUP_ID_KEY, USER_KV_DAILY_TARGET_KEY, USER_KV_DAILY_LIMIT_KEY],
@@ -424,7 +424,7 @@ class UserLeadTypesView(APIView):
                 'lead_types': []
             })
         
-        kv_rows = UserKVSetting.objects.filter(
+        kv_rows = TenantMemberSetting.objects.filter(
             tenant=tenant,
             tenant_membership=tenant_membership,
             key__in=[USER_KV_GROUP_ID_KEY],
@@ -468,12 +468,12 @@ class UserCoreKVSettingsView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        qs = UserKVSetting.objects.filter(
+        qs = TenantMemberSetting.objects.filter(
             tenant=tenant,
             tenant_membership=tenant_membership,
             key__in=[USER_KV_GROUP_ID_KEY, USER_KV_DAILY_TARGET_KEY, USER_KV_DAILY_LIMIT_KEY],
         ).order_by("key")
-        return Response(UserKVSettingSerializer(qs, many=True).data, status=status.HTTP_200_OK)
+        return Response(TenantMemberSettingSerializer(qs, many=True).data, status=status.HTTP_200_OK)
 
 
 class UserLeadsCountView(APIView):

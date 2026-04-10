@@ -1,5 +1,5 @@
 """
-Lead filters from Group + UserKVSetting only.
+Lead filters from Group + TenantMemberSetting only.
 All configuration is read from the database (no frontend overrides).
 Routing rules are separate: applied via apply_routing_rule_to_queryset(tenant, user_id, queue_type) using user_uuid from here.
 
@@ -13,7 +13,7 @@ from typing import List, Optional
 import uuid as uuid_module
 
 from authz.models import TenantMembership
-from user_settings.models import Group, UserKVSetting
+from user_settings.models import Group, TenantMemberSetting
 from user_settings.services import (
     USER_KV_DAILY_LIMIT_KEY,
     USER_KV_GROUP_ID_KEY,
@@ -80,7 +80,7 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
             ).first()
 
         if tenant_membership:
-            kv_settings = UserKVSetting.objects.filter(
+            kv_settings = TenantMemberSetting.objects.filter(
                 tenant=tenant,
                 tenant_membership=tenant_membership,
                 key__in=[USER_KV_DAILY_LIMIT_KEY, USER_KV_GROUP_ID_KEY],

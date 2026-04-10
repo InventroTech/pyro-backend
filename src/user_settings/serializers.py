@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import UserSettings, RoutingRule, Group, UserKVSetting
+from .models import UserSettings, RoutingRule, Group, TenantMemberSetting
 
 
 class UserSettingsSerializer(serializers.ModelSerializer):
@@ -43,11 +43,11 @@ class UserSettingsCreateSerializer(serializers.ModelSerializer):
         return value
 
 
-class UserKVSettingSerializer(serializers.ModelSerializer):
-    """Serializer for dedicated per-user key/value settings table."""
+class TenantMemberSettingSerializer(serializers.ModelSerializer):
+    """Serializer for dedicated per-tenant-member settings table."""
 
     class Meta:
-        model = UserKVSetting
+        model = TenantMemberSetting
         fields = ["id", "tenant", "tenant_membership", "key", "value", "created_at", "updated_at"]
         read_only_fields = ["id", "tenant", "created_at", "updated_at"]
 
