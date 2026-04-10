@@ -1,13 +1,16 @@
 from rest_framework import serializers
 
 
-class LegacyUserCreateSerializer(serializers.Serializer):
+class TenantMembershipCreateSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255)
     email = serializers.EmailField()
     company_name = serializers.CharField(required=False, allow_blank=True)
     department = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)
     role_id = serializers.UUIDField(required=False, allow_null=True)
     uid = serializers.UUIDField(required=False, allow_null=True)
+    lead_group_name = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)
+    daily_target = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    daily_limit = serializers.IntegerField(required=False, allow_null=True, min_value=0)
 
     def validate(self, attrs):
         req = self.context['request']
@@ -42,6 +45,54 @@ class LegacyUserCreateSerializer(serializers.Serializer):
                     'email': 'User with this email already exists in this tenant.'
                 })
 
+        return attrs
+
+
+class TenantMembershipUpdateSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=255)
+    email = serializers.EmailField()
+    department = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)
+    role_id = serializers.UUIDField(required=True)
+    original_email = serializers.EmailField(required=True)
+    original_role_id = serializers.UUIDField(required=True)
+    lead_group_name = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)
+    daily_target = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    daily_limit = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+
+    def validate(self, attrs):
+        req = self.context["request"]
+        tenant = getattr(req, "tenant", None)
+        if not tenant:
+            raise serializers.ValidationError("Tenant is not resolved")
+
+        from authz.models import TenantMembership
+
+        attrs["_tenant"] = tenant
+        attrs["email"] = attrs["email"].strip().lower()
+        attrs["original_email"] = attrs["original_email"].strip().lower()
+
+        existing_membership = TenantMembership.objects.filter(
+            tenant=tenant,
+            email=attrs["original_email"],
+            role_id=attrs["original_role_id"],
+        ).first()
+
+        if not existing_membership:
+            raise serializers.ValidationError({
+                "original_email": "Original user membership not found for this tenant."
+            })
+
+        conflict = TenantMembership.objects.filter(
+            tenant=tenant,
+            email=attrs["email"],
+            role_id=attrs["role_id"],
+        ).exclude(id=existing_membership.id).exists()
+        if conflict:
+            raise serializers.ValidationError({
+                "email": "User with this email and role already exists in this tenant."
+            })
+
+        attrs["_membership"] = existing_membership
         return attrs
 
 

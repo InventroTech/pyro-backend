@@ -1,5 +1,5 @@
 """
-Lead filters: party (lead types), lead source, lead status (from UserSettings table only).
+Lead filters from Group + TenantMemberSetting only.
 All configuration is read from the database (no frontend overrides).
 Routing rules are separate: applied via apply_routing_rule_to_queryset(tenant, user_id, queue_type) using user_uuid from here.
 
@@ -13,18 +13,23 @@ from typing import List, Optional
 import uuid as uuid_module
 
 from authz.models import TenantMembership
-from user_settings.models import UserSettings
+from user_settings.models import Group, TenantMemberSetting
+from user_settings.services import (
+    USER_KV_DAILY_LIMIT_KEY,
+    USER_KV_GROUP_ID_KEY,
+)
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class LeadFilters:
-    """Lead filter configuration for a user from UserSettings table (party, sources, statuses, daily_limit)."""
+    """Lead filter configuration for a user from Group/KV settings."""
 
     eligible_lead_types: List[str]  # party / affiliated_party values
     eligible_lead_sources: List[str]
     eligible_lead_statuses: List[str]
+    eligible_states: List[str]
     daily_limit: Optional[int]
     user_uuid: Optional[uuid_module.UUID]
     tenant_membership: Optional[TenantMembership]
@@ -33,12 +38,13 @@ class LeadFilters:
 def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
     """
     Load lead filters for the given user from the database only (no frontend params).
-    UserSettings table: eligible_lead_types, eligible_lead_sources, eligible_lead_statuses, daily_limit, user_uuid.
+    Group/KV settings: eligible_lead_types, eligible_lead_sources, eligible_lead_statuses, states, daily_limit, user_uuid.
     Routing is separate: use user_uuid with apply_routing_rule_to_queryset(tenant, user_id, queue_type).
     """
     eligible_lead_types: List[str] = []
     eligible_lead_sources: List[str] = []
     eligible_lead_statuses: List[str] = []
+    eligible_states: List[str] = []
     daily_limit: Optional[int] = None
     user_uuid = None
     tenant_membership = None
@@ -48,6 +54,7 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
             eligible_lead_types=eligible_lead_types,
             eligible_lead_sources=eligible_lead_sources,
             eligible_lead_statuses=eligible_lead_statuses,
+            eligible_states=eligible_states,
             daily_limit=daily_limit,
             user_uuid=user_uuid,
             tenant_membership=tenant_membership,
@@ -73,41 +80,41 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
             ).first()
 
         if tenant_membership:
-            any_setting = UserSettings.objects.filter(
-                tenant=tenant, tenant_membership=tenant_membership
-            ).first()
-            daily_limit = getattr(any_setting, "daily_limit", None) if any_setting else None
-
-            try:
-                setting = UserSettings.objects.get(
-                    tenant=tenant,
-                    tenant_membership=tenant_membership,
-                    key="LEAD_TYPE_ASSIGNMENT",
-                )
-                eligible_lead_types = setting.value if isinstance(setting.value, list) else []
-                eligible_lead_sources = (
-                    setting.lead_sources
-                    if isinstance(getattr(setting, "lead_sources", None), list)
-                    else []
-                )
+            kv_settings = TenantMemberSetting.objects.filter(
+                tenant=tenant,
+                tenant_membership=tenant_membership,
+                key__in=[USER_KV_DAILY_LIMIT_KEY, USER_KV_GROUP_ID_KEY],
+            )
+            kv_map = {row.key: row.value for row in kv_settings}
+            _dl = kv_map.get(USER_KV_DAILY_LIMIT_KEY)
+            if _dl is not None and not isinstance(_dl, bool):
                 try:
-                    eligible_lead_statuses = (
-                        setting.lead_statuses
-                        if isinstance(getattr(setting, "lead_statuses", None), list)
-                        else []
-                    )
-                except (AttributeError, Exception):
-                    eligible_lead_statuses = []
+                    daily_limit = int(_dl)
+                except (TypeError, ValueError):
+                    pass
+
+            group = None
+            group_id = kv_map.get(USER_KV_GROUP_ID_KEY)
+            if group_id:
+                group = Group.objects.filter(tenant=tenant, id=group_id).first()
+            if group:
+                group_data = group.group_data if isinstance(group.group_data, dict) else {}
+                eligible_lead_types = group_data.get("party") if isinstance(group_data.get("party"), list) else []
+                eligible_lead_sources = group_data.get("lead_sources") if isinstance(group_data.get("lead_sources"), list) else []
+                eligible_lead_statuses = group_data.get("lead_statuses") if isinstance(group_data.get("lead_statuses"), list) else []
+                eligible_states = group_data.get("states") if isinstance(group_data.get("states"), list) else []
                 logger.info(
-                    "[LeadFilters] From DB: lead_types=%s lead_sources=%s lead_statuses=%s daily_limit=%s",
+                    "[LeadFilters] From Group(%s): lead_types=%s lead_sources=%s lead_statuses=%s states=%s daily_limit=%s",
+                    group.name,
                     eligible_lead_types,
                     eligible_lead_sources or "(none)",
                     eligible_lead_statuses or "(none)",
+                    eligible_states or "(none)",
                     daily_limit,
                 )
-            except UserSettings.DoesNotExist:
+            else:
                 logger.info(
-                    "[LeadFilters] No LEAD_TYPE_ASSIGNMENT for user %s - all queueable leads eligible",
+                    "[LeadFilters] No GROUP KV for user %s - all queueable leads eligible",
                     user_identifier,
                 )
         else:
@@ -119,6 +126,7 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
         eligible_lead_types=eligible_lead_types,
         eligible_lead_sources=eligible_lead_sources,
         eligible_lead_statuses=eligible_lead_statuses,
+        eligible_states=eligible_states,
         daily_limit=daily_limit,
         user_uuid=user_uuid,
         tenant_membership=tenant_membership,
