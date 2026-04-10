@@ -87,10 +87,6 @@ def _get_attribute_value(record: Record, attr_path: str) -> Any:
         return None
 
 
-def _normalize_scoring_operator(operator: Any) -> str:
-    return str(operator or "==").strip()
-
-
 def _expected_value_is_null_sentinel(expected_value: Any) -> bool:
     """True when the user typed null/none as text (JSON null is not stored as the string 'null')."""
     if expected_value is None:
@@ -111,15 +107,15 @@ def _evaluate_rule(record: Record, rule: Dict[str, Any]) -> bool:
         True if rule matches, False otherwise
     """
     attr_path = rule.get('attr', '')
-    operator = _normalize_scoring_operator(rule.get('operator', '=='))
+    operator = str(rule.get('operator') or '==').strip()
     expected_value = rule.get('value', '')
     
     # Get the actual value from record (checks both direct fields and data JSONB)
     actual_value = _get_attribute_value(record, attr_path)
 
-    if operator in ("isNull", "is_null"):
+    if operator == "isNull":
         return actual_value is None
-    if operator in ("isNotNull", "is_not_null"):
+    if operator == "isNotNull":
         return actual_value is not None
 
     if actual_value is None:
@@ -296,7 +292,7 @@ def _build_rule_sql_expression(rule: Dict[str, Any]) -> tuple[str, list]:
           (id, entity_type, etc.) are treated as non-matching and contribute 0.
     """
     attr_path: str = str(rule.get("attr") or "").strip()
-    operator: str = _normalize_scoring_operator(rule.get("operator") or "==")
+    operator: str = str(rule.get("operator") or "==").strip()
     expected_value = rule.get("value", "")
     weight = float(rule.get("weight", 0) or 0)
 
@@ -327,11 +323,11 @@ def _build_rule_sql_expression(rule: Dict[str, Any]) -> tuple[str, list]:
 
     params: list = []
 
-    if operator in ("isNull", "is_null"):
+    if operator == "isNull":
         condition = f"({json_accessor} IS NULL)"
         fragment = f"CASE WHEN {condition} THEN {weight} ELSE 0 END"
         return fragment, []
-    if operator in ("isNotNull", "is_not_null"):
+    if operator == "isNotNull":
         condition = f"({json_accessor} IS NOT NULL)"
         fragment = f"CASE WHEN {condition} THEN {weight} ELSE 0 END"
         return fragment, []
