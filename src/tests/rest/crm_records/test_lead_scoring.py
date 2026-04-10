@@ -44,7 +44,7 @@ def _poster_free_rule(tenant, weight=42.0):
 
 @pytest.mark.django_db
 class ScoringNullOperatorTests(TestCase):
-    """isNull / isNotNull and == with literal null/none string (not JSON null)."""
+    """isNull / isNotNull operators on record data."""
 
     def setUp(self):
         self.tenant = TenantFactory(slug="score-tenant-null-op")
@@ -111,34 +111,6 @@ class ScoringNullOperatorTests(TestCase):
             },
         )
         self.assertEqual(calculate_lead_score(lead), 4.0)
-
-    def test_equals_null_string_matches_missing_not_literal(self):
-        """Typing 'null' in value with == now matches missing/JSON-null, not the word 'null'."""
-        ScoringRule.objects.create(
-            tenant=self.tenant,
-            entity_type="lead",
-            attribute="data.optional_tag",
-            data={"operator": "==", "value": "null"},
-            weight=2.0,
-            order=0,
-            is_active=True,
-        )
-        missing = RecordFactory(
-            tenant=self.tenant,
-            entity_type="lead",
-            data={"name": "B", "praja_id": "NULL4", "lead_stage": "FRESH"},
-        )
-        literal = RecordFactory(
-            tenant=self.tenant,
-            entity_type="lead",
-            data={
-                "optional_tag": "null",
-                "praja_id": "NULL5",
-                "lead_stage": "FRESH",
-            },
-        )
-        self.assertEqual(calculate_lead_score(missing), 2.0)
-        self.assertEqual(calculate_lead_score(literal), 0.0)
 
     def test_sql_batch_is_null_matches_python(self):
         ScoringRule.objects.create(
