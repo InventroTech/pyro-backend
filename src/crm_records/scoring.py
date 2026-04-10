@@ -99,11 +99,16 @@ def _evaluate_rule(record: Record, rule: Dict[str, Any]) -> bool:
         True if rule matches, False otherwise
     """
     attr_path = rule.get('attr', '')
-    operator = rule.get('operator', '==')
+    operator = str(rule.get('operator') or '==')
     expected_value = rule.get('value', '')
     
     # Get the actual value from record (checks both direct fields and data JSONB)
     actual_value = _get_attribute_value(record, attr_path)
+    
+    if operator == 'isNull':
+        return actual_value is None
+    if operator == 'isNotNull':
+        return actual_value is not None
     
     if actual_value is None:
         return False
@@ -275,7 +280,7 @@ def _build_rule_sql_expression(rule: Dict[str, Any]) -> tuple[str, list]:
           (id, entity_type, etc.) are treated as non-matching and contribute 0.
     """
     attr_path: str = str(rule.get("attr") or "").strip()
-    operator: str = str(rule.get("operator") or "==").strip()
+    operator: str = str(rule.get("operator") or "==")
     expected_value = rule.get("value", "")
     weight = float(rule.get("weight", 0) or 0)
 
@@ -305,6 +310,15 @@ def _build_rule_sql_expression(rule: Dict[str, Any]) -> tuple[str, list]:
         json_accessor = f"data#>>'{{{pg_path}}}'"
 
     params: list = []
+
+    if operator == "isNull":
+        condition = f"({json_accessor} IS NULL)"
+        fragment = f"CASE WHEN {condition} THEN {weight} ELSE 0 END"
+        return fragment, []
+    if operator == "isNotNull":
+        condition = f"({json_accessor} IS NOT NULL)"
+        fragment = f"CASE WHEN {condition} THEN {weight} ELSE 0 END"
+        return fragment, []
 
     if operator == "==":
         condition = f"lower({json_accessor}) = lower(%s)"
@@ -535,7 +549,11 @@ def get_scoring_rules(entity_type: str, tenant_id: str) -> List[Dict[str, Any]]:
             for rule in scoring_rules:
                 rule_dict = {
                     'attr': rule.attribute,
-                    'operator': rule.data.get('operator', '==') if isinstance(rule.data, dict) else '==',
+                    'operator': (
+                        str(rule.data.get('operator') or '==')
+                        if isinstance(rule.data, dict)
+                        else '=='
+                    ),
                     'value': rule.data.get('value', '') if isinstance(rule.data, dict) else '',
                     'weight': rule.weight,
                 }

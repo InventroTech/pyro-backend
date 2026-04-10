@@ -307,3 +307,97 @@ class EntityApiLeadScoringTests(TestCase):
         self.assertEqual(r1.status_code, 200)
         self.assertEqual(r1.data["data"].get("poster"), "paid")
         self.assertEqual(r1.data["data"].get("lead_score"), 0.0)
+
+
+@pytest.mark.django_db
+class ScoringIsNullOperatorTests(TestCase):
+    """Rules with operator isNull / isNotNull (Python path and SQL chunk path)."""
+
+    def setUp(self):
+        self.tenant = TenantFactory(slug="score-tenant-isnull-op")
+
+    def test_isnull_matches_missing_field_via_score_all_records(self):
+        ScoringRule.objects.create(
+            tenant=self.tenant,
+            entity_type="lead",
+            attribute="data.optional_field_xyz",
+            data={"operator": "isNull", "value": ""},
+            weight=11.0,
+            order=0,
+            is_active=True,
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={"praja_id": "ISNULL1", "poster": "free"},
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "praja_id": "ISNULL2",
+                "poster": "free",
+                "optional_field_xyz": "set",
+            },
+        )
+        result = score_all_records_for_tenant(
+            self.tenant.id, entity_type="lead", batch_size=10
+        )
+        self.assertEqual(result["total_leads"], 2)
+        self.assertEqual(result["updated_leads"], 1)
+        missing = Record.objects.get(data__praja_id="ISNULL1")
+        present = Record.objects.get(data__praja_id="ISNULL2")
+        self.assertEqual(missing.data.get("lead_score"), 11.0)
+        self.assertEqual(present.data.get("lead_score"), 0.0)
+
+    def test_isnotnull_matches_present_field_via_score_all_records(self):
+        ScoringRule.objects.create(
+            tenant=self.tenant,
+            entity_type="lead",
+            attribute="data.poster",
+            data={"operator": "isNotNull", "value": ""},
+            weight=3.0,
+            order=0,
+            is_active=True,
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={"praja_id": "NN1", "poster": "free"},
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={"praja_id": "NN2"},
+        )
+        score_all_records_for_tenant(self.tenant.id, entity_type="lead", batch_size=10)
+        with_poster = Record.objects.get(data__praja_id="NN1")
+        without = Record.objects.get(data__praja_id="NN2")
+        self.assertEqual(with_poster.data.get("lead_score"), 3.0)
+        self.assertEqual(without.data.get("lead_score"), 0.0)
+
+    def test_chunk_job_sql_applies_isnull_rule(self):
+        ScoringRule.objects.create(
+            tenant=self.tenant,
+            entity_type="lead",
+            attribute="data.optional_chunk_field",
+            data={"operator": "isNull", "value": ""},
+            weight=9.0,
+            order=0,
+            is_active=True,
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={"praja_id": "CHUNK_ISNULL", "lead_stage": "FRESH"},
+        )
+        job = BackgroundJob.objects.create(
+            tenant=self.tenant,
+            job_type=JobType.SCORE_LEADS,
+            status=JobStatus.PENDING,
+            payload={"entity_type": "lead", "batch_size": 50},
+        )
+        self.assertTrue(LeadScoringJobHandler().process(job))
+        _process_parent_chunk_jobs(job)
+        lead = Record.objects.get(data__praja_id="CHUNK_ISNULL")
+        self.assertEqual(lead.data.get("lead_score"), 9.0)
