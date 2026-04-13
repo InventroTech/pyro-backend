@@ -3092,11 +3092,49 @@ class PrajaLeadsAPIView(APIView):
         }
 
     def _execute_entity_create(self, prepared):
-        """Persist entity from output of _prepare_entity_create_request (same as POST /entity/)."""
+        """
+        Upsert entity from output of _prepare_entity_create_request.
+
+        If a record with the same (tenant, entity_type, praja_id) already exists,
+        merge the incoming data into it and return 200. Otherwise create a new
+        record and return 201.
+        """
         tenant = prepared["tenant"]
         entity_type = prepared["entity_type"]
         request_data = prepared["request_data"]
         praja_id = prepared["praja_id"]
+
+        incoming_data = request_data.get('data') if isinstance(request_data.get('data'), dict) else {}
+
+        if praja_id:
+            existing_record = Record.objects.filter(
+                data__praja_id=praja_id,
+                tenant=tenant,
+                entity_type=entity_type,
+            ).first()
+
+            if existing_record:
+                logger.info(
+                    "[PrajaLeadsAPI] Upsert – updating existing %s: id=%s praja_id=%s tenant=%s",
+                    entity_type, existing_record.id, praja_id, tenant.slug,
+                )
+                data = existing_record.data.copy() if existing_record.data else {}
+                data.update(incoming_data)
+                existing_record.data = data
+                existing_record.updated_at = timezone.now()
+                existing_record.save(update_fields=['data', 'updated_at'])
+
+                self._maybe_recalculate_lead_score(
+                    existing_record,
+                    tenant,
+                    context=f"POST upsert praja_id={praja_id}",
+                )
+                existing_record.refresh_from_db()
+
+                return Response(
+                    RecordSerializer(existing_record).data,
+                    status=status.HTTP_200_OK,
+                )
 
         serializer = RecordSerializer(data=request_data)
         if serializer.is_valid():
@@ -3107,30 +3145,8 @@ class PrajaLeadsAPIView(APIView):
                         entity_type=entity_type
                     )
             except IntegrityError:
-                existing_record = (
-                    Record.objects.filter(
-                        data__praja_id=praja_id,
-                        tenant=tenant,
-                        entity_type=entity_type,
-                    ).first()
-                    if praja_id
-                    else None
-                )
-                if existing_record:
-                    logger.warning(
-                        "[PrajaLeadsAPI] Duplicate praja_id: praja_id=%s tenant=%s existing_record_id=%s",
-                        praja_id, tenant.slug, existing_record.id,
-                    )
-                    return Response(
-                        {
-                            'error': f'{entity_type.capitalize()} with praja_id "{praja_id}" already exists',
-                            'praja_id': praja_id,
-                            'existing_record_id': existing_record.id
-                        },
-                        status=status.HTTP_409_CONFLICT
-                    )
                 return Response(
-                    {'error': 'Duplicate (conflict on praja_id)'},
+                    {'error': 'Duplicate record (conflict on unique constraint)'},
                     status=status.HTTP_409_CONFLICT,
                 )
 
@@ -3210,23 +3226,26 @@ class PrajaLeadsAPIView(APIView):
 
     def post(self, request):
         """
-        CREATE - Create a new lead record.
-        
+        UPSERT - Create a new record, or update it if one with the same praja_id already exists.
+
+        If a record matching (tenant, entity_type, data.praja_id) is found, its data
+        fields are merged with the incoming payload and HTTP 200 is returned.
+        Otherwise a new record is created and HTTP 201 is returned.
+
         Body:
         {
             "name": "Customer Name",
-            "tenant_id": "optional-tenant-uuid",  # Optional: if provided, uses this tenant; otherwise uses default tenant
+            "tenant_id": "optional-tenant-uuid",
             "data": {
-                "praja_id": "PRAJA123",  # Required: unique identifier for Praja system
+                "praja_id": "PRAJA123",
                 "phone_number": "+1234567890",
                 "lead_score": 85,
-                "lead_stage": "FRESH",   # Optional: defaults to FRESH if not provided
+                "lead_stage": "FRESH",
                 "poster": "free"
             }
         }
-        
+
         Defaults for new leads: lead_stage=FRESH, call_attempts=0 (when not provided).
-        Note: praja_id in the data field is required for UPDATE and DELETE operations.
         Note: tenant_id is optional. If not provided, uses DEFAULT_TENANT_SLUG from settings.
         """
         prepared = self._prepare_entity_create_request(request)
