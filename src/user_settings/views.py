@@ -176,20 +176,19 @@ class LeadTypeAssignmentView(APIView):
         """Get all lead type assignments for the tenant"""
         tenant = request.tenant
         
-        # Get RM role from authz
+        # Get RM/CSE roles from authz
         from authz.models import Role
-        rm_role = Role.objects.filter(
+        target_roles = Role.objects.filter(
             tenant=tenant,
-            name__iexact='RM'
-        ).first()
-        
-        if not rm_role:
+        ).filter(Q(name__iexact='RM') | Q(name__iexact='CSE'))
+
+        if not target_roles.exists():
             return Response([])
-        
-        # Get ALL TenantMemberships with RM role (not just those with UserSettings)
+
+        # Get ALL TenantMemberships with RM/CSE roles
         tenant_memberships = TenantMembership.objects.filter(
             tenant=tenant,
-            role=rm_role
+            role__in=target_roles
         ).select_related('role')
         
         # Fetch per-user KV rows for core settings and resolve group filters from Group table

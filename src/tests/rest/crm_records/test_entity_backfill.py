@@ -1,5 +1,9 @@
 """
-POST /entity/ vs POST /entity/backfill/: duplicate handling and idempotent create.
+POST /entity/ (upsert) vs POST /entity/backfill/ (idempotent create).
+
+POST /entity/ now performs an upsert: if a record with the same
+(tenant, entity_type, data.praja_id) exists, the incoming data is merged
+into it and 200 is returned. Otherwise a new record is created (201).
 
 Run with: pytest src/tests/rest/crm_records/test_entity_backfill.py -v
 """
@@ -34,15 +38,63 @@ class EntityBackfillApiTests(TestCase):
             },
         }
 
-    def test_post_entity_duplicate_praja_id_returns_409(self):
-        pid = "ENT_DUP_409"
+    def test_post_entity_duplicate_praja_id_upserts_and_returns_200(self):
+        pid = "ENT_DUP_UPSERT"
         body = self._create_payload(pid)
         r1 = self.client.post(self.entity_url, body, format="json", **self.headers)
         self.assertEqual(r1.status_code, 201)
-        r2 = self.client.post(self.entity_url, body, format="json", **self.headers)
-        self.assertEqual(r2.status_code, 409)
-        self.assertIn("existing_record_id", r2.data)
+        first_id = r1.data["id"]
+
+        updated_body = {
+            "data": {
+                "praja_id": pid,
+                "name": "Updated Lead Name",
+                "lead_stage": "ASSIGNED",
+                "phone_number": "+9999999999",
+            },
+        }
+        r2 = self.client.post(self.entity_url, updated_body, format="json", **self.headers)
+        self.assertEqual(r2.status_code, 200)
+        self.assertEqual(r2.data["id"], first_id)
+        self.assertEqual(r2.data["data"]["name"], "Updated Lead Name")
+        self.assertEqual(r2.data["data"]["lead_stage"], "ASSIGNED")
+        self.assertEqual(r2.data["data"]["phone_number"], "+9999999999")
         self.assertEqual(Record.objects.filter(data__praja_id=pid).count(), 1)
+
+    def test_post_entity_upsert_preserves_existing_fields(self):
+        """Upsert merges: fields not in the update payload are preserved."""
+        pid = "ENT_MERGE_PRESERVE"
+        body = {
+            "data": {
+                "praja_id": pid,
+                "name": "Original Name",
+                "lead_stage": "FRESH",
+                "phone_number": "+1111111111",
+                "notes": "important note",
+            },
+        }
+        r1 = self.client.post(self.entity_url, body, format="json", **self.headers)
+        self.assertEqual(r1.status_code, 201)
+
+        r2 = self.client.post(
+            self.entity_url,
+            {"data": {"praja_id": pid, "name": "New Name"}},
+            format="json",
+            **self.headers,
+        )
+        self.assertEqual(r2.status_code, 200)
+        self.assertEqual(r2.data["data"]["name"], "New Name")
+        self.assertEqual(r2.data["data"]["phone_number"], "+1111111111")
+        self.assertEqual(r2.data["data"]["notes"], "important note")
+
+    def test_post_entity_without_praja_id_creates_new_record(self):
+        """POST without praja_id always creates (no lookup key for upsert)."""
+        body = {"data": {"name": "No Praja Lead", "lead_stage": "FRESH"}}
+        r1 = self.client.post(self.entity_url, body, format="json", **self.headers)
+        self.assertEqual(r1.status_code, 201)
+        r2 = self.client.post(self.entity_url, body, format="json", **self.headers)
+        self.assertEqual(r2.status_code, 201)
+        self.assertNotEqual(r1.data["id"], r2.data["id"])
 
     def test_post_backfill_creates_when_absent_returns_201(self):
         pid = "BF_CREATE_201"
