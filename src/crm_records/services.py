@@ -4,7 +4,8 @@ import logging
 from typing import Dict, Any, Optional
 from django.conf import settings
 from pathlib import Path
-from crm_records.models import Record, Entity
+from crm_records.models import Record
+from core.models import Entity
 import environ
 
 logger = logging.getLogger(__name__)
@@ -279,31 +280,36 @@ def sync_entity_schema(tenant, entity_type, chunk_size=1000):
 
     last_id = entity_obj.last_processed_record_id or 0
 
-    new_records = Record.objects.filter(
+    # Use iterator() to stream records instead of loading all at once
+    # values_list() fetches only 'id' and 'data' fields (reduces memory)
+    new_records_iterator = Record.objects.filter(
         tenant=tenant,
         entity_type=entity_type,
         id__gt=last_id
-    ).order_by('id')[:chunk_size]
-
-    if not new_records.exists():
-        return 0
+    ).order_by('id').values_list('id', 'data').iterator(chunk_size=chunk_size)
 
     current_fields_list = entity_obj.schema or []
     unique_fields = set(current_fields_list)
     
-    current_last_id = last_id 
+    current_last_id = last_id
+    records_processed = 0
 
-    for record in new_records:
-        record_data = record.data or {}
-        for key in record_data.keys():
-            unique_fields.add(key)
-        current_last_id = record.id
+    # Iterate through the generator - only chunk_size records in memory at a time
+    for record_id, record_data in new_records_iterator:
+        if record_data:  # Handle None/null data
+            for key in record_data.keys():
+                unique_fields.add(key)
+        current_last_id = record_id
+        records_processed += 1
+
+    if records_processed == 0:
+        return 0
 
     entity_obj.schema = list(unique_fields)
     entity_obj.last_processed_record_id = current_last_id
     
     entity_obj.save()
     
-    logger.info(f"Synced {len(new_records)} {entity_type} records for tenant {tenant.id}")
+    logger.info(f"Synced {records_processed} {entity_type} records for tenant {tenant.id}")
     
-    return len(new_records)
+    return records_processed

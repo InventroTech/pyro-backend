@@ -1,6 +1,6 @@
 from django.test import TestCase
-from core.models import Tenant  # Adjust if Tenant is located somewhere else
-from crm_records.models import Record, Entity  # Or EntityTypeSchema depending on what you named it!
+from core.models import Tenant, Entity
+from crm_records.models import Record
 from crm_records.services import sync_entity_schema
 
 class EntitySchemaSyncTests(TestCase):

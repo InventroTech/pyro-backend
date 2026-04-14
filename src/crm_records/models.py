@@ -433,27 +433,3 @@ class UserBucketAssignment(HistoryTrackedModel, BaseModel):
         cache.delete(f"bucket_assignments_tenant:{tid}:v4")
         if uid:
             cache.delete(f"bucket_assignments:{tid}:{uid}:v2")
-
-class Entity(TenantModel):
-    """
-    Stores the schema/blueprint of record types (e.g., 'lead', 'ticket') 
-    for a specific tenant, and tracks the last processed record for the background sync job.
-    """
-    tenant = models.ForeignKey('core.Tenant', on_delete=models.CASCADE, related_name='entities')
-    name = models.CharField(max_length=255, help_text="The type of entity (e.g., lead, ticket)")
-    
-    # Stores the snapshot of all discovered fields and their data types
-    schema = models.JSONField(default=dict, blank=True) 
-    
-    # Cursor for the background job to know where it left off
-    last_processed_record_id = models.BigIntegerField(default=0) 
-    
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        # A tenant should only have one Entity blueprint per record type
-        unique_together = ('tenant', 'name') 
-
-    def __str__(self):
-        return f"{self.name} Schema for {self.tenant}"
