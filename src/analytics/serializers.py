@@ -18,13 +18,14 @@ class SupportTicketSerializer(serializers.ModelSerializer):
 class TeamOverviewSerializer(serializers.Serializer):
     """Serializer for team overview metrics."""
     attendance = serializers.IntegerField()
-    total_team_size = serializers.IntegerField()  # Dynamic team size from TeamResolver
+    total_team_size = serializers.IntegerField()
     calls_made = serializers.IntegerField()
     trials_activated = serializers.IntegerField()
     connected_to_trial_ratio = serializers.FloatField(allow_null=True)
     average_time_spent_seconds = serializers.FloatField(allow_null=True)
-    trail_target = serializers.IntegerField()  # Sum of daily_target from user_settings
-    allotted_leads = serializers.IntegerField()  # Sum of daily_limit from user_settings
+    trail_target = serializers.IntegerField()
+    allotted_leads = serializers.IntegerField()
+    unassigned_leads = serializers.IntegerField()
 
 
 class MemberBreakdownSerializer(serializers.Serializer):

@@ -1336,3 +1336,34 @@ class TeamTimeSeriesView(TenantScopedMixin, APIView):
         
         serializer = TimeSeriesSerializer(time_series, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class UnassignedLeadsBreakdownView(TenantScopedMixin, APIView):
+    """
+    Breakdown of unassigned leads by lead_source and lead_stage.
+    Returns total count plus grouped counts for filtering.
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        user_id = getattr(user, 'supabase_uid', None) or getattr(user, 'id', None)
+
+        if not user_id:
+            return Response(
+                {"error": "User ID not found"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        lead_source_raw = request.query_params.get('lead_source', '').strip()
+        lead_source_list = [s.strip() for s in lead_source_raw.split(',') if s.strip()] or None
+        lead_stage = request.query_params.get('lead_stage', '').strip() or None
+
+        team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
+        metrics_service = TeamMetricsService(team_user_ids, request.tenant)
+        breakdown = metrics_service.get_unassigned_leads_breakdown(
+            lead_source_filter=lead_source_list,
+            lead_stage_filter=lead_stage,
+        )
+
+        return Response(breakdown, status=status.HTTP_200_OK)
