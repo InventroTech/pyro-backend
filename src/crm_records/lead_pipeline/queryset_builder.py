@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional
 from django.db.models import QuerySet
 
 from crm_records.models import Record
-from user_settings.routing import apply_routing_rule_to_queryset
 
 logger = logging.getLogger(__name__)
 
@@ -96,12 +95,9 @@ class BucketQuerysetBuilder:
                 qs.count(),
             )
 
-        if bucket_filter_conditions.get("apply_routing_rule", True) and user_uuid:
-            qs = apply_routing_rule_to_queryset(qs, tenant=tenant, user_id=user_uuid, queue_type="lead")
         if debug:
             logger.info(
-                "[BucketQuerysetBuilder] after apply_routing_rule apply=%s user_uuid=%s count=%s",
-                bucket_filter_conditions.get("apply_routing_rule", True),
+                "[BucketQuerysetBuilder] routing rule skipped (group/KV-only lead flow) user_uuid=%s count=%s",
                 bool(user_uuid),
                 qs.count(),
             )
