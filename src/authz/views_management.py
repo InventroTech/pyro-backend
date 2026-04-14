@@ -10,6 +10,8 @@ from authz.permissions import IsTenantAuthenticated, HasPermissionKey
 from authz.models import Role, TenantMembership
 from .serializers import RoleListSerializer, CreateSyncedRoleSerializer, TenantMembershipUserSerializer
 from .service import create_or_sync_role
+from user_settings.models import Group, TenantMemberSetting
+from user_settings.services import USER_KV_GROUP_ID_KEY
 
 
 class RolesView(APIView):
@@ -85,15 +87,32 @@ class ListTenantUsersView(APIView):
         
         # Serialize the data
         data = TenantMembershipUserSerializer(qs, many=True).data
+        memberships = list(qs)
+        setting_map = {
+            s.tenant_membership_id: s.value
+            for s in TenantMemberSetting.objects.filter(
+                tenant=request.tenant,
+                key=USER_KV_GROUP_ID_KEY,
+                tenant_membership_id__in=[m.id for m in memberships],
+            )
+        }
+        group_ids = {gid for gid in setting_map.values() if gid}
+        groups_by_id = {}
+        if group_ids:
+            groups_by_id = {
+                g.id: g.name
+                for g in Group.objects.filter(tenant=request.tenant, id__in=group_ids).only("id", "name")
+            }
         
         # Add name and company_name fields to each result (from TenantMembership)
         for i, item in enumerate(data):
-            membership = qs[i]
+            membership = memberships[i]
             # Use TenantMembership.name directly (migrated from LegacyUser)
             item['name'] = membership.name or ''
             # Include company_name if serializer doesn't already include it
             if 'company_name' not in item:
                 item['company_name'] = membership.company_name or ''
+            item["lead_group_name"] = groups_by_id.get(setting_map.get(membership.id))
         
         return Response({"count": len(data), "results": data}, status=status.HTTP_200_OK)
 

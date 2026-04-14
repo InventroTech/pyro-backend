@@ -53,6 +53,7 @@ class BucketQuerysetBuilder:
         eligible_lead_types: List[str],
         eligible_lead_sources: List[str],
         eligible_lead_statuses: List[str],
+        eligible_states: List[str],
         debug: bool = False,
     ) -> QuerySet:
         qs = Record.objects.filter(tenant=tenant, entity_type="lead")
@@ -127,6 +128,14 @@ class BucketQuerysetBuilder:
                 logger.info(
                     "[BucketQuerysetBuilder] after eligible_lead_statuses=%s count=%s",
                     eligible_lead_statuses,
+                    qs.count(),
+                )
+        if eligible_states:
+            qs = qs.filter(data__state__in=eligible_states)
+            if debug:
+                logger.info(
+                    "[BucketQuerysetBuilder] after eligible_states=%s count=%s",
+                    eligible_states,
                     qs.count(),
                 )
 

@@ -58,7 +58,7 @@ class LeadPipeline:
         mem_id = getattr(resolved_user.membership, "id", None) if resolved_user.membership else None
         logger.info(
             "[LeadPipeline] start tenant=%s user=%s membership_id=%s user_uuid=%s "
-            "filters: affiliated_party=%s lead_source=%s lead_status=%s daily_limit=%s debug=%s",
+            "filters: affiliated_party=%s lead_source=%s lead_status=%s lead_state=%s daily_limit=%s debug=%s",
             _tenant_label(tenant),
             user_identifier,
             mem_id,
@@ -66,6 +66,7 @@ class LeadPipeline:
             resolved_user.eligible_lead_types,
             resolved_user.eligible_lead_sources or "(none)",
             resolved_user.eligible_lead_statuses or "(none)",
+            resolved_user.eligible_states or "(none)",
             resolved_user.daily_limit,
             debug,
         )
@@ -154,6 +155,7 @@ class LeadPipeline:
                     eligible_lead_types=resolved_user.eligible_lead_types,
                     eligible_lead_sources=resolved_user.eligible_lead_sources,
                     eligible_lead_statuses=resolved_user.eligible_lead_statuses,
+                    eligible_states=resolved_user.eligible_states,
                     debug=debug,
                 )
 
@@ -333,6 +335,7 @@ class LeadPipeline:
         eligible_lead_types = resolved_user.eligible_lead_types
         eligible_lead_sources = resolved_user.eligible_lead_sources
         eligible_lead_statuses = resolved_user.eligible_lead_statuses
+        eligible_states = resolved_user.eligible_states
 
         # Retry ordering for sales leads:
         # min call_attempts -> max lead_score -> tiebreak created_at desc.
@@ -408,6 +411,8 @@ class LeadPipeline:
             unassigned_retry_qs = unassigned_retry_qs.filter(data__lead_source__in=eligible_lead_sources)
         if eligible_lead_statuses:
             unassigned_retry_qs = unassigned_retry_qs.filter(data__lead_status__in=eligible_lead_statuses)
+        if eligible_states:
+            unassigned_retry_qs = unassigned_retry_qs.filter(data__state__in=eligible_states)
 
         if user_uuid:
             unassigned_retry_qs = apply_routing_rule_to_queryset(
@@ -425,11 +430,12 @@ class LeadPipeline:
             logger.exception("[LeadPipeline] fallback unassigned_retry_qs.count() failed user=%s", user_identifier)
         unassigned_retry_candidate = unassigned_retry_qs.first()
         logger.info(
-            "[LeadPipeline] fallback step=unassigned filters=affiliated_party=%s lead_source=%s lead_status=%s "
+            "[LeadPipeline] fallback step=unassigned filters=affiliated_party=%s lead_source=%s lead_status=%s lead_state=%s "
             "routing_applied=%s qs_count=%s first_record_id=%s user=%s",
             eligible_lead_types,
             eligible_lead_sources or "(none)",
             eligible_lead_statuses or "(none)",
+            eligible_states or "(none)",
             bool(user_uuid),
             unassigned_count,
             unassigned_retry_candidate.pk if unassigned_retry_candidate else None,

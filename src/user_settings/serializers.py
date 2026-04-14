@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import UserSettings, RoutingRule
+from .models import UserSettings, RoutingRule, Group, TenantMemberSetting
 
 
 class UserSettingsSerializer(serializers.ModelSerializer):
@@ -43,6 +43,15 @@ class UserSettingsCreateSerializer(serializers.ModelSerializer):
         return value
 
 
+class TenantMemberSettingSerializer(serializers.ModelSerializer):
+    """Serializer for dedicated per-tenant-member settings table."""
+
+    class Meta:
+        model = TenantMemberSetting
+        fields = ["id", "tenant", "tenant_membership", "key", "value", "created_at", "updated_at"]
+        read_only_fields = ["id", "tenant", "created_at", "updated_at"]
+
+
 class LeadTypeAssignmentSerializer(serializers.Serializer):
     """Serializer specifically for lead type assignments"""
     user_id = serializers.CharField()  # Accept both UUID and integer ID
@@ -77,7 +86,6 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
         min_value=0,
         help_text="Daily lead pull limit for the user (max leads they can fetch per day)"
     )
-    
     def validate_user_id(self, value):
         """Validate and normalize user_id - can be UUID string or integer string"""
         # Try to parse as UUID first
@@ -176,4 +184,26 @@ class RoutingRuleSerializer(serializers.ModelSerializer):
         if "conditions" not in attrs or attrs.get("conditions") is None:
             attrs["conditions"] = {}
         return attrs
+
+
+class GroupSerializer(serializers.ModelSerializer):
+    """Serializer for tenant groups."""
+
+    class Meta:
+        model = Group
+        fields = ["id", "tenant", "name", "group_data", "created_at", "updated_at"]
+        read_only_fields = ["id", "tenant", "created_at", "updated_at"]
+
+    def validate_name(self, value: str) -> str:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            raise serializers.ValidationError("Group name is required")
+        return cleaned
+
+    def validate_group_data(self, value):
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("group_data must be a JSON object")
+        return value
 

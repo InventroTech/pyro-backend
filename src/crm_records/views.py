@@ -1355,6 +1355,7 @@ class GetNextLeadView(APIView):
         eligible_lead_types,
         eligible_lead_sources,
         eligible_lead_statuses,
+        eligible_states,
         log_label: str,
     ):
         """
@@ -1394,6 +1395,8 @@ class GetNextLeadView(APIView):
                 qs = qs.filter(data__lead_source__in=eligible_lead_sources)
             if eligible_lead_statuses:
                 qs = qs.filter(data__lead_status__in=eligible_lead_statuses)
+            if eligible_states:
+                qs = qs.filter(data__state__in=eligible_states)
             if user_uuid:
                 qs = apply_routing_rule_to_queryset(qs, tenant=tenant, user_id=user_uuid, queue_type="lead")
             picked = qs.order_by("call_attempts_int", "updated_at", "id").first()
@@ -1660,15 +1663,17 @@ class GetNextLeadView(APIView):
         eligible_lead_types = filters.eligible_lead_types
         eligible_lead_sources = filters.eligible_lead_sources
         eligible_lead_statuses = filters.eligible_lead_statuses
+        eligible_states = filters.eligible_states
         daily_limit = filters.daily_limit
         user_uuid = filters.user_uuid
         tenant_membership = filters.tenant_membership
 
         logger.info(
-            "[GetNextLead] Step 2 done: eligible_lead_types=%s eligible_lead_sources=%s eligible_lead_statuses=%s daily_limit=%s",
+            "[GetNextLead] Step 2 done: eligible_lead_types=%s eligible_lead_sources=%s eligible_lead_statuses=%s eligible_states=%s daily_limit=%s",
             eligible_lead_types,
             eligible_lead_sources or "(none)",
             eligible_lead_statuses or "(none)",
+            eligible_states or "(none)",
             daily_limit,
         )
 
@@ -1792,6 +1797,7 @@ class GetNextLeadView(APIView):
                         eligible_lead_types=eligible_lead_types,
                         eligible_lead_sources=eligible_lead_sources,
                         eligible_lead_statuses=eligible_lead_statuses,
+                        eligible_states=eligible_states,
                         log_label="[GetNextLead] FALLBACK [daily-limit]:",
                     )
                     if resp:
@@ -1860,6 +1866,8 @@ class GetNextLeadView(APIView):
             assigned_snoozed_qs = assigned_snoozed_qs.filter(data__lead_source__in=eligible_lead_sources)
         if eligible_lead_statuses:
             assigned_snoozed_qs = assigned_snoozed_qs.filter(data__lead_status__in=eligible_lead_statuses)
+        if eligible_states:
+            assigned_snoozed_qs = assigned_snoozed_qs.filter(data__state__in=eligible_states)
         ordered_assigned_snoozed = self._order_by_score(assigned_snoozed_qs, now_iso)
         for c in ordered_assigned_snoozed[:50]:
             if self._lead_is_due_for_call(c.data, now):
@@ -1895,6 +1903,8 @@ class GetNextLeadView(APIView):
                 unassigned_snoozed_qs = unassigned_snoozed_qs.filter(data__lead_source__in=eligible_lead_sources)
             if eligible_lead_statuses:
                 unassigned_snoozed_qs = unassigned_snoozed_qs.filter(data__lead_status__in=eligible_lead_statuses)
+            if eligible_states:
+                unassigned_snoozed_qs = unassigned_snoozed_qs.filter(data__state__in=eligible_states)
             unassigned_snoozed_qs = unassigned_snoozed_qs.extra(
                 where=["""
                     NOT (
@@ -1968,6 +1978,9 @@ class GetNextLeadView(APIView):
         if eligible_lead_statuses:
             unassigned = unassigned.filter(data__lead_status__in=eligible_lead_statuses)
             logger.info("[GetNextLead] Filtered unassigned leads by eligible lead statuses (intersection): %s", eligible_lead_statuses)
+        if eligible_states:
+            unassigned = unassigned.filter(data__state__in=eligible_states)
+            logger.info("[GetNextLead] Filtered unassigned leads by eligible states (intersection): %s", eligible_states)
 
         # Exclude leads assigned to someone else (assigned_to = non-empty and != current user).
         # Treat JSON null, empty, 'null', 'none' as unassigned (exact data shape).
@@ -2250,6 +2263,7 @@ class GetNextLeadView(APIView):
                     eligible_lead_types=eligible_lead_types,
                     eligible_lead_sources=eligible_lead_sources,
                     eligible_lead_statuses=eligible_lead_statuses,
+                    eligible_states=eligible_states,
                     log_label="[GetNextLead] Step 5a:",
                 )
                 if resp:
