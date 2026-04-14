@@ -17,7 +17,8 @@ from .views import (
     TeamOverviewView,
     TeamMembersView,
     TeamEventsView,
-    TeamTimeSeriesView
+    TeamTimeSeriesView,
+    UnassignedLeadsBreakdownView,
 )
 app_name = "analytics"
 
@@ -79,4 +80,5 @@ urlpatterns = [
     path("team/members/", TeamMembersView.as_view(), name="team-members"),
     path("team/events/", TeamEventsView.as_view(), name="team-events"),
     path("team/time-series/", TeamTimeSeriesView.as_view(), name="team-time-series"),
+    path("team/unassigned-leads/", UnassignedLeadsBreakdownView.as_view(), name="team-unassigned-leads"),
 ]

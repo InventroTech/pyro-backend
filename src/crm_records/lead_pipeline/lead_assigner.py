@@ -69,6 +69,15 @@ class LeadAssigner:
             previous_assigned_to = data.get("assigned_to")
             is_fresh_assignment = previous_assigned_to in (None, "", "null", "None")
 
+            if not is_fresh_assignment and previous_assigned_to != user_identifier:
+                logger.info(
+                    "[LeadAssigner] aborting — lead already claimed by %s, requested by %s, candidate_pk=%s",
+                    previous_assigned_to,
+                    user_identifier,
+                    candidate_pk,
+                )
+                return None
+
             data["assigned_to"] = user_identifier
             data["lead_stage"] = self.ASSIGNED_STATUS
 

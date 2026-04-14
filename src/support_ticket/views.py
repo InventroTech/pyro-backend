@@ -21,8 +21,10 @@ from .models import SupportTicketDump
 from .models import SupportTicket
 from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer,UpdateCallStatusRequestSerializer
 from .services import MixpanelService, TicketTimeService
-from user_settings.routing import apply_routing_rule_to_queryset
+from user_settings.models import Group, TenantMemberSetting
+from user_settings.services import USER_KV_GROUP_ID_KEY
 from authz.permissions import IsTenantAuthenticated
+from authz.models import TenantMembership
 from accounts.models import SupabaseAuthUser
 from datetime import timedelta
 from analytics.serializers import SupportTicketSerializer
@@ -518,6 +520,48 @@ class GetNextTicketView(APIView):
             logger.error(f"[_get_and_assign_ticket] user.supabase_uid type: {type(user.supabase_uid)}, value: {user.supabase_uid}")
             # Return None if we can't convert to UUID
             return None
+
+        def _apply_ticket_filters_for_user(qs):
+            """
+            Filter tickets using the assigned user group only.
+            If no group is configured, leave queryset unchanged.
+            """
+            membership = TenantMembership.objects.filter(
+                tenant=tenant,
+                user_id=request.user.supabase_uid,
+            ).first()
+            if not membership:
+                logger.info("[_get_and_assign_ticket] Group ticket filter: no membership found, leaving queryset unchanged")
+                return qs
+
+            group_row = TenantMemberSetting.objects.filter(
+                tenant=tenant,
+                tenant_membership=membership,
+                key=USER_KV_GROUP_ID_KEY,
+            ).first()
+            group_id = group_row.value if group_row else None
+            if not isinstance(group_id, int):
+                logger.info("[_get_and_assign_ticket] Group ticket filter: no GROUP setting, leaving queryset unchanged")
+                return qs
+
+            group = Group.objects.filter(tenant=tenant, id=group_id).first()
+            group_data = group.group_data if group and isinstance(group.group_data, dict) else {}
+            states = group_data.get("states") if isinstance(group_data.get("states"), list) else []
+            posters = group_data.get("posters") if isinstance(group_data.get("posters"), list) else []
+
+            if states:
+                qs = qs.filter(state__in=states)
+            if posters:
+                qs = qs.filter(poster__in=posters)
+
+            logger.info(
+                "[_get_and_assign_ticket] Group ticket filter applied: group_id=%s states=%s posters=%s remaining=%s",
+                group_id,
+                states or "(none)",
+                posters or "(none)",
+                qs.count(),
+            )
+            return qs
         
         already_assigned_qs = SupportTicket.objects.select_for_update(
             skip_locked=True,
@@ -534,12 +578,7 @@ class GetNextTicketView(APIView):
         
         logger.info(f"[_get_and_assign_ticket] Step 1: Applying routing rules to already assigned tickets")
         try:
-            already_assigned_qs = apply_routing_rule_to_queryset(
-                already_assigned_qs,
-                tenant=tenant,
-                user_id=request.user.supabase_uid,
-                queue_type="ticket",
-            )
+            already_assigned_qs = _apply_ticket_filters_for_user(already_assigned_qs)
         except Exception as routing_error:
             logger.error(f"[_get_and_assign_ticket] Step 1: Error applying routing rules: {routing_error}")
             logger.exception(routing_error)
@@ -617,12 +656,7 @@ class GetNextTicketView(APIView):
         
         logger.info(f"[_get_and_assign_ticket] Step 2: Applying routing rules for tenant={tenant.id}, user={user_uuid_obj}, queue_type=ticket")
         try:
-            base_qs = apply_routing_rule_to_queryset(
-                base_qs,
-                tenant=tenant,
-                user_id=request.user.supabase_uid,
-                queue_type="ticket",
-            )
+            base_qs = _apply_ticket_filters_for_user(base_qs)
             logger.info(f"[_get_and_assign_ticket] Step 2: After routing rules, queryset count: {base_qs.count()}")
         except Exception as routing_error:
             logger.error(f"[_get_and_assign_ticket] Step 2: Error applying routing rules: {routing_error}")
@@ -707,12 +741,7 @@ class GetNextTicketView(APIView):
         if tenant and request.user:
             logger.info(f"[_get_and_assign_ticket] Step 3: Applying routing rules to snoozed tickets")
             try:
-                snoozed_qs = apply_routing_rule_to_queryset(
-                    snoozed_qs,
-                    tenant=tenant,
-                    user_id=request.user.supabase_uid,
-                    queue_type="ticket",
-                )
+                snoozed_qs = _apply_ticket_filters_for_user(snoozed_qs)
                 logger.info(f"[_get_and_assign_ticket] Step 3: After routing rules, snoozed queryset count: {snoozed_qs.count()}")
             except Exception as routing_error:
                 logger.error(f"[_get_and_assign_ticket] Step 3: Error applying routing rules: {routing_error}")
