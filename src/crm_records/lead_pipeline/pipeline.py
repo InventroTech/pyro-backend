@@ -16,7 +16,6 @@ from crm_records.lead_pipeline.pull_strategy import PullStrategyApplier
 from crm_records.lead_pipeline.queryset_builder import BucketQuerysetBuilder
 from crm_records.lead_pipeline.user_resolver import UserResolver
 from crm_records.models import Record
-from user_settings.routing import apply_routing_rule_to_queryset
 
 logger = logging.getLogger(__name__)
 
@@ -384,7 +383,7 @@ class LeadPipeline:
         if retry_candidate:
             return retry_candidate
 
-        # 2) Unassigned retry candidate (legacy code DOES apply eligible filters + routing here).
+        # 2) Unassigned retry candidate (apply eligible filters only; no routing rule).
         _unassigned_not_connected_where = """
             (
                 (data->>'assigned_to') IS NULL
@@ -414,14 +413,6 @@ class LeadPipeline:
         if eligible_states:
             unassigned_retry_qs = unassigned_retry_qs.filter(data__state__in=eligible_states)
 
-        if user_uuid:
-            unassigned_retry_qs = apply_routing_rule_to_queryset(
-                unassigned_retry_qs,
-                tenant=tenant,
-                user_id=user_uuid,
-                queue_type="lead",
-            )
-
         unassigned_retry_qs = self.strategy_applier.apply(qs=unassigned_retry_qs, strategy=retry_strategy, now_iso=now.isoformat())
         try:
             unassigned_count = unassigned_retry_qs.count()
@@ -436,7 +427,7 @@ class LeadPipeline:
             eligible_lead_sources or "(none)",
             eligible_lead_statuses or "(none)",
             eligible_states or "(none)",
-            bool(user_uuid),
+            False,
             unassigned_count,
             unassigned_retry_candidate.pk if unassigned_retry_candidate else None,
             user_identifier,

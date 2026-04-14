@@ -30,7 +30,6 @@ from .permissions import HasAPISecret
 from support_ticket.services import MixpanelService, RMAssignedMixpanelService
 from background_jobs.queue_service import get_queue_service
 from background_jobs.models import JobType
-from user_settings.routing import apply_routing_rule_to_queryset
 from .lead_filters import get_lead_filters_for_user
 import requests
 import uuid
@@ -1397,8 +1396,6 @@ class GetNextLeadView(APIView):
                 qs = qs.filter(data__lead_status__in=eligible_lead_statuses)
             if eligible_states:
                 qs = qs.filter(data__state__in=eligible_states)
-            if user_uuid:
-                qs = apply_routing_rule_to_queryset(qs, tenant=tenant, user_id=user_uuid, queue_type="lead")
             picked = qs.order_by("call_attempts_int", "updated_at", "id").first()
             if not picked:
                 return None
@@ -1853,13 +1850,7 @@ class GetNextLeadView(APIView):
             tenant=tenant,
             entity_type='lead'
         ).extra(where=[_assigned_snoozed_where], params=[user_identifier])
-        if user_uuid:
-            assigned_snoozed_qs = apply_routing_rule_to_queryset(
-                assigned_snoozed_qs,
-                tenant=tenant,
-                user_id=user_uuid,
-                queue_type="lead",
-            )
+        # Routing rules removed for lead flow; group/KV filters only.
         if eligible_lead_types:
             assigned_snoozed_qs = assigned_snoozed_qs.filter(data__affiliated_party__in=eligible_lead_types)
         if eligible_lead_sources:
@@ -1890,13 +1881,7 @@ class GetNextLeadView(APIView):
                 tenant=tenant,
                 entity_type='lead'
             ).extra(where=[_unassigned_snoozed_where])
-            if user_uuid:
-                unassigned_snoozed_qs = apply_routing_rule_to_queryset(
-                    unassigned_snoozed_qs,
-                    tenant=tenant,
-                    user_id=user_uuid,
-                    queue_type="lead",
-                )
+            # Routing rules removed for lead flow; group/KV filters only.
             if eligible_lead_types:
                 unassigned_snoozed_qs = unassigned_snoozed_qs.filter(data__affiliated_party__in=eligible_lead_types)
             if eligible_lead_sources:
@@ -1951,17 +1936,7 @@ class GetNextLeadView(APIView):
             queueable_before_routing,
         )
 
-        # Apply routing rule once (separate from lead filters; looked up from RoutingRule table by user)
-        if user_uuid:
-            base_qs = apply_routing_rule_to_queryset(
-                base_qs,
-                tenant=tenant,
-                user_id=user_uuid,
-                queue_type="lead",
-            )
-            logger.info("[GetNextLead] Step 3: Applied routing rule for user_uuid=%s (after routing: count=%d)", user_uuid, base_qs.count())
-        else:
-            logger.info("[GetNextLead] Step 3: No user_uuid - skipping routing rule.")
+        logger.info("[GetNextLead] Step 3: Routing rule skipped (group/KV-only lead flow).")
 
         # Filter by eligible lead types (affiliated_party) from lead filter – use party list from DB as-is
         if not eligible_lead_types:
@@ -2180,8 +2155,7 @@ class GetNextLeadView(APIView):
             queueable_total = Record.objects.filter(
                 tenant=tenant, entity_type='lead'
             ).extra(where=[_queueable_where]).count()
-            from user_settings.routing import _get_active_rule
-            rule = _get_active_rule(tenant=tenant, user_id=user_uuid, queue_type="lead") if user_uuid else None
+            rule = None
             sample_leads = list(
                 Record.objects.filter(tenant=tenant, entity_type='lead')[:5]
                 .values('id', 'data')

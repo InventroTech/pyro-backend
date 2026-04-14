@@ -10,6 +10,7 @@ from django.utils import timezone
 from authz.models import TenantMembership
 from crm_records.models import EventLog, Record
 from user_settings.models import UserSettings
+from django.db.models.expressions import RawSQL
 from .constants import TRACKED_EVENTS, TERMINAL_EVENTS
 from .utils import get_utc_datetime_range_for_ist_date
 
@@ -444,6 +445,80 @@ class TeamMetricsService:
         logger.info(f"[TeamMetricsService] Trail target calculated: {target_sum}")
         return int(target_sum)
     
+    _UNASSIGNED_WHERE = """
+        (
+            (data->>'assigned_to') IS NULL
+            OR TRIM(COALESCE(data->>'assigned_to', '')) = ''
+            OR LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) IN ('null', 'none')
+        )
+    """
+
+    def _get_unassigned_leads_qs(self):
+        return Record.objects.filter(
+            tenant=self.tenant,
+            entity_type="lead",
+        ).extra(where=[self._UNASSIGNED_WHERE])
+
+    def get_unassigned_leads_count(self) -> int:
+        """Count leads in the tenant where assigned_to is null/empty/none."""
+        return self._get_unassigned_leads_qs().count()
+
+    def get_unassigned_leads_breakdown(
+        self,
+        lead_source_filter: Optional[List[str]] = None,
+        lead_stage_filter: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Breakdown of unassigned leads by lead_source and lead_stage.
+        lead_source_filter accepts a list of sources for multi-select.
+        """
+        qs = self._get_unassigned_leads_qs()
+
+        if lead_source_filter:
+            placeholders = ", ".join(["%s"] * len(lead_source_filter))
+            qs = qs.extra(
+                where=[f"COALESCE(NULLIF(TRIM(data->>'lead_source'), ''), 'Unknown') IN ({placeholders})"],
+                params=lead_source_filter,
+            )
+        if lead_stage_filter:
+            qs = qs.extra(where=["COALESCE(NULLIF(TRIM(data->>'lead_stage'), ''), 'Unknown') = %s"],
+                          params=[lead_stage_filter])
+
+        total = qs.count()
+
+        by_source = list(
+            qs.extra(
+                select={"lead_source": "COALESCE(NULLIF(TRIM(data->>'lead_source'), ''), 'Unknown')"}
+            ).values("lead_source").annotate(count=Count("id")).order_by("-count")
+        )
+
+        by_status = list(
+            qs.extra(
+                select={"lead_stage": "COALESCE(NULLIF(TRIM(data->>'lead_stage'), ''), 'Unknown')"}
+            ).values("lead_stage").annotate(count=Count("id")).order_by("-count")
+        )
+
+        # Distinct values for filter dropdowns (always unfiltered so user sees all options)
+        all_qs = self._get_unassigned_leads_qs()
+        available_sources = list(
+            all_qs.extra(
+                select={"lead_source": "COALESCE(NULLIF(TRIM(data->>'lead_source'), ''), 'Unknown')"}
+            ).values_list("lead_source", flat=True).distinct().order_by("lead_source")
+        )
+        available_stages = list(
+            all_qs.extra(
+                select={"lead_stage": "COALESCE(NULLIF(TRIM(data->>'lead_stage'), ''), 'Unknown')"}
+            ).values_list("lead_stage", flat=True).distinct().order_by("lead_stage")
+        )
+
+        return {
+            "total": total,
+            "by_source": by_source,
+            "by_status": by_status,
+            "available_sources": available_sources,
+            "available_stages": available_stages,
+        }
+
     def get_allotted_leads(self, manager_user_id: Optional[str] = None) -> int:
         """
         Calculate allotted leads by summing daily_limit from user_settings for all team members (excluding manager).
@@ -504,13 +579,14 @@ class TeamMetricsService:
         
         return {
             'attendance': self.get_attendance(target_date, manager_user_id),
-            'total_team_size': total_team_size,  # Count of reports only (excluding manager)
+            'total_team_size': total_team_size,
             'calls_made': self.get_calls_made(target_date, target_date, manager_user_id),
             'trials_activated': self.get_trials_activated(target_date, target_date, manager_user_id),
             'connected_to_trial_ratio': self.get_connected_to_trial_ratio(target_date, target_date, manager_user_id),
             'average_time_spent_seconds': self.get_average_time_spent(target_date, target_date, manager_user_id),
-            'trail_target': self.get_trail_target(manager_user_id),  # Sum of daily_target from user_settings
-            'allotted_leads': self.get_allotted_leads(manager_user_id),  # Sum of daily_limit from user_settings
+            'trail_target': self.get_trail_target(manager_user_id),
+            'allotted_leads': self.get_allotted_leads(manager_user_id),
+            'unassigned_leads': self.get_unassigned_leads_count(),
         }
     
     def get_member_breakdown(self, start_date: Optional[date] = None, end_date: Optional[date] = None, manager_user_id: Optional[str] = None) -> List[Dict[str, Any]]:

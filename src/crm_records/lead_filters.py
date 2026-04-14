@@ -1,7 +1,6 @@
 """
 Lead filters from Group + TenantMemberSetting only.
 All configuration is read from the database (no frontend overrides).
-Routing rules are separate: applied via apply_routing_rule_to_queryset(tenant, user_id, queue_type) using user_uuid from here.
 
 Used by Get Next Lead API to determine which leads a user is eligible to receive.
 """
@@ -39,7 +38,6 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
     """
     Load lead filters for the given user from the database only (no frontend params).
     Group/KV settings: eligible_lead_types, eligible_lead_sources, eligible_lead_statuses, states, daily_limit, user_uuid.
-    Routing is separate: use user_uuid with apply_routing_rule_to_queryset(tenant, user_id, queue_type).
     """
     eligible_lead_types: List[str] = []
     eligible_lead_sources: List[str] = []
