@@ -4,7 +4,6 @@ import logging
 from typing import Dict, Any, Optional
 from django.conf import settings
 from pathlib import Path
-from crm_records.models import Record, Entity
 import environ
 
 logger = logging.getLogger(__name__)
@@ -268,43 +267,3 @@ class PrajaService:
             )
             return False
 
-
-logger = logging.getLogger(__name__)
-
-def sync_entity_schema(tenant, entity_type, chunk_size=1000):
-    entity_obj, created = Entity.objects.get_or_create(
-        tenant=tenant,
-        name=entity_type
-    )
-
-    # 1. READ THE BOOKMARK
-    last_id = entity_obj.last_processed_record_id or 0
-
-    # 2. FILTER USING THE BOOKMARK (id__gt) AND SORT ASCENDING ('id')
-    new_records = Record.objects.filter(
-        tenant=tenant,
-        entity_type=entity_type,
-        id__gt=last_id  # Only grab records we haven't processed yet!
-    ).order_by('id')[:chunk_size]  # Process oldest to newest
-
-    if not new_records.exists():
-        return 0
-
-    current_fields_list = entity_obj.schema or []
-    unique_fields = set(current_fields_list)
-
-    for record in new_records:
-        record_data = record.data or {}
-        for key in record_data.keys():
-            unique_fields.add(key)
-
-    entity_obj.schema = list(unique_fields)
-    
-    # 3. UPDATE THE BOOKMARK TO THE HIGHEST ID WE JUST PROCESSED
-    entity_obj.last_processed_record_id = new_records.last().id
-    
-    entity_obj.save()
-    
-    logger.info(f"Synced {len(new_records)} {entity_type} records for tenant {tenant.id}")
-    
-    return len(new_records)
