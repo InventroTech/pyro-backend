@@ -26,9 +26,7 @@ class RequestIDMiddleware(MiddlewareMixin):
     """
 
     def process_request(self, request: HttpRequest) -> None:
-        rid = request.META.get(
-            'HTTP_X_REQUEST_ID', uuid.uuid4().hex[:12]
-        )
+        rid = request.META.get('HTTP_X_REQUEST_ID') or uuid.uuid4().hex[:12]
         request.id = rid
         _request_id_var.set(rid)
 
