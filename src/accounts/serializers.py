@@ -11,6 +11,7 @@ class TenantMembershipCreateSerializer(serializers.Serializer):
     lead_group_name = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)
     daily_target = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     daily_limit = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    manager_email = serializers.EmailField(required=False, allow_null=True)
 
     def validate(self, attrs):
         req = self.context['request']
@@ -58,6 +59,7 @@ class TenantMembershipUpdateSerializer(serializers.Serializer):
     lead_group_name = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)
     daily_target = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     daily_limit = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    manager_email = serializers.EmailField(required=False, allow_null=True, allow_blank=True)
 
     def validate(self, attrs):
         req = self.context["request"]

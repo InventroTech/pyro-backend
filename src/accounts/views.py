@@ -108,6 +108,7 @@ class TenantMembershipCreateView(APIView):
         lead_group_name = ser.validated_data.get("lead_group_name")
         daily_target = ser.validated_data.get("daily_target")
         daily_limit = ser.validated_data.get("daily_limit")
+        manager_email = (ser.validated_data.get("manager_email") or "").strip().lower() or None
 
         if not role_id:
             return Response({
@@ -129,7 +130,17 @@ class TenantMembershipCreateView(APIView):
                         return Response({
                             'error': f'Role with ID {role_id} not found for this tenant'
                         }, status=status.HTTP_400_BAD_REQUEST)
-                
+
+                parent_membership = None
+                if manager_email:
+                    parent_membership = TenantMembership.objects.filter(
+                        tenant=tenant, email=manager_email
+                    ).first()
+                    if not parent_membership:
+                        return Response({
+                            'error': f'Manager with email {manager_email} not found in this tenant'
+                        }, status=status.HTTP_400_BAD_REQUEST)
+
                 # Create or update TenantMembership directly (no LegacyUser)
                 membership, created = TenantMembership.objects.get_or_create(
                     tenant=tenant,
@@ -140,7 +151,8 @@ class TenantMembershipCreateView(APIView):
                         'company_name': company_name,
                         'department': department,
                         'user_id': uid,
-                        'is_active': bool(uid)
+                        'is_active': bool(uid),
+                        'user_parent_id': parent_membership,
                     }
                 )
                 
@@ -152,6 +164,7 @@ class TenantMembershipCreateView(APIView):
                     if department is not None:
                         membership.department = department
                     membership.role = authz_role
+                    membership.user_parent_id = parent_membership
                     if uid:
                         membership.user_id = uid
                         membership.is_active = True
@@ -182,6 +195,7 @@ class TenantMembershipCreateView(APIView):
                     'is_active': membership.is_active,
                     'lead_group_id': group.id if group else None,
                     'lead_group_name': group.name if group else None,
+                    'manager_email': parent_membership.email if parent_membership else None,
                     'created': created
                 }, status=status.HTTP_201_CREATED)
                         
@@ -212,6 +226,7 @@ class TenantMembershipUpdateView(APIView):
         lead_group_name = ser.validated_data.get("lead_group_name")
         daily_target = ser.validated_data.get("daily_target")
         daily_limit = ser.validated_data.get("daily_limit")
+        manager_email = ser.validated_data.get("manager_email")
 
         with transaction.atomic():
             try:
@@ -226,10 +241,27 @@ class TenantMembershipUpdateView(APIView):
                             "error": f"Role with ID {role_id} not found for this tenant"
                         }, status=status.HTTP_400_BAD_REQUEST)
 
+                parent_membership = None
+                if manager_email:
+                    normalized_manager_email = manager_email.strip().lower()
+                    parent_membership = TenantMembership.objects.filter(
+                        tenant=tenant, email=normalized_manager_email
+                    ).first()
+                    if not parent_membership:
+                        return Response({
+                            "error": f"Manager with email {normalized_manager_email} not found in this tenant"
+                        }, status=status.HTTP_400_BAD_REQUEST)
+                    if parent_membership.id == membership.id:
+                        return Response({
+                            "error": "A user cannot be their own manager"
+                        }, status=status.HTTP_400_BAD_REQUEST)
+
                 membership.name = name
                 membership.email = email
                 membership.department = department
                 membership.role = authz_role
+                if manager_email is not None:
+                    membership.user_parent_id = parent_membership
                 membership.save()
 
                 group = _apply_group_and_assignment(
@@ -254,6 +286,7 @@ class TenantMembershipUpdateView(APIView):
                     "is_active": membership.is_active,
                     "lead_group_id": group.id if group else None,
                     "lead_group_name": group.name if group else None,
+                    "manager_email": membership.user_parent_id.email if membership.user_parent_id else None,
                     "updated": True
                 }, status=status.HTTP_200_OK)
             except Exception as e:
