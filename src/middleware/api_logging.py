@@ -193,13 +193,13 @@ class APILoggingMiddleware(MiddlewareMixin):
     """
     
     def process_request(self, request: HttpRequest):
-        """Capture request start time and log request details."""
+        """Capture request start time and snapshot request details for reuse in process_response."""
         if _should_skip_logging(request.path):
             return None
         
         request._api_log_start_time = time.time()
         
-        request_info = {
+        request_snapshot = {
             "method": request.method,
             "path": request.path,
             "endpoint": request.get_full_path(),
@@ -216,10 +216,9 @@ class APILoggingMiddleware(MiddlewareMixin):
         if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
             body = _get_request_body(request)
             if body:
-                request_info["payload"] = _mask_sensitive_data(body)
+                request_snapshot["payload"] = _mask_sensitive_data(body)
         
-        request_info["user"] = _get_user_info(request)
-        request_info["tenant"] = _get_tenant_info(request)
+        request._api_log_snapshot = request_snapshot
         
         return None
     
@@ -243,56 +242,28 @@ class APILoggingMiddleware(MiddlewareMixin):
             if response_body:
                 response_info["body"] = _mask_sensitive_data(response_body)
         
+        snapshot = getattr(request, '_api_log_snapshot', {})
         log_data = {
-            "method": request.method,
-            "path": request.path,
-            "endpoint": request.get_full_path(),
+            **snapshot,
+            "request_id": getattr(request, 'id', None),
             "status_code": response.status_code,
             "duration_ms": duration,
             "user": _get_user_info(request),
             "tenant": _get_tenant_info(request),
-            "query_params": _mask_sensitive_data(_get_query_params(request)),
-            "headers": _mask_sensitive_data({
-                key.replace('HTTP_', '').replace('_', '-').title(): value
-                for key, value in request.META.items()
-                if key.startswith('HTTP_') or key in ('CONTENT_TYPE', 'CONTENT_LENGTH')
-            }),
-            "ip_address": self._get_client_ip(request),
         }
-        
-        if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
-            body = _get_request_body(request)
-            if body:
-                log_data["payload"] = _mask_sensitive_data(body)
         
         log_data["response"] = response_info
         if response_info.get("body"):
             log_data["response_body"] = response_info["body"]
         
+        log_extra = {"log_data": log_data, "log_type": "api_response"}
+
         if response.status_code >= 500:
-            logger.error(
-                "",
-                extra={
-                    "log_data": log_data,
-                    "log_type": "api_response"
-                }
-            )
+            logger.error("", extra=log_extra)
         elif response.status_code >= 400:
-            logger.warning(
-                "",
-                extra={
-                    "log_data": log_data,
-                    "log_type": "api_response"
-                }
-            )
+            logger.warning("", extra=log_extra)
         else:
-            logger.info(
-                "",
-                extra={
-                    "log_data": log_data,
-                    "log_type": "api_response"
-                }
-            )
+            logger.info("", extra=log_extra)
         
         return response
     
@@ -308,14 +279,15 @@ class APILoggingMiddleware(MiddlewareMixin):
         logger.error(
             "",
             extra={
+                "request_id": getattr(request, 'id', None),
                 "method": request.method,
                 "path": request.path,
                 "exception_type": type(exception).__name__,
                 "exception_message": str(exception),
                 "duration_ms": duration,
-                "log_type": "api_exception"
+                "log_type": "api_exception",
             },
-            exc_info=True
+            exc_info=True,
         )
         
         return None
