@@ -80,11 +80,12 @@ MIDDLEWARE = [
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'middleware.request_id.RequestIDMiddleware',
     'middleware.tenant.TenantResolver', 
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'middleware.api_logging.APILoggingMiddleware',  # API logging middleware
+    'middleware.api_logging.APILoggingMiddleware',
     'object_history.middleware.HistoryMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -117,13 +118,18 @@ WSGI_APPLICATION = 'config.wsgi.application'
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
+    'filters': {
+        'request_id': {
+            '()': 'middleware.log_filters.RequestIDFilter',
+        },
+    },
     'formatters': {
         'verbose': {
-            'format': '{levelname} {asctime} {name} {funcName} - {message}',
+            'format': '{levelname} {asctime} [{request_id}] {name} {funcName} - {message}',
             'style': '{',
         },
         'simple': {
-            'format': '{levelname} {message}',
+            'format': '{levelname} [{request_id}] {message}',
             'style': '{',
         },
         'api_simple': {
@@ -136,12 +142,13 @@ LOGGING = {
         'console': {
             'class': 'logging.StreamHandler',
             'formatter': 'verbose',
+            'filters': ['request_id'],
         },
         'api_console': {
             'class': 'logging.StreamHandler',
             'formatter': 'api_simple',
+            'filters': ['request_id'],
         },
-        # will add file logging in future
     },
     'root': {
         'handlers': ['console'],  
@@ -160,12 +167,12 @@ LOGGING = {
         },
         'object_history': {
             'handlers': ['console'],
-            'level': 'WARNING',  # Reduce noise - only show warnings/errors
+            'level': 'WARNING',
             'propagate': False,
         },
         'django.server': {
             'handlers': ['console'],
-            'level': 'WARNING',  # Suppress normal request logs
+            'level': 'WARNING',
             'propagate': False,
         },
         'background_jobs': {

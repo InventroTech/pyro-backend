@@ -12,6 +12,8 @@ class SimpleAPILogFormatter(logging.Formatter):
     
     def format(self, record: logging.LogRecord) -> str:
         """Format log record with debugging details when needed."""
+        rid = getattr(record, 'request_id', '-')
+
         if hasattr(record, 'log_type'):
             if hasattr(record, 'log_data') and record.log_data:
                 log_data = record.log_data
@@ -21,9 +23,9 @@ class SimpleAPILogFormatter(logging.Formatter):
                 duration = log_data.get('duration_ms')
                 
                 if duration:
-                    base_line = f"{method:4} {path:40} → {status} ({duration:>6.0f}ms)"
+                    base_line = f"[{rid}] {method:4} {path:40} → {status} ({duration:>6.0f}ms)"
                 else:
-                    base_line = f"{method:4} {path:40} → {status}"
+                    base_line = f"[{rid}] {method:4} {path:40} → {status}"
                 
                 details = []
                 
@@ -62,6 +64,6 @@ class SimpleAPILogFormatter(logging.Formatter):
                 path = getattr(record, 'path', 'N/A')
                 exc_type = record.exception_type
                 exc_msg = getattr(record, 'exception_message', '')[:200]
-                return f"{method:4} {path:40} → EXCEPTION: {exc_type} - {exc_msg}"
+                return f"[{rid}] {method:4} {path:40} → EXCEPTION: {exc_type} - {exc_msg}"
         
         return super().format(record)
