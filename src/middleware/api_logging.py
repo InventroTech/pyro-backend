@@ -210,6 +210,7 @@ class APILoggingMiddleware(MiddlewareMixin):
                 if key.startswith('HTTP_') or key in ('CONTENT_TYPE', 'CONTENT_LENGTH')
             }),
             "ip_address": self._get_client_ip(request),
+            "user_agent": request.META.get('HTTP_USER_AGENT', 'Unknown'),
         }
         
         if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
