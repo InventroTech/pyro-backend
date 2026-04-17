@@ -4,6 +4,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.utils import timezone
 from django.core.validators import MinValueValidator
 from core.models import BaseModel
+from core.soft_delete import SoftDeleteModel, alive_q
 from object_history.models import HistoryTrackedModel
 
 
@@ -33,15 +34,25 @@ class TaskPolicy(HistoryTrackedModel, BaseModel):
     Declarative policy. :
     Example key='lead.call.v1', intervals=['30m','3h','10h','24h','72h'], max_attempts=5
     """
-    key = models.CharField(max_length=100, unique=True)
+    key = models.CharField(max_length=100, db_index=True)
     intervals = models.JSONField(default=list)  # list of strings like '30m','3h'
     max_attempts = models.PositiveSmallIntegerField(validators=[MinValueValidator(1)], default=5)
     business_hours_only = models.BooleanField(default=False)  # optional
     timezone = models.CharField(max_length=64, null=True, blank=True)  # optional
 
+    class Meta(BaseModel.Meta):
+        constraints = [
+            models.UniqueConstraint(
+                fields=["key"],
+                condition=alive_q(),
+                name="scheduler_taskpolicy_key_uniq_alive",
+            ),
+        ]
+
     def __str__(self):
         return self.key
-    
+
+
 class ScheduledTask(HistoryTrackedModel, BaseModel):
     """
     A scheduled action for any model instance via Generic FK.
@@ -66,13 +77,14 @@ class ScheduledTask(HistoryTrackedModel, BaseModel):
     # arbitrary info for the worker (e.g., phone number override or user notes)
     payload = models.JSONField(default=dict, blank=True)
 
-    class Meta:
+    class Meta(BaseModel.Meta):
         indexes = [
             models.Index(fields=["status", "due_at"]),
             models.Index(fields=["content_type", "object_id", "status"]),
         ]
 
-class AttemptLog(models.Model):
+
+class AttemptLog(SoftDeleteModel):
     task = models.ForeignKey(ScheduledTask, on_delete=models.CASCADE, related_name="attempt_logs")
     attempt_no = models.PositiveSmallIntegerField()
     started_at = models.DateTimeField(auto_now_add=True)
@@ -80,3 +92,8 @@ class AttemptLog(models.Model):
     outcome = models.CharField(max_length=50, choices=AttemptOutcome.choices)
     notes = models.TextField(null=True, blank=True)
 
+    class Meta:
+        indexes = [
+            models.Index(fields=["is_deleted"], name="sched_al_is_deleted_idx"),
+            models.Index(fields=["deleted_at"], name="sched_al_deleted_at_idx"),
+        ]

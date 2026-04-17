@@ -4,6 +4,7 @@ from django.contrib.postgres.indexes import GinIndex, BrinIndex
 from django.db.models import Q
 from django.utils import timezone
 from core.models import Tenant
+from core.soft_delete import SoftDeleteModel
 from accounts.models import SupabaseAuthUser
 from object_history.models import HistoryTrackedModel
 import logging
@@ -11,7 +12,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class SupportTicketDump(models.Model):
+class SupportTicketDump(SoftDeleteModel):
     """
     Temporary staging table for support tickets before they're processed.
     This matches the structure expected by the DumpTicketWebhookView.
@@ -41,6 +42,8 @@ class SupportTicketDump(models.Model):
         indexes = [
             models.Index(fields=["tenant_id", "-created_at"], name="std_tn_cr_desc"),
             models.Index(fields=["is_processed", "-created_at"], name="std_proc_cr"),
+            models.Index(fields=["is_deleted"], name="std_is_deleted_idx"),
+            models.Index(fields=["deleted_at"], name="std_deleted_at_idx"),
         ]
 
     def __str__(self):
@@ -48,7 +51,7 @@ class SupportTicketDump(models.Model):
 
 
 
-class SupportTicket(HistoryTrackedModel):
+class SupportTicket(HistoryTrackedModel, SoftDeleteModel):
     id = models.BigAutoField(primary_key=True)
     created_at = models.DateTimeField(default=timezone.now)
     ticket_date = models.DateTimeField(null=True, blank=True)
@@ -98,7 +101,11 @@ class SupportTicket(HistoryTrackedModel):
 
     class Meta:
         db_table = "support_ticket"
-        managed = True  # existing prod table -> keep unmanaged
+        managed = True
+        indexes = [
+            models.Index(fields=["is_deleted"], name="st_is_deleted_idx"),
+            models.Index(fields=["deleted_at"], name="st_deleted_at_idx"),
+        ]
 
     def save(self, *args, **kwargs):
         """

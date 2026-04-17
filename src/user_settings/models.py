@@ -1,8 +1,9 @@
 from django.db import models
 from core.models import Tenant
+from core.soft_delete import SoftDeleteModel, alive_q
 
 
-class UserSettings(models.Model):
+class UserSettings(SoftDeleteModel):
     """
     User settings model to store key-value pairs for users within tenants.
     Used for storing settings like lead type assignments for RMs.
@@ -56,18 +57,25 @@ class UserSettings(models.Model):
 
     class Meta:
         db_table = 'user_settings'
-        unique_together = ['tenant', 'tenant_membership', 'key']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'tenant_membership', 'key'],
+                condition=alive_q(),
+                name='user_settings_tenant_mship_key_uniq_alive',
+            ),
+        ]
         indexes = [
             models.Index(fields=['tenant', 'tenant_membership']),
             models.Index(fields=['tenant', 'key']),
+            models.Index(fields=['is_deleted']),
+            models.Index(fields=['deleted_at']),
         ]
 
     def __str__(self):
-
         return f"{self.tenant.name} - {self.tenant_membership.id} - {self.key}: {self.value}"
 
 
-class RoutingRule(models.Model):
+class RoutingRule(SoftDeleteModel):
     """
     Routing rule for queueable objects (tickets, leads), keyed by authz.TenantMembership.
     One active rule per (tenant, tenant_membership, queue_type). Works even when the
@@ -127,10 +135,18 @@ class RoutingRule(models.Model):
 
     class Meta:
         db_table = "routing_rules"
-        unique_together = [["tenant", "tenant_membership", "queue_type"]]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "tenant_membership", "queue_type"],
+                condition=alive_q(),
+                name="routing_rules_tenant_mship_queue_uniq_alive",
+            ),
+        ]
         indexes = [
             models.Index(fields=["tenant", "queue_type", "tenant_membership"]),
             models.Index(fields=["tenant", "queue_type", "is_active"]),
+            models.Index(fields=["is_deleted"]),
+            models.Index(fields=["deleted_at"]),
         ]
 
     def __str__(self) -> str:
@@ -140,7 +156,7 @@ class RoutingRule(models.Model):
         )
 
 
-class Group(models.Model):
+class Group(SoftDeleteModel):
     """Tenant-scoped lead assignment group configuration."""
 
     tenant = models.ForeignKey(
@@ -163,16 +179,24 @@ class Group(models.Model):
 
     class Meta:
         db_table = "groups"
-        unique_together = [["tenant", "name"]]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "name"],
+                condition=alive_q(),
+                name="user_settings_groups_tenant_name_uniq_alive",
+            ),
+        ]
         indexes = [
             models.Index(fields=["tenant", "name"]),
+            models.Index(fields=["is_deleted"]),
+            models.Index(fields=["deleted_at"]),
         ]
 
     def __str__(self) -> str:
         return f"Group(tenant={self.tenant_id}, name={self.name})"
 
 
-class TenantMemberSetting(models.Model):
+class TenantMemberSetting(SoftDeleteModel):
     """
     Dedicated key/value table for core per-user settings like:
       - GROUP (group id)
@@ -199,10 +223,18 @@ class TenantMemberSetting(models.Model):
 
     class Meta:
         db_table = "user_kv_settings"
-        unique_together = ["tenant", "tenant_membership", "key"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "tenant_membership", "key"],
+                condition=alive_q(),
+                name="user_kv_tenant_mship_key_uniq_alive",
+            ),
+        ]
         indexes = [
             models.Index(fields=["tenant", "tenant_membership", "key"]),
             models.Index(fields=["tenant", "key"]),
+            models.Index(fields=["is_deleted"]),
+            models.Index(fields=["deleted_at"]),
         ]
 
     def __str__(self) -> str:
