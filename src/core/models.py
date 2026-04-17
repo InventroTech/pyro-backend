@@ -80,6 +80,11 @@ class RoleModel(TenantModel):
 class BaseModel(TimeStampedModel, TenantModel):
     """
     One-stop base: timestamps + tenant + sensible indexes.
+
+    For soft-delete (is_deleted / deleted_at, default managers), use
+    ``core.soft_delete.SoftDeleteModel``. When combining with this base, list
+    ``SoftDeleteModel`` first (e.g. ``class M(SoftDeleteModel, BaseModel)``)
+    so soft-delete managers remain the defaults.
     """
     class Meta(TimeStampedModel.Meta):
         abstract = True

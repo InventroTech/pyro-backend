@@ -3,6 +3,9 @@ from django.db import models
 from django.db.models import Q
 from django.db.models.functions import Lower
 
+from core.soft_delete import SoftDeleteModel, not_deleted_q
+
+
 class Permission(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     perm_key = models.CharField(max_length=128, unique=True)
@@ -30,7 +33,7 @@ class RolePermission(models.Model):
     class Meta:
         unique_together = (('role','permission'),)
 
-class TenantMembership(models.Model):
+class TenantMembership(SoftDeleteModel):
     class Meta:
         db_table = "authz_tenantmembership"
         constraints = [
@@ -40,11 +43,12 @@ class TenantMembership(models.Model):
             ),
             models.UniqueConstraint(
                 fields=("tenant", "role", "email"),
+                condition=not_deleted_q(),
                 name="uniq_authz_tm_tenant_role_email",
             ),
             models.UniqueConstraint(
                 fields=("tenant", "user_id"),
-                condition=Q(user_id__isnull=False),
+                condition=Q(user_id__isnull=False) & not_deleted_q(),
                 name="uniq_authz_tm_tenant_user_nn",
             ),
         ]
@@ -56,9 +60,10 @@ class TenantMembership(models.Model):
             models.Index(fields=("user_parent_id",), name="authz_tm_user_parent_id_idx"),
             models.Index(fields=("tenant", "user_parent_id"), name="authz_tm_tenant_user_parent"),
             models.Index(fields=("is_active",), name="authz_tm_is_active_idx"),
-            # Indexes for migrated fields (for performance when filtering by name/company_name)
             models.Index(fields=("name",), name="authz_tm_name_idx"),
             models.Index(fields=("company_name",), name="authz_tm_company_name_idx"),
+            models.Index(fields=("is_deleted",), name="authz_tm_is_deleted_idx"),
+            models.Index(fields=("deleted_at",), name="authz_tm_deleted_at_idx"),
         ]
 
     tenant = models.ForeignKey("core.Tenant", on_delete=models.CASCADE)
@@ -71,14 +76,14 @@ class TenantMembership(models.Model):
         related_name='direct_reports',
         db_index=True
     )
-    email = models.EmailField(null=False)  # or null=True initially for backfill
+    email = models.EmailField(null=False)
     role = models.ForeignKey("Role", on_delete=models.RESTRICT)
     is_active = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
-    # Fields migrated from LegacyUser (public.users)
     name = models.CharField(max_length=255, null=True, blank=True, help_text="User's display name")
     company_name = models.CharField(max_length=255, null=True, blank=True, help_text="Optional company name")
     department = models.CharField(max_length=255, null=True, blank=True, help_text="Optional department")
+
     def save(self, *args, **kwargs):
         if self.email:
             self.email = self.email.strip().lower()
