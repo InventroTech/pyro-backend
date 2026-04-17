@@ -4,6 +4,7 @@ from django.utils import timezone
 from django.core.validators import RegexValidator
 
 from authz.models import Role
+from core.soft_delete import SoftDeleteModel
 
 
 class TimeStampedModel(models.Model):
@@ -77,18 +78,16 @@ class RoleModel(TenantModel):
         abstract = True
 
 
-class BaseModel(TimeStampedModel, TenantModel):
+class BaseModel(SoftDeleteModel, TimeStampedModel, TenantModel):
     """
-    One-stop base: timestamps + tenant + sensible indexes.
+    Timestamps + tenant + soft-delete (``is_deleted``, ``deleted_at``) + default
+    filtered ``objects`` / ``all_objects``.
 
-    For soft-delete (is_deleted / deleted_at, default managers), use
-    ``core.soft_delete.SoftDeleteModel``. When combining with this base, list
-    ``SoftDeleteModel`` first (e.g. ``class M(SoftDeleteModel, BaseModel)``)
-    so soft-delete managers remain the defaults.
+    Concrete models inherit soft-delete behavior; add ``UniqueConstraint`` with
+    ``alive_q()`` where uniqueness should ignore soft-deleted rows.
     """
     class Meta(TimeStampedModel.Meta):
         abstract = True
         indexes = [
-            
             models.Index(fields=['tenant', '-created_at']),
         ]

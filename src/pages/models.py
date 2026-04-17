@@ -1,9 +1,10 @@
 import uuid
 from django.db import models
 from core.models import TimeStampedModel, RoleModel
+from core.soft_delete import SoftDeleteModel, alive_q
 
 
-class Page(TimeStampedModel, RoleModel):
+class Page(SoftDeleteModel, TimeStampedModel, RoleModel):
     """
     User-defined dashboard page: name, role visibility, and widget config (JSON).
     Stored in public.pages; tenant + role from RoleModel (role column is "role").
@@ -17,9 +18,9 @@ class Page(TimeStampedModel, RoleModel):
     header_title = models.CharField(max_length=255, blank=True, null=True)
     display_order = models.IntegerField(default=0)
     icon_name = models.CharField(
-        max_length=100, 
-        blank=True, 
-        null=True, 
+        max_length=100,
+        blank=True,
+        null=True,
         default='Sparkles',
         help_text="Key matching the navigationIconMap in the frontend."
     )
@@ -28,7 +29,6 @@ class Page(TimeStampedModel, RoleModel):
         blank=True,
         help_text='List of widget configs, e.g. [{"id": "...", "type": "ticketTable", "config": {...}}].',
     )
-    # Override RoleModel.role: existing DB column is "role", not "role_id"; keep related_name='pages'
     role = models.ForeignKey(
         'authz.Role',
         null=True,
@@ -45,13 +45,15 @@ class Page(TimeStampedModel, RoleModel):
         indexes = [
             models.Index(fields=['tenant', 'user_id']),
             models.Index(fields=['tenant', 'role']),
+            models.Index(fields=['is_deleted']),
+            models.Index(fields=['deleted_at']),
         ]
 
     def __str__(self):
         return f"{self.name} (tenant={self.tenant_id}, user={self.user_id})"
 
 
-class CustomIcon(models.Model):
+class CustomIcon(SoftDeleteModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey('core.Tenant', on_delete=models.CASCADE)
     name = models.CharField(max_length=255)
@@ -61,7 +63,17 @@ class CustomIcon(models.Model):
 
     class Meta:
         db_table = 'custom_icons'
-        unique_together = ['tenant', 'name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'name'],
+                condition=alive_q(),
+                name='pages_customicon_tenant_name_uniq_alive',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['is_deleted']),
+            models.Index(fields=['deleted_at']),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.tenant.slug if self.tenant else 'No Tenant'})"

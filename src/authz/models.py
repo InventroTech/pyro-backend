@@ -3,35 +3,67 @@ from django.db import models
 from django.db.models import Q
 from django.db.models.functions import Lower
 
-from core.soft_delete import SoftDeleteModel, not_deleted_q
+from core.soft_delete import SoftDeleteModel, alive_q
 
 
-class Permission(models.Model):
+class Permission(SoftDeleteModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    perm_key = models.CharField(max_length=128, unique=True)
+    perm_key = models.CharField(max_length=128, db_index=True)
 
-class Role(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    tenant = models.ForeignKey('core.Tenant', on_delete=models.CASCADE)
-    key = models.CharField(max_length=64)   # e.g. GM, OWNER, AGENT
-    name = models.CharField(max_length=128)
-    description = models.TextField(blank=True, null=True)
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                Lower("key"), "tenant",
-                name="uniq_authz_role_tenant_lower_key"
+                fields=["perm_key"],
+                condition=alive_q(),
+                name="authz_permission_perm_key_uniq_alive",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=("is_deleted",), name="authz_perm_is_deleted_idx"),
+            models.Index(fields=("deleted_at",), name="authz_perm_deleted_at_idx"),
+        ]
+
+
+class Role(SoftDeleteModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey("core.Tenant", on_delete=models.CASCADE)
+    key = models.CharField(max_length=64)
+    name = models.CharField(max_length=128)
+    description = models.TextField(blank=True, null=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                Lower("key"),
+                "tenant",
+                condition=alive_q(),
+                name="uniq_authz_role_tenant_lower_key",
             ),
         ]
         indexes = [
             models.Index(Lower("key"), name="authz_role_lower_key_idx"),
+            models.Index(fields=("is_deleted",), name="authz_role_is_deleted_idx"),
+            models.Index(fields=("deleted_at",), name="authz_role_deleted_at_idx"),
         ]
 
-class RolePermission(models.Model):
+
+class RolePermission(SoftDeleteModel):
     role = models.ForeignKey(Role, on_delete=models.CASCADE)
     permission = models.ForeignKey(Permission, on_delete=models.CASCADE)
+
     class Meta:
-        unique_together = (('role','permission'),)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("role", "permission"),
+                condition=alive_q(),
+                name="authz_rolepermission_role_perm_uniq_alive",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=("is_deleted",), name="authz_rp_is_deleted_idx"),
+            models.Index(fields=("deleted_at",), name="authz_rp_deleted_at_idx"),
+        ]
+
 
 class TenantMembership(SoftDeleteModel):
     class Meta:
@@ -43,12 +75,12 @@ class TenantMembership(SoftDeleteModel):
             ),
             models.UniqueConstraint(
                 fields=("tenant", "role", "email"),
-                condition=not_deleted_q(),
+                condition=alive_q(),
                 name="uniq_authz_tm_tenant_role_email",
             ),
             models.UniqueConstraint(
                 fields=("tenant", "user_id"),
-                condition=Q(user_id__isnull=False) & not_deleted_q(),
+                condition=Q(user_id__isnull=False) & alive_q(),
                 name="uniq_authz_tm_tenant_user_nn",
             ),
         ]
@@ -69,12 +101,12 @@ class TenantMembership(SoftDeleteModel):
     tenant = models.ForeignKey("core.Tenant", on_delete=models.CASCADE)
     user_id = models.UUIDField(null=True, blank=True, db_index=True)
     user_parent_id = models.ForeignKey(
-        'self',
+        "self",
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='direct_reports',
-        db_index=True
+        related_name="direct_reports",
+        db_index=True,
     )
     email = models.EmailField(null=False)
     role = models.ForeignKey("Role", on_delete=models.RESTRICT)
@@ -89,46 +121,110 @@ class TenantMembership(SoftDeleteModel):
             self.email = self.email.strip().lower()
         super().save(*args, **kwargs)
 
-class UserGroup(models.Model):
+
+class UserGroup(SoftDeleteModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    tenant = models.ForeignKey('core.Tenant', on_delete=models.CASCADE)
+    tenant = models.ForeignKey("core.Tenant", on_delete=models.CASCADE)
     key = models.CharField(max_length=64)
     name = models.CharField(max_length=128)
     description = models.TextField(blank=True, null=True)
-    class Meta:
-        unique_together = (('tenant','key'),)
 
-class GroupMembership(models.Model):
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("tenant", "key"),
+                condition=alive_q(),
+                name="authz_usergroup_tenant_key_uniq_alive",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=("is_deleted",), name="authz_ug_is_deleted_idx"),
+            models.Index(fields=("deleted_at",), name="authz_ug_deleted_at_idx"),
+        ]
+
+
+class GroupMembership(SoftDeleteModel):
     group = models.ForeignKey(UserGroup, on_delete=models.CASCADE)
     user_id = models.UUIDField()
-    class Meta:
-        unique_together = (('group','user_id'),)
 
-class GroupPermission(models.Model):
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("group", "user_id"),
+                condition=alive_q(),
+                name="authz_groupmembership_group_user_uniq_alive",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=("is_deleted",), name="authz_gm_is_deleted_idx"),
+            models.Index(fields=("deleted_at",), name="authz_gm_deleted_at_idx"),
+        ]
+
+
+class GroupPermission(SoftDeleteModel):
     group = models.ForeignKey(UserGroup, on_delete=models.CASCADE)
     permission = models.ForeignKey(Permission, on_delete=models.CASCADE)
-    class Meta:
-        unique_together = (('group','permission'),)
 
-class GroupRole(models.Model):
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("group", "permission"),
+                condition=alive_q(),
+                name="authz_grouppermission_group_perm_uniq_alive",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=("is_deleted",), name="authz_gp_is_deleted_idx"),
+            models.Index(fields=("deleted_at",), name="authz_gp_deleted_at_idx"),
+        ]
+
+
+class GroupRole(SoftDeleteModel):
     group = models.ForeignKey(UserGroup, on_delete=models.CASCADE)
     role = models.ForeignKey(Role, on_delete=models.CASCADE)
-    class Meta:
-        unique_together = (('group','role'),)
 
-class UserPermission(models.Model):
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("group", "role"),
+                condition=alive_q(),
+                name="authz_grouprole_group_role_uniq_alive",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=("is_deleted",), name="authz_gr_is_deleted_idx"),
+            models.Index(fields=("deleted_at",), name="authz_gr_deleted_at_idx"),
+        ]
+
+
+class UserPermission(SoftDeleteModel):
     """
     Per-user permission overrides, scoped by TenantMembership.
     No explicit tenant FK is needed because membership.tenant is the source of truth.
     """
-    membership = models.ForeignKey(TenantMembership, on_delete=models.CASCADE,null=True,  # now non-nullable
-    blank=True)
+
+    membership = models.ForeignKey(
+        TenantMembership,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+    )
     permission = models.ForeignKey(Permission, on_delete=models.CASCADE)
     effect = models.CharField(
         max_length=8,
-        choices=[('allow', 'allow'), ('deny', 'deny')],
-        default='allow',
+        choices=[("allow", "allow"), ("deny", "deny")],
+        default="allow",
     )
 
     class Meta:
-        unique_together = (('membership', 'permission'),)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("membership", "permission"),
+                condition=alive_q(),
+                name="authz_userpermission_mship_perm_uniq_alive",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=("is_deleted",), name="authz_up_is_deleted_idx"),
+            models.Index(fields=("deleted_at",), name="authz_up_deleted_at_idx"),
+        ]

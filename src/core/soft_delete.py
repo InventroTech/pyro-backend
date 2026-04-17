@@ -1,23 +1,28 @@
 """
 Reusable soft-delete for Django models.
 
-Use for any table that should keep rows but hide them from normal queries:
+**Default manager** ``objects`` returns only *alive* rows: ``is_deleted=False`` and
+``deleted_at`` is null. Use ``all_objects`` only when you intentionally need
+soft-deleted rows (audits, restore flows, admin). Misuse of ``all_objects`` is
+the main foot-gun; keep business logic on ``objects``.
 
-    from core.soft_delete import SoftDeleteModel
+**Uniqueness**: use :func:`alive_q` as ``UniqueConstraint(condition=...)`` so
+uniqueness applies only to alive rows (both ``is_deleted`` and ``deleted_at``).
+
+**Delete behavior**: instance ``.delete()`` and ``QuerySet.delete()`` soft-delete
+(bulk ``UPDATE``). ``.hard_delete()`` performs a real ``DELETE``.
+
+    from core.soft_delete import SoftDeleteModel, alive_q
 
     class MyModel(SoftDeleteModel):
-        ...
-
-- Default manager ``objects`` excludes rows where ``deleted_at`` is set.
-- Use ``all_objects`` to query including soft-deleted rows.
-- Call ``.delete()`` to soft-delete; ``.hard_delete()`` for a real DB delete;
-  ``.restore()`` to undo a soft delete.
-
-Partial unique constraints should scope to non-deleted rows, e.g.::
-
-    condition=Q(deleted_at__isnull=True)
-
-or use :func:`not_deleted_q`.
+        class Meta:
+            constraints = [
+                models.UniqueConstraint(
+                    fields=("slug",),
+                    condition=alive_q(),
+                    name="uniq_mymodel_slug_alive",
+                ),
+            ]
 """
 
 from __future__ import annotations
@@ -27,31 +32,50 @@ from django.db.models import Q
 from django.utils import timezone
 
 
+def alive_q() -> Q:
+    """
+    Rows that are not soft-deleted. Use for partial unique constraints and
+    filtered querysets so constraints match the default manager semantics.
+    """
+    return Q(is_deleted=False) & Q(deleted_at__isnull=True)
+
+
 def not_deleted_q() -> Q:
-    """Use in ``UniqueConstraint(condition=...)`` so uniqueness ignores soft-deleted rows."""
-    return Q(deleted_at__isnull=True)
+    """Backward-compatible alias for :func:`alive_q`."""
+    return alive_q()
 
 
 class SoftDeleteQuerySet(models.QuerySet):
+    """QuerySet whose ``delete()`` soft-deletes instead of SQL ``DELETE``."""
+
     def delete(self):
-        count = self.update(is_deleted=True, deleted_at=timezone.now())
+        now = timezone.now()
+        count = self.update(is_deleted=True, deleted_at=now)
         return count, {self.model._meta.label: count}
 
     def hard_delete(self):
+        """Permanent delete (SQL ``DELETE``)."""
         return super().delete()
 
 
 class SoftDeleteManager(models.Manager):
-    """Excludes soft-deleted rows (``deleted_at`` is null)."""
+    """
+    Default manager: only *alive* rows (``is_deleted=False``, ``deleted_at`` unset).
+    This is what application code should use almost everywhere.
+    """
 
     def get_queryset(self):
         return SoftDeleteQuerySet(self.model, using=self._db).filter(
-            deleted_at__isnull=True
+            is_deleted=False,
+            deleted_at__isnull=True,
         )
 
 
 class AllObjectsManager(models.Manager):
-    """Includes soft-deleted rows."""
+    """
+    Unfiltered manager: includes soft-deleted rows. Use only when you explicitly
+    need deleted data (e.g. restore, compliance, debugging).
+    """
 
     def get_queryset(self):
         return SoftDeleteQuerySet(self.model, using=self._db)
@@ -59,10 +83,11 @@ class AllObjectsManager(models.Manager):
 
 class SoftDeleteModel(models.Model):
     """
-    Abstract base: ``is_deleted``, ``deleted_at``, soft-delete managers, and helpers.
+    Abstract base with ``is_deleted``, ``deleted_at``, soft-delete managers,
+    and ``delete`` / ``restore`` / ``hard_delete``.
 
-    Subclasses add their own fields and ``Meta``; add indexes on ``is_deleted`` /
-    ``deleted_at`` per table if you filter on them often.
+    The first declared manager is ``objects`` (filtered); ``all_objects`` is
+    intentionally separate so "see deleted rows" is an explicit choice.
     """
 
     is_deleted = models.BooleanField(default=False)
@@ -73,6 +98,20 @@ class SoftDeleteModel(models.Model):
 
     class Meta:
         abstract = True
+
+    def save(self, *args, **kwargs):
+        # Keep is_deleted / deleted_at consistent if one is set without the other.
+        if self.is_deleted and self.deleted_at is None:
+            self.deleted_at = timezone.now()
+        if not self.is_deleted:
+            self.deleted_at = None
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            uf = list(update_fields)
+            if "is_deleted" in uf and "deleted_at" not in uf:
+                uf.append("deleted_at")
+                kwargs["update_fields"] = uf
+        super().save(*args, **kwargs)
 
     def delete(self, using=None, keep_parents=False):
         self.is_deleted = True
