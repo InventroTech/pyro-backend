@@ -1,3 +1,4 @@
+import os
 from rest_framework import generics, status, serializers
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -35,6 +36,8 @@ from .lead_filters import get_lead_filters_for_user
 import requests
 import uuid
 from authz.models import TenantMembership
+from email_protocol.services import send_email
+from email_protocol.templates.newRequestUnmannd import build_new_request_unmannd_email
 
 from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
 from crm_records.lead_pipeline.pipeline import LeadPipeline
@@ -63,6 +66,114 @@ def _legacy_get_next_lead_assignees_match(stored, requester: str) -> bool:
     if _legacy_get_next_lead_assignee_is_unassigned(stored):
         return False
     return str(stored).strip().lower() == str(requester).strip().lower()
+
+
+def _notify_team_lead_for_inventory_request(request, record):
+    """
+    Send team-lead email notification for newly created inventory requests.
+    Never raises (best effort only).
+    """
+    if not record or record.entity_type not in {"inventory_request", "unmannd_request"}:
+        return
+
+    data = record.data if isinstance(record.data, dict) else {}
+    team_lead_value = data.get("team_lead")
+    if team_lead_value in (None, ""):
+        logger.info(
+            "Inventory request %s email skipped: team_lead missing in payload.",
+            getattr(record, "id", None),
+        )
+        return
+
+    tenant = getattr(request, "tenant", None)
+    if not tenant:
+        logger.info(
+            "Inventory request %s email skipped: tenant missing on request context.",
+            getattr(record, "id", None),
+        )
+        return
+
+    try:
+        team_lead_email = None
+        team_lead_name = "Team Lead"
+        membership = None
+        try:
+            membership = TenantMembership.objects.filter(
+                tenant=tenant,
+                id=team_lead_value,
+                is_active=True,
+            ).select_related("role").first()
+        except Exception:
+            membership = None
+
+        if membership:
+            team_lead_email = (membership.email or "").strip().lower()
+            team_lead_name = (membership.name or membership.email or "Team Lead").strip()
+
+        if not team_lead_email:
+            logger.info(
+                "Inventory request %s email skipped: no active team lead email found for team_lead=%s",
+                record.id,
+                team_lead_value,
+            )
+            return
+
+        frontend_base = (os.environ.get("PYRO_FRONTEND_URL") or os.environ.get("FRONTEND_URL") or "").strip().rstrip("/")
+        tenant_slug = str(getattr(tenant, "slug", "") or "").strip()
+        if frontend_base and "/app/" in frontend_base:
+            # If env already includes app path, use it directly.
+            redirect_url = frontend_base
+        elif frontend_base and tenant_slug:
+            # Preferred app redirect pattern.
+            redirect_url = f"{frontend_base}/app/{tenant_slug}"
+        elif frontend_base:
+            redirect_url = frontend_base
+        elif tenant_slug:
+            # Hard fallback to production app URL shape.
+            redirect_url = f"https://app.thepyro.ai/app/{tenant_slug}"
+        else:
+            redirect_url = request.build_absolute_uri(f"/crm-records/records/{record.id}/")
+
+        requester_name = str(data.get("requester_name") or "Requestor").strip()
+        subject, text_body, html_body = build_new_request_unmannd_email(
+            {
+                "request_id": record.id,
+                "tenant_name": getattr(tenant, "name", "Pyro"),
+                "team_lead_name": team_lead_name,
+                "requester_name": requester_name,
+                "department": str(data.get("department") or "N/A").strip(),
+                "item_name": str(data.get("item_name_freeform") or data.get("item_name") or "N/A").strip(),
+                "quantity": str(data.get("quantity_required") or "N/A").strip(),
+                "urgency": str(data.get("urgency_level") or "N/A").strip(),
+                "status_text": str(data.get("status_text") or data.get("status") or "Request submitted").strip(),
+                "redirect_url": redirect_url,
+            }
+        )
+
+        success, msg = send_email(
+            to_emails=team_lead_email,
+            subject=subject,
+            message=text_body,
+            html_message=html_body,
+            client_name="InventoryRequestNotification",
+            fail_silently=True,
+        )
+        if not success:
+            logger.warning(
+                "Inventory request %s email notification failed for team_lead=%s: %s",
+                record.id,
+                team_lead_email,
+                msg,
+            )
+        else:
+            logger.info(
+                "Inventory request %s email notification sent to %s (team_lead=%s).",
+                record.id,
+                team_lead_email,
+                team_lead_value,
+            )
+    except Exception:
+        logger.exception("Unexpected error while sending inventory request email notification for record=%s", getattr(record, "id", None))
 
 from .helper import parse_numeric_lookup, coerce_numeric
 from .assignee_display import build_assigned_to_search_q
@@ -365,6 +476,9 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 )
             except Exception as e:
                 logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
+
+        if entity_type in {"inventory_request", "unmannd_request"}:
+            _notify_team_lead_for_inventory_request(self.request, record)
     
     def put(self, request, *args, **kwargs):
         """
@@ -653,6 +767,9 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
                 )
             except Exception as e:
                 logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
+
+        if self.entity_type in {"inventory_request", "unmannd_request"}:
+            _notify_team_lead_for_inventory_request(self.request, record)
 
 
 class RecordEventView(TenantScopedMixin, APIView):

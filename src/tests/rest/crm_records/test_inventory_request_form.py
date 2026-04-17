@@ -2,7 +2,9 @@
 Tests for inventory request form backend: creating records with entity_type=inventory_request
 and full form payload (department, vendor, product_link, urgency_level, etc.).
 """
+import os
 import uuid
+from unittest.mock import patch
 
 from django.core.cache import cache
 from django.test import TestCase
@@ -50,6 +52,19 @@ class InventoryRequestFormBackendTests(TestCase):
             email=self.user.email,
             role=role,
             is_active=True,
+        )
+        self.team_lead_user = User.objects.create_user(
+            email="teamlead@example.com",
+            password="pass1234",
+            supabase_uid=str(uuid.uuid4()),
+        )
+        self.team_lead_membership = TenantMembership.objects.create(
+            tenant=self.tenant,
+            user_id=self.team_lead_user.supabase_uid,
+            email=self.team_lead_user.email,
+            role=role,
+            is_active=True,
+            name="Team Lead User",
         )
         self.client = APIClient()
         self.list_url = "/crm-records/records/"
@@ -105,6 +120,66 @@ class InventoryRequestFormBackendTests(TestCase):
         self.assertEqual(record.tenant_id, self.tenant.id)
         self.assertEqual(record.data["vendor"], "Acme Corp")
         self.assertEqual(record.data["department"], "Engineering")
+
+    @patch("crm_records.views.send_email")
+    def test_create_inventory_request_sends_email_to_team_lead(self, mock_send_email):
+        mock_send_email.return_value = (True, "ok")
+        payload = {
+            "entity_type": "inventory_request",
+            "data": {
+                "status": "DRAFT",
+                "status_text": "Submitted",
+                "request_date": "2026-02-09",
+                "requester_id": str(self.user.id),
+                "requester_name": "Test Requester",
+                "department": "Engineering",
+                "item_name_freeform": "Laptop stand",
+                "quantity_required": 2,
+                "urgency_level": "HIGH",
+                "team_lead": self.team_lead_membership.id,
+            },
+        }
+        response = self.client.post(
+            self.list_url,
+            payload,
+            format="json",
+            **self._auth_headers(),
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertTrue(mock_send_email.called)
+        kwargs = mock_send_email.call_args.kwargs
+        self.assertEqual(kwargs.get("to_emails"), "teamlead@example.com")
+
+    @patch.dict(os.environ, {"PYRO_FRONTEND_URL": "https://app.thepyro.ai"}, clear=False)
+    @patch("crm_records.views.send_email")
+    def test_create_unmannd_request_sends_email_with_app_redirect(self, mock_send_email):
+        mock_send_email.return_value = (True, "ok")
+        payload = {
+            "entity_type": "unmannd_request",
+            "data": {
+                "status": "NEW_REQUEST",
+                "status_text": "New request submitted",
+                "request_date": "2026-02-09",
+                "requester_id": str(self.user.id),
+                "requester_name": "Test Requester",
+                "department": "Engineering",
+                "item_name_freeform": "Drone",
+                "quantity_required": 1,
+                "urgency_level": "CRITICAL",
+                "team_lead": self.team_lead_membership.id,
+            },
+        }
+        response = self.client.post(
+            self.list_url,
+            payload,
+            format="json",
+            **self._auth_headers(),
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        kwargs = mock_send_email.call_args.kwargs
+        self.assertEqual(kwargs.get("to_emails"), "teamlead@example.com")
+        html_message = kwargs.get("html_message", "")
+        self.assertIn(f"https://app.thepyro.ai/app/{self.tenant.slug}", html_message)
 
     def test_create_inventory_request_with_empty_optional_fields(self):
         """Optional fields can be empty string; record still created."""
