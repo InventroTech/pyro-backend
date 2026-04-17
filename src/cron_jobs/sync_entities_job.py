@@ -1,40 +1,31 @@
 import logging
 from core.models import Tenant
-from crm_records.services import sync_entity_schema
-from crm_records.models import Record
+from core.services import aggregate_all_entities
 
 logger = logging.getLogger(__name__)
 
-def run_entity_sync():
+def run_entity_aggregation():
     """
-    Cron job entry point. Loops through all active tenants and updates 
-    their entity schemas for specific record types.
+    Cron job entry point for record aggregation.
+    Discovers entity schemas by scanning new records and building snapshots
+    with distinct field values.
     """
-    logger.info("Starting global entity schema sync job...")
+    logger.info("Starting global record aggregation job...")
     
-    # 1. Get all tenants in the system
-    tenants = Tenant.objects.all()
-    
-    # 2. Define which record types we want to track schemas for
-    # (Check with your team if there are others besides 'lead' and 'ticket')
-    entity_types_to_track = Record.objects.values_list('entity_type', flat=True).distinct()
-    
-    total_records_processed = 0
-    
-    # 3. Loop through every tenant and every entity type
-    for tenant in tenants:
-        for entity_type in entity_types_to_track:
-            try:
-                # Call the "Brain" we built in services.py!
-                processed_count = sync_entity_schema(tenant, entity_type)
-                total_records_processed += processed_count
-                
-            except Exception as e:
-                # If one tenant's data is corrupted, catch the error so the whole job doesn't crash
-                logger.error(f"Failed to sync {entity_type} for tenant {tenant.slug or tenant.id}: {str(e)}")
-
-    logger.info(f"Finished entity schema sync job. Total new records processed: {total_records_processed}")
+    try:
+        stats = aggregate_all_entities(chunk_size=1000)
+        logger.info(
+            f"Finished record aggregation job. "
+            f"Processed {stats.get('total_records_processed', 0)} records across "
+            f"{stats.get('total_entities_processed', 0)} entities. "
+            f"Errors: {len(stats.get('errors', []))}"
+        )
+        return stats
+        
+    except Exception as e:
+        logger.error(f"Record aggregation job failed: {str(e)}")
+        raise
 
 # If your team runs these as direct python scripts from a server cron tab:
 if __name__ == "__main__":
-    run_entity_sync()
+    run_entity_aggregation()

@@ -87,3 +87,86 @@ class BaseModel(TimeStampedModel, TenantModel):
             
             models.Index(fields=['tenant', '-created_at']),
         ]
+
+
+class SystemSettings(models.Model):
+    """
+    Global system settings for tracking processing state across the application.
+    Stores the last processed record ID for the record aggregator job.
+    
+    Key (setting_key) examples:
+    - "record_aggregator_last_processed_id": Last record ID processed by the aggregator job
+    """
+    setting_key = models.CharField(
+        max_length=255,
+        unique=True,
+        db_index=True,
+        help_text="Unique key for the setting (e.g., 'record_aggregator_last_processed_id')"
+    )
+    setting_value = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="The value of the setting, can be any JSON-serializable type"
+    )
+    description = models.TextField(
+        null=True,
+        blank=True,
+        help_text="Description of what this setting controls"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "system_settings"
+        verbose_name = "System Setting"
+        verbose_name_plural = "System Settings"
+
+    def __str__(self):
+        return f"{self.setting_key}: {self.setting_value}"
+
+
+class RecordAggregator(BaseModel):
+    """
+    Tracks entity schema snapshots per tenant.
+    One row per (tenant, entity_type) combination.
+    
+    The aggregator job runs every minute scanning the records table.
+    For each (tenant, entity_type) combination, it:
+    1. Reads records from last_processed_record_id onwards (from SystemSettings)
+    2. Captures all attribute names and their distinct values from the data JSON
+    3. Updates this record with the schema snapshot showing all fields and value variations
+    4. Updates the last_processed_record_id in SystemSettings for the next run
+    
+    This eliminates manual schema definitions - schema is automatically discovered from actual record data.
+    """
+    entity_type = models.CharField(
+        max_length=100,
+        db_index=True,
+        help_text="The entity type (e.g., 'lead', 'ticket', 'vendor', 'request', 'product')"
+    )
+    schema_snapshot = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Schema snapshot: {field_name: {values: [...distinct_values...], count: int, field_type: str}}"
+    )
+    total_records_processed = models.BigIntegerField(
+        default=0,
+        help_text="Total count of records processed for this entity type"
+    )
+    last_aggregation_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp of last aggregation run for this entity"
+    )
+
+    class Meta:
+        db_table = "record_aggregators"
+        unique_together = [['tenant', 'entity_type']]
+        indexes = [
+            models.Index(fields=['tenant', 'entity_type']),
+            models.Index(fields=['tenant', '-last_aggregation_at']),
+        ]
+
+    def __str__(self):
+        fields_count = len(self.schema_snapshot) if isinstance(self.schema_snapshot, dict) else 0
+        return f"{self.tenant.slug if self.tenant else 'N/A'}.{self.entity_type} ({fields_count} fields)"

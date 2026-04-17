@@ -29,7 +29,8 @@ from authz.models import TenantMembership
 from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
 from crm_records.models import Record, PartnerEvent
 from crm_records.scoring import get_scoring_rules, score_chunk_sql
-from crm_records.services import PrajaService, sync_entity_schema
+from crm_records.services import PrajaService
+from core.services import aggregate_all_entities
 from support_ticket.models import SupportTicket
 from support_ticket.services import MixpanelService, RMAssignedMixpanelService
 
@@ -1276,55 +1277,110 @@ class ReleaseLeadsAfter12hJobHandler(JobHandler):
         delays = [60, 300, 900]
         return delays[min(attempt - 1, len(delays) - 1)]
 
-class SyncEntitySchemasHandler(JobHandler):
+class ReleaseLeadsAfter12hJobHandler(JobHandler):
     """
-    Handler for syncing entity schemas across all active tenants.
+    Handler for releasing leads after 12 hours of NOT_CONNECTED status.
+    Finds leads assigned more than 12 hours ago with status NOT_CONNECTED and unassigns them.
+    """
+    
+    def process(self, job: BackgroundJob) -> bool:
+        try:
+            # Find leads that meet the criteria
+            twelve_hours_ago = timezone.now() - timedelta(hours=12)
+            
+            records = Record.objects.filter(
+                entity_type='lead',
+                data__assigned_to__isnull=False,
+                data__lead_status='NOT_CONNECTED',
+            )
+            
+            updated_count = 0
+            for record in records:
+                # Check if assigned_today_at is more than 12 hours old
+                first_assigned_str = record.data.get('first_assigned_today_at')
+                if not first_assigned_str:
+                    # Fall back to legacy field if needed
+                    first_assigned_str = record.data.get('not_connected_unassign_at')
+                
+                if first_assigned_str:
+                    try:
+                        first_assigned = timezone.make_aware(
+                            timezone.datetime.fromisoformat(first_assigned_str.replace('Z', '+00:00'))
+                        )
+                    except (ValueError, AttributeError):
+                        continue
+                    
+                    # If 12+ hours have passed, unassign
+                    if first_assigned <= twelve_hours_ago:
+                        record.data['assigned_to'] = None
+                        record.data['lead_status'] = 'NOT_CONNECTED'
+                        record.save()
+                        updated_count += 1
+            
+            job.result = {
+                "success": True,
+                "released_count": updated_count,
+                "timestamp": timezone.now().isoformat()
+            }
+            logger.info(f"Released {updated_count} NOT_CONNECTED leads")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error releasing leads: {str(e)}")
+            raise Exception(f"Release leads job failed: {str(e)}") from e
+
+    def get_retry_delay(self, attempt: int) -> int:
+        """Retry after 5, 10, 15 min"""
+        delays = [300, 600, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+
+class RecordAggregatorJobHandler(JobHandler):
+    """
+    Handler for aggregating records and building entity schemas.
+    Scans new records, discovers fields, and stores distinct values in RecordAggregator.
     """
     
     def process(self, job: BackgroundJob) -> bool:
         """
-        Process the sync_entity_schemas job.
-        Loops through all tenants and updates their entity definitions based on new records.
+        Process the aggregate_records job.
+        Scans all new records, builds schema snapshots with distinct field values,
+        and updates RecordAggregator and SystemSettings.
         """
         try:
             start_time = time.time()
-            print(f"\n🚀 [ENTITY SYNC JOB] Processing job {job.id}...")
+            print(f"\n🚀 [RECORD AGGREGATOR JOB] Processing job {job.id}...")
             
-            tenants = Tenant.objects.all()
-            entity_types_to_track = Record.objects.values_list('entity_type', flat=True).distinct()
-            total_records_processed = 0
-            
-            for tenant in tenants:
-                for entity_type in entity_types_to_track:
-                    try:
-                        # Call the "Brain" logic we built earlier!
-                        processed_count = sync_entity_schema(tenant, entity_type)
-                        total_records_processed += processed_count
-                        
-                        if processed_count > 0:
-                            print(f"📋 [ENTITY SYNC JOB] Synced {processed_count} {entity_type}s for {tenant.slug}")
-                            
-                    except Exception as e:
-                        logger.error(f"Failed to sync {entity_type} for tenant {tenant.id}: {str(e)}")
-                        # We don't raise here so one broken tenant doesn't crash the whole job
+            # Call the aggregation service
+            stats = aggregate_all_entities(chunk_size=1000)
             
             execution_time = time.time() - start_time
             
             # Store result with debugging information
             job.result = {
                 "success": True,
-                "total_records_processed": total_records_processed,
+                "total_entities_processed": stats.get('total_entities_processed', 0),
+                "total_records_processed": stats.get('total_records_processed', 0),
+                "errors": stats.get('errors', []),
                 "execution_time_seconds": round(execution_time, 3),
                 "timestamp": timezone.now().isoformat()
             }
             
-            print(f"✅ [ENTITY SYNC JOB] Job {job.id} completed. Processed {total_records_processed} records in {round(execution_time, 3)}s")
+            if stats.get('errors'):
+                print(f"⚠️  [RECORD AGGREGATOR JOB] Job {job.id} completed with {len(stats['errors'])} errors")
+                for error in stats['errors']:
+                    print(f"  - {error}")
+            else:
+                print(f"✅ [RECORD AGGREGATOR JOB] Job {job.id} completed. "
+                      f"Processed {stats['total_records_processed']} records across "
+                      f"{stats['total_entities_processed']} entities in {round(execution_time, 3)}s")
+            
             return True
             
         except Exception as e:
-            error_msg = f"Entity Schema Sync failed: {str(e)}"
-            print(f"❌ [ENTITY SYNC JOB] Job {job.id} failed: {error_msg}")
-            logger.error(f"Entity sync job {job.id} failed: {error_msg}")
+            error_msg = f"Record Aggregation failed: {str(e)}"
+            print(f"❌ [RECORD AGGREGATOR JOB] Job {job.id} failed: {error_msg}")
+            logger.error(f"Record aggregation job {job.id} failed: {error_msg}", exc_info=True)
             raise Exception(error_msg) from e
 
     def get_retry_delay(self, attempt: int) -> int:
@@ -1354,7 +1410,7 @@ class JobHandlerRegistry:
         self.register_handler(JobType.PARTNER_LEAD_ASSIGN, PartnerLeadAssignJobHandler())
         self.register_handler(JobType.UNASSIGN_SNOOZED_LEADS, UnassignSnoozedLeadsJobHandler())
         self.register_handler(JobType.RELEASE_LEADS_AFTER_12H, ReleaseLeadsAfter12hJobHandler())
-        self.register_handler(JobType.SYNC_ENTITY_SCHEMAS, SyncEntitySchemasHandler())
+        self.register_handler(JobType.AGGREGATE_RECORDS, RecordAggregatorJobHandler())
         self.register_handler(
             JobType.CLOSE_STALE_SUBSCRIPTION_LEADS, CloseStaleSubscriptionLeadsJobHandler()
         )

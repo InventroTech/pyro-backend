@@ -24,7 +24,7 @@ class JobType(models.TextChoices):
     PARTNER_LEAD_ASSIGN = "partner_lead_assign", "Partner Lead Assign"
     UNASSIGN_SNOOZED_LEADS = "unassign_snoozed_leads", "Unassign Snoozed Leads"
     RELEASE_LEADS_AFTER_12H = "release_leads_after_12h", "Release Leads After 12h"
-    SYNC_ENTITY_SCHEMAS = "sync_entity_schemas", "Sync Entity Schemas"
+    AGGREGATE_RECORDS = "aggregate_records", "Aggregate Records Schema"
     CLOSE_STALE_SUBSCRIPTION_LEADS = "close_stale_subscription_leads", "Close Stale Subscription Leads"
     SNOOZED_TO_NOT_CONNECTED_MIDNIGHT = (
         "snoozed_to_not_connected_midnight",
