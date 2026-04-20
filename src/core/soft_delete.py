@@ -12,9 +12,17 @@ uniqueness applies only to alive rows (both ``is_deleted`` and ``deleted_at``).
 **Delete behavior**: instance ``.delete()`` and ``QuerySet.delete()`` soft-delete
 (bulk ``UPDATE``). ``.hard_delete()`` performs a real ``DELETE``.
 
-    from core.soft_delete import SoftDeleteModel, alive_q
+**Cascade**: set ``soft_delete_cascade`` on a concrete model to a tuple of *reverse*
+relation accessor names (``ForeignKey`` / ``OneToOne`` from child to parent). On
+``delete()`` / ``QuerySet.delete()``, those related rows are soft-deleted first
+(recursively if they also define ``soft_delete_cascade``). Same accessors are
+used for ``hard_delete()`` so children are removed before the parent SQL
+``DELETE``. Restore does not cascade.
 
-    class MyModel(SoftDeleteModel):
+    from core.models import BaseModel
+    from core.soft_delete import alive_q
+
+    class MyModel(BaseModel):
         class Meta:
             constraints = [
                 models.UniqueConstraint(
@@ -27,9 +35,38 @@ uniqueness applies only to alive rows (both ``is_deleted`` and ``deleted_at``).
 
 from __future__ import annotations
 
-from django.db import models
+from django.core.exceptions import ImproperlyConfigured
+from django.db import DEFAULT_DB_ALIAS, models
 from django.db.models import Q
 from django.utils import timezone
+
+
+def _related_queryset_for_cascade(
+    parent_model: type[models.Model],
+    accessor_name: str,
+    parent_pks: list,
+    using: str,
+):
+    """
+    Queryset of related rows (default manager) for a reverse FK / O2O accessor.
+    """
+    for rel in parent_model._meta.related_objects:
+        if rel.get_accessor_name() == accessor_name:
+            field = rel.field
+            child_model = field.model
+            if not issubclass(child_model, SoftDeleteMixin):
+                raise ImproperlyConfigured(
+                    f"{parent_model.__name__}.soft_delete_cascade[{accessor_name!r}] "
+                    f"resolves to {child_model.__name__}, which must inherit SoftDeleteMixin "
+                    f"(or BaseModel / RoleBaseModel)."
+                )
+            kw = {f"{field.name}__in": parent_pks}
+            return child_model.objects.using(using).filter(**kw)
+    names = [r.get_accessor_name() for r in parent_model._meta.related_objects]
+    raise ImproperlyConfigured(
+        f"{parent_model.__name__} has no reverse relation {accessor_name!r} for "
+        f"soft_delete_cascade. Valid names: {names}"
+    )
 
 
 def alive_q() -> Q:
@@ -49,12 +86,34 @@ class SoftDeleteQuerySet(models.QuerySet):
     """QuerySet whose ``delete()`` soft-deletes instead of SQL ``DELETE``."""
 
     def delete(self):
+        model = self.model
+        cascade = getattr(model, "soft_delete_cascade", ()) or ()
+        if cascade:
+            parent_ids = list(self.values_list("pk", flat=True))
+            if parent_ids:
+                using = self.db
+                for accessor_name in cascade:
+                    child_qs = _related_queryset_for_cascade(
+                        model, accessor_name, parent_ids, using
+                    )
+                    child_qs.delete()
         now = timezone.now()
         count = self.update(is_deleted=True, deleted_at=now)
-        return count, {self.model._meta.label: count}
+        return count, {model._meta.label: count}
 
     def hard_delete(self):
-        """Permanent delete (SQL ``DELETE``)."""
+        """Permanent delete (SQL ``DELETE``), with optional cascade."""
+        model = self.model
+        cascade = getattr(model, "soft_delete_cascade", ()) or ()
+        if cascade:
+            parent_ids = list(self.values_list("pk", flat=True))
+            if parent_ids:
+                using = self.db
+                for accessor_name in cascade:
+                    child_qs = _related_queryset_for_cascade(
+                        model, accessor_name, parent_ids, using
+                    )
+                    child_qs.hard_delete()
         return super().delete()
 
 
@@ -81,14 +140,23 @@ class AllObjectsManager(models.Manager):
         return SoftDeleteQuerySet(self.model, using=self._db)
 
 
-class SoftDeleteModel(models.Model):
+class SoftDeleteMixin(models.Model):
     """
-    Abstract base with ``is_deleted``, ``deleted_at``, soft-delete managers,
-    and ``delete`` / ``restore`` / ``hard_delete``.
+    Soft-delete fields, managers, and ``delete`` / ``restore`` / ``hard_delete``.
+
+    **Prefer :class:`core.models.BaseModel`** (tenant + timestamps + soft-delete) for
+    new tables. Use this mixin only for models that cannot extend ``BaseModel`` or
+    :class:`core.models.RoleBaseModel` (e.g. authz tables without timestamps, or
+    analytics rows without a tenant FK).
+
+    Optional ``soft_delete_cascade``: tuple of reverse relation names whose rows
+    are soft-deleted before this row (see module docstring).
 
     The first declared manager is ``objects`` (filtered); ``all_objects`` is
     intentionally separate so "see deleted rows" is an explicit choice.
     """
+
+    soft_delete_cascade: tuple[str, ...] = ()
 
     is_deleted = models.BooleanField(default=False)
     deleted_at = models.DateTimeField(null=True, blank=True, default=None)
@@ -114,11 +182,27 @@ class SoftDeleteModel(models.Model):
         super().save(*args, **kwargs)
 
     def delete(self, using=None, keep_parents=False):
+        cascade = getattr(self.__class__, "soft_delete_cascade", ()) or ()
+        db = using or getattr(self._state, "db", None) or DEFAULT_DB_ALIAS
+        if cascade and self.pk is not None:
+            for accessor_name in cascade:
+                child_qs = _related_queryset_for_cascade(
+                    self.__class__, accessor_name, [self.pk], db
+                )
+                child_qs.delete()
         self.is_deleted = True
         self.deleted_at = timezone.now()
-        self.save(update_fields=["is_deleted", "deleted_at"])
+        self.save(update_fields=["is_deleted", "deleted_at"], using=using)
 
     def hard_delete(self, using=None, keep_parents=False):
+        cascade = getattr(self.__class__, "soft_delete_cascade", ()) or ()
+        db = using or getattr(self._state, "db", None) or DEFAULT_DB_ALIAS
+        if cascade and self.pk is not None:
+            for accessor_name in cascade:
+                child_qs = _related_queryset_for_cascade(
+                    self.__class__, accessor_name, [self.pk], db
+                )
+                child_qs.hard_delete()
         return super().delete(using=using, keep_parents=keep_parents)
 
     def restore(self):

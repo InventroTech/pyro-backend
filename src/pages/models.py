@@ -1,10 +1,10 @@
 import uuid
 from django.db import models
-from core.models import TimeStampedModel, RoleModel
-from core.soft_delete import SoftDeleteModel, alive_q
+from core.models import BaseModel, RoleBaseModel
+from core.soft_delete import alive_q
 
 
-class Page(SoftDeleteModel, TimeStampedModel, RoleModel):
+class Page(RoleBaseModel):
     """
     User-defined dashboard page: name, role visibility, and widget config (JSON).
     Stored in public.pages; tenant + role from RoleModel (role column is "role").
@@ -39,7 +39,7 @@ class Page(SoftDeleteModel, TimeStampedModel, RoleModel):
         related_name='pages',
     )
 
-    class Meta:
+    class Meta(RoleBaseModel.Meta):
         db_table = 'pages'
         ordering = ['display_order', '-updated_at']
         indexes = [
@@ -53,15 +53,13 @@ class Page(SoftDeleteModel, TimeStampedModel, RoleModel):
         return f"{self.name} (tenant={self.tenant_id}, user={self.user_id})"
 
 
-class CustomIcon(SoftDeleteModel):
+class CustomIcon(BaseModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey('core.Tenant', on_delete=models.CASCADE)
     name = models.CharField(max_length=255)
     svg_content = models.TextField()
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
-    class Meta:
+    class Meta(BaseModel.Meta):
         db_table = 'custom_icons'
         constraints = [
             models.UniqueConstraint(

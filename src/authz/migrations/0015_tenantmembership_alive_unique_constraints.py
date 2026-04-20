@@ -1,5 +1,5 @@
 """
-Tighten partial unique constraints to match SoftDeleteModel semantics:
+Tighten partial unique constraints to match SoftDeleteMixin / BaseModel semantics:
 uniqueness applies only when is_deleted=False AND deleted_at IS NULL (alive_q).
 """
 

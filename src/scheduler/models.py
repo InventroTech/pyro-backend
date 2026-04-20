@@ -3,8 +3,8 @@ from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.utils import timezone
 from django.core.validators import MinValueValidator
-from core.models import BaseModel
-from core.soft_delete import SoftDeleteModel, alive_q
+from core.models import BaseModel, SoftDeleteMixin
+from core.soft_delete import alive_q
 from object_history.models import HistoryTrackedModel
 
 
@@ -84,7 +84,7 @@ class ScheduledTask(HistoryTrackedModel, BaseModel):
         ]
 
 
-class AttemptLog(SoftDeleteModel):
+class AttemptLog(SoftDeleteMixin):
     task = models.ForeignKey(ScheduledTask, on_delete=models.CASCADE, related_name="attempt_logs")
     attempt_no = models.PositiveSmallIntegerField()
     started_at = models.DateTimeField(auto_now_add=True)

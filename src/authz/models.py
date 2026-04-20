@@ -3,10 +3,11 @@ from django.db import models
 from django.db.models import Q
 from django.db.models.functions import Lower
 
-from core.soft_delete import SoftDeleteModel, alive_q
+from core.models import SoftDeleteMixin
+from core.soft_delete import alive_q
 
 
-class Permission(SoftDeleteModel):
+class Permission(SoftDeleteMixin):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     perm_key = models.CharField(max_length=128, db_index=True)
 
@@ -24,7 +25,7 @@ class Permission(SoftDeleteModel):
         ]
 
 
-class Role(SoftDeleteModel):
+class Role(SoftDeleteMixin):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey("core.Tenant", on_delete=models.CASCADE)
     key = models.CharField(max_length=64)
@@ -47,7 +48,7 @@ class Role(SoftDeleteModel):
         ]
 
 
-class RolePermission(SoftDeleteModel):
+class RolePermission(SoftDeleteMixin):
     role = models.ForeignKey(Role, on_delete=models.CASCADE)
     permission = models.ForeignKey(Permission, on_delete=models.CASCADE)
 
@@ -65,7 +66,7 @@ class RolePermission(SoftDeleteModel):
         ]
 
 
-class TenantMembership(SoftDeleteModel):
+class TenantMembership(SoftDeleteMixin):
     class Meta:
         db_table = "authz_tenantmembership"
         constraints = [
@@ -116,13 +117,18 @@ class TenantMembership(SoftDeleteModel):
     company_name = models.CharField(max_length=255, null=True, blank=True, help_text="Optional company name")
     department = models.CharField(max_length=255, null=True, blank=True, help_text="Optional department")
 
+    soft_delete_cascade = (
+        "userpermission_set",
+        "direct_reports",
+    )
+
     def save(self, *args, **kwargs):
         if self.email:
             self.email = self.email.strip().lower()
         super().save(*args, **kwargs)
 
 
-class UserGroup(SoftDeleteModel):
+class UserGroup(SoftDeleteMixin):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey("core.Tenant", on_delete=models.CASCADE)
     key = models.CharField(max_length=64)
@@ -142,8 +148,14 @@ class UserGroup(SoftDeleteModel):
             models.Index(fields=("deleted_at",), name="authz_ug_deleted_at_idx"),
         ]
 
+    soft_delete_cascade = (
+        "groupmembership_set",
+        "grouppermission_set",
+        "grouprole_set",
+    )
 
-class GroupMembership(SoftDeleteModel):
+
+class GroupMembership(SoftDeleteMixin):
     group = models.ForeignKey(UserGroup, on_delete=models.CASCADE)
     user_id = models.UUIDField()
 
@@ -161,7 +173,7 @@ class GroupMembership(SoftDeleteModel):
         ]
 
 
-class GroupPermission(SoftDeleteModel):
+class GroupPermission(SoftDeleteMixin):
     group = models.ForeignKey(UserGroup, on_delete=models.CASCADE)
     permission = models.ForeignKey(Permission, on_delete=models.CASCADE)
 
@@ -179,7 +191,7 @@ class GroupPermission(SoftDeleteModel):
         ]
 
 
-class GroupRole(SoftDeleteModel):
+class GroupRole(SoftDeleteMixin):
     group = models.ForeignKey(UserGroup, on_delete=models.CASCADE)
     role = models.ForeignKey(Role, on_delete=models.CASCADE)
 
@@ -197,7 +209,7 @@ class GroupRole(SoftDeleteModel):
         ]
 
 
-class UserPermission(SoftDeleteModel):
+class UserPermission(SoftDeleteMixin):
     """
     Per-user permission overrides, scoped by TenantMembership.
     No explicit tenant FK is needed because membership.tenant is the source of truth.

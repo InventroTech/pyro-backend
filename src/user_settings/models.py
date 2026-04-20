@@ -1,9 +1,9 @@
 from django.db import models
-from core.models import Tenant
-from core.soft_delete import SoftDeleteModel, alive_q
+from core.models import BaseModel, Tenant
+from core.soft_delete import alive_q
 
 
-class UserSettings(SoftDeleteModel):
+class UserSettings(BaseModel):
     """
     User settings model to store key-value pairs for users within tenants.
     Used for storing settings like lead type assignments for RMs.
@@ -52,10 +52,8 @@ class UserSettings(SoftDeleteModel):
         blank=True,
         help_text="List of lead statuses assigned to this user (for key=LEAD_TYPE_ASSIGNMENT); only these leads are directed to the RM"
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
-    class Meta:
+    class Meta(BaseModel.Meta):
         db_table = 'user_settings'
         constraints = [
             models.UniqueConstraint(
@@ -75,7 +73,7 @@ class UserSettings(SoftDeleteModel):
         return f"{self.tenant.name} - {self.tenant_membership.id} - {self.key}: {self.value}"
 
 
-class RoutingRule(SoftDeleteModel):
+class RoutingRule(BaseModel):
     """
     Routing rule for queueable objects (tickets, leads), keyed by authz.TenantMembership.
     One active rule per (tenant, tenant_membership, queue_type). Works even when the
@@ -130,10 +128,7 @@ class RoutingRule(SoftDeleteModel):
         blank=True,
         help_text="Optional description for this rule",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
+    class Meta(BaseModel.Meta):
         db_table = "routing_rules"
         constraints = [
             models.UniqueConstraint(
@@ -156,7 +151,7 @@ class RoutingRule(SoftDeleteModel):
         )
 
 
-class Group(SoftDeleteModel):
+class Group(BaseModel):
     """Tenant-scoped lead assignment group configuration."""
 
     tenant = models.ForeignKey(
@@ -174,10 +169,8 @@ class Group(SoftDeleteModel):
         blank=True,
         help_text="Arbitrary group payload (party, lead sources, statuses, limits, etc.)",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
-    class Meta:
+    class Meta(BaseModel.Meta):
         db_table = "groups"
         constraints = [
             models.UniqueConstraint(
@@ -196,7 +189,7 @@ class Group(SoftDeleteModel):
         return f"Group(tenant={self.tenant_id}, name={self.name})"
 
 
-class TenantMemberSetting(SoftDeleteModel):
+class TenantMemberSetting(BaseModel):
     """
     Dedicated key/value table for core per-user settings like:
       - GROUP (group id)
@@ -218,10 +211,8 @@ class TenantMemberSetting(SoftDeleteModel):
     )
     key = models.CharField(max_length=100, help_text="Setting key (e.g., 'GROUP', 'DAILY_LIMIT')")
     value = models.JSONField(null=True, blank=True, help_text="Setting value (JSON)")
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
-    class Meta:
+    class Meta(BaseModel.Meta):
         db_table = "user_kv_settings"
         constraints = [
             models.UniqueConstraint(
