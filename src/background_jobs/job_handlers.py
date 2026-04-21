@@ -1277,6 +1277,68 @@ class ReleaseLeadsAfter12hJobHandler(JobHandler):
         return delays[min(attempt - 1, len(delays) - 1)]
 
 
+class RecordAggregatorJobHandler(JobHandler):
+    """
+    Job for aggregating record schema across all tenants and entity types.
+    
+    Scans the records table periodically to discover field names and their
+    occurrence counts for each (tenant, entity_type) combination. Stores the
+    schema snapshot in RecordAggregator table for entity schema discovery.
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        from core.services import aggregate_all_entities
+        
+        start_time = timezone.now()
+        logger.info("🚀 [RECORD AGGREGATOR JOB] Processing job %s...", job.id)
+        
+        try:
+            stats = aggregate_all_entities()
+            
+            execution_time = (timezone.now() - start_time).total_seconds()
+            job.result = {
+                "success": True,
+                "total_entities_processed": stats['total_entities_processed'],
+                "total_records_processed": stats['total_records_processed'],
+                "errors": stats['errors'],
+                "execution_time_seconds": execution_time,
+                "timestamp": timezone.now().isoformat(),
+            }
+            
+            error_count = len(stats['errors'])
+            if error_count == 0:
+                logger.info(
+                    "✅ [RECORD AGGREGATOR JOB] Job %s completed successfully. "
+                    "Processed %d entities with %d records",
+                    job.id, stats['total_entities_processed'], stats['total_records_processed']
+                )
+                return True
+            else:
+                logger.warning(
+                    "⚠️  [RECORD AGGREGATOR JOB] Job %s completed with %d errors",
+                    job.id, error_count
+                )
+                for error in stats['errors']:
+                    logger.error("  - %s", error)
+                return True
+                
+        except Exception as e:
+            logger.error(
+                "❌ [RECORD AGGREGATOR JOB] Job %s failed with exception: %s",
+                job.id, str(e)
+            )
+            job.result = {
+                "success": False,
+                "error": str(e),
+                "timestamp": timezone.now().isoformat(),
+            }
+            raise
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+
 class JobHandlerRegistry:
     """
     Registry for job handlers.
@@ -1305,6 +1367,7 @@ class JobHandlerRegistry:
             JobType.SNOOZED_TO_NOT_CONNECTED_MIDNIGHT,
             SnoozedToNotConnectedMidnightJobHandler(),
         )
+        self.register_handler(JobType.AGGREGATE_RECORDS, RecordAggregatorJobHandler())
         # Praja handler removed - now using MixpanelService instead
         # self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
     
