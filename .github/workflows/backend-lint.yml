@@ -1,0 +1,86 @@
+name: Backend Code Quality & SQL Warning
+
+on:
+  pull_request:
+    branches: [ "main", "develop", "staging" ]
+
+jobs:
+  lint-and-check-sql:
+    name: Lint & SQL Scan
+    runs-on: ubuntu-latest
+    
+    # PostgreSQL service for running tests
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10" 
+
+      - name: 📦 Install Linter
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 
+
+      - name: 🔍 Run Standard Python Linter (Flake8)
+        # We keep this as a BLOCKER. 
+        # If there is a syntax error, the PR should NOT be merged.
+        run: flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
+
+      - name: 📦 Install Project Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: ✅ Run Test Suite
+        # We keep this as a BLOCKER.
+        # If any tests fail, the PR should NOT be merged.
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings_test
+          DB_NAME: postgres
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DJANGO_SECRET_KEY: test-secret-key-do-not-use-in-production
+          SUPABASE_JWT_SECRET: test-jwt-secret
+          PYRO_SECRET: ""
+        run: pytest
+
+      - name: ⚠️ Scan for Raw SQL (Warning Only)
+        # This step will NOT block the PR. It will only add a warning.
+        run: |
+          echo "Scanning for raw SQL usage in the src/ directory..."
+          
+          # Capture the output of grep. We use '|| true' so the script doesn't crash if no SQL is found.
+          RAW_SQL_MATCHES=$(grep -rnE "objects\.raw\(|connection\.cursor\(|\.execute\(|RawSQL\(" src/ || true)
+          
+          if [ -n "$RAW_SQL_MATCHES" ]; then
+            echo "--------------------------------------------------------"
+            echo "⚠️  RAW SQL DETECTED ⚠️"
+            echo "The following lines contain raw SQL queries:"
+            echo "$RAW_SQL_MATCHES"
+            echo "--------------------------------------------------------"
+            
+            # This line creates the yellow 'Warning' box in the GitHub UI
+            echo "::warning title=Raw SQL detected::This PR contains raw SQL. Please verify with the team if the Django ORM could be used instead."
+          else
+            echo "✅ No raw SQL found. The database logic looks clean!"
+          fi
