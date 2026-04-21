@@ -5,6 +5,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Constants required by your test suite
+API_SECRET_CACHE_KEY_PREFIX = "api_secret_cache_"
+API_SECRET_CACHE_TTL = 3600  # 1 hour
 
 class HasAPISecret(BasePermission):
     """
