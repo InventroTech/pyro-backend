@@ -2,7 +2,7 @@ name: Backend Code Quality & SQL Warning
 
 on:
   pull_request:
-    branches: [ "main", "develop", "staging" ]
+    branches: [ "main", "TESTING", "PROD" ]
 
 jobs:
   lint-and-check-sql:
