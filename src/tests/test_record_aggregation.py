@@ -191,7 +191,7 @@ class TestSingleEntityAggregation:
         set_last_processed_record_id(tenant, "lead", record1.id)
         
         # Create a new record after checkpoint
-        record2 = RecordFactory(tenant=tenant, entity_type="lead", data={"name": "Jane"})
+        RecordFactory(tenant=tenant, entity_type="lead", data={"name": "Jane"})
         
         processed = aggregate_records_for_tenant_entity(tenant, "lead")
         
