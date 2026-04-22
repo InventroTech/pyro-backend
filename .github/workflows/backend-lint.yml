@@ -49,6 +49,38 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: ⏳ Wait for PostgreSQL to be ready
+        run: |
+          python -c "
+          import socket
+          import time
+          for i in range(30):
+              try:
+                  socket.create_connection(('localhost', 5432), timeout=1)
+                  print('PostgreSQL is ready!')
+                  exit(0)
+              except (socket.timeout, socket.error):
+                  if i < 29:
+                      time.sleep(1)
+          print('PostgreSQL connection timeout')
+          exit(1)
+          "
+
+      - name: 🗄️ Run Database Migrations
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings_test
+          DB_NAME: postgres
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DJANGO_SECRET_KEY: test-secret-key-do-not-use-in-production
+          SUPABASE_JWT_SECRET: test-jwt-secret
+          PYRO_SECRET: ""
+        run: |
+          cd src
+          python manage.py migrate
+
       - name: ✅ Run Test Suite
         # We keep this as a BLOCKER.
         # If any tests fail, the PR should NOT be merged.
