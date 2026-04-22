@@ -230,7 +230,7 @@ class TestSingleEntityAggregation:
     def test_aggregate_skips_when_no_new_records(self):
         """Should return 0 when no new records to process."""
         tenant = TenantFactory(slug=self._get_unique_slug())
-        record = RecordFactory(tenant=tenant, entity_type="lead", data={"name": "John"})
+        RecordFactory(tenant=tenant, entity_type="lead", data={"name": "John"})
         
         # First aggregation
         aggregate_records_for_tenant_entity(tenant, "lead")
