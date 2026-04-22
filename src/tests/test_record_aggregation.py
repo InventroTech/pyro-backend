@@ -175,7 +175,7 @@ class TestSingleEntityAggregation:
     def test_aggregate_single_entity_creates_record_aggregator(self):
         """Should create RecordAggregator for new entity type."""
         tenant = TenantFactory(slug=self._get_unique_slug())
-        record = RecordFactory(tenant=tenant, entity_type="lead", data={"name": "John"})
+        RecordFactory(tenant=tenant, entity_type="lead", data={"name": "John"})
         
         processed = aggregate_records_for_tenant_entity(tenant, "lead")
         
