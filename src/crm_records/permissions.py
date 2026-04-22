@@ -7,11 +7,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Cache configuration for API secret validation
-API_SECRET_CACHE_KEY_PREFIX = "api_secret_"
-API_SECRET_CACHE_TTL = 3600  # 1 hour
-
-
 class HasAPISecret(BasePermission):
     """
     Permission class that checks for X-Secret-Pyro header.
