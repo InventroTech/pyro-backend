@@ -43,10 +43,9 @@ class Page(RoleBaseModel):
         db_table = 'pages'
         ordering = ['display_order', '-updated_at']
         indexes = [
+            *RoleBaseModel.Meta.indexes,
             models.Index(fields=['tenant', 'user_id']),
             models.Index(fields=['tenant', 'role']),
-            models.Index(fields=['is_deleted']),
-            models.Index(fields=['deleted_at']),
         ]
 
     def __str__(self):
@@ -68,10 +67,7 @@ class CustomIcon(BaseModel):
                 name='pages_customicon_tenant_name_uniq_alive',
             ),
         ]
-        indexes = [
-            models.Index(fields=['is_deleted']),
-            models.Index(fields=['deleted_at']),
-        ]
+        indexes = list(BaseModel.Meta.indexes)
 
     def __str__(self):
         return f"{self.name} ({self.tenant.slug if self.tenant else 'No Tenant'})"

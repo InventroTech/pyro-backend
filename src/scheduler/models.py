@@ -79,6 +79,7 @@ class ScheduledTask(HistoryTrackedModel, BaseModel):
 
     class Meta(BaseModel.Meta):
         indexes = [
+            *BaseModel.Meta.indexes,
             models.Index(fields=["status", "due_at"]),
             models.Index(fields=["content_type", "object_id", "status"]),
         ]
@@ -93,7 +94,4 @@ class AttemptLog(SoftDeleteMixin):
     notes = models.TextField(null=True, blank=True)
 
     class Meta:
-        indexes = [
-            models.Index(fields=["is_deleted"], name="sched_al_is_deleted_idx"),
-            models.Index(fields=["deleted_at"], name="sched_al_deleted_at_idx"),
-        ]
+        pass

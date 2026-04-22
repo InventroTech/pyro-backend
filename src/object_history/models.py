@@ -66,6 +66,7 @@ class ObjectHistory(BaseModel):
     class Meta(BaseModel.Meta):
         db_table = "object_history"
         indexes = [
+            *BaseModel.Meta.indexes,
             models.Index(
                 fields=["tenant", "content_type", "object_id", "-created_at"],
                 name="object_hist_obj_lookup",

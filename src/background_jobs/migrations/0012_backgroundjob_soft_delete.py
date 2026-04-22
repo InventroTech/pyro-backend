@@ -13,25 +13,13 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name="backgroundjob",
             name="is_deleted",
-            field=models.BooleanField(default=False),
+            field=models.BooleanField(db_index=True, default=False),
         ),
         migrations.AddField(
             model_name="backgroundjob",
             name="deleted_at",
-            field=models.DateTimeField(blank=True, default=None, null=True),
-        ),
-        migrations.AddIndex(
-            model_name="backgroundjob",
-            index=models.Index(
-                fields=("is_deleted",),
-                name="bg_jobs_is_deleted_idx",
-            ),
-        ),
-        migrations.AddIndex(
-            model_name="backgroundjob",
-            index=models.Index(
-                fields=("deleted_at",),
-                name="bg_jobs_deleted_at_idx",
+            field=models.DateTimeField(
+                blank=True, db_index=True, default=None, null=True
             ),
         ),
         migrations.AlterModelManagers(

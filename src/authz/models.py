@@ -19,10 +19,6 @@ class Permission(SoftDeleteMixin):
                 name="authz_permission_perm_key_uniq_alive",
             ),
         ]
-        indexes = [
-            models.Index(fields=("is_deleted",), name="authz_perm_is_deleted_idx"),
-            models.Index(fields=("deleted_at",), name="authz_perm_deleted_at_idx"),
-        ]
 
 
 class Role(SoftDeleteMixin):
@@ -43,8 +39,6 @@ class Role(SoftDeleteMixin):
         ]
         indexes = [
             models.Index(Lower("key"), name="authz_role_lower_key_idx"),
-            models.Index(fields=("is_deleted",), name="authz_role_is_deleted_idx"),
-            models.Index(fields=("deleted_at",), name="authz_role_deleted_at_idx"),
         ]
 
 
@@ -59,10 +53,6 @@ class RolePermission(SoftDeleteMixin):
                 condition=alive_q(),
                 name="authz_rolepermission_role_perm_uniq_alive",
             ),
-        ]
-        indexes = [
-            models.Index(fields=("is_deleted",), name="authz_rp_is_deleted_idx"),
-            models.Index(fields=("deleted_at",), name="authz_rp_deleted_at_idx"),
         ]
 
 
@@ -95,8 +85,6 @@ class TenantMembership(SoftDeleteMixin):
             models.Index(fields=("is_active",), name="authz_tm_is_active_idx"),
             models.Index(fields=("name",), name="authz_tm_name_idx"),
             models.Index(fields=("company_name",), name="authz_tm_company_name_idx"),
-            models.Index(fields=("is_deleted",), name="authz_tm_is_deleted_idx"),
-            models.Index(fields=("deleted_at",), name="authz_tm_deleted_at_idx"),
         ]
 
     tenant = models.ForeignKey("core.Tenant", on_delete=models.CASCADE)
@@ -143,10 +131,6 @@ class UserGroup(SoftDeleteMixin):
                 name="authz_usergroup_tenant_key_uniq_alive",
             ),
         ]
-        indexes = [
-            models.Index(fields=("is_deleted",), name="authz_ug_is_deleted_idx"),
-            models.Index(fields=("deleted_at",), name="authz_ug_deleted_at_idx"),
-        ]
 
     soft_delete_cascade = (
         "groupmembership_set",
@@ -167,10 +151,6 @@ class GroupMembership(SoftDeleteMixin):
                 name="authz_groupmembership_group_user_uniq_alive",
             ),
         ]
-        indexes = [
-            models.Index(fields=("is_deleted",), name="authz_gm_is_deleted_idx"),
-            models.Index(fields=("deleted_at",), name="authz_gm_deleted_at_idx"),
-        ]
 
 
 class GroupPermission(SoftDeleteMixin):
@@ -185,10 +165,6 @@ class GroupPermission(SoftDeleteMixin):
                 name="authz_grouppermission_group_perm_uniq_alive",
             ),
         ]
-        indexes = [
-            models.Index(fields=("is_deleted",), name="authz_gp_is_deleted_idx"),
-            models.Index(fields=("deleted_at",), name="authz_gp_deleted_at_idx"),
-        ]
 
 
 class GroupRole(SoftDeleteMixin):
@@ -202,10 +178,6 @@ class GroupRole(SoftDeleteMixin):
                 condition=alive_q(),
                 name="authz_grouprole_group_role_uniq_alive",
             ),
-        ]
-        indexes = [
-            models.Index(fields=("is_deleted",), name="authz_gr_is_deleted_idx"),
-            models.Index(fields=("deleted_at",), name="authz_gr_deleted_at_idx"),
         ]
 
 
@@ -235,8 +207,4 @@ class UserPermission(SoftDeleteMixin):
                 condition=alive_q(),
                 name="authz_userpermission_mship_perm_uniq_alive",
             ),
-        ]
-        indexes = [
-            models.Index(fields=("is_deleted",), name="authz_up_is_deleted_idx"),
-            models.Index(fields=("deleted_at",), name="authz_up_deleted_at_idx"),
         ]

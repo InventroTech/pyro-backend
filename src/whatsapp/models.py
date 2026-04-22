@@ -19,7 +19,7 @@ class WhatsAppTemplate(HistoryTrackedModel, BaseModel):
     class Meta:
         db_table = 'whatsapp_templates'
         indexes = [
-            models.Index(fields=['tenant', '-created_at']),
+            *BaseModel.Meta.indexes,
             models.Index(fields=['tenant', 'title']),
         ]
         ordering = ['-created_at']

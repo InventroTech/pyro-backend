@@ -89,6 +89,7 @@ class BaseModel(SoftDeleteMixin, TimeStampedModel, TenantModel):
     class Meta(TimeStampedModel.Meta):
         abstract = True
         indexes = [
+            # is_deleted / deleted_at: db_index on SoftDeleteMixin; do not repeat Meta.Index
             models.Index(fields=['tenant', '-created_at']),
         ]
 

@@ -63,10 +63,9 @@ class UserSettings(BaseModel):
             ),
         ]
         indexes = [
+            *BaseModel.Meta.indexes,
             models.Index(fields=['tenant', 'tenant_membership']),
             models.Index(fields=['tenant', 'key']),
-            models.Index(fields=['is_deleted']),
-            models.Index(fields=['deleted_at']),
         ]
 
     def __str__(self):
@@ -138,10 +137,9 @@ class RoutingRule(BaseModel):
             ),
         ]
         indexes = [
+            *BaseModel.Meta.indexes,
             models.Index(fields=["tenant", "queue_type", "tenant_membership"]),
             models.Index(fields=["tenant", "queue_type", "is_active"]),
-            models.Index(fields=["is_deleted"]),
-            models.Index(fields=["deleted_at"]),
         ]
 
     def __str__(self) -> str:
@@ -180,9 +178,8 @@ class Group(BaseModel):
             ),
         ]
         indexes = [
+            *BaseModel.Meta.indexes,
             models.Index(fields=["tenant", "name"]),
-            models.Index(fields=["is_deleted"]),
-            models.Index(fields=["deleted_at"]),
         ]
 
     def __str__(self) -> str:
@@ -222,10 +219,9 @@ class TenantMemberSetting(BaseModel):
             ),
         ]
         indexes = [
+            *BaseModel.Meta.indexes,
             models.Index(fields=["tenant", "tenant_membership", "key"]),
             models.Index(fields=["tenant", "key"]),
-            models.Index(fields=["is_deleted"]),
-            models.Index(fields=["deleted_at"]),
         ]
 
     def __str__(self) -> str:

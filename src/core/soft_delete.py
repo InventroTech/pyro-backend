@@ -158,8 +158,11 @@ class SoftDeleteMixin(models.Model):
 
     soft_delete_cascade: tuple[str, ...] = ()
 
-    is_deleted = models.BooleanField(default=False)
-    deleted_at = models.DateTimeField(null=True, blank=True, default=None)
+    # Per-table indexes; avoid repeating models.Index in each Meta.
+    is_deleted = models.BooleanField(default=False, db_index=True)
+    deleted_at = models.DateTimeField(
+        null=True, blank=True, default=None, db_index=True
+    )
 
     objects = SoftDeleteManager()
     all_objects = AllObjectsManager()

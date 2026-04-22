@@ -14,12 +14,14 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name="tenantmembership",
             name="is_deleted",
-            field=models.BooleanField(default=False),
+            field=models.BooleanField(db_index=True, default=False),
         ),
         migrations.AddField(
             model_name="tenantmembership",
             name="deleted_at",
-            field=models.DateTimeField(blank=True, default=None, null=True),
+            field=models.DateTimeField(
+                blank=True, db_index=True, default=None, null=True
+            ),
         ),
         migrations.RemoveConstraint(
             model_name="tenantmembership",
@@ -43,20 +45,6 @@ class Migration(migrations.Migration):
                 fields=("tenant", "user_id"),
                 condition=Q(user_id__isnull=False, deleted_at__isnull=True),
                 name="uniq_authz_tm_tenant_user_nn",
-            ),
-        ),
-        migrations.AddIndex(
-            model_name="tenantmembership",
-            index=models.Index(
-                fields=("is_deleted",),
-                name="authz_tm_is_deleted_idx",
-            ),
-        ),
-        migrations.AddIndex(
-            model_name="tenantmembership",
-            index=models.Index(
-                fields=("deleted_at",),
-                name="authz_tm_deleted_at_idx",
             ),
         ),
         migrations.AlterModelManagers(

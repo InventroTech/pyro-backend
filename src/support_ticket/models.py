@@ -42,8 +42,6 @@ class SupportTicketDump(SoftDeleteMixin):
         indexes = [
             models.Index(fields=["tenant_id", "-created_at"], name="std_tn_cr_desc"),
             models.Index(fields=["is_processed", "-created_at"], name="std_proc_cr"),
-            models.Index(fields=["is_deleted"], name="std_is_deleted_idx"),
-            models.Index(fields=["deleted_at"], name="std_deleted_at_idx"),
         ]
 
     def __str__(self):
@@ -102,10 +100,6 @@ class SupportTicket(HistoryTrackedModel, SoftDeleteMixin):
     class Meta:
         db_table = "support_ticket"
         managed = True
-        indexes = [
-            models.Index(fields=["is_deleted"], name="st_is_deleted_idx"),
-            models.Index(fields=["deleted_at"], name="st_deleted_at_idx"),
-        ]
 
     def save(self, *args, **kwargs):
         """
