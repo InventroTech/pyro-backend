@@ -222,7 +222,7 @@ class TestSingleEntityAggregation:
         assert agg.total_records_processed == 1
         
         # Second batch
-        record2 = RecordFactory(tenant=tenant, entity_type="lead", data={"name": "Jane"})
+        RecordFactory(tenant=tenant, entity_type="lead", data={"name": "Jane"})
         aggregate_records_for_tenant_entity(tenant, "lead")
         agg.refresh_from_db()
         assert agg.total_records_processed == 2
