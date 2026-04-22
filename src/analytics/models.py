@@ -4,11 +4,10 @@ from django.contrib.postgres.indexes import GinIndex, BrinIndex
 import uuid
 from django.db.models import Q
 
+from core.models import SoftDeleteMixin
 
 
-
-
-class AnalyticsRunCore(models.Model):
+class AnalyticsRunCore(SoftDeleteMixin):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     completed_at = models.DateTimeField(null=True, blank=True)
@@ -30,4 +29,6 @@ class AnalyticsRunCore(models.Model):
             models.Index(fields=["created_at"]),
             models.Index(fields=["user_id", "created_at"]),
             models.Index(fields=["status"]),
+            models.Index(fields=["is_deleted"]),
+            models.Index(fields=["deleted_at"]),
         ]

@@ -5,13 +5,32 @@ from django.contrib.contenttypes.models import ContentType
 
 from accounts.models import SupabaseAuthUser
 from core.models import BaseModel
+from core.soft_delete import (
+    alive_q,
+    SoftDeleteQuerySet,
+    SoftDeleteManager,
+    AllObjectsManager,
+)
 
 
-class ObjectHistoryQuerySet(models.QuerySet):
+class ObjectHistoryQuerySet(SoftDeleteQuerySet):
     def for_instance(self, instance):
         """Filter history entries for a specific model instance."""
         content_type = ContentType.objects.get_for_model(instance.__class__)
         return self.filter(content_type=content_type, object_id=str(instance.pk))
+
+
+class ObjectHistoryManager(SoftDeleteManager):
+    def get_queryset(self):
+        return ObjectHistoryQuerySet(self.model, using=self._db).filter(
+            is_deleted=False,
+            deleted_at__isnull=True,
+        )
+
+
+class ObjectHistoryAllObjectsManager(AllObjectsManager):
+    def get_queryset(self):
+        return ObjectHistoryQuerySet(self.model, using=self._db)
 
 
 class ObjectHistory(BaseModel):
@@ -41,7 +60,8 @@ class ObjectHistory(BaseModel):
     after_state = models.JSONField(null=True, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
 
-    objects = ObjectHistoryQuerySet.as_manager()
+    objects = ObjectHistoryManager()
+    all_objects = ObjectHistoryAllObjectsManager()
 
     class Meta(BaseModel.Meta):
         db_table = "object_history"
@@ -58,6 +78,7 @@ class ObjectHistory(BaseModel):
         constraints = [
             models.UniqueConstraint(
                 fields=["content_type", "object_id", "version"],
+                condition=alive_q(),
                 name="object_hist_unique_version",
             ),
         ]
