@@ -87,3 +87,67 @@ class BaseModel(TimeStampedModel, TenantModel):
             
             models.Index(fields=['tenant', '-created_at']),
         ]
+
+
+class SystemSettings(TimeStampedModel):
+    """
+    Global system settings storage.
+    NOT tenant-scoped - these are application-wide settings.
+    """
+    setting_key = models.CharField(
+        max_length=255,
+        db_index=True,
+        unique=True,
+        help_text="Unique key for this setting"
+    )
+    setting_value = models.JSONField(
+        default=dict,
+        help_text="JSON value for this setting"
+    )
+    description = models.TextField(
+        blank=True,
+        help_text="Description of what this setting is for"
+    )
+
+    class Meta:
+        db_table = "system_settings"
+        verbose_name_plural = "System Settings"
+
+    def __str__(self):
+        return f"{self.setting_key}"
+
+
+class RecordAggregator(BaseModel):
+    """
+    Stores the aggregated schema for each (tenant, entity_type) combination.
+    Captures field names and their occurrence counts from the records table.
+    """
+    entity_type = models.CharField(
+        max_length=100,
+        db_index=True,
+        help_text="Entity type (e.g., 'lead', 'invoice', 'inventory_item')"
+    )
+    schema_snapshot = models.JSONField(
+        default=dict,
+        help_text="Schema snapshot: {field_name: {count, field_type}}"
+    )
+    total_records_processed = models.BigIntegerField(
+        default=0,
+        help_text="Total records processed for this entity type"
+    )
+    last_aggregation_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp of last aggregation run"
+    )
+
+    class Meta:
+        db_table = "record_aggregators"
+        unique_together = [('tenant', 'entity_type')]
+        indexes = [
+            models.Index(fields=['tenant', 'entity_type']),
+            models.Index(fields=['tenant', '-last_aggregation_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.entity_type} ({self.tenant.slug})"

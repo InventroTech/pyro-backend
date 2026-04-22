@@ -112,7 +112,7 @@ def _evaluate_rule(record: Record, rule: Dict[str, Any]) -> bool:
     
     if actual_value is None:
         return False
-    
+
     # Convert to string for comparison (handles different types)
     actual_str = str(actual_value).lower() if actual_value is not None else ''
     expected_str = str(expected_value).lower() if expected_value is not None else ''
