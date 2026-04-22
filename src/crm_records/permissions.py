@@ -1,10 +1,11 @@
 from rest_framework.permissions import BasePermission
 from django.conf import settings
 from django.utils import timezone
+from django.core.cache import cache
+import hashlib
 import logging
 
 logger = logging.getLogger(__name__)
-
 
 class HasAPISecret(BasePermission):
     """
@@ -32,16 +33,41 @@ class HasAPISecret(BasePermission):
             request.is_default_secret = True
             return True
 
-        # Database: simple match on secret column
+        # Database: check cache first, then fall back to DB
         try:
             from .models import ApiSecretKey
 
+            # Generate cache key
+            cache_key = API_SECRET_CACHE_KEY_PREFIX + hashlib.sha256(secret_header.encode()).hexdigest()
+            
+            # Try to get from cache
+            cached_data = cache.get(cache_key)
+            if cached_data:
+                # Cache hit: use cached data
+                api_secret_obj = ApiSecretKey.objects.get(pk=cached_data['api_secret_key_id'])
+                api_secret_obj.last_used_at = timezone.now()
+                api_secret_obj.save(update_fields=["last_used_at"])
+                request.api_secret_key = secret_header
+                request.is_default_secret = False
+                request.api_secret_obj = api_secret_obj
+                return True
+            
+            # Cache miss: query database
             api_secret_obj = (
                 ApiSecretKey.objects.filter(secret=secret_header, is_active=True)
                 .select_related("tenant")
                 .first()
             )
             if api_secret_obj:
+                # Cache the result
+                cache.set(
+                    cache_key,
+                    {
+                        "api_secret_key_id": api_secret_obj.id,
+                        "tenant_id": api_secret_obj.tenant_id,
+                    },
+                    API_SECRET_CACHE_TTL,
+                )
                 api_secret_obj.last_used_at = timezone.now()
                 api_secret_obj.save(update_fields=["last_used_at"])
                 request.api_secret_key = secret_header
