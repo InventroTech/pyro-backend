@@ -69,11 +69,11 @@ jobs:
       - name: 🗄️ Run Database Migrations
         env:
           DJANGO_SETTINGS_MODULE: config.settings_test
-          DB_NAME: postgres
-          DB_USER: postgres
-          DB_PASSWORD: postgres
-          DB_HOST: localhost
-          DB_PORT: 5432
+          LOCAL_DB_NAME: postgres
+          LOCAL_DB_USER: postgres
+          LOCAL_DB_PASSWORD: postgres
+          LOCAL_DB_HOST: localhost
+          LOCAL_DB_PORT: 5432
           DJANGO_SECRET_KEY: test-secret-key-do-not-use-in-production
           SUPABASE_JWT_SECRET: test-jwt-secret
           PYRO_SECRET: ""
@@ -86,11 +86,11 @@ jobs:
         # If any tests fail, the PR should NOT be merged.
         env:
           DJANGO_SETTINGS_MODULE: config.settings_test
-          DB_NAME: postgres
-          DB_USER: postgres
-          DB_PASSWORD: postgres
-          DB_HOST: localhost
-          DB_PORT: 5432
+          LOCAL_DB_NAME: postgres
+          LOCAL_DB_USER: postgres
+          LOCAL_DB_PASSWORD: postgres
+          LOCAL_DB_HOST: localhost
+          LOCAL_DB_PORT: 5432
           DJANGO_SECRET_KEY: test-secret-key-do-not-use-in-production
           SUPABASE_JWT_SECRET: test-jwt-secret
           PYRO_SECRET: ""
