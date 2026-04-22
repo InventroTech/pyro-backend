@@ -11,7 +11,7 @@ import pytest
 from datetime import datetime
 import uuid
 
-from core.models import SystemSettings, RecordAggregator, Tenant
+from core.models import SystemSettings, RecordAggregator
 from core.services import (
     get_last_processed_record_id,
     set_last_processed_record_id,
@@ -19,7 +19,6 @@ from core.services import (
     aggregate_records_for_tenant_entity,
     aggregate_all_entities,
 )
-from crm_records.models import Record
 from tests.factories.core_factory import TenantFactory
 from tests.factories.crm_records_factory import RecordFactory
 
@@ -176,7 +175,7 @@ class TestSingleEntityAggregation:
     def test_aggregate_single_entity_creates_record_aggregator(self):
         """Should create RecordAggregator for new entity type."""
         tenant = TenantFactory(slug=self._get_unique_slug())
-        record = RecordFactory(tenant=tenant, entity_type="lead", data={"name": "John"})
+        RecordFactory(tenant=tenant, entity_type="lead", data={"name": "John"})
         
         processed = aggregate_records_for_tenant_entity(tenant, "lead")
         
@@ -192,7 +191,7 @@ class TestSingleEntityAggregation:
         set_last_processed_record_id(tenant, "lead", record1.id)
         
         # Create a new record after checkpoint
-        record2 = RecordFactory(tenant=tenant, entity_type="lead", data={"name": "Jane"})
+        RecordFactory(tenant=tenant, entity_type="lead", data={"name": "Jane"})
         
         processed = aggregate_records_for_tenant_entity(tenant, "lead")
         
@@ -217,13 +216,13 @@ class TestSingleEntityAggregation:
         tenant = TenantFactory(slug=self._get_unique_slug())
         
         # First batch
-        record1 = RecordFactory(tenant=tenant, entity_type="lead", data={"name": "John"})
+        RecordFactory(tenant=tenant, entity_type="lead", data={"name": "John"})
         aggregate_records_for_tenant_entity(tenant, "lead")
         agg = RecordAggregator.objects.get(tenant=tenant, entity_type="lead")
         assert agg.total_records_processed == 1
         
         # Second batch
-        record2 = RecordFactory(tenant=tenant, entity_type="lead", data={"name": "Jane"})
+        RecordFactory(tenant=tenant, entity_type="lead", data={"name": "Jane"})
         aggregate_records_for_tenant_entity(tenant, "lead")
         agg.refresh_from_db()
         assert agg.total_records_processed == 2
@@ -231,7 +230,7 @@ class TestSingleEntityAggregation:
     def test_aggregate_skips_when_no_new_records(self):
         """Should return 0 when no new records to process."""
         tenant = TenantFactory(slug=self._get_unique_slug())
-        record = RecordFactory(tenant=tenant, entity_type="lead", data={"name": "John"})
+        RecordFactory(tenant=tenant, entity_type="lead", data={"name": "John"})
         
         # First aggregation
         aggregate_records_for_tenant_entity(tenant, "lead")
