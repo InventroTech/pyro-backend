@@ -90,7 +90,7 @@ def build_schema_snapshot(records_queryset) -> Dict[str, Dict[str, Any]]:
     return snapshot
 
 
-def aggregate_records_for_tenant_entity(tenant, entity_type, chunk_size: int = 1000) -> int:
+def aggregate_records_for_tenant_entity(tenant, entity_type, chunk_size: int = 50000) -> int:
     """
     Aggregate records for a specific tenant and entity type.
     
@@ -104,7 +104,7 @@ def aggregate_records_for_tenant_entity(tenant, entity_type, chunk_size: int = 1
     Args:
         tenant: The Tenant object
         entity_type: The entity type string (e.g., 'lead', 'ticket')
-        chunk_size: Number of records to process per call (default: 1000)
+        chunk_size: Number of records to process per call (default: 50000)
         
     Returns:
         Number of records processed
@@ -175,7 +175,7 @@ def aggregate_records_for_tenant_entity(tenant, entity_type, chunk_size: int = 1
         raise
 
 
-def aggregate_all_entities(chunk_size: int = 1000) -> Dict[str, Any]:
+def aggregate_all_entities(chunk_size: int = 50000) -> Dict[str, Any]:
     """
     Aggregate all entities across all tenants.
     
@@ -185,7 +185,7 @@ def aggregate_all_entities(chunk_size: int = 1000) -> Dict[str, Any]:
     3. Call aggregate_records_for_tenant_entity for each (tenant, entity_type) pair
     
     Args:
-        chunk_size: Number of records to process per entity (default: 1000)
+        chunk_size: Number of records to process per entity (default: 50000)
         
     Returns:
         Dictionary with aggregation statistics
