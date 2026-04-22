@@ -19,7 +19,6 @@ from core.services import (
     aggregate_records_for_tenant_entity,
     aggregate_all_entities,
 )
-from crm_records.models import Record
 from tests.factories.core_factory import TenantFactory
 from tests.factories.crm_records_factory import RecordFactory
 
