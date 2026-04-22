@@ -216,7 +216,7 @@ class TestSingleEntityAggregation:
         tenant = TenantFactory(slug=self._get_unique_slug())
         
         # First batch
-        record1 = RecordFactory(tenant=tenant, entity_type="lead", data={"name": "John"})
+        RecordFactory(tenant=tenant, entity_type="lead", data={"name": "John"})
         aggregate_records_for_tenant_entity(tenant, "lead")
         agg = RecordAggregator.objects.get(tenant=tenant, entity_type="lead")
         assert agg.total_records_processed == 1
