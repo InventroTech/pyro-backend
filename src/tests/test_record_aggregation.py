@@ -11,7 +11,7 @@ import pytest
 from datetime import datetime
 import uuid
 
-from core.models import SystemSettings, RecordAggregator, Tenant
+from core.models import SystemSettings, RecordAggregator
 from core.services import (
     get_last_processed_record_id,
     set_last_processed_record_id,
