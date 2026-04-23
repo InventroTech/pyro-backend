@@ -19,6 +19,7 @@ from django.db import IntegrityError
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule, PartnerEvent, ApiSecretKey
@@ -67,51 +68,61 @@ def _legacy_get_next_lead_assignees_match(stored, requester: str) -> bool:
     return str(stored).strip().lower() == str(requester).strip().lower()
 
 
+REQUEST_NOTIFICATION_ENTITY_TYPES = frozenset({"inventory_request", "unmannd_request"})
+
+
 def _notify_team_lead_for_inventory_request(request, record):
     """
-    Send team-lead email notification for newly created inventory requests.
-    Never raises (best effort only).
+    Send team-lead email when a new inventory / UNMANND request record is created.
+    Best-effort only; never raises.
     """
-    if not record or record.entity_type not in {"inventory_request", "unmannd_request"}:
+    if not record or record.entity_type not in REQUEST_NOTIFICATION_ENTITY_TYPES:
         return
 
     data = record.data if isinstance(record.data, dict) else {}
     team_lead_value = data.get("team_lead")
     if team_lead_value in (None, ""):
         logger.info(
-            "Inventory request %s email skipped: team_lead missing in payload.",
+            "Request %s email skipped: team_lead missing in payload (entity_type=%s).",
             getattr(record, "id", None),
+            getattr(record, "entity_type", None),
         )
         return
 
     tenant = getattr(request, "tenant", None)
     if not tenant:
         logger.info(
-            "Inventory request %s email skipped: tenant missing on request context.",
+            "Request %s email skipped: tenant missing on request context.",
             getattr(record, "id", None),
         )
         return
 
     try:
+        try:
+            team_lead_pk = int(team_lead_value)
+        except (TypeError, ValueError):
+            logger.info(
+                "Request %s email skipped: invalid team_lead value %r.",
+                record.id,
+                team_lead_value,
+            )
+            return
+
+        membership = TenantMembership.objects.filter(
+            tenant=tenant,
+            id=team_lead_pk,
+            is_active=True,
+        ).select_related("role").first()
+
         team_lead_email = None
         team_lead_name = "Team Lead"
-        membership = None
-        try:
-            membership = TenantMembership.objects.filter(
-                tenant=tenant,
-                id=team_lead_value,
-                is_active=True,
-            ).select_related("role").first()
-        except Exception:
-            membership = None
-
         if membership:
             team_lead_email = (membership.email or "").strip().lower()
             team_lead_name = (membership.name or membership.email or "Team Lead").strip()
 
         if not team_lead_email:
             logger.info(
-                "Inventory request %s email skipped: no active team lead email found for team_lead=%s",
+                "Request %s email skipped: no active team lead email for team_lead=%s",
                 record.id,
                 team_lead_value,
             )
@@ -120,15 +131,12 @@ def _notify_team_lead_for_inventory_request(request, record):
         frontend_base = (os.environ.get("PYRO_FRONTEND_URL") or os.environ.get("FRONTEND_URL") or "").strip().rstrip("/")
         tenant_slug = str(getattr(tenant, "slug", "") or "").strip()
         if frontend_base and "/app/" in frontend_base:
-            # If env already includes app path, use it directly.
             redirect_url = frontend_base
         elif frontend_base and tenant_slug:
-            # Preferred app redirect pattern.
             redirect_url = f"{frontend_base}/app/{tenant_slug}"
         elif frontend_base:
             redirect_url = frontend_base
         elif tenant_slug:
-            # Hard fallback to production app URL shape.
             redirect_url = f"https://app.thepyro.ai/app/{tenant_slug}"
         else:
             redirect_url = request.build_absolute_uri(f"/crm-records/records/{record.id}/")
@@ -159,20 +167,25 @@ def _notify_team_lead_for_inventory_request(request, record):
         )
         if not success:
             logger.warning(
-                "Inventory request %s email notification failed for team_lead=%s: %s",
+                "Request %s email notification failed for team_lead=%s: %s",
                 record.id,
                 team_lead_email,
                 msg,
             )
         else:
             logger.info(
-                "Inventory request %s email notification sent to %s (team_lead=%s).",
+                "Request %s email notification sent to %s (team_lead=%s, entity_type=%s).",
                 record.id,
                 team_lead_email,
                 team_lead_value,
+                record.entity_type,
             )
     except Exception:
-        logger.exception("Unexpected error while sending inventory request email notification for record=%s", getattr(record, "id", None))
+        logger.exception(
+            "Unexpected error while sending request email notification for record=%s",
+            getattr(record, "id", None),
+        )
+
 
 from .helper import parse_numeric_lookup, coerce_numeric
 from .assignee_display import build_assigned_to_search_q
@@ -476,9 +489,9 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
             except Exception as e:
                 logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
 
-        if entity_type in {"inventory_request", "unmannd_request"}:
+        if entity_type in REQUEST_NOTIFICATION_ENTITY_TYPES:
             _notify_team_lead_for_inventory_request(self.request, record)
-    
+
     def put(self, request, *args, **kwargs):
         """
         Update an existing record by record_id.
@@ -767,7 +780,7 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
             except Exception as e:
                 logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
 
-        if self.entity_type in {"inventory_request", "unmannd_request"}:
+        if self.entity_type in REQUEST_NOTIFICATION_ENTITY_TYPES:
             _notify_team_lead_for_inventory_request(self.request, record)
 
 

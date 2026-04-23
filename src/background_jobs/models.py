@@ -29,6 +29,7 @@ class JobType(models.TextChoices):
         "snoozed_to_not_connected_midnight",
         "Snoozed To Not Connected (midnight)",
     )
+    AGGREGATE_RECORDS = "aggregate_records", "Aggregate Records Schema"
     # Future job types can be added here:
     # SEND_EMAIL = "send_email", "Send Email"
     # GENERATE_REPORT = "generate_report", "Generate Report"

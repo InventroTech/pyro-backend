@@ -3,7 +3,7 @@ from typing import Any, Dict, Tuple
 
 def build_new_request_unmannd_email(context: Dict[str, Any]) -> Tuple[str, str, str]:
     """
-    Returns (subject, text_body, html_body) for new inventory request notifications.
+    Returns (subject, text_body, html_body) for new inventory / UNMANND request notifications.
     """
     request_id = context.get("request_id", "N/A")
     requester_name = context.get("requester_name", "Requestor")
@@ -88,4 +88,3 @@ def build_new_request_unmannd_email(context: Dict[str, Any]) -> Tuple[str, str, 
 </html>
 """
     return subject, text_body, html_body
-
