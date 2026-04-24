@@ -28,9 +28,6 @@ logger = logging.getLogger(__name__)
 # Interval (seconds) between enqueueing lead cron jobs from the worker (no external cron needed)
 LEAD_CRON_ENQUEUE_INTERVAL = 900  # 15 minutes
 
-# Interval (seconds) between enqueueing record aggregator job from the worker
-RECORD_AGGREGATOR_ENQUEUE_INTERVAL = 300  # 5 minutes
-
 # Enqueue ``snoozed_to_not_connected_midnight`` at exactly this clock minute in ``TIME_ZONE`` (UTC).
 # 23:55 keeps ``NOW()`` on the same calendar date as same-day ``next_call_at`` (e.g. 31 Mar snoozes
 # flip on 31 Mar, not after midnight when the date rolls to the next day).
@@ -53,8 +50,6 @@ class JobProcessor:
         self._handler_registry = get_handler_registry()
         # Last time we enqueued lead cron jobs (unassign snoozed, release after 12h)
         self._last_lead_cron_enqueue_at = None
-        # Last time we enqueued record aggregator job
-        self._last_record_aggregator_enqueue_at = None
         # UTC calendar date we last enqueued snoozed→NOT_CONNECTED job (see TIME_ZONE)
         self._last_snoozed_midnight_enqueue_date = None
         # Circuit breaker state for connection errors
@@ -465,32 +460,6 @@ class JobProcessor:
                 exc_info=True,
             )
 
-    def _maybe_enqueue_record_aggregator_job(self):
-        """
-        Every RECORD_AGGREGATOR_ENQUEUE_INTERVAL seconds (5 minutes), enqueue the record
-        aggregator job to discover entity schemas from new records.
-        """
-        now = timezone.now()
-        if self._last_record_aggregator_enqueue_at is not None:
-            elapsed = (now - self._last_record_aggregator_enqueue_at).total_seconds()
-            if elapsed < RECORD_AGGREGATOR_ENQUEUE_INTERVAL:
-                return
-        try:
-            queue = get_queue_service()
-            queue.enqueue_job(
-                job_type=JobType.AGGREGATE_RECORDS,
-                payload={},
-                priority=1,  # Higher priority for schema discovery
-            )
-            self._last_record_aggregator_enqueue_at = now
-            logger.debug(
-                f"[Worker {self.worker_id}] Enqueued aggregate_records job"
-            )
-        except Exception as e:
-            logger.warning(
-                f"[Worker {self.worker_id}] Failed to enqueue record aggregator job: {e}",
-                exc_info=True,
-            )
 
     def process_next_job(self, tenant_id: Optional[str] = None) -> bool:
         """
@@ -587,8 +556,6 @@ class JobProcessor:
                 self._maybe_enqueue_lead_cron_jobs()
                 # Daily at 23:55 exact minute (TIME_ZONE): SNOOZED → NOT_CONNECTED
                 self._maybe_enqueue_snoozed_to_not_connected_midnight()
-                # Every 5 minutes: aggregate record schemas for entity discovery
-                self._maybe_enqueue_record_aggregator_job()
 
                 if jobs_processed > 0:
                     logger.debug(
