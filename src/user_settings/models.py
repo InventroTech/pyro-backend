@@ -1,8 +1,9 @@
 from django.db import models
-from core.models import Tenant
+from core.models import BaseModel, Tenant
+from core.soft_delete import alive_q
 
 
-class UserSettings(models.Model):
+class UserSettings(BaseModel):
     """
     User settings model to store key-value pairs for users within tenants.
     Used for storing settings like lead type assignments for RMs.
@@ -51,23 +52,27 @@ class UserSettings(models.Model):
         blank=True,
         help_text="List of lead statuses assigned to this user (for key=LEAD_TYPE_ASSIGNMENT); only these leads are directed to the RM"
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
-    class Meta:
+    class Meta(BaseModel.Meta):
         db_table = 'user_settings'
-        unique_together = ['tenant', 'tenant_membership', 'key']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'tenant_membership', 'key'],
+                condition=alive_q(),
+                name='user_settings_tenant_mship_key_uniq_alive',
+            ),
+        ]
         indexes = [
+            *BaseModel.Meta.indexes,
             models.Index(fields=['tenant', 'tenant_membership']),
             models.Index(fields=['tenant', 'key']),
         ]
 
     def __str__(self):
-
         return f"{self.tenant.name} - {self.tenant_membership.id} - {self.key}: {self.value}"
 
 
-class RoutingRule(models.Model):
+class RoutingRule(BaseModel):
     """
     Routing rule for queueable objects (tickets, leads), keyed by authz.TenantMembership.
     One active rule per (tenant, tenant_membership, queue_type). Works even when the
@@ -122,13 +127,17 @@ class RoutingRule(models.Model):
         blank=True,
         help_text="Optional description for this rule",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
+    class Meta(BaseModel.Meta):
         db_table = "routing_rules"
-        unique_together = [["tenant", "tenant_membership", "queue_type"]]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "tenant_membership", "queue_type"],
+                condition=alive_q(),
+                name="routing_rules_tenant_mship_queue_uniq_alive",
+            ),
+        ]
         indexes = [
+            *BaseModel.Meta.indexes,
             models.Index(fields=["tenant", "queue_type", "tenant_membership"]),
             models.Index(fields=["tenant", "queue_type", "is_active"]),
         ]
@@ -140,7 +149,7 @@ class RoutingRule(models.Model):
         )
 
 
-class Group(models.Model):
+class Group(BaseModel):
     """Tenant-scoped lead assignment group configuration."""
 
     tenant = models.ForeignKey(
@@ -158,13 +167,18 @@ class Group(models.Model):
         blank=True,
         help_text="Arbitrary group payload (party, lead sources, statuses, limits, etc.)",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
-    class Meta:
+    class Meta(BaseModel.Meta):
         db_table = "groups"
-        unique_together = [["tenant", "name"]]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "name"],
+                condition=alive_q(),
+                name="user_settings_groups_tenant_name_uniq_alive",
+            ),
+        ]
         indexes = [
+            *BaseModel.Meta.indexes,
             models.Index(fields=["tenant", "name"]),
         ]
 
@@ -172,7 +186,7 @@ class Group(models.Model):
         return f"Group(tenant={self.tenant_id}, name={self.name})"
 
 
-class TenantMemberSetting(models.Model):
+class TenantMemberSetting(BaseModel):
     """
     Dedicated key/value table for core per-user settings like:
       - GROUP (group id)
@@ -194,13 +208,18 @@ class TenantMemberSetting(models.Model):
     )
     key = models.CharField(max_length=100, help_text="Setting key (e.g., 'GROUP', 'DAILY_LIMIT')")
     value = models.JSONField(null=True, blank=True, help_text="Setting value (JSON)")
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
-    class Meta:
+    class Meta(BaseModel.Meta):
         db_table = "user_kv_settings"
-        unique_together = ["tenant", "tenant_membership", "key"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "tenant_membership", "key"],
+                condition=alive_q(),
+                name="user_kv_tenant_mship_key_uniq_alive",
+            ),
+        ]
         indexes = [
+            *BaseModel.Meta.indexes,
             models.Index(fields=["tenant", "tenant_membership", "key"]),
             models.Index(fields=["tenant", "key"]),
         ]
