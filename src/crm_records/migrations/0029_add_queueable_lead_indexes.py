@@ -12,7 +12,7 @@ class Migration(migrations.Migration):
     operations = [
         migrations.RunSQL(
             sql="""
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS records_lead_queueable_main_idx
+            CREATE INDEX IF NOT EXISTS records_lead_queueable_main_idx
             ON public.records (tenant_id)
             WHERE entity_type = 'lead'
               AND (
@@ -23,12 +23,12 @@ class Migration(migrations.Migration):
               AND UPPER(COALESCE(data->>'lead_stage', '')) IN ('FRESH', 'IN_QUEUE')
               AND COALESCE((data->>'call_attempts')::int, 0) = 0;
 
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS records_tenant_entity_idx
+            CREATE INDEX IF NOT EXISTS records_tenant_entity_idx
             ON public.records (tenant_id, entity_type);
             """,
             reverse_sql="""
-            DROP INDEX CONCURRENTLY IF EXISTS public.records_lead_queueable_main_idx;
-            DROP INDEX CONCURRENTLY IF EXISTS public.records_tenant_entity_idx;
+            DROP INDEX IF EXISTS public.records_lead_queueable_main_idx;
+            DROP INDEX IF EXISTS public.records_tenant_entity_idx;
             """,
         ),
     ]

@@ -12,12 +12,12 @@ class Migration(migrations.Migration):
     operations = [
         migrations.RunSQL(
             sql="""
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS records_lead_stats_tenant_stage_idx
+            CREATE INDEX IF NOT EXISTS records_lead_stats_tenant_stage_idx
             ON public.records (tenant_id, ((data->>'lead_stage')))
             WHERE entity_type = 'lead';
             """,
             reverse_sql="""
-            DROP INDEX CONCURRENTLY IF EXISTS public.records_lead_stats_tenant_stage_idx;
+            DROP INDEX IF EXISTS public.records_lead_stats_tenant_stage_idx;
             """,
         ),
     ]
