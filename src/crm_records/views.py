@@ -1315,13 +1315,11 @@ class LeadStatsView(APIView):
         # Get all leads for this tenant - use tenant_id for better index usage
         leads_qs = Record.objects.filter(tenant_id=tenant.id, entity_type='lead')
         
-        # Use database aggregation instead of Python loops for performance
-        # Count total leads
-        total_leads = leads_qs.count()
-        
-        # Count by lead_stage using JSONB field aggregation (lead_stage stored in CAPITAL)
+        # Use a single DB aggregation query for total + per-stage counts.
+        # This avoids running a separate count() scan for total_leads.
         # Stages: FRESH, IN_QUEUE, ASSIGNED, SNOOZED, NOT_CONNECTED, CLOSED (no WON, LOST, SCHEDULED, CALL_LATER)
         stage_counts = leads_qs.aggregate(
+            total_leads=Count('id'),
             fresh=Count('id', filter=Q(data__lead_stage='FRESH')),
             in_queue=Count('id', filter=Q(data__lead_stage='IN_QUEUE')),
             assigned=Count('id', filter=Q(data__lead_stage='ASSIGNED')),
@@ -1331,7 +1329,7 @@ class LeadStatsView(APIView):
         )
         
         stats = {
-            "total_leads": total_leads,
+            "total_leads": stage_counts.get('total_leads', 0) or 0,
             "fresh": stage_counts.get('fresh', 0) or 0,
             "in_queue": stage_counts.get('in_queue', 0) or 0,
             "assigned": stage_counts.get('assigned', 0) or 0,
