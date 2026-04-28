@@ -1,6 +1,7 @@
 from typing import Dict
 from datetime import timedelta
 from django.utils import timezone
+import logging
 from authz.models import (
     TenantMembership, RolePermission, Permission,
     GroupMembership, GroupPermission, GroupRole, UserPermission
@@ -13,6 +14,7 @@ from django.db.models import Q
 
 _CACHE: Dict[str, dict] = {}
 _TTL = timedelta(minutes=10)
+logger = logging.getLogger(__name__)
 
 def _normalize_tenant_id(tenant_or_id) -> str:
     """
@@ -169,19 +171,16 @@ def link_user_uid_and_activate(email: str, uid: str) -> dict:
                     'code': 'NO_TENANT_MEMBERSHIP'
                 }
             
-            # Link the UID and activate memberships
-            activated_count = 0
-            membership_ids = []
-            for membership in memberships:
-                # Link the UID to authz_tenantmembership and activate the user
-                membership.user_id = uid
-                membership.is_active = True
-                membership.save()
-                activated_count += 1
-                membership_ids.append(str(membership.id))
-                
-                # Clear permissions cache for this user-tenant combination
-                drop_permissions_cache(uid, membership.tenant)
+            # Link the UID and activate memberships in one DB statement to reduce lock time.
+            # We capture ids/tenant ids first for response and cache invalidation.
+            memberships_snapshot = list(memberships.values_list("id", "tenant_id"))
+            membership_ids = [str(membership_id) for membership_id, _ in memberships_snapshot]
+            tenant_ids = {str(tenant_id) for _, tenant_id in memberships_snapshot}
+            activated_count = memberships.update(user_id=uid, is_active=True)
+
+            # Clear permissions cache for affected user-tenant combinations.
+            for tenant_id in tenant_ids:
+                drop_permissions_cache(uid, tenant_id)
             
             return {
                 'success': True,
@@ -193,6 +192,13 @@ def link_user_uid_and_activate(email: str, uid: str) -> dict:
             }
             
     except Exception as e:
+        logger.error(
+            "Failed linking UID for email=%s uid=%s: %s",
+            email,
+            uid,
+            str(e),
+            exc_info=True,
+        )
         return {
             'success': False,
             'error': str(e),

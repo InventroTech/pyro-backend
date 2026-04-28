@@ -1,5 +1,6 @@
 import re
 import uuid
+import time
 from typing import Optional
 from django.db import transaction, connection
 from django.utils import timezone
@@ -437,6 +438,7 @@ class LinkUserUidView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        started_at = time.perf_counter()
         try:
             serializer = LinkUserUidSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
@@ -445,15 +447,26 @@ class LinkUserUidView(APIView):
             uid = serializer.validated_data["uid"]
 
             result = link_user_uid_and_activate(email, uid)
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            logger.info(
+                "LinkUserUid completed email=%s uid=%s success=%s elapsed_ms=%s",
+                email,
+                uid,
+                bool(result.get("success")),
+                elapsed_ms,
+            )
 
             if result.get("success"):
                 return Response(result, status=status.HTTP_200_OK)
             return Response(result, status=status.HTTP_400_BAD_REQUEST)
 
         except serializers.ValidationError as ve:
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            logger.warning("LinkUserUid validation failed elapsed_ms=%s error=%s", elapsed_ms, ve.detail)
             return Response({"error": ve.detail}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
-            logger.error(f"Error in LinkUserUidView.post: {e}", exc_info=True)
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            logger.error("Error in LinkUserUidView.post elapsed_ms=%s error=%s", elapsed_ms, e, exc_info=True)
             return Response(
                 {"error": "Internal server error", "message": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
