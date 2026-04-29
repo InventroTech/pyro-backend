@@ -5,8 +5,9 @@ import threading
 from typing import Any, Dict, Optional
 
 from django.contrib.contenttypes.models import ContentType
-from django.db import transaction, IntegrityError
+from django.db import IntegrityError, router, transaction
 
+from accounts.models import SupabaseAuthUser
 from .models import ObjectHistory
 from .registry import get_config
 from .serializers import compute_diff, redact_payload, serialize_instance
@@ -85,6 +86,54 @@ def get_request_context():
 
 class HistoryEngine:
     @staticmethod
+    def _normalize_actor_user(actor_user):
+        """
+        Normalize actor_user to SupabaseAuthUser, because callers may pass
+        accounts.User instances in tests/scripts.
+        """
+        if not actor_user:
+            return None
+        if isinstance(actor_user, SupabaseAuthUser):
+            return actor_user
+
+        candidate_id = getattr(actor_user, "supabase_uid", None) or getattr(actor_user, "id", None)
+        try:
+            return SupabaseAuthUser.objects.filter(id=candidate_id).first()
+        except Exception:
+            logger.warning("HistoryEngine: unable to normalize actor_user %r", actor_user)
+            return None
+
+    @staticmethod
+    def _is_duplicate_event(
+        latest: Optional[ObjectHistory],
+        *,
+        action: str,
+        actor_user,
+        actor_label: Optional[str],
+        changes: Dict[str, Dict[str, Any]],
+        before_state: Dict[str, Any],
+        after_state: Optional[Dict[str, Any]],
+        include_after: bool,
+        metadata: Dict[str, Any],
+    ) -> bool:
+        if not latest:
+            return False
+
+        same_actor_user_id = (latest.actor_user_id or None) == (
+            getattr(actor_user, "id", None) if actor_user else None
+        )
+        same_after = latest.after_state == (after_state if include_after else None)
+        return (
+            latest.action == action
+            and same_actor_user_id
+            and latest.actor_label == actor_label
+            and latest.changes == changes
+            and latest.before_state == before_state
+            and same_after
+            and latest.metadata == metadata
+        )
+
+    @staticmethod
     def capture_before(instance, *, for_delete: bool = False):
         config = get_config(instance.__class__)
         if not config:
@@ -122,7 +171,9 @@ class HistoryEngine:
             return
 
         request_ctx = get_request_context()
-        resolved_actor_user = actor_user or request_ctx.get("actor_user")
+        resolved_actor_user = HistoryEngine._normalize_actor_user(
+            actor_user or request_ctx.get("actor_user")
+        )
         actor_label = actor or request_ctx.get("actor_label")
         
         # Log actor resolution for debugging
@@ -183,15 +234,13 @@ class HistoryEngine:
         include_after: bool,
     ):
         """
-        Write history entry with proper transaction handling to prevent race conditions.
-        
-        The entire operation (getting next version + inserting) is wrapped in a single
-        transaction with row-level locking to prevent duplicate version numbers.
-        Uses retry logic with savepoints to handle edge cases where concurrent
-        transactions might still conflict.
+        Write a history entry on the write database only, under one transaction.
+        Reads and writes are intentionally pinned to the writer DB alias to avoid
+        stale version reads from read replicas.
         """
+        db_alias = router.db_for_write(ObjectHistory, instance=instance)
         tenant = getattr(instance, "tenant", None)
-        content_type = ContentType.objects.get_for_model(instance.__class__)
+        content_type = ContentType.objects.db_manager(db_alias).get_for_model(instance.__class__)
         object_repr = str(instance)
         object_id = instance.pk
 
@@ -229,24 +278,42 @@ class HistoryEngine:
                 if has_field(after_temp, field)
             }
 
-        # Retry logic with savepoints to handle race conditions
-        max_retries = 3
-        for attempt in range(max_retries):
-            # Use savepoint for each retry attempt
-            with transaction.atomic():
-                # Get the next version within the transaction, with row locking
-                # This ensures no other concurrent request can get the same version
-                # while we're in this transaction
-                latest = (
-                    ObjectHistory.objects.select_for_update()
-                    .filter(content_type=content_type, object_id=str(object_id))
-                    .order_by("-version")
-                    .first()
-                )
-                version = 1 if not latest else latest.version + 1
+        redacted_before = redact_payload(before_snapshot, config.redact_fields)
+        redacted_after = (
+            redact_payload(after_snapshot, config.redact_fields) if include_after else None
+        )
 
-                try:
-                    ObjectHistory.objects.create(
+        max_attempts = 6  # handle bursty concurrent writes creating same next version
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with transaction.atomic(using=db_alias):
+                    latest = (
+                        ObjectHistory.objects.using(db_alias)
+                        .select_for_update()
+                        .filter(content_type=content_type, object_id=str(object_id))
+                        .order_by("-version")
+                        .first()
+                    )
+                    if HistoryEngine._is_duplicate_event(
+                        latest,
+                        action=action,
+                        actor_user=actor_user,
+                        actor_label=actor_label,
+                        changes=changes,
+                        before_state=redacted_before,
+                        after_state=redacted_after,
+                        include_after=include_after,
+                        metadata=metadata,
+                    ):
+                        logger.info(
+                            "Skipping duplicate object history event for %s#%s",
+                            content_type.model,
+                            object_id,
+                        )
+                        return
+
+                    version = 1 if not latest else latest.version + 1
+                    ObjectHistory.objects.using(db_alias).create(
                         tenant=tenant,
                         content_type=content_type,
                         object_id=str(object_id),
@@ -256,32 +323,20 @@ class HistoryEngine:
                         actor_label=actor_label,
                         version=version,
                         changes=changes,
-                        before_state=redact_payload(before_snapshot, config.redact_fields),
-                        after_state=redact_payload(after_snapshot, config.redact_fields)
-                        if include_after
-                        else None,
+                        before_state=redacted_before,
+                        after_state=redacted_after,
                         metadata=metadata,
                     )
-                    # Success, break out of retry loop
                     return
-                except IntegrityError as e:
-                    # Check if it's the unique constraint violation we're concerned about
-                    if "object_hist_unique_version" in str(e) and attempt < max_retries - 1:
-                        # Another transaction inserted this version between our select and insert
-                        # This should be extremely rare with proper locking, but can happen
-                        # in edge cases (e.g., when there are no existing rows to lock)
-                        logger.warning(
-                            f"Race condition detected in object history for "
-                            f"{content_type.model}#{object_id}, retrying (attempt {attempt + 1}/{max_retries})"
-                        )
-                        # Transaction will roll back automatically, continue to next attempt
-                        continue
-                    else:
-                        # Re-raise if it's a different error or we've exhausted retries
-                        logger.error(
-                            f"Failed to write object history after {max_retries} attempts: {e}"
-                        )
-                        raise
+            except IntegrityError as exc:
+                if "object_hist_unique_version" in str(exc) and attempt < max_attempts:
+                    logger.warning(
+                        "Unique version conflict in object history for %s#%s; retrying once",
+                        content_type.model,
+                        object_id,
+                    )
+                    continue
+                raise
 
 __all__ = [
     "HistoryEngine",
