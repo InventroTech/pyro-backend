@@ -171,6 +171,9 @@ class SoftDeleteMixin(models.Model):
         abstract = True
 
     def save(self, *args, **kwargs):
+        # None must not persist: NOT NULL columns and alive_q semantics need a real boolean.
+        if self.is_deleted is None:
+            self.is_deleted = False
         # Keep is_deleted / deleted_at consistent if one is set without the other.
         if self.is_deleted and self.deleted_at is None:
             self.deleted_at = timezone.now()
