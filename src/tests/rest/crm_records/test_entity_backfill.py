@@ -134,3 +134,20 @@ class EntityBackfillApiTests(TestCase):
     def test_get_entity_backfill_returns_405(self):
         r = self.client.get(self.backfill_url, **self.headers)
         self.assertEqual(r.status_code, 405)
+
+    def test_get_entity_list_uses_has_next_pagination_meta(self):
+        for i in range(11):
+            Record.objects.create(
+                tenant=self.tenant,
+                entity_type="lead",
+                data={"praja_id": f"ENT_PAGE_{i}", "name": f"Lead {i}"},
+            )
+
+        r = self.client.get(f"{self.entity_url}?page=1&page_size=10", **self.headers)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("data", r.data)
+        self.assertIn("page_meta", r.data)
+        self.assertNotIn("total_count", r.data["page_meta"])
+        self.assertNotIn("number_of_pages", r.data["page_meta"])
+        self.assertTrue(r.data["page_meta"]["has_next"])
+        self.assertFalse(r.data["page_meta"]["has_previous"])

@@ -5,7 +5,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError, NotFound
 from rest_framework.permissions import AllowAny
 from authz.permissions import IsTenantAuthenticated
-from core.pagination import MetaPageNumberPagination
+from core.pagination import MetaPageNumberPagination, HasNextPageNumberPagination
 from core.models import Tenant
 from django.utils import timezone
 from datetime import datetime, time, timedelta, timezone as std_utc
@@ -3411,7 +3411,7 @@ class PrajaLeadsAPIView(APIView):
         queryset = queryset.order_by('-created_at')
         
         # Pagination
-        paginator = MetaPageNumberPagination()
+        paginator = HasNextPageNumberPagination()
         page = paginator.paginate_queryset(queryset, request)
         
         if page is not None:
