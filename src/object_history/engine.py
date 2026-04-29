@@ -261,8 +261,6 @@ class HistoryEngine:
                         if include_after
                         else None,
                         metadata=metadata,
-                        is_deleted=False,
-                        deleted_at=None,
                     )
                     # Success, break out of retry loop
                     return
