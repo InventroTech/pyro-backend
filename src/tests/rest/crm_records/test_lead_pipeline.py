@@ -38,7 +38,8 @@ from crm_records.lead_pipeline.daily_limit import DailyLimitChecker
 from crm_records.lead_pipeline.pipeline import LeadPipeline
 from crm_records.lead_pipeline.pull_strategy import PullStrategyApplier
 from crm_records.models import Bucket, Record, UserBucketAssignment
-from user_settings.models import RoutingRule, UserSettings
+from user_settings.models import Group, RoutingRule, TenantMemberSetting
+from user_settings.services import USER_KV_DAILY_LIMIT_KEY, USER_KV_GROUP_ID_KEY
 
 from tests.factories import (
     RecordFactory,
@@ -68,7 +69,7 @@ def _make_rm_user(
     lead_statuses: list | None = None,
     daily_limit: int | None = None,
 ):
-    """RM user + membership + LEAD_TYPE_ASSIGNMENT (realistic field names)."""
+    """RM user + membership + Group/KV filter settings."""
     uid = str(uuid.uuid4())
     user = UserFactory(
         supabase_uid=uid,
@@ -83,14 +84,26 @@ def _make_rm_user(
         email=user.email,
         role=role,
     )
-    UserSettings.objects.create(
+    group = Group.objects.create(
+        tenant=tenant,
+        name=f"rm-group-{uid[:8]}",
+        group_data={
+            "party": eligible_parties if eligible_parties is not None else [],
+            "lead_sources": lead_sources if lead_sources is not None else [],
+            "lead_statuses": lead_statuses if lead_statuses is not None else ["SALES LEAD"],
+        },
+    )
+    TenantMemberSetting.objects.update_or_create(
         tenant=tenant,
         tenant_membership=membership,
-        key="LEAD_TYPE_ASSIGNMENT",
-        value=eligible_parties if eligible_parties is not None else [],
-        lead_sources=lead_sources if lead_sources is not None else [],
-        lead_statuses=lead_statuses if lead_statuses is not None else ["SALES LEAD"],
-        daily_limit=daily_limit,
+        key=USER_KV_GROUP_ID_KEY,
+        defaults={"value": group.id},
+    )
+    TenantMemberSetting.objects.update_or_create(
+        tenant=tenant,
+        tenant_membership=membership,
+        key=USER_KV_DAILY_LIMIT_KEY,
+        defaults={"value": daily_limit},
     )
     return user, membership, uid
 
