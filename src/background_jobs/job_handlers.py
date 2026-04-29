@@ -1069,6 +1069,48 @@ def _close_stale_subscription_leads_all_tenants(days: int) -> Tuple[int, int, st
     return total, n_tenants, cutoff.isoformat()
 
 
+class PurgeOldLogTablesJobHandler(JobHandler):
+    """
+    Permanently remove rows older than ``days`` (default: ``LOG_RETENTION_DAYS``) from
+    ``object_history``, ``event_logs``, and ``rule_exec_logs``, and from ``background_jobs``
+    only when ``status`` is COMPLETED or FAILED (queue rows are kept).
+
+    Payload:
+    - ``days`` (int, optional): retention window; defaults to :setting:`LOG_RETENTION_DAYS`.
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        from core.log_retention import get_log_retention_days, purge_old_log_rows
+
+        payload = job.payload or {}
+        if "days" in payload:
+            days = int(payload["days"])
+        else:
+            days = get_log_retention_days()
+        if days < 1:
+            raise ValueError("days must be >= 1")
+        stats = purge_old_log_rows(days=days)
+        job.result = {"success": True, **stats}
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+    def validate_payload(self, payload: Dict[str, Any]) -> bool:
+        try:
+            p = payload or {}
+            if "days" in p:
+                days = int(p["days"])
+            else:
+                from core.log_retention import get_log_retention_days
+
+                days = get_log_retention_days()
+        except (TypeError, ValueError):
+            return False
+        return days >= 1
+
+
 class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
     """
     Set ``data.lead_stage`` to CLOSED for **SELF TRIAL** leads (``lead_status``) whose
@@ -1303,6 +1345,10 @@ class JobHandlerRegistry:
         self.register_handler(
             JobType.SNOOZED_TO_NOT_CONNECTED_MIDNIGHT,
             SnoozedToNotConnectedMidnightJobHandler(),
+        )
+        self.register_handler(
+            JobType.PURGE_OLD_LOG_TABLES,
+            PurgeOldLogTablesJobHandler(),
         )
         # Praja handler removed - now using MixpanelService instead
         # self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())

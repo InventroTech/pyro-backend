@@ -40,6 +40,9 @@ class ObjectHistory(BaseModel):
     before_state = models.JSONField(null=True, blank=True)
     after_state = models.JSONField(null=True, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
+    # Copied from core.TenantSettings.persistent_object_history at write time; retained rows are
+    # excluded from LOG_RETENTION_DAYS purge (see core.log_retention).
+    persistent_history = models.BooleanField(default=False, db_index=True)
 
     objects = ObjectHistoryQuerySet.as_manager()
 
@@ -53,6 +56,10 @@ class ObjectHistory(BaseModel):
             models.Index(
                 fields=["content_type", "action", "-created_at"],
                 name="object_hist_action_lookup",
+            ),
+            models.Index(
+                fields=["persistent_history", "created_at"],
+                name="object_hist_persist_cr_idx",
             ),
         ]
         constraints = [
