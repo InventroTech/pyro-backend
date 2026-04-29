@@ -43,9 +43,10 @@ class Page(RoleBaseModel):
         db_table = 'pages'
         ordering = ['display_order', '-updated_at']
         indexes = [
-            *RoleBaseModel.Meta.indexes,
-            models.Index(fields=['tenant', 'user_id']),
-            models.Index(fields=['tenant', 'role']),
+            # Explicit names align with migrations + prod; avoid hashed RenameIndex churn.
+            models.Index(fields=['tenant', '-created_at'], name='pages_tnt_cr_desc_idx'),
+            models.Index(fields=['tenant', 'user_id'], name='pages_tenant__138dc7_idx'),
+            models.Index(fields=['tenant', 'role'], name='pages_tenant__7bb27b_idx'),
         ]
 
     def __str__(self):
@@ -67,7 +68,9 @@ class CustomIcon(BaseModel):
                 name='pages_customicon_tenant_name_uniq_alive',
             ),
         ]
-        indexes = list(BaseModel.Meta.indexes)
+        indexes = [
+            models.Index(fields=['tenant', '-created_at'], name='custom_icons_tnt_cr_desc_idx'),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.tenant.slug if self.tenant else 'No Tenant'})"
