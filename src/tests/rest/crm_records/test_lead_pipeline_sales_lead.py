@@ -32,7 +32,8 @@ from background_jobs.models import JobType
 from crm_records.lead_pipeline.pipeline import LeadPipeline
 from crm_records.models import Bucket, Record, UserBucketAssignment
 from crm_records.rule_engine import action_compute_next_call_from_attempts
-from user_settings.models import UserSettings
+from user_settings.models import Group, TenantMemberSetting
+from user_settings.services import USER_KV_DAILY_LIMIT_KEY, USER_KV_GROUP_ID_KEY
 
 from tests.factories import BackgroundJobFactory, RecordFactory, TenantFactory, UserFactory
 from tests.factories import RoleFactory, SupabaseAuthUserFactory, TenantMembershipFactory
@@ -69,17 +70,29 @@ def _make_sales_lead_user_settings(
     lead_sources: list | None = None,
     daily_limit: int | None = None,
 ):
-    """LEAD_TYPE_ASSIGNMENT for SALES LEAD RMs (lead_statuses filter)."""
-    UserSettings.objects.update_or_create(
+    """Group/KV settings for SALES LEAD RMs (lead_statuses filter)."""
+    group, _ = Group.objects.update_or_create(
+        tenant=env.tenant,
+        name=f"sales-rm-group-{env.user_identifier[:8]}",
+        defaults={
+            "group_data": {
+                "party": eligible_parties if eligible_parties is not None else [],
+                "lead_sources": lead_sources if lead_sources is not None else [],
+                "lead_statuses": ["SALES LEAD"],
+            }
+        },
+    )
+    TenantMemberSetting.objects.update_or_create(
         tenant=env.tenant,
         tenant_membership=env.membership,
-        key="LEAD_TYPE_ASSIGNMENT",
-        defaults={
-            "value": eligible_parties if eligible_parties is not None else [],
-            "lead_sources": lead_sources if lead_sources is not None else [],
-            "lead_statuses": ["SALES LEAD"],
-            "daily_limit": daily_limit,
-        },
+        key=USER_KV_GROUP_ID_KEY,
+        defaults={"value": group.id},
+    )
+    TenantMemberSetting.objects.update_or_create(
+        tenant=env.tenant,
+        tenant_membership=env.membership,
+        key=USER_KV_DAILY_LIMIT_KEY,
+        defaults={"value": daily_limit},
     )
 
 
