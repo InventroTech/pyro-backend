@@ -8,6 +8,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.db import IntegrityError
 from django.db.models.query import QuerySet
 
+from core.models import TenantSettings
 from crm_records.models import Record
 from object_history.engine import HistoryEngine, set_manual_context, clear_request_context
 from object_history.models import ObjectHistory
@@ -207,3 +208,21 @@ def test_actor_metadata(model_instance):
     assert hist.actor_label == "test-user"
     assert hist.metadata["source"] == "unit-test"
     assert hist.metadata["operation"] == "history-write"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_persistent_history_when_tenant_settings_enabled(model_instance):
+    tenant = model_instance.tenant
+    TenantSettings.objects.create(tenant=tenant, persistent_object_history=True)
+
+    HistoryEngine.capture_before(model_instance)
+    model_instance.data["name"] = "persistent-flag-test"
+    HistoryEngine.capture_after(model_instance)
+
+    hist = (
+        ObjectHistory.objects.filter(object_id=str(model_instance.pk))
+        .order_by("-version")
+        .first()
+    )
+    assert hist is not None
+    assert hist.persistent_history is True
