@@ -242,7 +242,10 @@ class HistoryEngine:
         """
         db_alias = router.db_for_write(ObjectHistory, instance=instance)
         tenant = getattr(instance, "tenant", None)
-        persistent_history = TenantSettings.object_history_should_persist(tenant)
+        # Same DB as the history write: avoid stale reads from read replicas.
+        persistent_history = TenantSettings.object_history_should_persist(
+            tenant, using=db_alias
+        )
         content_type = ContentType.objects.db_manager(db_alias).get_for_model(
             instance.__class__
         )

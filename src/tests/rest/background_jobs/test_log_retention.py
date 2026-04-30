@@ -208,6 +208,22 @@ class TestTenantSettingsPersistentHistory:
         )
         assert TenantSettings.object_history_should_persist(tenant) is True
 
+    def test_delete_settings_clears_persistent_history_on_rows(self):
+        tenant = TenantFactory()
+        oh = _make_object_history_row(tenant=tenant, old=False, persistent_history=False)
+        ts = TenantSettings.objects.create(
+            tenant=tenant,
+            persistent_object_history=True,
+        )
+        oh.refresh_from_db()
+        assert oh.persistent_history is True
+
+        ts.delete()
+
+        assert not TenantSettings.objects.filter(pk=tenant.pk).exists()
+        oh.refresh_from_db()
+        assert oh.persistent_history is False
+
 
 @pytest.mark.django_db(transaction=True)
 class TestPurgeOldLogTablesJobHandler:

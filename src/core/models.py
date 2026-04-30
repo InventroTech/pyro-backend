@@ -69,15 +69,26 @@ class TenantSettings(models.Model):
         return f"TenantSettings({self.tenant_id})"
 
     @classmethod
-    def object_history_should_persist(cls, tenant) -> bool:
+    def object_history_should_persist(cls, tenant, *, using=None) -> bool:
         if tenant is None:
             return False
         tid = getattr(tenant, "pk", None)
         if tid is None:
             return False
-        return cls.objects.filter(
-            tenant_id=tid, persistent_object_history=True
-        ).exists()
+        qs = cls.objects if using is None else cls.objects.db_manager(using)
+        return qs.filter(tenant_id=tid, persistent_object_history=True).exists()
+
+    def delete(self, *args, **kwargs):
+        tenant_id = self.tenant_id
+        was_persistent = bool(self.persistent_object_history)
+        result = super().delete(*args, **kwargs)
+        if was_persistent and tenant_id:
+            from object_history.models import ObjectHistory
+
+            ObjectHistory.all_objects.filter(tenant_id=tenant_id).update(
+                persistent_history=False
+            )
+        return result
 
     def save(self, *args, **kwargs):
         was_persistent = False
