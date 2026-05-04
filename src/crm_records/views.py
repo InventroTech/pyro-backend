@@ -13,6 +13,7 @@ try:
     from dateutil import parser as date_parser
 except ImportError:
     date_parser = None
+from django.contrib.contenttypes.models import ContentType
 from django.db.models import Q, F, Count, Case, When, Value, IntegerField
 from django.db import transaction
 from django.db import IntegrityError
@@ -23,7 +24,18 @@ import os
 
 logger = logging.getLogger(__name__)
 from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule, PartnerEvent, ApiSecretKey
-from .serializers import RecordSerializer, EventLogSerializer, RuleSetSerializer, RuleExecutionLogSerializer, EntityTypeSchemaSerializer, LeadScoringRequestSerializer, CallAttemptMatrixSerializer, ScoringRuleModelSerializer
+from object_history.models import ObjectHistory
+from .serializers import (
+    RecordSerializer,
+    EventLogSerializer,
+    RuleSetSerializer,
+    RuleExecutionLogSerializer,
+    EntityTypeSchemaSerializer,
+    LeadScoringRequestSerializer,
+    CallAttemptMatrixSerializer,
+    ScoringRuleModelSerializer,
+    RecordHistoryEntrySerializer,
+)
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
 from .scoring import calculate_and_update_lead_score
@@ -704,6 +716,93 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
             'message': f'Record {record.id} deleted successfully',
             'deleted_record': record_data
         }, status=status.HTTP_200_OK)
+
+
+_RECORD_HISTORY_CONTENT_TYPE_ID = None
+
+
+def _record_history_content_type_id():
+    global _RECORD_HISTORY_CONTENT_TYPE_ID
+    if _RECORD_HISTORY_CONTENT_TYPE_ID is None:
+        _RECORD_HISTORY_CONTENT_TYPE_ID = ContentType.objects.get_for_model(Record).id
+    return _RECORD_HISTORY_CONTENT_TYPE_ID
+
+
+class RecordHistoryView(TenantScopedMixin, APIView):
+    """
+    Object history for a single CRM record (tenant-scoped).
+    Returns only fields needed by the UI; caps rows via ``limit`` for predictable cost.
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+    default_limit = 100
+    max_limit = 200
+
+    @extend_schema(
+        summary="Record history",
+        description=(
+            "Returns object_history rows for this record in the current tenant. "
+            "Each entry includes action, version, actor, and field-level ``changes`` only "
+            "(no full before/after snapshots)."
+        ),
+        parameters=[
+            OpenApiParameter(
+                name="limit",
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description="Max entries to return (default 100, max 200). Newest versions first.",
+            ),
+        ],
+        responses={
+            200: OpenApiResponse(description="record_id and history list"),
+            404: OpenApiResponse(description="Record not found"),
+        },
+        tags=["Records"],
+    )
+    def get(self, request, pk):
+        tenant = request.tenant
+        if not tenant:
+            return Response({"error": "Tenant context required"}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            pk_int = int(pk)
+        except (TypeError, ValueError):
+            return Response({"error": "Invalid record id"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not Record.objects.filter(id=pk_int, tenant=tenant).exists():
+            return Response({"error": "Record not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        raw_limit = request.query_params.get("limit")
+        try:
+            limit_n = int(raw_limit) if raw_limit is not None else self.default_limit
+        except (TypeError, ValueError):
+            limit_n = self.default_limit
+        limit_n = max(1, min(limit_n, self.max_limit))
+
+        ct_id = _record_history_content_type_id()
+
+        qs = (
+            ObjectHistory.objects.filter(
+                tenant_id=tenant.id,
+                content_type_id=ct_id,
+                object_id=str(pk_int),
+            )
+            .select_related("actor_user")
+            .only(
+                "id",
+                "action",
+                "version",
+                "created_at",
+                "changes",
+                "actor_label",
+                "actor_user_id",
+            )
+            .order_by("-version", "-id")[:limit_n]
+        )
+
+        data = RecordHistoryEntrySerializer(qs, many=True).data
+        return Response({"record_id": pk_int, "history": data, "limit": limit_n}, status=status.HTTP_200_OK)
 
 
 class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
