@@ -1,4 +1,7 @@
+from typing import Optional
+
 from rest_framework import serializers
+from object_history.models import ObjectHistory
 from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule
 from .assignee_display import build_assigned_to_display_map, _is_empty_assigned
 
@@ -445,3 +448,42 @@ class CallAttemptMatrixSerializer(serializers.ModelSerializer):
         if value > 168:  # 1 week
             raise serializers.ValidationError("Minimum time between calls cannot exceed 168 hours (1 week).")
         return value
+
+
+def _actor_display_name(user) -> Optional[str]:
+    if not user:
+        return None
+    meta = user.raw_user_meta_data
+    if isinstance(meta, dict):
+        return meta.get("full_name") or meta.get("name")
+    return None
+
+
+class RecordHistoryEntrySerializer(serializers.ModelSerializer):
+    """
+    Lean payload for record audit UI: field-level diff only, no full snapshots.
+    """
+
+    actor = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ObjectHistory
+        fields = ["id", "action", "version", "created_at", "actor", "changes"]
+        read_only_fields = fields
+
+    def get_actor(self, obj):
+        user = getattr(obj, "actor_user", None)
+        label = obj.actor_label
+        if user:
+            return {
+                "id": str(user.id),
+                "email": user.email,
+                "name": _actor_display_name(user),
+                "label": label,
+            }
+        return {
+            "id": None,
+            "email": None,
+            "name": None,
+            "label": label,
+        }
