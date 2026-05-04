@@ -16,11 +16,14 @@ from django.db import IntegrityError
 from config.supabase_auth import SupabaseJWTAuthentication
 from authz.permissions import IsTenantAuthenticated
 import os
+from typing import Any, Dict
 
 from .models import SupportTicketDump
 from .models import SupportTicket
 from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer,UpdateCallStatusRequestSerializer
 from .services import MixpanelService, TicketTimeService
+from background_jobs.queue_service import get_queue_service
+from background_jobs.models import JobType
 from user_settings.models import Group, TenantMemberSetting
 from user_settings.services import USER_KV_GROUP_ID_KEY
 from authz.permissions import IsTenantAuthenticated
@@ -31,6 +34,33 @@ from analytics.serializers import SupportTicketSerializer
 from .utils import send_to_mixpanel, ticket_to_mixpanel_data
 
 logger = logging.getLogger(__name__)
+
+
+def _enqueue_mixpanel_event(
+    *,
+    user_id: Any,
+    event_name: str,
+    properties: Dict[str, Any],
+    tenant_id: Any = None,
+) -> None:
+    if not user_id:
+        logger.warning("Skipping Mixpanel enqueue for event=%s due to missing user_id", event_name)
+        return
+    try:
+        queue_service = get_queue_service()
+        queue_service.enqueue_job(
+            job_type=JobType.SEND_MIXPANEL_EVENT,
+            payload={
+                "user_id": str(user_id),
+                "event_name": event_name,
+                "properties": properties or {},
+            },
+            tenant_id=str(tenant_id) if tenant_id else None,
+            priority=0,
+            max_attempts=3,
+        )
+    except Exception as e:
+        logger.error("Failed to enqueue Mixpanel event=%s user_id=%s error=%s", event_name, user_id, e, exc_info=True)
 
 
 class GetWIPTicketsView(APIView):
@@ -311,18 +341,16 @@ class SaveAndContinueView(APIView):
                 }
                 mixpanel_properties.update(ticket_to_mixpanel_data(current_ticket))
                 
-                jwt_token = getattr(request, 'token', None)
-                
-                mixpanel_service.send_to_mixpanel_sync(
-                    current_ticket.user_id,
-                    'pyro_st_connected',
-                    mixpanel_properties
+                _enqueue_mixpanel_event(
+                    user_id=current_ticket.user_id,
+                    event_name='pyro_st_connected',
+                    properties=mixpanel_properties
                 )
                 
-                mixpanel_service.send_to_mixpanel_sync(
-                    current_ticket.user_id,
-                    mixpanel_event_name,
-                    mixpanel_properties
+                _enqueue_mixpanel_event(
+                    user_id=current_ticket.user_id,
+                    event_name=mixpanel_event_name,
+                    properties=mixpanel_properties
                 )
 
             elif mixpanel_event_name and not current_ticket.user_id:
@@ -620,11 +648,10 @@ class GetNextTicketView(APIView):
                         "created_at": already_assigned_ticket.created_at.isoformat() if already_assigned_ticket.created_at else None,
                     }
                     logger.info(f"[_get_and_assign_ticket] Step 1: Mixpanel properties: {json.dumps(mixpanel_properties, indent=2, default=str)}")
-                    
-                    mixpanel_service.send_to_mixpanel_sync(
-                        already_assigned_ticket.user_id,
-                        "support_ticket_assignment",
-                        mixpanel_properties,
+                    _enqueue_mixpanel_event(
+                        user_id=already_assigned_ticket.user_id,
+                        event_name="pyro_st_assigned",
+                        properties=mixpanel_properties
                     )
                     logger.info(f"[_get_and_assign_ticket] Step 1: ✅ Mixpanel event 'support_ticket_assignment' sent successfully")
                 except Exception as mixpanel_error:
@@ -691,7 +718,6 @@ class GetNextTicketView(APIView):
                     logger.info(f"[_get_and_assign_ticket] Step 2: CSE assigned: {user_email} ({user_uuid_obj})")
                     logger.info(f"[_get_and_assign_ticket] Step 2: Ticket ID: {unassigned_ticket.id}")
                     
-                    mixpanel_service = MixpanelService()
                     mixpanel_properties = {
                         "ticket_id": unassigned_ticket.id,
                         "tenant_id": str(unassigned_ticket.tenant.id) if unassigned_ticket.tenant else None,
@@ -704,11 +730,10 @@ class GetNextTicketView(APIView):
                         "created_at": unassigned_ticket.created_at.isoformat() if unassigned_ticket.created_at else None,
                     }
                     logger.info(f"[_get_and_assign_ticket] Step 2: Mixpanel properties: {json.dumps(mixpanel_properties, indent=2, default=str)}")
-                    
-                    mixpanel_service.send_to_mixpanel_sync(
-                        unassigned_ticket.user_id,
-                        "pyro_support_ticket_assignment",
-                        mixpanel_properties,
+                    _enqueue_mixpanel_event(
+                        user_id=unassigned_ticket.user_id,
+                        event_name="pyro_st_assigned",
+                        properties=mixpanel_properties
                     )
                     logger.info(f"[_get_and_assign_ticket] Step 2: ✅ Mixpanel event 'support_ticket_assignment' sent successfully")
                 except Exception as mixpanel_error:
@@ -788,11 +813,10 @@ class GetNextTicketView(APIView):
                         "snooze_until": snoozed_ticket.snooze_until.isoformat() if snoozed_ticket.snooze_until else None,
                     }
                     logger.info(f"[_get_and_assign_ticket] Step 3: Mixpanel properties: {json.dumps(mixpanel_properties, indent=2, default=str)}")
-                    
-                    mixpanel_service.send_to_mixpanel_sync(
-                        snoozed_ticket.user_id,
-                        "pyro_support_ticket_assignment",
-                        mixpanel_properties,
+                    _enqueue_mixpanel_event(
+                        user_id=snoozed_ticket.user_id,
+                        event_name="pyro_st_assigned",
+                        properties=mixpanel_properties
                     )
                     logger.info(f"[_get_and_assign_ticket] Step 3: ✅ Mixpanel event 'support_ticket_assignment' sent successfully")
                 except Exception as mixpanel_error:
@@ -1170,9 +1194,6 @@ class ProcessDumpedTicketsView(APIView):
             # Send Mixpanel events for each inserted ticket
             for ticket in inserted_tickets:
                 try:
-                    from background_jobs.queue_service import get_queue_service
-                    from background_jobs.models import JobType
-                    
                     user_id = ticket.user_id or str(ticket.id)
                     event_name = 'pyro_st_ticket_created'
                     
@@ -1222,22 +1243,11 @@ class ProcessDumpedTicketsView(APIView):
                         'review_requested': ticket.review_requested,
                     }
                     
-                    # Enqueue background job
-                    queue_service = get_queue_service()
-                    job = queue_service.enqueue_job(
-                        job_type=JobType.SEND_MIXPANEL_EVENT,
-                        payload={
-                            "user_id": str(user_id),
-                            "event_name": event_name,
-                            "properties": properties
-                        },
-                        priority=0,
-                        tenant_id=str(ticket.tenant.id) if ticket.tenant else None,
-                        max_attempts=3
+                    _enqueue_mixpanel_event(
+                        user_id=user_id,
+                        event_name=event_name,
+                        properties=properties
                     )
-                    # Send sync
-                    mixpanel_service = MixpanelService()
-                    mixpanel_service.send_to_mixpanel_sync(str(user_id), event_name, properties)
                 except Exception as e:
                     logger.error(f"❌ [Mixpanel] Error sending ticket {ticket.id}: {e}")
             
