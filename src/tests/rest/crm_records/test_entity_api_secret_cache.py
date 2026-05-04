@@ -97,6 +97,8 @@ class HasAPISecretTests(SimpleTestCase):
         perm = HasAPISecret()
 
         mock_secret_obj = MagicMock()
+        mock_secret_obj.id = 42
+        mock_secret_obj.tenant_id = "tenant-uuid-99"
         mock_chain = MagicMock()
         mock_chain.select_related.return_value.first.return_value = mock_secret_obj
 
@@ -108,3 +110,4 @@ class HasAPISecretTests(SimpleTestCase):
         MockApiSecretKey.objects.filter.assert_called_once_with(
             secret="lowercase-secret", is_active=True
         )
+        mock_secret_obj.save.assert_called_once_with(update_fields=["last_used_at"])
