@@ -167,15 +167,17 @@ class LeadPipeline:
 
                 qs = self.strategy_applier.apply(qs=qs, strategy=assignment.pull_strategy, now_iso=now_iso)
 
+                # Full COUNT(*) on JSON-heavy lead querysets is slow at scale; only run when debug=1.
                 qs_count = None
-                try:
-                    qs_count = qs.count()
-                except Exception:
-                    logger.exception(
-                        "[LeadPipeline] qs.count() failed bucket=%s scope=%s",
-                        assignment.bucket_slug,
-                        scope,
-                    )
+                if debug:
+                    try:
+                        qs_count = qs.count()
+                    except Exception:
+                        logger.exception(
+                            "[LeadPipeline] qs.count() failed bucket=%s scope=%s",
+                            assignment.bucket_slug,
+                            scope,
+                        )
 
                 logger.info(
                     "[LeadPipeline] bucket_try bucket=%s priority=%s scope=%s qs_after_strategy=%s pull_strategy=%s",
@@ -246,32 +248,66 @@ class LeadPipeline:
                                 )
                             return result.record
 
-                if qs_count == 0:
-                    logger.info(
-                        "[LeadPipeline] no candidates in queryset bucket=%s scope=%s user=%s",
-                        assignment.bucket_slug,
-                        scope,
-                        user_identifier,
-                    )
-                elif qs_count is not None and due_seen == 0:
-                    logger.info(
-                        "[LeadPipeline] bucket had rows but none due for call (first 50) bucket=%s scope=%s "
-                        "qs_count=%s user=%s",
-                        assignment.bucket_slug,
-                        scope,
-                        qs_count,
-                        user_identifier,
-                    )
-                elif due_seen > 0:
-                    logger.info(
-                        "[LeadPipeline] due candidates failed assign (lock/race) bucket=%s scope=%s "
-                        "due_in_first_50=%s qs_count=%s user=%s",
-                        assignment.bucket_slug,
-                        scope,
-                        due_seen,
-                        qs_count,
-                        user_identifier,
-                    )
+                if debug:
+                    if qs_count == 0:
+                        logger.info(
+                            "[LeadPipeline] no candidates in queryset bucket=%s scope=%s user=%s",
+                            assignment.bucket_slug,
+                            scope,
+                            user_identifier,
+                        )
+                    elif qs_count is not None and due_seen == 0:
+                        logger.info(
+                            "[LeadPipeline] bucket had rows but none due for call (first 50) bucket=%s scope=%s "
+                            "qs_count=%s user=%s",
+                            assignment.bucket_slug,
+                            scope,
+                            qs_count,
+                            user_identifier,
+                        )
+                    elif due_seen > 0:
+                        logger.info(
+                            "[LeadPipeline] due candidates failed assign (lock/race) bucket=%s scope=%s "
+                            "due_in_first_50=%s qs_count=%s user=%s",
+                            assignment.bucket_slug,
+                            scope,
+                            due_seen,
+                            qs_count,
+                            user_identifier,
+                        )
+                else:
+                    try:
+                        has_any = qs.exists()
+                    except Exception:
+                        logger.exception(
+                            "[LeadPipeline] qs.exists() failed bucket=%s scope=%s",
+                            assignment.bucket_slug,
+                            scope,
+                        )
+                        has_any = None
+                    if has_any is False:
+                        logger.info(
+                            "[LeadPipeline] no candidates in queryset bucket=%s scope=%s user=%s",
+                            assignment.bucket_slug,
+                            scope,
+                            user_identifier,
+                        )
+                    elif has_any and due_seen == 0:
+                        logger.info(
+                            "[LeadPipeline] bucket had rows but none due for call (first 50) bucket=%s scope=%s user=%s",
+                            assignment.bucket_slug,
+                            scope,
+                            user_identifier,
+                        )
+                    elif due_seen > 0:
+                        logger.info(
+                            "[LeadPipeline] due candidates failed assign (lock/race) bucket=%s scope=%s "
+                            "due_in_first_50=%s user=%s",
+                            assignment.bucket_slug,
+                            scope,
+                            due_seen,
+                            user_identifier,
+                        )
 
         if limit_status and limit_status.is_reached and not debug:
             logger.info(
@@ -367,15 +403,9 @@ class LeadPipeline:
         )
 
         assigned_retry_qs = self.strategy_applier.apply(qs=assigned_retry_qs, strategy=retry_strategy, now_iso=now.isoformat())
-        try:
-            assigned_count = assigned_retry_qs.count()
-        except Exception:
-            assigned_count = None
-            logger.exception("[LeadPipeline] fallback assigned_retry_qs.count() failed user=%s", user_identifier)
         retry_candidate = assigned_retry_qs.first()
         logger.info(
-            "[LeadPipeline] fallback step=assigned_to_me qs_count=%s first_record_id=%s user=%s",
-            assigned_count,
+            "[LeadPipeline] fallback step=assigned_to_me first_record_id=%s user=%s",
             retry_candidate.pk if retry_candidate else None,
             user_identifier,
         )
@@ -414,21 +444,15 @@ class LeadPipeline:
             unassigned_retry_qs = unassigned_retry_qs.filter(data__state__in=eligible_states)
 
         unassigned_retry_qs = self.strategy_applier.apply(qs=unassigned_retry_qs, strategy=retry_strategy, now_iso=now.isoformat())
-        try:
-            unassigned_count = unassigned_retry_qs.count()
-        except Exception:
-            unassigned_count = None
-            logger.exception("[LeadPipeline] fallback unassigned_retry_qs.count() failed user=%s", user_identifier)
         unassigned_retry_candidate = unassigned_retry_qs.first()
         logger.info(
             "[LeadPipeline] fallback step=unassigned filters=affiliated_party=%s lead_source=%s lead_status=%s lead_state=%s "
-            "routing_applied=%s qs_count=%s first_record_id=%s user=%s",
+            "routing_applied=%s first_record_id=%s user=%s",
             eligible_lead_types,
             eligible_lead_sources or "(none)",
             eligible_lead_statuses or "(none)",
             eligible_states or "(none)",
             False,
-            unassigned_count,
             unassigned_retry_candidate.pk if unassigned_retry_candidate else None,
             user_identifier,
         )
