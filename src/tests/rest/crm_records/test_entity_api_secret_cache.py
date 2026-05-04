@@ -3,8 +3,10 @@ Unit tests for HasAPISecret permission behavior (crm_records/permissions.py).
 These tests intentionally avoid cache-specific assertions.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from django.core.cache import cache
 from django.test import SimpleTestCase, override_settings
 
 from crm_records.permissions import HasAPISecret
@@ -21,6 +23,10 @@ def _make_request(secret_header: str):
     PYRO_SECRET=None,
 )
 class HasAPISecretTests(SimpleTestCase):
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+
     def test_missing_header_returns_false(self):
         request = _make_request("")
         request.headers = {}
@@ -82,9 +88,12 @@ class HasAPISecretTests(SimpleTestCase):
         )
 
     def test_header_case_insensitive(self):
-        request = MagicMock()
-        request.headers = {"x-secret-pyro": "lowercase-secret"}
-        request.META = {}
+        # Use a plain object, not MagicMock: mock META/headers can be truthy non-strings
+        # and break header resolution before the real dict is read.
+        request = SimpleNamespace(
+            headers={"x-secret-pyro": "lowercase-secret"},
+            META={},
+        )
         perm = HasAPISecret()
 
         mock_secret_obj = MagicMock()
