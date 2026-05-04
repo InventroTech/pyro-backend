@@ -136,10 +136,9 @@ class SaveAndContinueViewTest(BaseAPITestCase):
         
         self.url = reverse('support_ticket:save-and-continue')
     
-    @patch('support_ticket.services.MixpanelService.send_to_mixpanel_sync')
-    def test_save_and_continue_success(self, mock_mixpanel):
+    @patch("support_ticket.views._enqueue_mixpanel_event")
+    def test_save_and_continue_success(self, mock_enqueue_mixpanel):
         """Test successful save and continue operation"""
-        mock_mixpanel.return_value = True
         
         data = {
             'ticketId': self.support_ticket.id,
@@ -171,8 +170,10 @@ class SaveAndContinueViewTest(BaseAPITestCase):
         self.assertEqual(updated_ticket.other_reasons, ['Network issue'])
         self.assertIsNotNone(updated_ticket.completed_at)
         
-        # Verify Mixpanel calls
-        self.assertEqual(mock_mixpanel.call_count, 2)  # pyro_st_connected + pyro_st_resolve
+        # Verify Mixpanel enqueue (pyro_st_connected + pyro_st_resolve)
+        self.assertEqual(mock_enqueue_mixpanel.call_count, 2)
+        names = [c.kwargs["event_name"] for c in mock_enqueue_mixpanel.call_args_list]
+        self.assertEqual(names, ["pyro_st_connected", "pyro_st_resolve"])
     
     def test_save_and_continue_time_accumulation(self):
         """Test time accumulation functionality"""
@@ -187,7 +188,7 @@ class SaveAndContinueViewTest(BaseAPITestCase):
             'isReadOnly': False
         }
         
-        with patch('support_ticket.services.MixpanelService.send_to_mixpanel_sync'):
+        with patch("support_ticket.views._enqueue_mixpanel_event"):
             response = self.client.post(self.url, data, format='json', **self.auth_headers)
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -248,10 +249,9 @@ class SaveAndContinueViewTest(BaseAPITestCase):
         
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
     
-    @patch('support_ticket.services.MixpanelService.send_to_mixpanel_sync')
-    def test_mixpanel_events_for_different_statuses(self, mock_mixpanel):
+    @patch("support_ticket.views._enqueue_mixpanel_event")
+    def test_mixpanel_events_for_different_statuses(self, mock_enqueue_mixpanel):
         """Test that correct Mixpanel events are sent for different resolution statuses"""
-        mock_mixpanel.return_value = True
         
         test_cases = [
             ('Resolved', 'pyro_st_resolve'),
@@ -261,7 +261,7 @@ class SaveAndContinueViewTest(BaseAPITestCase):
         
         for resolution_status, expected_event in test_cases:
             with self.subTest(resolution_status=resolution_status):
-                mock_mixpanel.reset_mock()
+                mock_enqueue_mixpanel.reset_mock()
                 
                 data = {
                     'ticketId': self.support_ticket.id,
@@ -273,18 +273,14 @@ class SaveAndContinueViewTest(BaseAPITestCase):
                 
                 self.assertEqual(response.status_code, status.HTTP_200_OK)
                 
-                # Verify Mixpanel calls
-                self.assertEqual(mock_mixpanel.call_count, 2)
-                
-                # Check the calls
-                calls = mock_mixpanel.call_args_list
-                self.assertEqual(calls[0][0][1], 'pyro_st_connected')  # First call
-                self.assertEqual(calls[1][0][1], expected_event)    # Second call
-    
-    @patch('support_ticket.services.MixpanelService.send_to_mixpanel_sync')
-    def test_no_mixpanel_event_without_user_id(self, mock_mixpanel):
+                self.assertEqual(mock_enqueue_mixpanel.call_count, 2)
+                names = [c.kwargs["event_name"] for c in mock_enqueue_mixpanel.call_args_list]
+                self.assertEqual(names[0], "pyro_st_connected")
+                self.assertEqual(names[1], expected_event)
+
+    @patch("support_ticket.views._enqueue_mixpanel_event")
+    def test_no_mixpanel_event_without_user_id(self, mock_enqueue_mixpanel):
         """Test that no Mixpanel events are sent when ticket has no user_id"""
-        mock_mixpanel.return_value = True
         
         # Create ticket without user_id
         ticket_without_user = SupportTicketFactory.create(
@@ -304,8 +300,7 @@ class SaveAndContinueViewTest(BaseAPITestCase):
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         
-        # Verify no Mixpanel calls were made
-        mock_mixpanel.assert_not_called()
+        mock_enqueue_mixpanel.assert_not_called()
     
     def test_options_request_cors(self):
         """Test CORS preflight OPTIONS request"""

@@ -16,6 +16,31 @@ def _cache_key_for_secret(secret: str) -> str:
     return API_SECRET_CACHE_KEY_PREFIX + hashlib.sha256(secret.encode()).hexdigest()
 
 
+def _x_secret_pyro_from_request(request) -> str:
+    """Resolve X-Secret-Pyro from META or headers; only real strings count (avoids MagicMock truthiness in tests)."""
+    meta = getattr(request, "META", None) or {}
+    meta_val = meta.get("HTTP_X_SECRET_PYRO", "")
+    if isinstance(meta_val, str) and meta_val.strip():
+        return meta_val.strip()
+
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return ""
+
+    get = getattr(headers, "get", None)
+    if callable(get):
+        for key in ("X-Secret-Pyro", "x-secret-pyro"):
+            val = get(key, "")
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        items = getattr(headers, "items", None)
+        if callable(items):
+            for k, v in items():
+                if str(k).lower() == "x-secret-pyro" and isinstance(v, str) and v.strip():
+                    return v.strip()
+    return ""
+
+
 class HasAPISecret(BasePermission):
     """
     Permission class that checks for X-Secret-Pyro header.
@@ -23,11 +48,7 @@ class HasAPISecret(BasePermission):
     """
 
     def has_permission(self, request, view):
-        secret_header = (
-            request.headers.get("X-Secret-Pyro", "")
-            or request.headers.get("x-secret-pyro", "")
-            or request.META.get("HTTP_X_SECRET_PYRO", "")
-        )
+        secret_header = _x_secret_pyro_from_request(request)
 
         if not secret_header:
             logger.warning("[HasAPISecret] X-Secret-Pyro header missing")
