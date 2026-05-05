@@ -56,14 +56,6 @@ class HasAPISecret(BasePermission):
             if api_secret_obj:
                 api_secret_obj.last_used_at = timezone.now()
                 api_secret_obj.save(update_fields=["last_used_at"])
-                cache.set(
-                    cache_key,
-                    {
-                        "api_secret_key_id": api_secret_obj.id,
-                        "tenant_id": str(api_secret_obj.tenant_id),
-                    },
-                    API_SECRET_CACHE_TTL,
-                )
                 request.api_secret_key = secret_header
                 request.is_default_secret = False
                 request.api_secret_obj = api_secret_obj
