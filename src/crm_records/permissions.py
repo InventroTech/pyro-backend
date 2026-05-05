@@ -43,28 +43,9 @@ class HasAPISecret(BasePermission):
             return True
 
         cache_key = _cache_key_for_secret(secret_header)
-        cached_entry = cache.get(cache_key)
 
         try:
             from .models import ApiSecretKey
-
-            if cached_entry:
-                cached_secret = (
-                    ApiSecretKey.objects.filter(
-                        pk=cached_entry.get("api_secret_key_id"), is_active=True
-                    )
-                    .select_related("tenant")
-                    .first()
-                )
-                if cached_secret:
-                    cached_secret.last_used_at = timezone.now()
-                    cached_secret.save(update_fields=["last_used_at"])
-                    request.api_secret_key = secret_header
-                    request.is_default_secret = False
-                    request.api_secret_obj = cached_secret
-                    return True
-
-                cache.delete(cache_key)
 
             # Database: simple match on secret column
             api_secret_obj = (
