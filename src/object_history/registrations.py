@@ -53,7 +53,8 @@ register(
         "tenant_id",
         "description",
         "is_active",
-        "last_used_at",
+        # Omit last_used_at: HasAPISecret saves it on every API call; tracking it
+        # floods object_history and causes object_hist_unique_version races under load.
         "created_at",
         "updated_at",
     ],
