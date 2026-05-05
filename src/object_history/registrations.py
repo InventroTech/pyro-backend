@@ -45,21 +45,6 @@ register(
     snapshot_strategy="minimal",
 )
 
-register(
-    ApiSecretKey,
-    track_fields=[
-        "secret",
-        "secret_key_last4",
-        "tenant_id",
-        "description",
-        "is_active",
-        "last_used_at",
-        "created_at",
-        "updated_at",
-    ],
-    redact_fields={"secret"},
-    snapshot_strategy="minimal",
-)
 
 register(
     BackgroundJob,
@@ -84,22 +69,7 @@ register(
     snapshot_strategy="minimal",
 )
 
-register(
-    Bucket,
-    track_fields=[
-        "name",
-        "slug",
-        "description",
-        "filter_conditions",
-        "is_system",
-        "is_active",
-        "tenant_id",
-        "created_at",
-        "updated_at",
-    ],
-    redact_fields=set(),
-    snapshot_strategy="minimal",
-)
+
 
 register(
     CallAttemptMatrix,
@@ -132,21 +102,6 @@ register(
 )
 
 register(
-    EventLog,
-    track_fields=[
-        "record_id",
-        "event",
-        "payload",
-        "timestamp",
-        "tenant_id",
-        "created_at",
-        "updated_at",
-    ],
-    redact_fields=set(),
-    snapshot_strategy="minimal",
-)
-
-register(
     PartnerEvent,
     track_fields=[
         "partner_slug",
@@ -165,23 +120,6 @@ register(
     snapshot_strategy="minimal",
 )
 
-register(
-    RuleExecutionLog,
-    track_fields=[
-        "record_id",
-        "rule_id",
-        "event_name",
-        "matched",
-        "actions",
-        "errors",
-        "duration_ms",
-        "tenant_id",
-        "created_at",
-        "updated_at",
-    ],
-    redact_fields=set(),
-    snapshot_strategy="minimal",
-)
 
 register(
     RuleSet,
@@ -199,28 +137,6 @@ register(
     snapshot_strategy="minimal",
 )
 
-register(
-    ScheduledTask,
-    track_fields=[
-        "content_type_id",
-        "object_id",
-        "action",
-        "policy_id",
-        "status",
-        "due_at",
-        "priority",
-        "attempts",
-        "max_attempts",
-        "locked_by",
-        "locked_at",
-        "payload",
-        "tenant_id",
-        "created_at",
-        "updated_at",
-    ],
-    redact_fields=set(),
-    snapshot_strategy="minimal",
-)
 
 register(
     ScoringRule,
@@ -240,21 +156,7 @@ register(
     snapshot_strategy="minimal",
 )
 
-register(
-    TaskPolicy,
-    track_fields=[
-        "key",
-        "intervals",
-        "max_attempts",
-        "business_hours_only",
-        "timezone",
-        "tenant_id",
-        "created_at",
-        "updated_at",
-    ],
-    redact_fields=set(),
-    snapshot_strategy="minimal",
-)
+
 
 register(
     UserBucketAssignment,
