@@ -68,7 +68,7 @@ class HasAPISecretTests(SimpleTestCase):
         self.assertFalse(getattr(request, "is_default_secret", True))
         self.assertEqual(getattr(request, "api_secret_key", ""), secret)
         self.assertIs(getattr(request, "api_secret_obj", None), mock_secret_obj)
-        mock_secret_obj.save.assert_called_once_with(update_fields=["last_used_at"])
+        mock_secret_obj.save.assert_not_called()
 
     def test_invalid_secret_returns_false(self):
         secret = "invalid-secret"
@@ -110,4 +110,4 @@ class HasAPISecretTests(SimpleTestCase):
         MockApiSecretKey.objects.filter.assert_called_once_with(
             secret="lowercase-secret", is_active=True
         )
-        mock_secret_obj.save.assert_called_once_with(update_fields=["last_used_at"])
+        mock_secret_obj.save.assert_not_called()
