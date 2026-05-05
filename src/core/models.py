@@ -3,7 +3,7 @@ from django.db import models
 from django.utils import timezone
 from django.core.validators import RegexValidator
 
-from authz.models import Role
+from core.soft_delete import SoftDeleteMixin
 
 
 class TimeStampedModel(models.Model):
@@ -39,6 +39,69 @@ class Tenant(models.Model):
         return f"{self.name} ({self.slug})"
 
 
+class TenantSettings(models.Model):
+    """
+    Per-tenant product settings stored in the app DB (unlike :class:`Tenant`, which
+    mirrors an external ``tenants`` table).
+
+    ``persistent_object_history``: when ``True``, :class:`object_history.models.ObjectHistory`
+    rows for this tenant are stamped ``persistent_history=True`` and are skipped by
+    :func:`core.log_retention.purge_old_log_rows`.
+    """
+
+    tenant = models.OneToOneField(
+        Tenant,
+        on_delete=models.CASCADE,
+        db_column="tenant_id",
+        related_name="app_settings",
+        primary_key=True,
+    )
+    persistent_object_history = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="If True, object history for this tenant is not purged by retention.",
+    )
+
+    class Meta:
+        db_table = "core_tenant_settings"
+
+    def __str__(self) -> str:
+        return f"TenantSettings({self.tenant_id})"
+
+    @classmethod
+    def object_history_should_persist(cls, tenant) -> bool:
+        if tenant is None:
+            return False
+        tid = getattr(tenant, "pk", None)
+        if tid is None:
+            return False
+        return cls.objects.filter(
+            tenant_id=tid, persistent_object_history=True
+        ).exists()
+
+    def save(self, *args, **kwargs):
+        was_persistent = False
+        if self.tenant_id:
+            was_persistent = (
+                type(self)
+                .objects.filter(tenant_id=self.tenant_id)
+                .values_list("persistent_object_history", flat=True)
+                .first()
+                is True
+            )
+        super().save(*args, **kwargs)
+        from object_history.models import ObjectHistory
+
+        if self.persistent_object_history:
+            ObjectHistory.all_objects.filter(tenant_id=self.tenant_id).update(
+                persistent_history=True
+            )
+        elif was_persistent:
+            ObjectHistory.all_objects.filter(tenant_id=self.tenant_id).update(
+                persistent_history=False
+            )
+
+
 class TenantModel(models.Model):
     """
     Standard tenant scoping FK pointing to public.tenants(id).
@@ -61,10 +124,10 @@ class TenantModel(models.Model):
 class RoleModel(TenantModel):
     """
     Tenant-scoped role (authz_role is per-tenant). Adds role_id; tenant comes from TenantModel.
-    Use with BaseModel for tenant + timestamps + role.
+    Use :class:`BaseModel` or :class:`RoleBaseModel` for application tables.
     """
     role = models.ForeignKey(
-        Role,
+        'authz.Role',
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
@@ -77,13 +140,29 @@ class RoleModel(TenantModel):
         abstract = True
 
 
-class BaseModel(TimeStampedModel, TenantModel):
+class BaseModel(SoftDeleteMixin, TimeStampedModel, TenantModel):
     """
-    One-stop base: timestamps + tenant + sensible indexes.
+    Primary concrete base: timestamps + tenant FK + soft-delete (``is_deleted``,
+    ``deleted_at``) + filtered ``objects`` / ``all_objects``.
+
+    Prefer this over inheriting :class:`core.soft_delete.SoftDeleteMixin` directly.
+    Add ``UniqueConstraint(..., condition=alive_q())`` where uniqueness should ignore
+    soft-deleted rows.
     """
     class Meta(TimeStampedModel.Meta):
         abstract = True
         indexes = [
-            
+            # is_deleted / deleted_at: db_index on SoftDeleteMixin; do not repeat Meta.Index
+            models.Index(fields=['tenant', '-created_at']),
+        ]
+
+
+class RoleBaseModel(SoftDeleteMixin, TimeStampedModel, RoleModel):
+    """
+    Same as :class:`BaseModel` plus the authz ``role`` FK (e.g. dashboard ``Page``).
+    """
+    class Meta(TimeStampedModel.Meta):
+        abstract = True
+        indexes = [
             models.Index(fields=['tenant', '-created_at']),
         ]
