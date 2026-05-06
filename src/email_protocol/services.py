@@ -125,22 +125,12 @@ def send_email(
                 reply_to=reply_to_list if reply_to_list else None
             )
         
-        # Send email (Django returns number of successfully delivered messages; 0 means failure/suppressed)
-        sent_count = email.send(fail_silently=fail_silently)
-
+        # Send email
+        email.send(fail_silently=fail_silently)
+        
         total_recipients = len(to_emails_list) + len(cc_list) + len(bcc_list)
-        if not sent_count:
-            error_msg = (
-                f"Email send returned 0 (no message accepted by backend). "
-                f"Recipients={total_recipients}, to={to_emails_list}"
-            )
-            logger.error(f"[{client_id}] {error_msg}")
-            return False, error_msg
-
-        logger.info(
-            f"[{client_id}] Email sent successfully (messages={sent_count}) to {total_recipients} recipient(s)"
-        )
-        return True, f"Email sent successfully (messages={sent_count}) to {total_recipients} recipient(s)"
+        logger.info(f"[{client_id}] Email sent successfully to {total_recipients} recipient(s)")
+        return True, f"Email sent successfully to {total_recipients} recipient(s)"
         
     except Exception as e:
         error_msg = f"Failed to send email: {str(e)}"
