@@ -6,7 +6,7 @@ class Migration(migrations.Migration):
     atomic = False
 
     dependencies = [
-        ("crm_records", "0028_record_lead_field_expression_indexes"),
+        ("crm_records", "0029_crm_records_soft_delete"),
     ]
 
     operations = [
