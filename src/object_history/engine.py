@@ -8,6 +8,8 @@ from django.contrib.contenttypes.models import ContentType
 from django.db import IntegrityError, router, transaction
 
 from accounts.models import SupabaseAuthUser
+from core.models import TenantSettings
+
 from .models import ObjectHistory
 from .registry import get_config
 from .serializers import compute_diff, redact_payload, serialize_instance
@@ -240,7 +242,10 @@ class HistoryEngine:
         """
         db_alias = router.db_for_write(ObjectHistory, instance=instance)
         tenant = getattr(instance, "tenant", None)
-        content_type = ContentType.objects.db_manager(db_alias).get_for_model(instance.__class__)
+        persistent_history = TenantSettings.object_history_should_persist(tenant)
+        content_type = ContentType.objects.db_manager(db_alias).get_for_model(
+            instance.__class__
+        )
         object_repr = str(instance)
         object_id = instance.pk
 
@@ -326,6 +331,7 @@ class HistoryEngine:
                         before_state=redacted_before,
                         after_state=redacted_after,
                         metadata=metadata,
+                        persistent_history=persistent_history,
                     )
                     return
             except IntegrityError as exc:

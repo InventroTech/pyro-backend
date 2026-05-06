@@ -6,7 +6,7 @@ class Migration(migrations.Migration):
     atomic = False
 
     dependencies = [
-        ("crm_records", "0029_add_queueable_lead_indexes"),
+        ("crm_records", "0030_add_queueable_lead_indexes"),
     ]
 
     operations = [
