@@ -118,6 +118,7 @@ class BackgroundJob(HistoryTrackedModel, BaseModel):
     class Meta:
         db_table = "background_jobs"
         indexes = [
+            *BaseModel.Meta.indexes,
             models.Index(fields=["status", "priority", "-created_at"]),
             models.Index(fields=["status", "scheduled_at"]),
             models.Index(fields=["job_type", "status"]),

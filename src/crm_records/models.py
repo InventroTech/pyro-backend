@@ -4,6 +4,7 @@ from django.contrib.postgres.fields import ArrayField
 from django.contrib.postgres.indexes import GinIndex
 from django.core.cache import cache
 from core.models import BaseModel
+from core.soft_delete import alive_q
 from object_history.models import HistoryTrackedModel
 
 
@@ -174,7 +175,13 @@ class EntityTypeSchema(HistoryTrackedModel, BaseModel):
     
     class Meta:
         db_table = "entity_type_schemas"
-        unique_together = [['tenant', 'entity_type']]  # One schema per entity_type per tenant
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "entity_type"],
+                condition=alive_q(),
+                name="entity_type_schemas_tenant_entity_type_uniq_alive",
+            ),
+        ]
         indexes = [
             models.Index(fields=["tenant", "entity_type"]),
         ]
@@ -323,7 +330,13 @@ class CallAttemptMatrix(HistoryTrackedModel, BaseModel):
 
     class Meta:
         db_table = "call_attempt_matrix"
-        unique_together = [['tenant', 'lead_type']]  # One configuration per lead type per tenant
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "lead_type"],
+                condition=alive_q(),
+                name="call_attempt_matrix_tenant_lead_type_uniq_alive",
+            ),
+        ]
         indexes = [
             models.Index(fields=["tenant", "lead_type"]),
         ]
@@ -371,7 +384,13 @@ class Bucket(HistoryTrackedModel, BaseModel):
     is_active = models.BooleanField(default=True)
 
     class Meta:
-        unique_together = [("tenant", "slug")]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "slug"],
+                condition=alive_q(),
+                name="crm_records_bucket_tenant_slug_uniq_alive",
+            ),
+        ]
         indexes = [models.Index(fields=["tenant", "slug"]), models.Index(fields=["tenant", "is_active"])]
 
     def __str__(self):
@@ -406,12 +425,12 @@ class UserBucketAssignment(HistoryTrackedModel, BaseModel):
         constraints = [
             models.UniqueConstraint(
                 fields=["tenant", "bucket"],
-                condition=Q(user__isnull=True),
+                condition=Q(user__isnull=True) & alive_q(),
                 name="crm_records_uba_tenant_bucket_tenant_default_uniq",
             ),
             models.UniqueConstraint(
                 fields=["tenant", "user", "bucket"],
-                condition=Q(user__isnull=False),
+                condition=Q(user__isnull=False) & alive_q(),
                 name="crm_records_uba_tenant_user_bucket_uniq",
             ),
         ]
