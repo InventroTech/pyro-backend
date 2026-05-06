@@ -81,6 +81,7 @@ def _legacy_get_next_lead_assignees_match(stored, requester: str) -> bool:
 
 
 REQUEST_NOTIFICATION_ENTITY_TYPES = frozenset({"inventory_request", "unmannd_request"})
+REQUEST_PAID_NOTIFICATION_ENTITY_TYPES = frozenset({"inventory_request", "unmannd_request"})
 
 
 def _notify_team_lead_for_inventory_request(request, record):
@@ -195,6 +196,147 @@ def _notify_team_lead_for_inventory_request(request, record):
     except Exception:
         logger.exception(
             "Unexpected error while sending request email notification for record=%s",
+            getattr(record, "id", None),
+        )
+
+
+def _normalize_status_value(value) -> str:
+    return str(value or "").strip().upper()
+
+
+def _resolve_requester_email_and_name(tenant, data: dict) -> tuple[str, str]:
+    """
+    Resolve requester recipient from request data with best-effort fallbacks.
+    Priority:
+    1) TenantMembership by requester_id / created_by_id (id or user_id)
+    2) requester_email/email in payload
+    """
+    requester_name = str(data.get("requester_name") or "Requester").strip() or "Requester"
+
+    candidate_ids = [data.get("requester_id"), data.get("created_by_id")]
+    for candidate in candidate_ids:
+        if candidate in (None, ""):
+            continue
+        candidate_str = str(candidate).strip()
+        if not candidate_str:
+            continue
+
+        membership = None
+        if candidate_str.isdigit():
+            membership = TenantMembership.objects.filter(
+                tenant=tenant,
+                id=int(candidate_str),
+                is_active=True,
+            ).first()
+        if membership is None:
+            membership = TenantMembership.objects.filter(
+                tenant=tenant,
+                user_id=candidate_str,
+                is_active=True,
+            ).first()
+
+        if membership and membership.email:
+            resolved_name = (membership.name or membership.email or requester_name).strip()
+            return membership.email.strip().lower(), resolved_name
+
+    email_fallback = str(data.get("requester_email") or data.get("email") or "").strip().lower()
+    if email_fallback:
+        return email_fallback, requester_name
+
+    return "", requester_name
+
+
+def _notify_requester_when_request_paid(request, record, previous_status: str):
+    """
+    Send requester email only on transition to PAID for request entities.
+    Best-effort only; never raises.
+    """
+    if not record or record.entity_type not in REQUEST_PAID_NOTIFICATION_ENTITY_TYPES:
+        logger.info(
+            "[PAID_NOTIFY] Skip: record missing or entity_type not eligible (record_id=%s, entity_type=%s)",
+            getattr(record, "id", None),
+            getattr(record, "entity_type", None),
+        )
+        return
+
+    data = record.data if isinstance(record.data, dict) else {}
+    current_status = _normalize_status_value(data.get("status"))
+    previous_status_norm = _normalize_status_value(previous_status)
+    logger.info(
+        "[PAID_NOTIFY] Evaluate transition (record_id=%s, entity_type=%s, previous_status=%s, current_status=%s)",
+        getattr(record, "id", None),
+        getattr(record, "entity_type", None),
+        previous_status_norm or "EMPTY",
+        current_status or "EMPTY",
+    )
+    if current_status != "PAID" or previous_status_norm == "PAID":
+        logger.info(
+            "[PAID_NOTIFY] Skip: not a valid non-PAID -> PAID transition (record_id=%s)",
+            getattr(record, "id", None),
+        )
+        return
+
+    tenant = getattr(request, "tenant", None)
+    if not tenant:
+        logger.warning(
+            "[PAID_NOTIFY] Skip: tenant missing on request (record_id=%s)",
+            getattr(record, "id", None),
+        )
+        return
+
+    try:
+        requester_email, requester_name = _resolve_requester_email_and_name(tenant, data)
+        logger.info(
+            "[PAID_NOTIFY] Resolved requester (record_id=%s, requester_name=%s, requester_email=%s, requester_id=%s, created_by_id=%s)",
+            getattr(record, "id", None),
+            requester_name,
+            requester_email or "EMPTY",
+            str(data.get("requester_id") or ""),
+            str(data.get("created_by_id") or ""),
+        )
+        if not requester_email:
+            logger.info(
+                "[PAID_NOTIFY] Skip: requester email not found (record_id=%s).",
+                getattr(record, "id", None),
+            )
+            return
+
+        item_name = str(data.get("item_name_freeform") or data.get("item_name") or "Requested item").strip()
+        request_date = str(data.get("request_date") or record.created_at.date()).strip()
+        subject = f"[Pyro] Request #{record.id} marked as PAID"
+        text_body = (
+            f"Hi {requester_name},\n\n"
+            f"Your request has been marked as PAID / ordered.\n\n"
+            f"Request ID: #{record.id}\n"
+            f"Item: {item_name}\n"
+            f"Date: {request_date}\n"
+            f"Status: PAID\n\n"
+            f"Regards,\nPyro Team"
+        )
+
+        success, msg = send_email(
+            to_emails=requester_email,
+            subject=subject,
+            message=text_body,
+            client_name="RequestPaidNotification",
+            fail_silently=True,
+        )
+        if not success:
+            logger.warning(
+                "[PAID_NOTIFY] Send failed (record_id=%s, to=%s): %s",
+                record.id,
+                requester_email,
+                msg,
+            )
+        else:
+            logger.info(
+                "[PAID_NOTIFY] Sent successfully (record_id=%s, to=%s)",
+                record.id,
+                requester_email,
+            )
+    except Exception:
+        logger.exception(
+            "[PAID_NOTIFY] Unexpected error while sending notification for record=%s",
             getattr(record, "id", None),
         )
 
@@ -551,12 +693,17 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 status=status.HTTP_404_NOT_FOUND
             )
         
+        old_status = ""
+        if isinstance(record.data, dict):
+            old_status = str(record.data.get("status") or "")
+
         # Update the record
         serializer = self.get_serializer(record, data=request.data, partial=False)
         serializer.is_valid(raise_exception=True)
         
         # Preserve tenant (don't allow changing tenant)
-        serializer.save(tenant=self.request.tenant)
+        updated_record = serializer.save(tenant=self.request.tenant)
+        _notify_requester_when_request_paid(request, updated_record, old_status)
         
         return Response(serializer.data, status=status.HTTP_200_OK)
     
@@ -607,12 +754,17 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 status=status.HTTP_404_NOT_FOUND
             )
         
+        old_status = ""
+        if isinstance(record.data, dict):
+            old_status = str(record.data.get("status") or "")
+
         # Partially update the record
         serializer = self.get_serializer(record, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         
         # Preserve tenant (don't allow changing tenant)
-        serializer.save(tenant=self.request.tenant)
+        updated_record = serializer.save(tenant=self.request.tenant)
+        _notify_requester_when_request_paid(request, updated_record, old_status)
         
         return Response(serializer.data, status=status.HTTP_200_OK)
     
@@ -697,7 +849,12 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
         """
         Update record. "Not connected" logic is handled by the rule engine when lead_stage is set to "NOT_CONNECTED".
         """
-        serializer.save()
+        old_status = ""
+        instance = getattr(serializer, "instance", None)
+        if instance is not None and isinstance(instance.data, dict):
+            old_status = str(instance.data.get("status") or "")
+        updated_record = serializer.save()
+        _notify_requester_when_request_paid(self.request, updated_record, old_status)
 
     def delete(self, request, *args, **kwargs):
         """
