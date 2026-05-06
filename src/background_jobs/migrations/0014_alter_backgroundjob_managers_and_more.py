@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('background_jobs', '0012_backgroundjob_soft_delete'),
+        ('background_jobs', '0013_add_purge_old_log_tables_job_type'),
         ('core', '0004_idle_in_transaction_session_timeout'),
     ]
 
@@ -24,7 +24,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='backgroundjob',
             name='job_type',
-            field=models.CharField(choices=[('send_mixpanel_event', 'Send Mixpanel Event'), ('send_rm_assigned_event', 'Send RM Assigned Event'), ('send_webhook', 'Send Webhook'), ('execute_function', 'Execute Function'), ('score_leads', 'Score Leads'), ('score_leads_chunk', 'Score Leads Chunk'), ('send_to_praja', 'Send to Praja Server'), ('partner_lead_assign', 'Partner Lead Assign'), ('unassign_snoozed_leads', 'Unassign Snoozed Leads'), ('release_leads_after_12h', 'Release Leads After 12h'), ('close_stale_subscription_leads', 'Close Stale Subscription Leads'), ('snoozed_to_not_connected_midnight', 'Snoozed To Not Connected (midnight)')], db_index=True, help_text='Type of job to execute', max_length=50),
+            field=models.CharField(choices=[('send_mixpanel_event', 'Send Mixpanel Event'), ('send_rm_assigned_event', 'Send RM Assigned Event'), ('send_webhook', 'Send Webhook'), ('execute_function', 'Execute Function'), ('score_leads', 'Score Leads'), ('score_leads_chunk', 'Score Leads Chunk'), ('send_to_praja', 'Send to Praja Server'), ('partner_lead_assign', 'Partner Lead Assign'), ('unassign_snoozed_leads', 'Unassign Snoozed Leads'), ('release_leads_after_12h', 'Release Leads After 12h'), ('close_stale_subscription_leads', 'Close Stale Subscription Leads'), ('snoozed_to_not_connected_midnight', 'Snoozed To Not Connected (midnight)'), ('purge_old_log_tables', 'Purge Old Log Tables')], db_index=True, help_text='Type of job to execute', max_length=50),
         ),
         migrations.AddIndex(
             model_name='backgroundjob',
