@@ -3,7 +3,7 @@ from django.db import models
 from django.utils import timezone
 from django.core.validators import RegexValidator
 
-from authz.models import Role
+from core.soft_delete import SoftDeleteMixin
 
 
 class TimeStampedModel(models.Model):
@@ -61,10 +61,10 @@ class TenantModel(models.Model):
 class RoleModel(TenantModel):
     """
     Tenant-scoped role (authz_role is per-tenant). Adds role_id; tenant comes from TenantModel.
-    Use with BaseModel for tenant + timestamps + role.
+    Use :class:`BaseModel` or :class:`RoleBaseModel` for application tables.
     """
     role = models.ForeignKey(
-        Role,
+        'authz.Role',
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
@@ -77,13 +77,29 @@ class RoleModel(TenantModel):
         abstract = True
 
 
-class BaseModel(TimeStampedModel, TenantModel):
+class BaseModel(SoftDeleteMixin, TimeStampedModel, TenantModel):
     """
-    One-stop base: timestamps + tenant + sensible indexes.
+    Primary concrete base: timestamps + tenant FK + soft-delete (``is_deleted``,
+    ``deleted_at``) + filtered ``objects`` / ``all_objects``.
+
+    Prefer this over inheriting :class:`core.soft_delete.SoftDeleteMixin` directly.
+    Add ``UniqueConstraint(..., condition=alive_q())`` where uniqueness should ignore
+    soft-deleted rows.
     """
     class Meta(TimeStampedModel.Meta):
         abstract = True
         indexes = [
-            
+            # is_deleted / deleted_at: db_index on SoftDeleteMixin; do not repeat Meta.Index
+            models.Index(fields=['tenant', '-created_at']),
+        ]
+
+
+class RoleBaseModel(SoftDeleteMixin, TimeStampedModel, RoleModel):
+    """
+    Same as :class:`BaseModel` plus the authz ``role`` FK (e.g. dashboard ``Page``).
+    """
+    class Meta(TimeStampedModel.Meta):
+        abstract = True
+        indexes = [
             models.Index(fields=['tenant', '-created_at']),
         ]

@@ -4,6 +4,7 @@ from django.contrib.postgres.indexes import GinIndex, BrinIndex
 from django.db.models import Q
 from django.utils import timezone
 from core.models import Tenant
+from core.soft_delete import SoftDeleteMixin
 from accounts.models import SupabaseAuthUser
 from object_history.models import HistoryTrackedModel
 import logging
@@ -11,7 +12,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class SupportTicketDump(models.Model):
+class SupportTicketDump(SoftDeleteMixin):
     """
     Temporary staging table for support tickets before they're processed.
     This matches the structure expected by the DumpTicketWebhookView.
@@ -48,7 +49,7 @@ class SupportTicketDump(models.Model):
 
 
 
-class SupportTicket(HistoryTrackedModel):
+class SupportTicket(HistoryTrackedModel, SoftDeleteMixin):
     id = models.BigAutoField(primary_key=True)
     created_at = models.DateTimeField(default=timezone.now)
     ticket_date = models.DateTimeField(null=True, blank=True)
@@ -98,7 +99,7 @@ class SupportTicket(HistoryTrackedModel):
 
     class Meta:
         db_table = "support_ticket"
-        managed = True  # existing prod table -> keep unmanaged
+        managed = True
 
     def save(self, *args, **kwargs):
         """
