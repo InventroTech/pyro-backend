@@ -6,118 +6,118 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('crm_records', '0029_crm_records_soft_delete'),
+        ("crm_records", "0031_add_lead_stats_stage_index"),
     ]
 
     operations = [
         migrations.AlterModelManagers(
-            name='apisecretkey',
+            name="apisecretkey",
             managers=[
             ],
         ),
         migrations.AlterModelManagers(
-            name='bucket',
+            name="bucket",
             managers=[
             ],
         ),
         migrations.AlterModelManagers(
-            name='callattemptmatrix',
+            name="callattemptmatrix",
             managers=[
             ],
         ),
         migrations.AlterModelManagers(
-            name='entitytypeschema',
+            name="entitytypeschema",
             managers=[
             ],
         ),
         migrations.AlterModelManagers(
-            name='eventlog',
+            name="eventlog",
             managers=[
             ],
         ),
         migrations.AlterModelManagers(
-            name='partnerevent',
+            name="partnerevent",
             managers=[
             ],
         ),
         migrations.AlterModelManagers(
-            name='record',
+            name="record",
             managers=[
             ],
         ),
         migrations.AlterModelManagers(
-            name='ruleexecutionlog',
+            name="ruleexecutionlog",
             managers=[
             ],
         ),
         migrations.AlterModelManagers(
-            name='ruleset',
+            name="ruleset",
             managers=[
             ],
         ),
         migrations.AlterModelManagers(
-            name='scoringrule',
+            name="scoringrule",
             managers=[
             ],
         ),
         migrations.AlterModelManagers(
-            name='userbucketassignment',
+            name="userbucketassignment",
             managers=[
             ],
         ),
         migrations.AlterField(
-            model_name='apisecretkey',
-            name='is_deleted',
+            model_name="apisecretkey",
+            name="is_deleted",
             field=models.BooleanField(db_default=False, db_index=True, default=False),
         ),
         migrations.AlterField(
-            model_name='bucket',
-            name='is_deleted',
+            model_name="bucket",
+            name="is_deleted",
             field=models.BooleanField(db_default=False, db_index=True, default=False),
         ),
         migrations.AlterField(
-            model_name='callattemptmatrix',
-            name='is_deleted',
+            model_name="callattemptmatrix",
+            name="is_deleted",
             field=models.BooleanField(db_default=False, db_index=True, default=False),
         ),
         migrations.AlterField(
-            model_name='entitytypeschema',
-            name='is_deleted',
+            model_name="entitytypeschema",
+            name="is_deleted",
             field=models.BooleanField(db_default=False, db_index=True, default=False),
         ),
         migrations.AlterField(
-            model_name='eventlog',
-            name='is_deleted',
+            model_name="eventlog",
+            name="is_deleted",
             field=models.BooleanField(db_default=False, db_index=True, default=False),
         ),
         migrations.AlterField(
-            model_name='partnerevent',
-            name='is_deleted',
+            model_name="partnerevent",
+            name="is_deleted",
             field=models.BooleanField(db_default=False, db_index=True, default=False),
         ),
         migrations.AlterField(
-            model_name='record',
-            name='is_deleted',
+            model_name="record",
+            name="is_deleted",
             field=models.BooleanField(db_default=False, db_index=True, default=False),
         ),
         migrations.AlterField(
-            model_name='ruleexecutionlog',
-            name='is_deleted',
+            model_name="ruleexecutionlog",
+            name="is_deleted",
             field=models.BooleanField(db_default=False, db_index=True, default=False),
         ),
         migrations.AlterField(
-            model_name='ruleset',
-            name='is_deleted',
+            model_name="ruleset",
+            name="is_deleted",
             field=models.BooleanField(db_default=False, db_index=True, default=False),
         ),
         migrations.AlterField(
-            model_name='scoringrule',
-            name='is_deleted',
+            model_name="scoringrule",
+            name="is_deleted",
             field=models.BooleanField(db_default=False, db_index=True, default=False),
         ),
         migrations.AlterField(
-            model_name='userbucketassignment',
-            name='is_deleted',
+            model_name="userbucketassignment",
+            name="is_deleted",
             field=models.BooleanField(db_default=False, db_index=True, default=False),
         ),
     ]
