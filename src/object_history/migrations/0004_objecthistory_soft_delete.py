@@ -9,7 +9,7 @@ import object_history.models as object_history_models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("object_history", "0002_alter_objecthistory_options_and_more"),
+        ("object_history", "0003_objecthistory_persistent_history"),
     ]
 
     operations = [
