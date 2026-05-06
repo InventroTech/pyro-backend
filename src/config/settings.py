@@ -325,6 +325,11 @@ SPECTACULAR_SETTINGS = {
 }
 
 
+# Object history, event_logs, rule_exec_logs, and finished background_jobs
+# (COMPLETED/FAILED only): rows older than this many days are permanently removed
+# (see core.log_retention and purge_old_log_tables job).
+LOG_RETENTION_DAYS = env.int("LOG_RETENTION_DAYS", default=30)
+
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 
 # Staging environment flag - used to control certain behaviors like assigned_to field updates

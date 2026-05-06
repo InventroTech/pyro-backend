@@ -39,6 +39,69 @@ class Tenant(models.Model):
         return f"{self.name} ({self.slug})"
 
 
+class TenantSettings(models.Model):
+    """
+    Per-tenant product settings stored in the app DB (unlike :class:`Tenant`, which
+    mirrors an external ``tenants`` table).
+
+    ``persistent_object_history``: when ``True``, :class:`object_history.models.ObjectHistory`
+    rows for this tenant are stamped ``persistent_history=True`` and are skipped by
+    :func:`core.log_retention.purge_old_log_rows`.
+    """
+
+    tenant = models.OneToOneField(
+        Tenant,
+        on_delete=models.CASCADE,
+        db_column="tenant_id",
+        related_name="app_settings",
+        primary_key=True,
+    )
+    persistent_object_history = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="If True, object history for this tenant is not purged by retention.",
+    )
+
+    class Meta:
+        db_table = "core_tenant_settings"
+
+    def __str__(self) -> str:
+        return f"TenantSettings({self.tenant_id})"
+
+    @classmethod
+    def object_history_should_persist(cls, tenant) -> bool:
+        if tenant is None:
+            return False
+        tid = getattr(tenant, "pk", None)
+        if tid is None:
+            return False
+        return cls.objects.filter(
+            tenant_id=tid, persistent_object_history=True
+        ).exists()
+
+    def save(self, *args, **kwargs):
+        was_persistent = False
+        if self.tenant_id:
+            was_persistent = (
+                type(self)
+                .objects.filter(tenant_id=self.tenant_id)
+                .values_list("persistent_object_history", flat=True)
+                .first()
+                is True
+            )
+        super().save(*args, **kwargs)
+        from object_history.models import ObjectHistory
+
+        if self.persistent_object_history:
+            ObjectHistory.all_objects.filter(tenant_id=self.tenant_id).update(
+                persistent_history=True
+            )
+        elif was_persistent:
+            ObjectHistory.all_objects.filter(tenant_id=self.tenant_id).update(
+                persistent_history=False
+            )
+
+
 class TenantModel(models.Model):
     """
     Standard tenant scoping FK pointing to public.tenants(id).

@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 # Interval (seconds) between enqueueing lead cron jobs from the worker (no external cron needed)
 LEAD_CRON_ENQUEUE_INTERVAL = 900  # 15 minutes
 
+# How often the worker enqueues log retention (object_history, event_logs, rule_exec_logs)
+LOG_RETENTION_ENQUEUE_INTERVAL = 86400  # 24 hours
+
 # Enqueue ``snoozed_to_not_connected_midnight`` at exactly this clock minute in ``TIME_ZONE`` (UTC).
 # 23:55 keeps ``NOW()`` on the same calendar date as same-day ``next_call_at`` (e.g. 31 Mar snoozes
 # flip on 31 Mar, not after midnight when the date rolls to the next day).
@@ -52,6 +55,8 @@ class JobProcessor:
         self._last_lead_cron_enqueue_at = None
         # UTC calendar date we last enqueued snoozed→NOT_CONNECTED job (see TIME_ZONE)
         self._last_snoozed_midnight_enqueue_date = None
+        # Last time we enqueued purge_old_log_tables
+        self._last_log_retention_enqueue_at = None
         # Circuit breaker state for connection errors
         self._connection_error_count = 0
         self._last_connection_error_time = None
@@ -460,6 +465,35 @@ class JobProcessor:
                 exc_info=True,
             )
 
+    def _maybe_enqueue_log_retention(self):
+        """
+        Enqueue :data:`~background_jobs.models.JobType.PURGE_OLD_LOG_TABLES` at most
+        once per :data:`LOG_RETENTION_ENQUEUE_INTERVAL` so old audit/log rows are removed
+        without external cron. Finished job rows (COMPLETED/FAILED) in ``background_jobs``
+        are pruned; active queue states are not removed.
+        """
+        now = timezone.now()
+        if self._last_log_retention_enqueue_at is not None:
+            elapsed = (now - self._last_log_retention_enqueue_at).total_seconds()
+            if elapsed < LOG_RETENTION_ENQUEUE_INTERVAL:
+                return
+        try:
+            days = int(getattr(settings, "LOG_RETENTION_DAYS", 30))
+            queue = get_queue_service()
+            queue.enqueue_job(
+                job_type=JobType.PURGE_OLD_LOG_TABLES,
+                payload={"days": days},
+                priority=0,
+            )
+            self._last_log_retention_enqueue_at = now
+            logger.debug(
+                f"[Worker {self.worker_id}] Enqueued purge_old_log_tables (days={days})"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[Worker {self.worker_id}] Failed to enqueue purge_old_log_tables: {e}",
+                exc_info=True,
+            )
 
     def process_next_job(self, tenant_id: Optional[str] = None) -> bool:
         """
@@ -556,6 +590,8 @@ class JobProcessor:
                 self._maybe_enqueue_lead_cron_jobs()
                 # Daily at 23:55 exact minute (TIME_ZONE): SNOOZED → NOT_CONNECTED
                 self._maybe_enqueue_snoozed_to_not_connected_midnight()
+                # Periodic purge of object_history, event_logs, rule_exec_logs, finished background_jobs
+                self._maybe_enqueue_log_retention()
 
                 if jobs_processed > 0:
                     logger.debug(
