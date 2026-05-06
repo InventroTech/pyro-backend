@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from django.db import models
 from django.contrib.contenttypes.models import ContentType
 
@@ -11,6 +13,8 @@ from core.soft_delete import (
     SoftDeleteManager,
     AllObjectsManager,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ObjectHistoryQuerySet(SoftDeleteQuerySet):
@@ -110,14 +114,22 @@ class HistoryTrackedModel(models.Model):
 
         HistoryEngine.capture_before(self)
         result = super().save(*args, **kwargs)
-        HistoryEngine.capture_after(
-            self,
-            action=history_action,
-            actor=history_actor,
-            actor_user=history_actor_user,
-            force=history_force,
-            extra_metadata=history_metadata,
-        )
+        try:
+            HistoryEngine.capture_after(
+                self,
+                action=history_action,
+                actor=history_actor,
+                actor_user=history_actor_user,
+                force=history_force,
+                extra_metadata=history_metadata,
+            )
+        except Exception as exc:
+            logger.exception(
+                "History capture failed on save for %s pk=%s; continuing. Error: %s",
+                self.__class__.__name__,
+                getattr(self, "pk", None),
+                exc,
+            )
         return result
 
     def delete(
@@ -132,15 +144,23 @@ class HistoryTrackedModel(models.Model):
 
         HistoryEngine.capture_before(self, for_delete=True)
         result = super().delete(*args, **kwargs)
-        HistoryEngine.capture_after(
-            self,
-            action="deleted",
-            actor=history_actor,
-            actor_user=history_actor_user,
-            force=True,  # deletions should always persist
-            include_after=False,
-            extra_metadata=history_metadata,
-        )
+        try:
+            HistoryEngine.capture_after(
+                self,
+                action="deleted",
+                actor=history_actor,
+                actor_user=history_actor_user,
+                force=True,  # deletions should always persist
+                include_after=False,
+                extra_metadata=history_metadata,
+            )
+        except Exception as exc:
+            logger.exception(
+                "History capture failed on delete for %s pk=%s; continuing. Error: %s",
+                self.__class__.__name__,
+                getattr(self, "pk", None),
+                exc,
+            )
         return result
 
 
