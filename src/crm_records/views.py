@@ -50,6 +50,7 @@ import uuid
 from authz.models import TenantMembership
 from email_protocol.services import send_email
 from email_protocol.templates.newRequestUnmannd import build_new_request_unmannd_email
+from email_protocol.templates.requestPaidUnmannd import build_request_paid_unmannd_email
 
 from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
 from crm_records.lead_pipeline.pipeline import LeadPipeline
@@ -81,6 +82,126 @@ def _legacy_get_next_lead_assignees_match(stored, requester: str) -> bool:
 
 
 REQUEST_NOTIFICATION_ENTITY_TYPES = frozenset({"inventory_request", "unmannd_request"})
+
+
+def _normalize_status_value(raw_status):
+    if raw_status is None:
+        return ""
+    return str(raw_status).strip().upper()
+
+
+def _record_app_redirect_url(request, record):
+    tenant = getattr(request, "tenant", None)
+    frontend_base = (os.environ.get("PYRO_FRONTEND_URL") or os.environ.get("FRONTEND_URL") or "").strip().rstrip("/")
+    tenant_slug = str(getattr(tenant, "slug", "") or "").strip() if tenant else ""
+
+    if frontend_base and "/app/" in frontend_base:
+        return frontend_base
+    if frontend_base and tenant_slug:
+        return f"{frontend_base}/app/{tenant_slug}"
+    if frontend_base:
+        return frontend_base
+    if tenant_slug:
+        return f"https://app.thepyro.ai/app/{tenant_slug}"
+    return request.build_absolute_uri(f"/crm-records/records/{record.id}/")
+
+
+def _notify_requester_when_paid(request, record, previous_status):
+    """
+    Send requester email when inventory / UNMANND request status transitions to PAID.
+    Best-effort only; never raises.
+    """
+    if not record or record.entity_type not in REQUEST_NOTIFICATION_ENTITY_TYPES:
+        return
+
+    tenant = getattr(request, "tenant", None)
+    if not tenant:
+        return
+
+    data = record.data if isinstance(record.data, dict) else {}
+    current_status = _normalize_status_value(data.get("status"))
+    old_status = _normalize_status_value(previous_status)
+    if current_status != "PAID" or old_status == "PAID":
+        return
+
+    requester_email = str(data.get("requester_email") or "").strip().lower()
+    requester_name = str(data.get("requester_name") or "").strip()
+
+    # Resolve requester from membership:
+    # - requester_id might be TenantMembership.id (int) OR TenantMembership.user_id (uuid string)
+    if not requester_email:
+        requester_ref = data.get("requester_id") or data.get("created_by_id")
+        requester_ref_str = str(requester_ref).strip() if requester_ref is not None else ""
+        membership = None
+
+        if requester_ref_str:
+            try:
+                membership_id = int(requester_ref_str)
+            except (TypeError, ValueError):
+                membership_id = None
+            if membership_id is not None:
+                membership = (
+                    TenantMembership.objects
+                    .filter(tenant=tenant, id=membership_id)
+                    .only("id", "email", "name")
+                    .first()
+                )
+
+        if membership is None and requester_ref_str:
+            membership = (
+                TenantMembership.objects
+                .filter(tenant=tenant, user_id=requester_ref_str)
+                .only("id", "email", "name")
+                .first()
+            )
+
+        if membership:
+            requester_email = (membership.email or "").strip().lower()
+            if not requester_name:
+                requester_name = (membership.name or "").strip()
+
+    if not requester_email:
+        logger.info(
+            "[RequestPaidEmail] Skip: record=%s requester email not found.",
+            getattr(record, "id", None),
+        )
+        return
+
+    if not requester_name:
+        requester_name = "Requester"
+
+    subject, text_body, html_body = build_request_paid_unmannd_email(
+        {
+            "request_id": record.id,
+            "requester_name": requester_name,
+            "tenant_name": getattr(tenant, "name", "Pyro"),
+            "item_name": str(data.get("item_name_freeform") or data.get("item_name") or "N/A").strip(),
+            "status_text": str(data.get("status_text") or data.get("status") or "PAID").strip(),
+            "redirect_url": _record_app_redirect_url(request, record),
+        }
+    )
+
+    send_ok, send_msg = send_email(
+        to_emails=requester_email,
+        subject=subject,
+        message=text_body,
+        html_message=html_body,
+        client_name="RequestPaidNotification",
+        fail_silently=True,
+    )
+    if not send_ok:
+        logger.warning(
+            "[RequestPaidEmail] Failed: record=%s email=%s msg=%s",
+            getattr(record, "id", None),
+            requester_email,
+            send_msg,
+        )
+    else:
+        logger.info(
+            "[RequestPaidEmail] Sent: record=%s email=%s",
+            getattr(record, "id", None),
+            requester_email,
+        )
 
 
 def _notify_team_lead_for_inventory_request(request, record):
@@ -555,8 +676,13 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         serializer = self.get_serializer(record, data=request.data, partial=False)
         serializer.is_valid(raise_exception=True)
         
+        previous_status = None
+        if isinstance(getattr(record, "data", None), dict):
+            previous_status = record.data.get("status")
+
         # Preserve tenant (don't allow changing tenant)
-        serializer.save(tenant=self.request.tenant)
+        updated_record = serializer.save(tenant=self.request.tenant)
+        _notify_requester_when_paid(self.request, updated_record, previous_status)
         
         return Response(serializer.data, status=status.HTTP_200_OK)
     
@@ -611,8 +737,13 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         serializer = self.get_serializer(record, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         
+        previous_status = None
+        if isinstance(getattr(record, "data", None), dict):
+            previous_status = record.data.get("status")
+
         # Preserve tenant (don't allow changing tenant)
-        serializer.save(tenant=self.request.tenant)
+        updated_record = serializer.save(tenant=self.request.tenant)
+        _notify_requester_when_paid(self.request, updated_record, previous_status)
         
         return Response(serializer.data, status=status.HTTP_200_OK)
     
@@ -697,7 +828,13 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
         """
         Update record. "Not connected" logic is handled by the rule engine when lead_stage is set to "NOT_CONNECTED".
         """
-        serializer.save()
+        previous_status = None
+        instance = getattr(serializer, "instance", None)
+        if instance is not None and isinstance(getattr(instance, "data", None), dict):
+            previous_status = instance.data.get("status")
+
+        updated_record = serializer.save()
+        _notify_requester_when_paid(self.request, updated_record, previous_status)
 
     def delete(self, request, *args, **kwargs):
         """
