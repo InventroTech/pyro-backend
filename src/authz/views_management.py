@@ -6,6 +6,7 @@ from django.db.models.functions import Lower
 from django.conf import settings
 import jwt
 
+from rest_framework.permissions import IsAuthenticated
 from authz.permissions import IsTenantAuthenticated, HasPermissionKey
 from authz.models import Role, TenantMembership
 from .serializers import RoleListSerializer, CreateSyncedRoleSerializer, TenantMembershipUserSerializer
@@ -19,8 +20,11 @@ class RolesView(APIView):
     GET  /api/authz/roles      -> list roles from authz_role (tenant-scoped)
     POST /api/authz/roles      -> create role in BOTH authz_role & legacy roles (same UUID)
     """
-    permission_classes = [IsTenantAuthenticated]  # POST will add GM requirement inline
 
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsTenantAuthenticated()]
+        return [IsAuthenticated()]
 
     def get(self, request, *args, **kwargs):
         """
@@ -231,8 +235,13 @@ class CurrentUserRoleView(APIView):
     """
     Get the current authenticated user's role from TenantMembership (backend source of truth).
     This ensures frontend uses the same role that backend permissions check against.
+
+    Uses IsAuthenticated (not IsTenantAuthenticated) because the frontend calls
+    this endpoint as a fallback when the JWT lacks user_data claims. Requiring an
+    active membership here would create a chicken-and-egg problem: the endpoint
+    that checks membership would itself require membership to access.
     """
-    permission_classes = [IsTenantAuthenticated]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         user = request.user
