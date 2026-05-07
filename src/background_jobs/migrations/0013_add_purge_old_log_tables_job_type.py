@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("background_jobs", "0011_add_snoozed_to_not_connected_midnight_job_type"),
+        ("background_jobs", "0012_backgroundjob_soft_delete"),
     ]
 
     operations = [
