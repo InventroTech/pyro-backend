@@ -1,6 +1,5 @@
 from rest_framework.permissions import BasePermission
 from django.conf import settings
-from django.utils import timezone
 import logging
 
 logger = logging.getLogger(__name__)
@@ -31,18 +30,16 @@ class HasAPISecret(BasePermission):
             request.is_default_secret = True
             return True
 
-        # Database: simple match on secret column
         try:
             from .models import ApiSecretKey
 
+            # Database: simple match on secret column
             api_secret_obj = (
                 ApiSecretKey.objects.filter(secret=secret_header, is_active=True)
                 .select_related("tenant")
                 .first()
             )
             if api_secret_obj:
-                api_secret_obj.last_used_at = timezone.now()
-                api_secret_obj.save(update_fields=["last_used_at"])
                 request.api_secret_key = secret_header
                 request.is_default_secret = False
                 request.api_secret_obj = api_secret_obj

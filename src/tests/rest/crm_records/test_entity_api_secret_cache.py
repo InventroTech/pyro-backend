@@ -3,8 +3,10 @@ Unit tests for HasAPISecret permission behavior (crm_records/permissions.py).
 These tests intentionally avoid cache-specific assertions.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from django.core.cache import cache
 from django.test import SimpleTestCase, override_settings
 
 from crm_records.permissions import HasAPISecret
@@ -21,6 +23,10 @@ def _make_request(secret_header: str):
     PYRO_SECRET=None,
 )
 class HasAPISecretTests(SimpleTestCase):
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+
     def test_missing_header_returns_false(self):
         request = _make_request("")
         request.headers = {}
@@ -62,7 +68,7 @@ class HasAPISecretTests(SimpleTestCase):
         self.assertFalse(getattr(request, "is_default_secret", True))
         self.assertEqual(getattr(request, "api_secret_key", ""), secret)
         self.assertIs(getattr(request, "api_secret_obj", None), mock_secret_obj)
-        mock_secret_obj.save.assert_called_once_with(update_fields=["last_used_at"])
+        mock_secret_obj.save.assert_not_called()
 
     def test_invalid_secret_returns_false(self):
         secret = "invalid-secret"
@@ -82,12 +88,17 @@ class HasAPISecretTests(SimpleTestCase):
         )
 
     def test_header_case_insensitive(self):
-        request = MagicMock()
-        request.headers = {"x-secret-pyro": "lowercase-secret"}
-        request.META = {}
+        # Use a plain object, not MagicMock: mock META/headers can be truthy non-strings
+        # and break header resolution before the real dict is read.
+        request = SimpleNamespace(
+            headers={"x-secret-pyro": "lowercase-secret"},
+            META={},
+        )
         perm = HasAPISecret()
 
         mock_secret_obj = MagicMock()
+        mock_secret_obj.id = 42
+        mock_secret_obj.tenant_id = "tenant-uuid-99"
         mock_chain = MagicMock()
         mock_chain.select_related.return_value.first.return_value = mock_secret_obj
 
@@ -99,3 +110,4 @@ class HasAPISecretTests(SimpleTestCase):
         MockApiSecretKey.objects.filter.assert_called_once_with(
             secret="lowercase-secret", is_active=True
         )
+        mock_secret_obj.save.assert_not_called()
