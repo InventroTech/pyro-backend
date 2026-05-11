@@ -6,7 +6,7 @@ from django.db.models.functions import Lower
 from django.conf import settings
 import jwt
 
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from authz.permissions import IsTenantAuthenticated, HasPermissionKey
 from authz.models import Role, TenantMembership
 from .serializers import RoleListSerializer, CreateSyncedRoleSerializer, TenantMembershipUserSerializer
@@ -241,7 +241,7 @@ class CurrentUserRoleView(APIView):
     active membership here would create a chicken-and-egg problem: the endpoint
     that checks membership would itself require membership to access.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         user = request.user

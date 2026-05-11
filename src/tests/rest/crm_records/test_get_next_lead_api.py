@@ -192,20 +192,6 @@ def _seed_sales_pipeline(tenant, membership, *, lead_sources=None, lead_statuses
     return group
 
 
-def _make_jwt_no_tenant(sub: str, email: str) -> str:
-    """JWT with no tenant (for 403 tests: no tenant in JWT, rely on slug or fail)."""
-    payload = {
-        "sub": sub,
-        "email": email,
-        "exp": datetime.now(timezone.utc) + timedelta(hours=1),
-        "iat": datetime.now(timezone.utc),
-        "role": "authenticated",
-        "aud": "authenticated",
-    }
-    token = jwt.encode(payload, settings.SUPABASE_JWT_SECRET, algorithm="HS256")
-    return token if isinstance(token, str) else token.decode("utf-8")
-
-
 def _should_exclude_lead(lead_data: dict, current_user_id: str) -> bool:
     """Same logic as GetNextLead exclude: exclude if assigned_to is set and not current user."""
     assigned_to = (lead_data or {}).get("assigned_to")
@@ -271,21 +257,21 @@ class GetNextLeadAPITests(BaseAPITestCase):
         self.assertEqual(response.status_code, 403)
         self.client.force_authenticate(user=self.user)
 
-    def test_authenticated_no_tenant_returns_403(self):
-        """GET with JWT but no tenant_id in JWT and no slug returns 403 when tenant cannot be resolved."""
-        token = _make_jwt_no_tenant(self.supabase_uid, self.email)
+    def test_jwt_without_tenant_id_resolves_via_membership(self):
+        """GET with JWT missing user_data.tenant_id resolves tenant via TenantMembership lookup on sub."""
+        payload = {
+            "sub": self.supabase_uid,
+            "email": self.email,
+            "exp": datetime.now(timezone.utc) + timedelta(hours=1),
+            "iat": datetime.now(timezone.utc),
+            "role": "authenticated",
+            "aud": "authenticated",
+        }
+        token = jwt.encode(payload, settings.SUPABASE_JWT_SECRET, algorithm="HS256")
+        if isinstance(token, bytes):
+            token = token.decode("utf-8")
         response = self.client.get(self.url, HTTP_AUTHORIZATION=f"Bearer {token}")
-        self.assertEqual(response.status_code, 403)
-
-    def test_authenticated_unknown_tenant_slug_returns_403(self):
-        """GET with JWT (no tenant in JWT) and non-existent tenant slug returns 403."""
-        token = _make_jwt_no_tenant(self.supabase_uid, self.email)
-        response = self.client.get(
-            self.url,
-            HTTP_AUTHORIZATION=f"Bearer {token}",
-            HTTP_X_TENANT_SLUG="nonexistent-tenant",
-        )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
 
     def test_authenticated_no_queueable_leads_returns_200_empty(self):
         """GET with auth and tenant but no queueable leads returns 200 with empty body."""
