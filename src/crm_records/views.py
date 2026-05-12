@@ -393,11 +393,11 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
             ):
                 single_val = field_value.strip() if isinstance(field_value, str) else field_value
                 field_q = (
-                    Q(**{f'data__{field_name}': single_val})
+                    Q(data__contains={field_name: single_val})
                     | Q(**{f'data__{field_name}__isnull': True})
-                    | Q(**{f'data__{field_name}': ''})
-                    | Q(**{f'data__{field_name}': 'null'})
-                    | Q(**{f'data__{field_name}': 'None'})
+                    | Q(data__contains={field_name: ''})
+                    | Q(data__contains={field_name: 'null'})
+                    | Q(data__contains={field_name: 'None'})
                 )
                 q_objects &= field_q
                 continue
@@ -409,19 +409,18 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 if ok and num_val is not None:
                     q_objects &= Q(**{f'data__{base_key}{lookup_suffix}': num_val})
                 else:
-                    # Invalid value for numeric lookup; treat as exact match on the full key (likely no match)
-                    q_objects &= Q(**{f'data__{field_name}': field_value})
+                    q_objects &= Q(data__contains={field_name: field_value})
                 continue
             # Support multiple values for the same field (comma-separated)
             if ',' in str(field_value):
                 values = [v.strip() for v in str(field_value).split(',') if v.strip()]
                 field_q = Q()
                 for value in values:
-                    field_q |= Q(**{f'data__{field_name}': value})
+                    field_q |= Q(data__contains={field_name: value})
                 q_objects &= field_q
             else:
-                # Single value - exact match
-                q_objects &= Q(**{f'data__{field_name}': field_value})
+                # Single value - exact match (uses @> operator → GIN index)
+                q_objects &= Q(data__contains={field_name: field_value})
         
         if q_objects:
             queryset = queryset.filter(q_objects)
