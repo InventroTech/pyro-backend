@@ -6,8 +6,8 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('background_jobs', '0013_add_purge_old_log_tables_job_type'),
-        ('core', '0004_idle_in_transaction_session_timeout'),
+        ("background_jobs", "0013_add_purge_old_log_tables_job_type"),
+        ("core", "0004_idle_in_transaction_session_timeout"),
     ]
 
     operations = [
