@@ -20,6 +20,7 @@ def _get_bearer_token(request) -> str | None:
 def _get_tenant_id_from_jwt(request) -> str | None:
     """
     Extract tenant_id from JWT token if present.
+    Priority: user_data.tenant_id claim, then TenantMembership lookup by sub.
     Returns tenant_id (UUID string) or None.
     """
     token = _get_bearer_token(request)
@@ -32,13 +33,31 @@ def _get_tenant_id_from_jwt(request) -> str | None:
     
     try:
         claims = jwt.decode(token, jwt_secret, algorithms=["HS256"], options={"verify_aud": False})
-        # Extract tenant_id from user_data.tenant_id
         user_data = claims.get("user_data", {})
         tenant_id = user_data.get("tenant_id")
         if tenant_id:
             return str(tenant_id)
+
+        # JWT lacks user_data.tenant_id -- resolve from TenantMembership
+        sub = claims.get("sub")
+        if sub:
+            cache_key = f"tenant:sub:{sub}"
+            cached_tid = cache.get(cache_key)
+            if cached_tid:
+                return cached_tid
+
+            from authz.models import TenantMembership
+            membership = (
+                TenantMembership.objects
+                .filter(user_id=sub, is_active=True)
+                .values_list("tenant_id", flat=True)
+                .first()
+            )
+            if membership:
+                tid = str(membership)
+                cache.set(cache_key, tid, CACHE_TTL)
+                return tid
     except (ExpiredSignatureError, InvalidTokenError, Exception):
-        # If JWT is invalid/expired, fall back to slug-based resolution
         pass
     
     return None
