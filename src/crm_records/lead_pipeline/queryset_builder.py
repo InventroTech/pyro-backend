@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+from functools import reduce
+from operator import or_
 from typing import Any, Dict, List, Optional
 
-from django.db.models import QuerySet
+from django.db.models import Q, QuerySet
 
 from crm_records.models import Record
 
@@ -103,7 +105,7 @@ class BucketQuerysetBuilder:
             )
 
         if eligible_lead_types:
-            qs = qs.filter(data__affiliated_party__in=eligible_lead_types)
+            qs = qs.filter(self._build_contains_in_q("affiliated_party", eligible_lead_types))
             if debug:
                 logger.info(
                     "[BucketQuerysetBuilder] after eligible_lead_types=%s count=%s",
@@ -111,7 +113,7 @@ class BucketQuerysetBuilder:
                     qs.count(),
                 )
         if eligible_lead_sources:
-            qs = qs.filter(data__lead_source__in=eligible_lead_sources)
+            qs = qs.filter(self._build_contains_in_q("lead_source", eligible_lead_sources))
             if debug:
                 logger.info(
                     "[BucketQuerysetBuilder] after eligible_lead_sources=%s count=%s",
@@ -119,7 +121,7 @@ class BucketQuerysetBuilder:
                     qs.count(),
                 )
         if eligible_lead_statuses:
-            qs = qs.filter(data__lead_status__in=eligible_lead_statuses)
+            qs = qs.filter(self._build_contains_in_q("lead_status", eligible_lead_statuses))
             if debug:
                 logger.info(
                     "[BucketQuerysetBuilder] after eligible_lead_statuses=%s count=%s",
@@ -127,7 +129,7 @@ class BucketQuerysetBuilder:
                     qs.count(),
                 )
         if eligible_states:
-            qs = qs.filter(data__state__in=eligible_states)
+            qs = qs.filter(self._build_contains_in_q("state", eligible_states))
             if debug:
                 logger.info(
                     "[BucketQuerysetBuilder] after eligible_states=%s count=%s",
@@ -165,6 +167,11 @@ class BucketQuerysetBuilder:
         if exclude_other_assignees:
             qs = qs.extra(where=[self._EXCLUDE_OTHER_ASSIGNEES_WHERE], params=[user_identifier])
         return qs
+
+    @staticmethod
+    def _build_contains_in_q(field: str, values: List[str]) -> Q:
+        """Build OR of data__contains lookups to leverage the GIN index."""
+        return reduce(or_, [Q(data__contains={field: v}) for v in values])
 
     def _apply_call_attempts_range(self, qs: QuerySet, ca: Dict[str, Any]) -> QuerySet:
         col = "COALESCE((data->>'call_attempts')::int, 0)"

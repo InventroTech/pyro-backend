@@ -1030,7 +1030,7 @@ def _close_stale_subscription_leads_queryset(
                 output_field=DateTimeField(),
             )
         )
-        .filter(entity_type="lead", data__lead_status="SELF TRIAL")
+        .filter(entity_type="lead", data__contains={"lead_status": "SELF TRIAL"})
         .exclude(data__lead_stage__iexact="CLOSED")
     )
     if tenant_id is not None:
@@ -1200,8 +1200,7 @@ class SnoozedToNotConnectedMidnightJobHandler(JobHandler):
         tz_name = settings.TIME_ZONE
         qs = Record.objects.filter(
             entity_type="lead",
-            data__lead_stage="SNOOZED",
-            data__lead_status="SALES LEAD",
+            data__contains={"lead_stage": "SNOOZED", "lead_status": "SALES LEAD"},
         ).extra(
             where=[
                 """

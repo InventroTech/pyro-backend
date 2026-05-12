@@ -48,7 +48,7 @@ class CallAttemptMatrixFilter:
     def _exclude_by_max_attempts_and_sla(self, qs: QuerySet, matrices: Dict[str, CallAttemptMatrix], now) -> QuerySet:
         exclusion_filters = Q()
         for lead_type, matrix in matrices.items():
-            lead_type_filter = Q(data__affiliated_party=lead_type)
+            lead_type_filter = Q(data__contains={"affiliated_party": lead_type})
             exclusion_filters |= lead_type_filter & Q(data__call_attempts__gte=matrix.max_call_attempts)
             exclusion_filters |= lead_type_filter & Q(created_at__lt=now - timedelta(days=matrix.sla_days))
 
