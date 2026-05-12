@@ -150,7 +150,13 @@ def _build_filters_from_conditions(
                 q &= Q(**{model_field: value})
                 applied.append({"field": field, "op": op, "value": value, "model_field": model_field})
         elif op == "in" and isinstance(value, (list, tuple)):
-            q &= Q(**{f"{model_field}__in": list(value)})
+            if model_field.startswith("data__"):
+                data_key = model_field.replace("data__", "", 1)
+                from functools import reduce
+                from operator import or_
+                q &= reduce(or_, [Q(data__contains={data_key: v}) for v in value])
+            else:
+                q &= Q(**{f"{model_field}__in": list(value)})
             applied.append({"field": field, "op": op, "value": value, "model_field": f"{model_field}__in"})
         else:
             logger.warning(

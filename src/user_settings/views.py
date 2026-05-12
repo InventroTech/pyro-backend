@@ -492,7 +492,7 @@ class UserLeadsCountView(APIView):
         count = Record.objects.filter(
             tenant=tenant,
             entity_type='lead',
-            data__assigned_to=str(user_id)
+            data__contains={"assigned_to": str(user_id)}
         ).count()
         
         return Response({
