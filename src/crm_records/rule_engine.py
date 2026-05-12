@@ -585,7 +585,7 @@ def action_bulk_update_requests_in_cart(
     requests_qs = Record.objects.filter(
         tenant_id=record.tenant_id,
         entity_type="inventory_request",
-    ).filter(Q(data__cart_id=cart_id_str) | Q(data__cart_id=record.id))
+    ).filter(Q(data__contains={"cart_id": cart_id_str}) | Q(data__contains={"cart_id": record.id}))
 
     updated_ids = []
     for req in requests_qs:
@@ -658,7 +658,7 @@ def action_receive_add_to_inventory(
                 tenant_id=record.tenant_id,
                 entity_type="inventory_item",
             )
-            .filter(data__part_number_or_sku=part_number)
+            .filter(data__contains={"part_number_or_sku": part_number})
             .first()
         )
     if inventory_item is None and name:
@@ -667,7 +667,7 @@ def action_receive_add_to_inventory(
                 tenant_id=record.tenant_id,
                 entity_type="inventory_item",
             )
-            .filter(Q(data__name=name) | Q(data__part_number_or_sku=name))
+            .filter(Q(data__contains={"name": name}) | Q(data__contains={"part_number_or_sku": name}))
             .first()
         )
 
