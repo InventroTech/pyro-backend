@@ -57,6 +57,7 @@ def purge_old_log_rows(
             ObjectHistory,
             {"created_at__lt": before, "persistent_history": False},
             chunk_size,
+            order_by=("created_at", "pk"),
         ),
         "event_logs": _chunked_hard_delete(
             EventLog, {"created_at__lt": before}, chunk_size
@@ -86,12 +87,14 @@ def _chunked_hard_delete(
     model: type[models.Model],
     filter_kw: dict,
     chunk_size: int,
+    *,
+    order_by: tuple[str, ...] = ("pk",),
 ) -> int:
     total = 0
     while True:
         pks = list(
             model.all_objects.filter(**filter_kw)
-            .order_by("pk")
+            .order_by(*order_by)
             .values_list("pk", flat=True)[:chunk_size]
         )
         if not pks:

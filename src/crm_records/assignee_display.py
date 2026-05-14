@@ -180,5 +180,5 @@ def build_assigned_to_search_q(tenant, search_term: str) -> Q:
     if identifiers:
         from functools import reduce
         from operator import or_
-        q |= reduce(or_, [Q(data__contains={"assigned_to": i}) for i in identifiers])
+        q |= reduce(or_, [Q(**{"data__assigned_to": i}) for i in identifiers])
     return q

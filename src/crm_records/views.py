@@ -19,8 +19,8 @@ from django.db import transaction
 from django.db import IntegrityError
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
+import json
 import logging
-import os
 
 logger = logging.getLogger(__name__)
 from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule, PartnerEvent, ApiSecretKey
@@ -393,11 +393,11 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
             ):
                 single_val = field_value.strip() if isinstance(field_value, str) else field_value
                 field_q = (
-                    Q(data__contains={field_name: single_val})
-                    | Q(**{f'data__{field_name}__isnull': True})
-                    | Q(data__contains={field_name: ''})
-                    | Q(data__contains={field_name: 'null'})
-                    | Q(data__contains={field_name: 'None'})
+                    Q(**{f"data__{field_name}": single_val})
+                    | Q(**{f"data__{field_name}__isnull": True})
+                    | Q(**{f"data__{field_name}": ""})
+                    | Q(**{f"data__{field_name}": "null"})
+                    | Q(**{f"data__{field_name}": "None"})
                 )
                 q_objects &= field_q
                 continue
@@ -409,18 +409,18 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 if ok and num_val is not None:
                     q_objects &= Q(**{f'data__{base_key}{lookup_suffix}': num_val})
                 else:
-                    q_objects &= Q(data__contains={field_name: field_value})
+                    q_objects &= Q(**{f"data__{field_name}": field_value})
                 continue
             # Support multiple values for the same field (comma-separated)
             if ',' in str(field_value):
                 values = [v.strip() for v in str(field_value).split(',') if v.strip()]
                 field_q = Q()
                 for value in values:
-                    field_q |= Q(data__contains={field_name: value})
+                    field_q |= Q(**{f"data__{field_name}": value})
                 q_objects &= field_q
             else:
-                # Single value - exact match (uses @> operator → GIN index)
-                q_objects &= Q(data__contains={field_name: field_value})
+                # Single value — Django JSONField lookup uses ``data->'key'`` (jsonb path).
+                q_objects &= Q(**{f"data__{field_name}": field_value})
         
         if q_objects:
             queryset = queryset.filter(q_objects)
@@ -1555,12 +1555,12 @@ class LeadStatsView(APIView):
         # Stages: FRESH, IN_QUEUE, ASSIGNED, SNOOZED, NOT_CONNECTED, CLOSED (no WON, LOST, SCHEDULED, CALL_LATER)
         stage_counts = leads_qs.aggregate(
             total_leads=Count('id'),
-            fresh=Count('id', filter=Q(data__lead_stage='FRESH')),
-            in_queue=Count('id', filter=Q(data__lead_stage='IN_QUEUE')),
-            assigned=Count('id', filter=Q(data__lead_stage='ASSIGNED')),
-            snoozed=Count('id', filter=Q(data__lead_stage='SNOOZED')),
-            not_connected=Count('id', filter=Q(data__lead_stage='NOT_CONNECTED')),
-            closed=Count('id', filter=Q(data__lead_stage='CLOSED')),
+            fresh=Count('id', filter=Q(data__lead_stage="FRESH")),
+            in_queue=Count('id', filter=Q(data__lead_stage="IN_QUEUE")),
+            assigned=Count('id', filter=Q(data__lead_stage="ASSIGNED")),
+            snoozed=Count('id', filter=Q(data__lead_stage="SNOOZED")),
+            not_connected=Count('id', filter=Q(data__lead_stage="NOT_CONNECTED")),
+            closed=Count('id', filter=Q(data__lead_stage="CLOSED")),
         )
         
         stats = {
@@ -2366,81 +2366,70 @@ class GetNextLeadView(APIView):
         # Filter out leads that exceed matrix limits
         if call_attempt_matrices:
             excluded_count = 0
-            valid_lead_ids = []
-            
-            # Build Q objects for efficient filtering
+
             exclusion_filters = Q()
-            
             for lead_type, matrix in call_attempt_matrices.items():
-                # Filter by lead type (from DB; same party list as lead filter)
                 lead_type_filter = Q(data__affiliated_party=lead_type)
-                
-                # Exclude leads that exceed max call attempts
-                max_attempts_exceeded = lead_type_filter & Q(
-                    data__call_attempts__gte=matrix.max_call_attempts
-                )
-                exclusion_filters |= max_attempts_exceeded
-                
-                # Exclude leads that exceed SLA (days since creation)
-                # Calculate cutoff date
+                exclusion_filters |= lead_type_filter & Q(data__call_attempts__gte=matrix.max_call_attempts)
                 cutoff_date = now - timedelta(days=matrix.sla_days)
-                sla_exceeded = lead_type_filter & Q(created_at__lt=cutoff_date)
-                exclusion_filters |= sla_exceeded
-                
+                exclusion_filters |= lead_type_filter & Q(created_at__lt=cutoff_date)
                 logger.debug(
                     "[GetNextLead] Added exclusion filters for lead_type=%s: max_attempts>=%d, sla_days=%d",
-                    lead_type, matrix.max_call_attempts, matrix.sla_days
+                    lead_type,
+                    matrix.max_call_attempts,
+                    matrix.sla_days,
                 )
-            
-            # Apply exclusions
+
             if exclusion_filters:
                 before_count = unassigned.count()
                 unassigned = unassigned.exclude(exclusion_filters)
                 after_count = unassigned.count()
                 excluded_count = before_count - after_count
-                
+
                 if excluded_count > 0:
                     logger.info(
                         "[GetNextLead] Excluded %d leads based on call attempt matrix rules (max attempts or SLA)",
-                        excluded_count
+                        excluded_count,
                     )
-            
+
             # Additional check for minimum time between calls (requires per-record evaluation)
-            if call_attempt_matrices:
-                final_valid_ids = []
-                for lead in unassigned[:1000]:  # Limit to first 1000 for performance
-                    lead_data = lead.data or {}
-                    lead_type = lead_data.get('affiliated_party')
-                    # Find matching matrix
-                    matrix = None
-                    for lt, m in call_attempt_matrices.items():
-                        if lead_type == lt:
-                            matrix = m
-                            break
-                    
-                    if matrix:
-                        should_exclude, reason = self._should_exclude_lead_by_matrix(lead, lead_data, matrix, now)
-                        if should_exclude:
-                            excluded_count += 1
-                            logger.debug(
-                                "[GetNextLead] Excluding lead_id=%d lead_type=%s reason=%s",
-                                lead.id, lead_type, reason
-                            )
-                            continue
-                    
-                    final_valid_ids.append(lead.id)
-                
-                if final_valid_ids:
-                    unassigned = unassigned.filter(id__in=final_valid_ids)
-                    logger.info(
-                        "[GetNextLead] Step 3: After call attempt matrix (min_time_between_calls): %d leads remaining (valid_ids count=%d)",
-                        len(final_valid_ids), len(final_valid_ids),
-                    )
-                else:
-                    unassigned = unassigned.none()
-                    logger.warning(
-                        "[GetNextLead] Step 3: Call attempt matrix excluded all leads (min_time_between_calls or other matrix rules). unassigned set to none.",
-                    )
+            final_valid_ids = []
+            for lead in unassigned[:1000]:  # Limit to first 1000 for performance
+                lead_data = lead.data or {}
+                lead_type = lead_data.get('affiliated_party')
+                # Find matching matrix
+                matrix = None
+                for lt, m in call_attempt_matrices.items():
+                    if lead_type == lt:
+                        matrix = m
+                        break
+
+                if matrix:
+                    should_exclude, reason = self._should_exclude_lead_by_matrix(lead, lead_data, matrix, now)
+                    if should_exclude:
+                        excluded_count += 1
+                        logger.debug(
+                            "[GetNextLead] Excluding lead_id=%d lead_type=%s reason=%s",
+                            lead.id,
+                            lead_type,
+                            reason,
+                        )
+                        continue
+
+                final_valid_ids.append(lead.id)
+
+            if final_valid_ids:
+                unassigned = unassigned.filter(id__in=final_valid_ids)
+                logger.info(
+                    "[GetNextLead] Step 3: After call attempt matrix (min_time_between_calls): %d leads remaining (valid_ids count=%d)",
+                    len(final_valid_ids),
+                    len(final_valid_ids),
+                )
+            else:
+                unassigned = unassigned.none()
+                logger.warning(
+                    "[GetNextLead] Step 3: Call attempt matrix excluded all leads (min_time_between_calls or other matrix rules). unassigned set to none.",
+                )
         after_matrix_cnt = unassigned.count()
         if call_attempt_matrices and after_matrix_cnt == 0:
             logger.info(
@@ -2475,7 +2464,7 @@ class GetNextLeadView(APIView):
         all_snoozed_count = Record.objects.filter(
             tenant=tenant,
             entity_type='lead',
-            data__lead_stage='SNOOZED'
+            data__lead_stage="SNOOZED",
         ).count()
         expired_snoozed_before_filter = Record.objects.filter(
             tenant=tenant,
@@ -2490,7 +2479,7 @@ class GetNextLeadView(APIView):
             """]
         ).count()
         # Check after affiliated_party filter
-        snoozed_count = unassigned.filter(data__lead_stage='SNOOZED').count()
+        snoozed_count = unassigned.filter(data__lead_stage="SNOOZED").count()
         expired_snoozed_count = unassigned.extra(
             where=["""
                 data->>'lead_stage' = 'SNOOZED'
@@ -2851,7 +2840,7 @@ class GetMyCurrentLeadView(APIView):
             tenant=tenant,
             entity_type='lead',
             data__assigned_to=user_identifier,
-            data__lead_stage='ASSIGNED'
+            data__lead_stage="ASSIGNED",
         ).order_by('-updated_at').first()
         
         # Force fresh DB query - refresh from database
@@ -3144,7 +3133,7 @@ class PartnerLeadView(APIView):
             tenant=tenant,
             entity_type='lead',
             data__assigned_to=user_identifier,
-            data__lead_stage='ASSIGNED',
+            data__lead_stage="ASSIGNED",
         ).filter(
             Q(data__partner_source=partner_slug) | Q(pyro_data__partner_source=partner_slug)
         ).order_by('-updated_at').first()
@@ -3161,7 +3150,7 @@ class PartnerLeadView(APIView):
                 tenant=tenant,
                 entity_type='lead',
                 data__assigned_to=user_identifier,
-                data__lead_stage='ASSIGNED',
+                data__lead_stage="ASSIGNED",
             ).count()
             logger.info(
                 "[PartnerLead] No lead returned. partner_slug=%s tenant=%s user_identifier=%s | "
