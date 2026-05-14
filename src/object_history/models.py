@@ -82,6 +82,7 @@ class ObjectHistory(BaseModel):
                 fields=["persistent_history", "created_at"],
                 name="object_hist_persist_cr_idx",
             ),
+            # Partial purge index: migration 0006 ``object_hist_ephemeral_created_cutoff_idx``.
         ]
         constraints = [
             models.UniqueConstraint(

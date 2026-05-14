@@ -383,7 +383,7 @@ class LeadPipeline:
         }
 
         # 1) Assigned-to-me retry candidate (legacy code does NOT apply lead filters here).
-        assigned_retry_qs = Record.objects.filter(tenant=tenant, entity_type="lead", data__contains={"assigned_to": user_identifier}).extra(
+        assigned_retry_qs = Record.objects.filter(tenant=tenant, entity_type="lead", data__assigned_to=user_identifier).extra(
             select={
                 "call_attempts_int": "COALESCE((data->>'call_attempts')::int, 0)",
                 "lead_stage_norm": "UPPER(COALESCE(data->>'lead_stage',''))",
@@ -435,13 +435,13 @@ class LeadPipeline:
         )
 
         if eligible_lead_types:
-            unassigned_retry_qs = unassigned_retry_qs.filter(BucketQuerysetBuilder._build_contains_in_q("affiliated_party", eligible_lead_types))
+            unassigned_retry_qs = unassigned_retry_qs.filter(data__affiliated_party__in=eligible_lead_types)
         if eligible_lead_sources:
-            unassigned_retry_qs = unassigned_retry_qs.filter(BucketQuerysetBuilder._build_contains_in_q("lead_source", eligible_lead_sources))
+            unassigned_retry_qs = unassigned_retry_qs.filter(data__lead_source__in=eligible_lead_sources)
         if eligible_lead_statuses:
-            unassigned_retry_qs = unassigned_retry_qs.filter(BucketQuerysetBuilder._build_contains_in_q("lead_status", eligible_lead_statuses))
+            unassigned_retry_qs = unassigned_retry_qs.filter(data__lead_status__in=eligible_lead_statuses)
         if eligible_states:
-            unassigned_retry_qs = unassigned_retry_qs.filter(BucketQuerysetBuilder._build_contains_in_q("state", eligible_states))
+            unassigned_retry_qs = unassigned_retry_qs.filter(data__state__in=eligible_states)
 
         unassigned_retry_qs = self.strategy_applier.apply(qs=unassigned_retry_qs, strategy=retry_strategy, now_iso=now.isoformat())
         unassigned_retry_candidate = unassigned_retry_qs.first()
