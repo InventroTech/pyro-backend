@@ -7,10 +7,11 @@ class Migration(migrations.Migration):
 
     Django ``Record.objects.filter(data__lead_stage=…)`` compiles to jsonb path ``->``,
     not text ``->>``. Migration ``0031`` indexes ``(data->>'lead_stage')`` for stats-style
-    scans; this index matches ORM equality filters and aggregates on ``data__lead_stage``.
-    """
+    scans; this index matches ORM equality filters on ``data__lead_stage``.
 
-    atomic = False
+    Plain ``CREATE INDEX`` / ``DROP INDEX`` (not ``CONCURRENTLY``) so ``migrate`` succeeds
+    inside a transaction.
+    """
 
     dependencies = [
         ("crm_records", "0037_realign_lead_queue_expression_indexes"),
@@ -19,14 +20,14 @@ class Migration(migrations.Migration):
     operations = [
         migrations.RunSQL(
             sql="""
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS records_lead_tnt_lead_stage_jsonpath_idx
+            CREATE INDEX IF NOT EXISTS records_lead_tnt_lead_stage_jsonpath_idx
             ON public.records (tenant_id, ((data->'lead_stage')))
             WHERE entity_type = 'lead'
               AND is_deleted = false
               AND deleted_at IS NULL;
             """,
             reverse_sql="""
-            DROP INDEX CONCURRENTLY IF EXISTS public.records_lead_tnt_lead_stage_jsonpath_idx;
+            DROP INDEX IF EXISTS public.records_lead_tnt_lead_stage_jsonpath_idx;
             """,
         ),
     ]
