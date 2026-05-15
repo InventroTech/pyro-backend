@@ -1,6 +1,7 @@
 
 from django.urls import path
-from .views import (SupabaseAuthCheckView)
+from .views import SupabaseAuthCheckView, SupabasePasswordRecoverView
+
 app_name = "authentication"
 
 urlpatterns = [
@@ -8,5 +9,10 @@ urlpatterns = [
         'test-supabase-login/',
         SupabaseAuthCheckView.as_view(),
         name="authcheck"
+    ),
+    path(
+        'forgot-password/',
+        SupabasePasswordRecoverView.as_view(),
+        name="forgot-password"
     ),
 ]
