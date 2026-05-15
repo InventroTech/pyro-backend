@@ -1349,6 +1349,12 @@ class JobHandlerRegistry:
             JobType.PURGE_OLD_LOG_TABLES,
             PurgeOldLogTablesJobHandler(),
         )
+        # Imported lazily to avoid a circular import (dispatch_sync imports JobHandler from this module).
+        from .dispatch_sync import SyncDispatchToRecordsJobHandler
+        self.register_handler(
+            JobType.SYNC_DISPATCH_TO_RECORDS,
+            SyncDispatchToRecordsJobHandler(),
+        )
         # Praja handler removed - now using MixpanelService instead
         # self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
     
