@@ -108,17 +108,21 @@ def _seed_tenant_buckets_for_pipeline(tenant):
         },
     )
 
-    strategy_snoozed = {
-        "order_by": "score_desc",
-        "tiebreaker": "desc",
-        "tiebreaker_field": "created_at",
+    strategy_followup = {
+        "order": ["-day(created_at)", "-lead_score", "-created_at"],
+        "day_timezone": "Asia/Kolkata",
         "include_snoozed_due": True,
         "ignore_score_for_sources": [],
     }
-    strategy_plain = {
-        "order_by": "score_desc",
-        "tiebreaker": "desc",
-        "tiebreaker_field": "created_at",
+    strategy_fresh = {
+        "order": ["-day(created_at)", "-lead_score", "-created_at"],
+        "day_timezone": "Asia/Kolkata",
+        "include_snoozed_due": True,
+        "ignore_score_for_sources": [],
+    }
+    strategy_not_connected = {
+        "order": ["next_call_at", "call_attempts", "-day(created_at)", "-lead_score", "-created_at"],
+        "day_timezone": "Asia/Kolkata",
         "include_snoozed_due": False,
         "ignore_score_for_sources": [],
     }
@@ -128,21 +132,21 @@ def _seed_tenant_buckets_for_pipeline(tenant):
         user=None,
         bucket=followup,
         priority=1,
-        pull_strategy=strategy_snoozed,
+        pull_strategy=strategy_followup,
     )
     UserBucketAssignment.objects.create(
         tenant=tenant,
         user=None,
         bucket=fresh,
         priority=2,
-        pull_strategy=strategy_snoozed,
+        pull_strategy=strategy_fresh,
     )
     UserBucketAssignment.objects.create(
         tenant=tenant,
         user=None,
         bucket=not_connected,
         priority=3,
-        pull_strategy=strategy_plain,
+        pull_strategy=strategy_not_connected,
     )
     return {"followup": followup, "fresh": fresh, "not_connected": not_connected}
 
