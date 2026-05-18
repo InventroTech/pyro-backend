@@ -11,9 +11,8 @@ Business semantics (aligned with production data + code):
   values use e.g. `PREMIUM_REFERRAL` for source and ``SALES LEAD`` for status).
 - **Bucket priority** (tenant-wide): follow-up (snoozed) → **fresh** → not-connected retry.
   So when both a fresh **and** a due NOT_CONNECTED retry exist, **fresh is tried first** and wins.
-- **Pull tiebreaker:** ``tiebreaker`` is ``asc`` or ``desc`` on ``tiebreaker_field`` (default ``desc`` if omitted).
-  Legacy ``lifo`` / ``fifo`` are accepted as aliases for ``desc`` / ``asc``. ``tiebreaker_field``: ``created_at`` or ``updated_at`` (default ``created_at``).
-  Secondary sort is the other timestamp descending, then ``id``.
+- **Pull ordering:** ``order`` array; ``include_snoozed_due`` prepends due-snoozed sort when true.
+  Leading ``-`` = descending. ``day_timezone`` defaults to Asia/Kolkata.
 
 Run (venv activated):
 
@@ -156,43 +155,55 @@ def _seed_tenant_buckets(tenant) -> dict:
         },
     )
 
-    strategy_snoozed = {
-        "order_by": "score_desc",
-        "tiebreaker": "desc",
-        "tiebreaker_field": "created_at",
-        "include_snoozed_due": True,
-        "ignore_score_for_sources": [],
-    }
-    strategy_plain = {
-        "order_by": "score_desc",
-        "tiebreaker": "desc",
-        "tiebreaker_field": "created_at",
-        "include_snoozed_due": False,
-        "ignore_score_for_sources": [],
-    }
-
     UserBucketAssignment.objects.create(
         tenant=tenant,
         user=None,
         bucket=followup,
         priority=1,
-        pull_strategy=strategy_snoozed,
+        pull_strategy=_pull_strategy_followup(),
     )
     UserBucketAssignment.objects.create(
         tenant=tenant,
         user=None,
         bucket=fresh,
         priority=2,
-        pull_strategy=strategy_snoozed,
+        pull_strategy=_pull_strategy_fresh(),
     )
     UserBucketAssignment.objects.create(
         tenant=tenant,
         user=None,
         bucket=not_connected,
         priority=3,
-        pull_strategy=strategy_plain,
+        pull_strategy=_pull_strategy_not_connected(),
     )
     return {"followup": followup, "fresh": fresh, "not_connected": not_connected}
+
+
+def _pull_strategy_fresh():
+    return {
+        "order": ["-day(created_at)", "-lead_score", "-created_at"],
+        "day_timezone": "Asia/Kolkata",
+        "include_snoozed_due": True,
+        "ignore_score_for_sources": [],
+    }
+
+
+def _pull_strategy_followup():
+    return {
+        "order": ["-day(created_at)", "-lead_score", "-created_at"],
+        "day_timezone": "Asia/Kolkata",
+        "include_snoozed_due": True,
+        "ignore_score_for_sources": [],
+    }
+
+
+def _pull_strategy_not_connected():
+    return {
+        "order": ["next_call_at", "call_attempts", "-day(created_at)", "-lead_score", "-created_at"],
+        "day_timezone": "Asia/Kolkata",
+        "include_snoozed_due": False,
+        "ignore_score_for_sources": [],
+    }
 
 
 def _sales_lead_row(**kwargs):
@@ -352,54 +363,8 @@ def test_daily_limit_debug_mode_never_reached():
 
 
 @pytest.mark.django_db
-def test_pull_strategy_expired_snoozed_before_fresh_in_sort_order():
-    """With include_snoozed_due, due SNOOZED rows sort before non-snoozed (is_expired_snoozed=0 first)."""
-    tenant = TenantFactory()
-    now = timezone.now()
-    past = (now - timedelta(hours=1)).isoformat()
-
-    fresh = RecordFactory(
-        tenant=tenant,
-        entity_type="lead",
-        data=_sales_lead_row(
-            name="Fresh",
-            lead_stage="IN_QUEUE",
-            call_attempts=0,
-            lead_score=999,
-        ),
-    )
-    snoozed = RecordFactory(
-        tenant=tenant,
-        entity_type="lead",
-        data=_sales_lead_row(
-            name="Snoozed due",
-            lead_stage="SNOOZED",
-            call_attempts=1,
-            next_call_at=past,
-            lead_score=1,
-        ),
-    )
-
-    qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[fresh.id, snoozed.id])
-    applier = PullStrategyApplier()
-    ordered = applier.apply(
-        qs=qs,
-        strategy={
-            "order_by": "score_desc",
-            "include_snoozed_due": True,
-            "ignore_score_for_sources": [],
-            "tiebreaker": "desc",
-        },
-        now_iso=now.isoformat(),
-    )
-    first = ordered.first()
-    assert first is not None
-    assert first.id == snoozed.id
-
-
-@pytest.mark.django_db
-def test_pull_strategy_asc_tiebreaker_older_created_at_wins():
-    """Same score and attempts: asc tiebreaker prefers smaller created_at (oldest created first)."""
+def test_pull_strategy_created_at_asc_and_desc():
+    """``created_at`` / ``-created_at`` in ``order`` control FIFO vs LIFO among ties."""
     tenant = TenantFactory()
     now = timezone.now()
 
@@ -418,186 +383,28 @@ def test_pull_strategy_asc_tiebreaker_older_created_at_wins():
 
     qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[older.id, newer.id])
     applier = PullStrategyApplier()
-    ordered = applier.apply(
-        qs=qs,
-        strategy={
-            "order_by": "score_desc",
-            "include_snoozed_due": False,
-            "ignore_score_for_sources": [],
-            "tiebreaker": "asc",
-        },
-        now_iso=now.isoformat(),
+    base = {"ignore_score_for_sources": []}
+
+    assert (
+        applier.apply(
+            qs=qs,
+            strategy={**base, "order": ["-lead_score", "-created_at"]},
+            now_iso=now.isoformat(),
+        ).first().id
+        == newer.id
     )
-    first = ordered.first()
-    assert first is not None
-    assert first.id == older.id
+    assert (
+        applier.apply(
+            qs=qs,
+            strategy={**base, "order": ["-lead_score", "created_at"]},
+            now_iso=now.isoformat(),
+        ).first().id
+        == older.id
+    )
 
 
 @pytest.mark.django_db
-def test_pull_strategy_desc_tiebreaker_newer_created_at_wins():
-    """Same score and attempts: desc tiebreaker prefers larger created_at (newest created first)."""
-    tenant = TenantFactory()
-    now = timezone.now()
-
-    older = RecordFactory(
-        tenant=tenant,
-        entity_type="lead",
-        data=_sales_lead_row(name="Older", lead_stage="IN_QUEUE", lead_score=50),
-    )
-    newer = RecordFactory(
-        tenant=tenant,
-        entity_type="lead",
-        data=_sales_lead_row(name="Newer", lead_stage="IN_QUEUE", lead_score=50),
-    )
-    Record.objects.filter(pk=older.pk).update(created_at=now - timedelta(hours=2))
-    Record.objects.filter(pk=newer.pk).update(created_at=now)
-
-    qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[older.id, newer.id])
-    applier = PullStrategyApplier()
-    ordered = applier.apply(
-        qs=qs,
-        strategy={
-            "order_by": "score_desc",
-            "include_snoozed_due": False,
-            "ignore_score_for_sources": [],
-            "tiebreaker": "desc",
-        },
-        now_iso=now.isoformat(),
-    )
-    first = ordered.first()
-    assert first is not None
-    assert first.id == newer.id
-
-
-@pytest.mark.django_db
-def test_pull_strategy_desc_uses_created_at_not_updated_at_for_ties():
-    """Larger created_at wins even when that row has smaller updated_at (secondary sort is updated_at)."""
-    tenant = TenantFactory()
-    now = timezone.now()
-
-    older_created = RecordFactory(
-        tenant=tenant,
-        entity_type="lead",
-        data=_sales_lead_row(name="OldCreate", lead_stage="IN_QUEUE", lead_score=50),
-    )
-    newer_created = RecordFactory(
-        tenant=tenant,
-        entity_type="lead",
-        data=_sales_lead_row(name="NewCreate", lead_stage="IN_QUEUE", lead_score=50),
-    )
-    # Older row was touched recently; newer row has stale updated_at.
-    Record.objects.filter(pk=older_created.pk).update(
-        created_at=now - timedelta(hours=3),
-        updated_at=now,
-    )
-    Record.objects.filter(pk=newer_created.pk).update(
-        created_at=now - timedelta(hours=1),
-        updated_at=now - timedelta(hours=2),
-    )
-
-    qs = Record.objects.filter(
-        tenant=tenant, entity_type="lead", id__in=[older_created.id, newer_created.id]
-    )
-    applier = PullStrategyApplier()
-    ordered = applier.apply(
-        qs=qs,
-        strategy={
-            "order_by": "score_desc",
-            "include_snoozed_due": False,
-            "ignore_score_for_sources": [],
-            "tiebreaker": "desc",
-        },
-        now_iso=now.isoformat(),
-    )
-    first = ordered.first()
-    assert first is not None
-    assert first.id == newer_created.id
-
-
-@pytest.mark.django_db
-def test_pull_strategy_default_tiebreaker_desc_on_created_at():
-    """Omitted tiebreaker defaults to desc (newest created_at first)."""
-    tenant = TenantFactory()
-    now = timezone.now()
-
-    older = RecordFactory(
-        tenant=tenant,
-        entity_type="lead",
-        data=_sales_lead_row(name="Older", lead_stage="IN_QUEUE", lead_score=50),
-    )
-    newer = RecordFactory(
-        tenant=tenant,
-        entity_type="lead",
-        data=_sales_lead_row(name="Newer", lead_stage="IN_QUEUE", lead_score=50),
-    )
-    Record.objects.filter(pk=older.pk).update(created_at=now - timedelta(hours=2))
-    Record.objects.filter(pk=newer.pk).update(created_at=now)
-
-    qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[older.id, newer.id])
-    applier = PullStrategyApplier()
-    ordered = applier.apply(
-        qs=qs,
-        strategy={
-            "order_by": "score_desc",
-            "include_snoozed_due": False,
-            "ignore_score_for_sources": [],
-        },
-        now_iso=now.isoformat(),
-    )
-    assert ordered.first().id == newer.id
-
-
-@pytest.mark.django_db
-def test_pull_strategy_legacy_lifo_fifo_aliases():
-    """Stored JSON may still use lifo/fifo; they map to desc/asc."""
-    tenant = TenantFactory()
-    now = timezone.now()
-
-    older = RecordFactory(
-        tenant=tenant,
-        entity_type="lead",
-        data=_sales_lead_row(name="Older", lead_stage="IN_QUEUE", lead_score=50),
-    )
-    newer = RecordFactory(
-        tenant=tenant,
-        entity_type="lead",
-        data=_sales_lead_row(name="Newer", lead_stage="IN_QUEUE", lead_score=50),
-    )
-    Record.objects.filter(pk=older.pk).update(created_at=now - timedelta(hours=2))
-    Record.objects.filter(pk=newer.pk).update(created_at=now)
-
-    qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[older.id, newer.id])
-    applier = PullStrategyApplier()
-    desc_like = applier.apply(
-        qs=qs,
-        strategy={
-            "order_by": "score_desc",
-            "include_snoozed_due": False,
-            "ignore_score_for_sources": [],
-            "tiebreaker": "lifo",
-            "tiebreaker_field": "created_at",
-        },
-        now_iso=now.isoformat(),
-    )
-    assert desc_like.first().id == newer.id
-
-    asc_like = applier.apply(
-        qs=qs,
-        strategy={
-            "order_by": "score_desc",
-            "include_snoozed_due": False,
-            "ignore_score_for_sources": [],
-            "tiebreaker": "fifo",
-            "tiebreaker_field": "created_at",
-        },
-        now_iso=now.isoformat(),
-    )
-    assert asc_like.first().id == older.id
-
-
-@pytest.mark.django_db
-def test_pull_strategy_desc_on_updated_at_when_tiebreaker_field_set():
-    """``tiebreaker_field: updated_at`` + ``desc`` — newer ``updated_at`` wins among same score (same ``created_at``)."""
+def test_pull_strategy_order_updated_at_desc():
     tenant = TenantFactory()
     now = timezone.now()
     same_created = now - timedelta(days=1)
@@ -627,53 +434,204 @@ def test_pull_strategy_desc_on_updated_at_when_tiebreaker_field_set():
     applier = PullStrategyApplier()
     ordered = applier.apply(
         qs=qs,
-        strategy={
-            "order_by": "score_desc",
-            "include_snoozed_due": False,
-            "ignore_score_for_sources": [],
-            "tiebreaker": "desc",
-            "tiebreaker_field": "updated_at",
-        },
+        strategy={"order": ["-lead_score", "-updated_at"], "ignore_score_for_sources": []},
         now_iso=now.isoformat(),
     )
     assert ordered.first().id == newer_touch.id
 
 
 @pytest.mark.django_db
-def test_pull_strategy_unknown_tiebreaker_field_defaults_to_created_at():
-    """Invalid ``tiebreaker_field`` values are ignored; ordering matches ``created_at`` tiebreak."""
+def test_pull_strategy_include_snoozed_due_prepends_sort():
+    """``include_snoozed_due: true`` puts due SNOOZED before other rows (without listing it in ``order``)."""
     tenant = TenantFactory()
     now = timezone.now()
+    past = (now - timedelta(hours=1)).isoformat()
 
-    older = RecordFactory(
+    fresh = RecordFactory(
         tenant=tenant,
         entity_type="lead",
-        data=_sales_lead_row(name="Older", lead_stage="IN_QUEUE", lead_score=50),
+        data=_sales_lead_row(name="Fresh", lead_stage="IN_QUEUE", lead_score=999),
     )
-    newer = RecordFactory(
+    snoozed = RecordFactory(
         tenant=tenant,
         entity_type="lead",
-        data=_sales_lead_row(name="Newer", lead_stage="IN_QUEUE", lead_score=50),
+        data=_sales_lead_row(
+            name="Snoozed due",
+            lead_stage="SNOOZED",
+            call_attempts=1,
+            next_call_at=past,
+            lead_score=1,
+        ),
     )
-    Record.objects.filter(pk=older.pk).update(created_at=now - timedelta(hours=2))
-    Record.objects.filter(pk=newer.pk).update(created_at=now)
-    # Same updated_at so secondary does not flip order.
-    Record.objects.filter(pk__in=[older.pk, newer.pk]).update(updated_at=now - timedelta(hours=5))
 
-    qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[older.id, newer.id])
+    qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[fresh.id, snoozed.id])
     applier = PullStrategyApplier()
     ordered = applier.apply(
         qs=qs,
         strategy={
-            "order_by": "score_desc",
-            "include_snoozed_due": False,
+            "order": ["-lead_score", "-created_at"],
+            "include_snoozed_due": True,
             "ignore_score_for_sources": [],
-            "tiebreaker": "desc",
-            "tiebreaker_field": "not_a_column",
         },
         now_iso=now.isoformat(),
     )
-    assert ordered.first().id == newer.id
+    assert ordered.first().id == snoozed.id
+
+
+@pytest.mark.django_db
+def test_pull_strategy_order_is_expired_snoozed_in_order_array():
+    """Due snoozed first when ``is_expired_snoozed`` is listed explicitly in ``order``."""
+    tenant = TenantFactory()
+    now = timezone.now()
+    past = (now - timedelta(hours=1)).isoformat()
+
+    fresh = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="Fresh", lead_stage="IN_QUEUE", lead_score=999),
+    )
+    snoozed = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="Snoozed due",
+            lead_stage="SNOOZED",
+            call_attempts=1,
+            next_call_at=past,
+            lead_score=1,
+        ),
+    )
+
+    qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[fresh.id, snoozed.id])
+    applier = PullStrategyApplier()
+    ordered = applier.apply(
+        qs=qs,
+        strategy={
+            "order": [
+                "is_expired_snoozed",
+                "-day(created_at)",
+                "-lead_score",
+                "-created_at",
+            ],
+            "day_timezone": "UTC",
+            "ignore_score_for_sources": [],
+        },
+        now_iso=now.isoformat(),
+    )
+    assert ordered.first().id == snoozed.id
+
+
+@pytest.mark.django_db
+def test_pull_strategy_order_day_then_score_then_lifo():
+    """Custom order: today before yesterday; then score; then created_at LIFO within day."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    yesterday_high = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="YHigh", lead_stage="IN_QUEUE", lead_score=999),
+    )
+    today_low = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="TLow", lead_stage="IN_QUEUE", lead_score=10),
+    )
+    Record.objects.filter(pk=yesterday_high.pk).update(created_at=now - timedelta(days=1))
+    Record.objects.filter(pk=today_low.pk).update(created_at=now)
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[yesterday_high.id, today_low.id]
+    )
+    applier = PullStrategyApplier()
+    ordered = applier.apply(
+        qs=qs,
+        strategy={
+            "order": ["-day(created_at)", "-lead_score", "-created_at"],
+            "day_timezone": "UTC",
+            "ignore_score_for_sources": [],
+        },
+        now_iso=now.isoformat(),
+    )
+    assert ordered.first().id == today_low.id
+
+
+@pytest.mark.django_db
+def test_pull_strategy_order_same_day_score_then_lifo():
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    older_low = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="OldLow", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    newer_high = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="NewHigh", lead_stage="IN_QUEUE", lead_score=90),
+    )
+    Record.objects.filter(pk=older_low.pk).update(created_at=now - timedelta(hours=3))
+    Record.objects.filter(pk=newer_high.pk).update(created_at=now - timedelta(hours=1))
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[older_low.id, newer_high.id]
+    )
+    applier = PullStrategyApplier()
+    ordered = applier.apply(
+        qs=qs,
+        strategy={
+            "order": ["-day(created_at)", "-lead_score", "-created_at"],
+            "day_timezone": "UTC",
+            "ignore_score_for_sources": [],
+        },
+        now_iso=now.isoformat(),
+    )
+    assert ordered.first().id == newer_high.id
+
+
+@pytest.mark.django_db
+def test_pull_strategy_created_at_day_beats_older_day_higher_score():
+    """day(created_at): today's row wins over yesterday even with lower lead_score."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    yesterday_high = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="YHigh", lead_stage="IN_QUEUE", lead_score=999),
+    )
+    today_low = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="TLow", lead_stage="IN_QUEUE", lead_score=10),
+    )
+    Record.objects.filter(pk=yesterday_high.pk).update(created_at=now - timedelta(days=1))
+    Record.objects.filter(pk=today_low.pk).update(created_at=now)
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[yesterday_high.id, today_low.id]
+    )
+    applier = PullStrategyApplier()
+    ordered = applier.apply(
+        qs=qs,
+        strategy=_pull_strategy_fresh() | {"day_timezone": "UTC"},
+        now_iso=now.isoformat(),
+    )
+    assert ordered.first().id == today_low.id
+
+
+@pytest.mark.django_db
+def test_pull_strategy_day_rejects_non_created_at_field():
+    tenant = TenantFactory()
+    qs = Record.objects.filter(tenant=tenant, entity_type="lead")
+    applier = PullStrategyApplier()
+    with pytest.raises(ValueError, match="day\\(\\) only supports created_at"):
+        applier.apply(
+            qs=qs,
+            strategy={"order": ["-day(subscription_time_stamp)"], "ignore_score_for_sources": []},
+            now_iso=timezone.now().isoformat(),
+        )
 
 
 # ===================================================================
@@ -868,8 +826,8 @@ def test_pipeline_fresh_bucket_returns_higher_score_first():
 
 
 @pytest.mark.django_db
-def test_pipeline_desc_tiebreaker_newer_created_at_wins():
-    """Same score: newer created_at wins (desc on created_at)."""
+def test_pipeline_desc_created_at_wins_on_score_tie():
+    """Same score: newer created_at wins when ``-created_at`` is in pull_strategy order."""
     tenant = TenantFactory()
     _seed_tenant_buckets(tenant)
     user, _, _ = _make_rm_user(tenant, lead_sources=[], lead_statuses=["SALES LEAD"])
