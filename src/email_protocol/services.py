@@ -127,11 +127,11 @@ def send_email(
         
         # Send email
         email.send(fail_silently=fail_silently)
-        
+
         total_recipients = len(to_emails_list) + len(cc_list) + len(bcc_list)
         logger.info(f"[{client_id}] Email sent successfully to {total_recipients} recipient(s)")
         return True, f"Email sent successfully to {total_recipients} recipient(s)"
-        
+
     except Exception as e:
         error_msg = f"Failed to send email: {str(e)}"
         client_id = client_name or "internal"
