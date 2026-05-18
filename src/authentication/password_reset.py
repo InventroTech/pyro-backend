@@ -70,32 +70,13 @@ def admin_headers() -> Optional[Tuple[str, dict]]:
     return base, hdrs
 
 
-def find_supabase_user_id_for_email(normalized_email: str) -> Optional[str]:
+def _find_user_id_via_supabase_admin_list(base: str, headers: dict, normalized_email: str) -> Optional[str]:
     """
-    Resolve Supabase Auth user UUID: Django auth User, TenantMembership.user_id,
-    then scan Supabase Admin list (paginated) as fallback.
+    Paginated scan of auth users in the *current* Supabase project (matches base URL + service key).
     """
     e = normalized_email.strip().lower()
-
-    du = User.objects.filter(email__iexact=e).first()
-    if du and getattr(du, "supabase_uid", None):
-        return str(du.supabase_uid).strip()
-
-    tm = (
-        TenantMembership.objects.filter(email__iexact=e, is_active=True)
-        .exclude(user_id__isnull=True)
-        .first()
-    )
-    if tm and tm.user_id:
-        return str(tm.user_id)
-
-    bh = admin_headers()
-    if not bh:
-        return None
-    base, headers = bh
     page = 1
     per_page = 200
-
     try:
         while page <= 50:
             r = requests.get(
@@ -118,6 +99,41 @@ def find_supabase_user_id_for_email(normalized_email: str) -> Optional[str]:
             page += 1
     except requests.RequestException:
         logger.exception("Supabase admin list users failed")
+    return None
+
+
+def find_supabase_user_id_for_email(normalized_email: str) -> Optional[str]:
+    """
+    Resolve Supabase Auth user UUID for the configured project.
+
+    When Admin credentials are set, the user id comes only from the Admin *list users* API for
+    the current ``SUPABASE_*`` / ``STAGING_*`` URL+key. That avoids using Django ``supabase_uid`` /
+    ``TenantMembership.user_id`` when those values refer to another Supabase project (Admin
+    ``PUT /admin/users/{id}`` would then return "User not found").
+
+    With no Admin credentials (e.g. some tests), fall back to Django ``User`` and
+    ``TenantMembership``.
+    """
+    e = normalized_email.strip().lower()
+
+    bh = admin_headers()
+    if bh:
+        base, headers = bh
+        # Do not fall back to Django supabase_uid: it may belong to a different Supabase project.
+        return _find_user_id_via_supabase_admin_list(base, headers, e)
+
+    du = User.objects.filter(email__iexact=e).first()
+    if du and getattr(du, "supabase_uid", None):
+        return str(du.supabase_uid).strip()
+
+    tm = (
+        TenantMembership.objects.filter(email__iexact=e, is_active=True)
+        .exclude(user_id__isnull=True)
+        .first()
+    )
+    if tm and tm.user_id:
+        return str(tm.user_id)
+
     return None
 
 
