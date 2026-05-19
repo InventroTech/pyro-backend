@@ -1111,6 +1111,34 @@ class PurgeOldLogTablesJobHandler(JobHandler):
         return days >= 1
 
 
+class SyncDispatchToRecordsJobHandler(JobHandler):
+    """
+    Sync Airbyte ``dispatch_dataDispatchData`` rows into ``records``
+    (``entity_type=dispatch_request``). See ``dispatch_sync.run_dispatch_sync``.
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        from .dispatch_sync import run_dispatch_sync
+
+        stats = run_dispatch_sync()
+        job.result = {
+            "success": True,
+            "fetched": stats["fetched"],
+            "upserted": stats["upserted"],
+            "soft_deleted": stats["soft_deleted"],
+            "skipped": stats["skipped"],
+            "timestamp": timezone.now().isoformat(),
+        }
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+    def validate_payload(self, payload: Dict[str, Any]) -> bool:
+        return True
+
+
 class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
     """
     Set ``data.lead_stage`` to CLOSED for **SELF TRIAL** leads (``lead_status``) whose
@@ -1349,8 +1377,6 @@ class JobHandlerRegistry:
             JobType.PURGE_OLD_LOG_TABLES,
             PurgeOldLogTablesJobHandler(),
         )
-        # Imported lazily to avoid a circular import (dispatch_sync imports JobHandler from this module).
-        from .dispatch_sync import SyncDispatchToRecordsJobHandler
         self.register_handler(
             JobType.SYNC_DISPATCH_TO_RECORDS,
             SyncDispatchToRecordsJobHandler(),

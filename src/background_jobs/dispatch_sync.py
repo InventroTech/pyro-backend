@@ -24,6 +24,8 @@ re-appears in a later sync we revive it (``is_deleted=False``, ``deleted_at=None
 from __future__ import annotations
 
 import logging
+import os
+import re
 import traceback
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -34,9 +36,6 @@ from django.utils import timezone
 
 from crm_records.models import Record
 
-from .job_handlers import JobHandler
-from .models import BackgroundJob
-
 logger = logging.getLogger(__name__)
 
 
@@ -44,9 +43,20 @@ logger = logging.getLogger(__name__)
 # Configuration
 # =====================================================================
 
-# TODO(tenant): replace with the real tenant UUID for the dispatch tenant.
-# Hardcoded per agreement; change here when you have the value.
-DISPATCH_TENANT_ID = "00000000-0000-0000-0000-000000000000"
+# Tenant UUID (not slug). Set per environment in pyro-backend/.env or host env:
+#   DISPATCH_SYNC_TENANT_ID=<uuid from tenants.id>
+_PLACEHOLDER_TENANT_ID = "00000000-0000-0000-0000-000000000000"
+DISPATCH_TENANT_ID = (os.getenv("DISPATCH_SYNC_TENANT_ID") or "").strip() or _PLACEHOLDER_TENANT_ID
+
+
+def _require_dispatch_tenant_id() -> str:
+    tid = (DISPATCH_TENANT_ID or "").strip()
+    if not tid or tid == _PLACEHOLDER_TENANT_ID:
+        raise ValueError(
+            "DISPATCH_SYNC_TENANT_ID is missing or still the placeholder. "
+            "Set it to the staging/production tenant UUID (tenants.id) in the backend environment."
+        )
+    return tid
 
 # Confirmed entity_type for dispatch rows in the records table.
 DISPATCH_ENTITY_TYPE = "dispatch_request"
@@ -63,10 +73,69 @@ _AIRBYTE_META_COLUMNS = {
     "_airbyte_generation_id",
 }
 
-# (source column name, destination data key, type tag).
-# Listed in the same groups as the spec for readability.
-_FIELD_MAP: List[tuple] = [
+# Sheet header labels (row 1 in Google Sheets) → destination ``data`` keys.
+# Matching is case-insensitive; punctuation/spacing is normalized.
+# Add aliases here when ops rename columns — no need to change Airbyte column names.
+_FIELD_SPECS: List[tuple] = [
     # CORE ORDER INFO
+    (("sr no", "s no"), "sr_no", "str"),
+    (("dc no", "dc number"), "dc_number", "str"),
+    (("dc date",), "dc_date", "date"),
+    (("account name", "party name", "customer name"), "account_name", "str"),
+    (("products", "product"), "products", "str"),
+    (("terms", "payment terms"), "terms", "str"),
+    (("quantity", "qty"), "quantity", "int"),
+    (("amount", "value"), "amount", "decimal"),
+    (("po number", "po no", "p o number"), "po_number", "str"),
+    (("po date",), "po_date", "date"),
+    (("engineer",), "engineer", "str"),
+    (("sales order number", "so number", "sales order no"), "sales_order_number", "str"),
+    (("consignee city", "city"), "consignee_city", "str"),
+    (("serial numbers",), "serial_numbers", "str"),
+    (("remarks", "remark"), "remarks", "str"),
+    (("dc received in office",), "dc_received_in_office", "bool"),
+    # LOGISTICS / GODOWN
+    (("date of material dispatch",), "date_of_material_dispatch", "date"),
+    (("date dispatch godown dc to office",), "date_dispatch_godown_dc_to_office", "date"),
+    (("date scanned copy dc to office",), "date_scanned_copy_dc_to_office", "date"),
+    (("e way bill number", "eway bill number"), "e_way_bill_number", "str"),
+    (("transporter name",), "transporter_name", "str"),
+    (("vehicle number",), "vehicle_number", "str"),
+    (("godown in time",), "godown_in_time", "str"),
+    (("godown out time",), "godown_out_time", "str"),
+    (("date lr dispatch to office",), "date_lr_dispatch_to_office", "date"),
+    (("e way updated in server",), "e_way_updated_in_server", "str"),
+    # FREIGHT / LR
+    (("lr number",), "lr_number", "str"),
+    (("lr date",), "lr_date", "date"),
+    (("freight mode",), "freight_mode", "str"),
+    (("freight amount",), "freight_amount", "decimal"),
+    (("date delivery at consignee",), "date_delivery_at_consignee", "date"),
+    (("date email vehicle dispatch details",), "date_email_vehicle_dispatch_details", "date"),
+    (("lr received in office",), "lr_received_in_office", "str"),
+    # CUSTOMER COMMUNICATION (person names in Airbyte cols may change; header text should stay stable)
+    (("date email inv details", "invoice email date"), "date_email_inv_details", "date"),
+    (("date email tc details",), "date_email_tc_details", "date"),
+    (("date courier to customer",), "date_courier_to_customer", "date"),
+    # SIS / CTF
+    (("sis ctf pump model",), "sis_ctf_pump_model", "str"),
+    (("sis ctf model serial number",), "sis_ctf_model_serial_number", "str"),
+    (("sis ctf crm number",), "sis_ctf_crm_number", "str"),
+    (("sis ctf date",), "sis_ctf_date", "date"),
+    (("sis ctf done",), "sis_ctf_done", "str"),
+    (("sis ctf mail",), "sis_ctf_mail", "bool"),
+    # WARRANTY / CHECKS
+    (("e warranty number", "ewarranty number"), "e_warranty_number", "str"),
+    (("e warranty updated date",), "e_warranty_updated_date", "date"),
+    (("dc in office",), "dc_in_office", "bool"),
+    (("note", "notes"), "note", "str"),
+    # VERIFICATION
+    (("checked gather",), "checked_gather", "date"),
+    (("barcode",), "barcode", "date"),
+]
+
+# Fallback when header row is missing or no labels match (legacy Airbyte column names).
+_LEGACY_FIELD_MAP: List[tuple] = [
     ("column_A", "sr_no", "str"),
     ("column_B", "dc_number", "str"),
     ("column_C", "dc_date", "date"),
@@ -83,7 +152,6 @@ _FIELD_MAP: List[tuple] = [
     ("column_N", "serial_numbers", "str"),
     ("column_R", "remarks", "str"),
     ("column_S", "dc_received_in_office", "bool"),
-    # LOGISTICS / GODOWN
     ("Godown_O1", "date_of_material_dispatch", "date"),
     ("Godown_P1", "date_dispatch_godown_dc_to_office", "date"),
     ("Godown_Q1", "date_scanned_copy_dc_to_office", "date"),
@@ -94,7 +162,6 @@ _FIELD_MAP: List[tuple] = [
     ("GODOWN_AV1", "godown_out_time", "str"),
     ("Godown_AD1", "date_lr_dispatch_to_office", "date"),
     ("Godown___Check", "e_way_updated_in_server", "str"),
-    # FREIGHT / LR
     ("ArvindG_Y1", "lr_number", "str"),
     ("ArvindG_Z1", "lr_date", "date"),
     ("ArvindG_AA1", "freight_mode", "str"),
@@ -102,26 +169,24 @@ _FIELD_MAP: List[tuple] = [
     ("ArvindG_AC1", "date_delivery_at_consignee", "date"),
     ("ArvindG_AF1", "date_email_vehicle_dispatch_details", "date"),
     ("Umesh_AE1", "lr_received_in_office", "str"),
-    # CUSTOMER COMMUNICATION
     ("Tulsi_AI1", "date_email_inv_details", "date"),
     ("Tulsi_AJ1", "date_email_tc_details", "date"),
     ("Tulsi_AK1", "date_courier_to_customer", "date"),
-    # SIS / CTF
     ("Umesh_AL1", "sis_ctf_pump_model", "str"),
     ("Umesh_AM1", "sis_ctf_model_serial_number", "str"),
     ("Umesh_AN1", "sis_ctf_crm_number", "str"),
     ("Umesh_AO1", "sis_ctf_date", "date"),
     ("Umesh_AP1", "sis_ctf_done", "str"),
     ("Umesh_AQ1", "sis_ctf_mail", "bool"),
-    # WARRANTY / CHECKS
     ("column_AH", "e_warranty_number", "str"),
     ("Akshay", "e_warranty_updated_date", "date"),
     ("Umesh_Akshay", "dc_in_office", "bool"),
     ("column_AR", "note", "str"),
-    # VERIFICATION
     ("DarshanS_AS1", "checked_gather", "date"),
     ("DarshanS_AT1", "barcode", "date"),
 ]
+
+_DC_HEADER_LABELS = frozenset({"dc no", "dc number"})
 
 
 # =====================================================================
@@ -214,59 +279,181 @@ _TRANSFORMERS = {
 }
 
 
+def _normalize_header_label(value: Any) -> Optional[str]:
+    """Normalize a sheet header cell for alias lookup."""
+    raw = _clean(value)
+    if raw is None:
+        return None
+    s = raw.lower().replace("#", " ")
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return " ".join(s.split()) or None
+
+
+def _build_header_alias_index() -> Dict[str, tuple]:
+    index: Dict[str, tuple] = {}
+    for aliases, dest_key, type_tag in _FIELD_SPECS:
+        for alias in aliases:
+            norm = _normalize_header_label(alias)
+            if norm:
+                index[norm] = (dest_key, type_tag)
+    return index
+
+
+_HEADER_ALIAS_INDEX = _build_header_alias_index()
+
+
 # =====================================================================
 # Step 1 — fetch
 # =====================================================================
 
-def _fetch_source_rows() -> List[Dict[str, Any]]:
-    """
-    Pull all non-header rows from the Airbyte source table.
+def _is_header_row(row: Dict[str, Any]) -> bool:
+    """True when this row is the sheet header row (e.g. column B cell is ``DC# No``)."""
+    for col_key, cell in row.items():
+        if col_key in _AIRBYTE_META_COLUMNS:
+            continue
+        label = _normalize_header_label(cell)
+        if label in _DC_HEADER_LABELS:
+            return True
+    return False
 
-    Returns a list of dicts keyed by source column name.
+
+def _fetch_header_and_data_rows() -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    sql = (
-        f'SELECT * FROM "{SOURCE_TABLE}" '
-        f'WHERE "column_B" IS NOT NULL AND "column_B" <> %s'
-    )
+    Load the full Airbyte table, split header row vs data rows.
+
+    Header row = first row whose sheet label for DC# is ``DC# No`` / ``DC No``.
+    Data rows = everything else with a non-empty DC# value.
+    """
+    sql = f'SELECT * FROM "{SOURCE_TABLE}"'
     with connection.cursor() as cursor:
-        cursor.execute(sql, ["DC# No"])
+        cursor.execute(sql)
         col_names = [c[0] for c in cursor.description]
-        return [dict(zip(col_names, row)) for row in cursor.fetchall()]
+        all_rows = [dict(zip(col_names, row)) for row in cursor.fetchall()]
+
+    header_row: Optional[Dict[str, Any]] = None
+    data_rows: List[Dict[str, Any]] = []
+    for row in all_rows:
+        if _is_header_row(row):
+            if header_row is None:
+                header_row = row
+            continue
+        data_rows.append(row)
+
+    return header_row, data_rows
+
+
+def _fetch_source_rows() -> List[Dict[str, Any]]:
+    """Backward-compatible helper: data rows only (tests may patch this)."""
+    _, data_rows = _fetch_header_and_data_rows()
+    return data_rows
+
+
+def _build_column_mapping(header_row: Optional[Dict[str, Any]]) -> Dict[str, tuple]:
+    """
+    Map physical DB column keys (``column_A``, ``Godown_W1``, …) → (dest_key, type).
+
+    Uses header row cell text when available; falls back to legacy Airbyte names.
+    """
+    mapping: Dict[str, tuple] = {}
+    if header_row:
+        for col_key, cell in header_row.items():
+            if col_key in _AIRBYTE_META_COLUMNS:
+                continue
+            label = _normalize_header_label(cell)
+            if not label:
+                continue
+            spec = _HEADER_ALIAS_INDEX.get(label)
+            if spec:
+                mapping[col_key] = spec
+            else:
+                logger.debug(
+                    "[DispatchSync] Unmapped sheet header %r (physical col=%s)",
+                    cell,
+                    col_key,
+                )
+        if mapping:
+            logger.info(
+                "[DispatchSync] Built column mapping from sheet headers (%s columns)",
+                len(mapping),
+            )
+            return mapping
+        logger.warning(
+            "[DispatchSync] Header row present but no columns matched aliases; using legacy map"
+        )
+
+    mapping = {
+        src_col: (dest_key, type_tag)
+        for src_col, dest_key, type_tag in _LEGACY_FIELD_MAP
+        if src_col not in _AIRBYTE_META_COLUMNS
+    }
+    logger.info("[DispatchSync] Using legacy Airbyte column-name mapping (%s columns)", len(mapping))
+    return mapping
+
+
+def _find_dc_column_key(
+    header_row: Optional[Dict[str, Any]],
+    col_mapping: Dict[str, tuple],
+) -> Optional[str]:
+    """Physical column that holds the DC# / upsert key for data rows."""
+    for col_key, (dest_key, _) in col_mapping.items():
+        if dest_key == "dc_number":
+            return col_key
+    if header_row:
+        for col_key, cell in header_row.items():
+            if col_key in _AIRBYTE_META_COLUMNS:
+                continue
+            if _normalize_header_label(cell) in _DC_HEADER_LABELS:
+                return col_key
+    return "column_B"
+
+
+def _row_dc_value(row: Dict[str, Any], dc_col_key: str) -> Optional[str]:
+    """DC# for a data row; skip header-like values."""
+    raw = _clean(row.get(dc_col_key))
+    if not raw:
+        return None
+    if _normalize_header_label(raw) in _DC_HEADER_LABELS:
+        return None
+    return raw
 
 
 # =====================================================================
 # Step 2 — transform
 # =====================================================================
 
-def _transform_row(row: Dict[str, Any], synced_at_iso: str) -> Optional[Dict[str, Any]]:
+def _transform_row(
+    row: Dict[str, Any],
+    col_mapping: Dict[str, tuple],
+    dc_col_key: str,
+    synced_at_iso: str,
+) -> Optional[Dict[str, Any]]:
     """
     Map a single source row to the records-table-shaped dict.
 
-    Per-field parse failures are swallowed (None stored for that field) so a
-    single bad cell doesn't fail the whole job. Returns None only when the
-    upsert key (column_B / dc_number) is missing — those rows can't be
-    keyed, so we skip them with a warning.
+    ``col_mapping`` comes from :func:`_build_column_mapping` (sheet header labels).
     """
-    source_row_id = _clean(row.get("column_B"))
+    source_row_id = _row_dc_value(row, dc_col_key)
     if not source_row_id:
         return None
 
     data: Dict[str, Any] = {}
-    for src_col, dest_key, type_tag in _FIELD_MAP:
+    for src_col, (dest_key, type_tag) in col_mapping.items():
         if src_col in _AIRBYTE_META_COLUMNS:
             continue
         try:
             data[dest_key] = _TRANSFORMERS[type_tag](row.get(src_col))
-        except Exception:  # pragma: no cover — extreme paranoia, transformers swallow
+        except Exception:  # pragma: no cover
             logger.exception(
                 "[DispatchSync] Transformer crashed for column=%s key=%s; storing None",
-                src_col, dest_key,
+                src_col,
+                dest_key,
             )
             data[dest_key] = None
 
-    # Embedded keys (recorded in data because the records table has no real columns for them).
     data["source_row_id"] = source_row_id
     data["synced_at"] = synced_at_iso
+    if "dc_number" not in data or data.get("dc_number") is None:
+        data["dc_number"] = source_row_id
 
     return {
         "source_row_id": source_row_id,
@@ -391,26 +578,37 @@ def run_dispatch_sync() -> Dict[str, int]:
     """
     logger.info("[DispatchSync] Starting dispatch sync")
     try:
+        tenant_id = _require_dispatch_tenant_id()
+        logger.info("[DispatchSync] Using tenant_id=%s", tenant_id)
         # Settings has TIME_ZONE='UTC' and USE_TZ=False, so timezone.now() is naive UTC.
         now = timezone.now()
         synced_at_iso = now.isoformat()
 
-        rows = _fetch_source_rows()
+        header_row, rows = _fetch_header_and_data_rows()
+        col_mapping = _build_column_mapping(header_row)
+        dc_col_key = _find_dc_column_key(header_row, col_mapping)
+        if not dc_col_key:
+            raise ValueError("[DispatchSync] Could not determine DC# column from header row")
+
         logger.info(
-            "[DispatchSync] Fetched %s rows from %s", len(rows), SOURCE_TABLE
+            "[DispatchSync] Fetched %s data row(s) from %s (header row=%s, dc_col=%s)",
+            len(rows),
+            SOURCE_TABLE,
+            "yes" if header_row else "no",
+            dc_col_key,
         )
 
         transformed: List[Dict[str, Any]] = []
         skipped = 0
         for row in rows:
-            payload = _transform_row(row, synced_at_iso)
+            payload = _transform_row(row, col_mapping, dc_col_key, synced_at_iso)
             if payload is None:
                 skipped += 1
                 continue
             transformed.append(payload)
         if skipped:
             logger.warning(
-                "[DispatchSync] Skipped %s source row(s) with empty column_B", skipped
+                "[DispatchSync] Skipped %s source row(s) with empty/invalid DC#", skipped
             )
 
         with transaction.atomic():
@@ -433,32 +631,3 @@ def run_dispatch_sync() -> Dict[str, int]:
             "[DispatchSync] Dispatch sync failed:\n%s", traceback.format_exc()
         )
         raise
-
-
-# =====================================================================
-# JobHandler integration
-# =====================================================================
-
-class SyncDispatchToRecordsJobHandler(JobHandler):
-    """Wraps :func:`run_dispatch_sync` for the background-jobs queue."""
-
-    def process(self, job: BackgroundJob) -> bool:
-        stats = run_dispatch_sync()
-        job.result = {
-            "success": True,
-            "fetched": stats["fetched"],
-            "upserted": stats["upserted"],
-            "soft_deleted": stats["soft_deleted"],
-            "skipped": stats["skipped"],
-            "timestamp": timezone.now().isoformat(),
-        }
-        return True
-
-    def get_retry_delay(self, attempt: int) -> int:
-        # Sync is heavy, retries should be modest. Mirrors lead-cron handlers.
-        delays = [60, 300, 900]
-        return delays[min(attempt - 1, len(delays) - 1)]
-
-    def validate_payload(self, payload: Dict[str, Any]) -> bool:  # noqa: D401
-        # No payload required.
-        return True

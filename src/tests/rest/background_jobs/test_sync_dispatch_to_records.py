@@ -36,7 +36,8 @@ from django.utils import timezone
 from background_jobs import dispatch_sync as ds
 from background_jobs.dispatch_sync import (
     DISPATCH_ENTITY_TYPE,
-    SyncDispatchToRecordsJobHandler,
+    _build_column_mapping,
+    _find_dc_column_key,
     _to_bool,
     _to_date,
     _to_decimal,
@@ -45,6 +46,7 @@ from background_jobs.dispatch_sync import (
     _transform_row,
     run_dispatch_sync,
 )
+from background_jobs.job_handlers import SyncDispatchToRecordsJobHandler
 from background_jobs.models import JobType
 from crm_records.models import Record
 
@@ -118,6 +120,70 @@ def _source_row(**overrides):
     }
     defaults.update(overrides)
     return defaults
+
+
+def _sheet_header_row() -> dict:
+    """
+    Row 1 labels as they appear in the Google Sheet (not Airbyte column names).
+    Physical keys match ``_source_row`` defaults for tests.
+    """
+    return {
+        "column_A": "Sr No",
+        "column_B": "DC# No",
+        "column_C": "DC Date",
+        "column_D": "Account Name",
+        "column_E": "Products",
+        "column_F": "Terms",
+        "column_G": "Quantity",
+        "column_H": "Amount",
+        "column_I": "PO Number",
+        "column_J": "PO Date",
+        "column_K": "Engineer",
+        "column_L": "Sales Order Number",
+        "column_M": "Consignee City",
+        "column_N": "Serial Numbers",
+        "column_R": "Remarks",
+        "column_S": "DC Received In Office",
+        "Godown_O1": "Date Of Material Dispatch",
+        "Godown_P1": "Date Dispatch Godown Dc To Office",
+        "Godown_Q1": "Date Scanned Copy Dc To Office",
+        "Godown_U1": "E Way Bill Number",
+        "Godown_W1": "Transporter Name",
+        "Godown_X1": "Vehicle Number",
+        "GODOWN_AU1": "Godown In Time",
+        "GODOWN_AV1": "Godown Out Time",
+        "Godown_AD1": "Date Lr Dispatch To Office",
+        "Godown___Check": "E Way Updated In Server",
+        "ArvindG_Y1": "LR Number",
+        "ArvindG_Z1": "LR Date",
+        "ArvindG_AA1": "Freight Mode",
+        "ArvindG_AB1": "Freight Amount",
+        "ArvindG_AC1": "Date Delivery At Consignee",
+        "ArvindG_AF1": "Date Email Vehicle Dispatch Details",
+        "Umesh_AE1": "LR Received In Office",
+        "Tulsi_AI1": "Date Email Inv Details",
+        "Tulsi_AJ1": "Date Email Tc Details",
+        "Tulsi_AK1": "Date Courier To Customer",
+        "Umesh_AL1": "Sis Ctf Pump Model",
+        "Umesh_AM1": "Sis Ctf Model Serial Number",
+        "Umesh_AN1": "Sis Ctf Crm Number",
+        "Umesh_AO1": "Sis Ctf Date",
+        "Umesh_AP1": "Sis Ctf Done",
+        "Umesh_AQ1": "Sis Ctf Mail",
+        "column_AH": "E Warranty Number",
+        "Akshay": "E Warranty Updated Date",
+        "Umesh_Akshay": "DC In Office",
+        "column_AR": "Note",
+        "DarshanS_AS1": "Checked Gather",
+        "DarshanS_AT1": "Barcode",
+    }
+
+
+def _transform_row_for_test(row: dict, synced_at: str):
+    header = _sheet_header_row()
+    col_mapping = _build_column_mapping(header)
+    dc_col = _find_dc_column_key(header, col_mapping)
+    return _transform_row(row, col_mapping, dc_col, synced_at)
 
 
 # =====================================================================
@@ -202,7 +268,7 @@ class DispatchTransformerTests(unittest.TestCase):
 
     def test_transform_row_maps_full_set_of_fields(self):
         synced_at = "2026-05-15T08:05:00"
-        result = _transform_row(_source_row(), synced_at)
+        result = _transform_row_for_test(_source_row(), synced_at)
 
         self.assertIsNotNone(result)
         self.assertEqual(result["source_row_id"], "DC-001")
@@ -230,19 +296,19 @@ class DispatchTransformerTests(unittest.TestCase):
         self.assertEqual(data["synced_at"], synced_at)
 
     def test_transform_row_skips_when_column_b_blank(self):
-        self.assertIsNone(_transform_row(_source_row(column_B=""), "2026-05-15T00:00:00"))
-        self.assertIsNone(_transform_row(_source_row(column_B=None), "2026-05-15T00:00:00"))
-        self.assertIsNone(_transform_row(_source_row(column_B="   "), "2026-05-15T00:00:00"))
+        self.assertIsNone(_transform_row_for_test(_source_row(column_B=""), "2026-05-15T00:00:00"))
+        self.assertIsNone(_transform_row_for_test(_source_row(column_B=None), "2026-05-15T00:00:00"))
+        self.assertIsNone(_transform_row_for_test(_source_row(column_B="   "), "2026-05-15T00:00:00"))
 
     def test_transform_row_does_not_map_airbyte_metadata_columns(self):
-        result = _transform_row(_source_row(), "2026-05-15T00:00:00")
+        result = _transform_row_for_test(_source_row(), "2026-05-15T00:00:00")
         for meta_key in ("_airbyte_raw_id", "_airbyte_extracted_at", "_airbyte_meta", "_airbyte_generation_id"):
             self.assertNotIn(meta_key, result["data"])
 
     def test_transform_row_stores_none_for_unparseable_field_without_failing(self):
         """A bad date should not blow up the row — it should land as None."""
         row = _source_row(column_C="garbage", column_G="not-a-number")
-        result = _transform_row(row, "2026-05-15T00:00:00")
+        result = _transform_row_for_test(row, "2026-05-15T00:00:00")
         self.assertIsNotNone(result)
         self.assertIsNone(result["data"]["dc_date"])
         self.assertIsNone(result["data"]["quantity"])
@@ -251,12 +317,31 @@ class DispatchTransformerTests(unittest.TestCase):
         row = _source_row(
             column_C="", column_G="", column_H="", column_S="", Akshay="",
         )
-        result = _transform_row(row, "2026-05-15T00:00:00")
+        result = _transform_row_for_test(row, "2026-05-15T00:00:00")
         self.assertIsNone(result["data"]["dc_date"])
         self.assertIsNone(result["data"]["quantity"])
         self.assertIsNone(result["data"]["amount"])
         self.assertIsNone(result["data"]["dc_received_in_office"])
         self.assertIsNone(result["data"]["e_warranty_updated_date"])
+
+    def test_header_labels_map_even_when_physical_column_names_change(self):
+        """Ops may rename Airbyte cols; row-1 header text is the stable key."""
+        header = {
+            "new_col_dc": "DC# No",
+            "new_col_name": "Account Name",
+            "new_col_inv_email": "Date Email Inv Details",
+        }
+        col_mapping = _build_column_mapping(header)
+        dc_col = _find_dc_column_key(header, col_mapping)
+        row = {
+            "new_col_dc": "DC-RENAMED-99",
+            "new_col_name": "Renamed Customer",
+            "new_col_inv_email": "07-Apr-26",
+        }
+        result = _transform_row(row, col_mapping, dc_col, "2026-05-15T00:00:00")
+        self.assertEqual(result["source_row_id"], "DC-RENAMED-99")
+        self.assertEqual(result["data"]["account_name"], "Renamed Customer")
+        self.assertEqual(result["data"]["date_email_inv_details"], "2026-04-07")
 
 
 # =====================================================================
@@ -281,8 +366,12 @@ class DispatchSyncEndToEndTests(_DispatchTenantPatchMixin, TestCase):
     """End-to-end ``run_dispatch_sync`` runs with the source fetch mocked."""
 
     def _patch_source_rows(self, rows):
-        """Patch _fetch_source_rows to return ``rows`` (list of dicts)."""
-        return patch.object(ds, "_fetch_source_rows", return_value=rows)
+        """Patch fetch to return a sheet header row plus data rows."""
+        return patch.object(
+            ds,
+            "_fetch_header_and_data_rows",
+            return_value=(_sheet_header_row(), rows),
+        )
 
     # -----------------------------------------------------------------
     # Insert
