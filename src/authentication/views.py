@@ -17,9 +17,10 @@ from authentication.supabase_env import supabase_anon_key, supabase_api_base_url
 from authentication.password_reset import (
     OTP_TTL_SECONDS,
     admin_update_user_password,
-    find_supabase_user_id_for_email,
+    find_supabase_user_id_for_password_reset,
     otp_codes_match,
     otp_hmac_digest,
+    _email_log_tag,
 )
 
 from email_protocol.services import send_email
@@ -28,6 +29,18 @@ logger = logging.getLogger(__name__)
 
 SUPABASE_PROJECT_URL = supabase_api_base_url() or None
 SUPABASE_ANON_KEY = supabase_anon_key() or None
+
+
+def _client_correlation_id(request) -> str:
+    """Prefer reverse-proxy request id headers for log correlation."""
+    rid = (
+        request.META.get("HTTP_X_REQUEST_ID")
+        or request.META.get("HTTP_X_CORRELATION_ID")
+        or request.META.get("HTTP_X_AMZN_TRACE_ID")
+    )
+    if rid:
+        return str(rid).strip()[:200]
+    return "no-client-request-id"
 
 
 class SupabaseAuthCheckView(APIView):
@@ -135,10 +148,34 @@ class SupabasePasswordRecoverView(APIView):
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         normalized = email.lower()
+        rid = _client_correlation_id(request)
 
-        uid = find_supabase_user_id_for_email(normalized)
+        logger.info(
+            "[PasswordReset][forgot-password] start rid=%s %s",
+            rid,
+            _email_log_tag(normalized),
+        )
+
+        uid, lookup_failed = find_supabase_user_id_for_password_reset(normalized)
+        if lookup_failed:
+            logger.error(
+                "[PasswordReset][forgot-password] resolve_failed_503 rid=%s %s "
+                "(check resolve_user + supabase_admin_list logs for error_id)",
+                rid,
+                _email_log_tag(normalized),
+            )
+            return Response(
+                {
+                    "error": "Unable to verify account right now. Please try again in a few minutes.",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         if not uid:
-            logger.info("[PasswordReset] No Supabase user for email (request acknowledged).")
+            logger.info(
+                "[PasswordReset][forgot-password] no_supabase_user_ack rid=%s %s",
+                rid,
+                _email_log_tag(normalized),
+            )
             return Response({"ok": True})
 
         otp_plain = _generate_six_digit_otp()
@@ -164,7 +201,12 @@ class SupabasePasswordRecoverView(APIView):
         )
 
         if not ok:
-            logger.error("[PasswordReset] OTP email failed for %s: %s", normalized, msg)
+            logger.error(
+                "[PasswordReset][forgot-password] send_email_failed rid=%s %s err=%s",
+                rid,
+                _email_log_tag(normalized),
+                msg,
+            )
             return Response(
                 {"error": "Unable to send reset email. Try again later."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -178,14 +220,20 @@ class SupabasePasswordRecoverView(APIView):
                 )
         except Exception:
             logger.exception(
-                "[PasswordReset] OTP email sent but DB save failed for %s", normalized
+                "[PasswordReset][forgot-password] otp_db_save_failed rid=%s %s",
+                rid,
+                _email_log_tag(normalized),
             )
             return Response(
                 {"error": "Unable to finalize reset request. Try again later."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
-        logger.info("[PasswordReset] OTP issued for %s", normalized)
+        logger.info(
+            "[PasswordReset][forgot-password] otp_issued rid=%s %s",
+            rid,
+            _email_log_tag(normalized),
+        )
         return Response({"ok": True})
 
 
@@ -199,6 +247,7 @@ class PasswordResetConfirmView(APIView):
 
     def post(self, request):
         email = (request.data.get("email") or "").strip().lower()
+        rid = _client_correlation_id(request)
         otp = (request.data.get("otp") or "").strip().replace(" ", "")
         password = request.data.get("password") or ""
         password_confirm = request.data.get("password_confirm") or ""
@@ -221,8 +270,31 @@ class PasswordResetConfirmView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        uid = find_supabase_user_id_for_email(email)
+        logger.info(
+            "[PasswordReset][confirm-password] start rid=%s %s",
+            rid,
+            _email_log_tag(email),
+        )
+
+        uid, lookup_failed = find_supabase_user_id_for_password_reset(email)
+        if lookup_failed:
+            logger.error(
+                "[PasswordReset][confirm-password] resolve_failed_503 rid=%s %s",
+                rid,
+                _email_log_tag(email),
+            )
+            return Response(
+                {
+                    "error": "Unable to verify account right now. Please try again in a few minutes.",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         if not uid:
+            logger.info(
+                "[PasswordReset][confirm-password] no_uid_bad_request rid=%s %s",
+                rid,
+                _email_log_tag(email),
+            )
             return Response(
                 {"error": "Invalid email or code."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -235,6 +307,11 @@ class PasswordResetConfirmView(APIView):
             .first()
         )
         if not row or not otp_codes_match(email, otp, row.otp_hash):
+            logger.info(
+                "[PasswordReset][confirm-password] invalid_or_expired_otp rid=%s %s",
+                rid,
+                _email_log_tag(email),
+            )
             return Response(
                 {"error": "Invalid or expired code. Request a new reset email."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -244,9 +321,20 @@ class PasswordResetConfirmView(APIView):
         PasswordResetOTP.objects.filter(email__iexact=email).delete()
 
         if not success:
+            logger.error(
+                "[PasswordReset][confirm-password] admin_set_password_failed rid=%s %s err=%s",
+                rid,
+                _email_log_tag(email),
+                err_msg,
+            )
             return Response(
                 {"error": err_msg or "Could not update password."},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
+        logger.info(
+            "[PasswordReset][confirm-password] success rid=%s %s",
+            rid,
+            _email_log_tag(email),
+        )
         return Response({"ok": True})
