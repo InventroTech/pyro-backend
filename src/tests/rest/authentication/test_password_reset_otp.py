@@ -29,9 +29,9 @@ class SupabasePasswordRecoverOTPTests(TestCase):
         self.client = APIClient()
 
     @patch("authentication.views.send_email")
-    @patch("authentication.views.find_supabase_user_id_for_email")
+    @patch("authentication.views.find_supabase_user_id_for_password_reset")
     def test_issues_otp_and_sends_mail(self, mock_find, mock_send):
-        mock_find.return_value = "00000000-0000-0000-0000-000000000001"
+        mock_find.return_value = ("00000000-0000-0000-0000-000000000001", False)
         mock_send.return_value = (True, "sent")
 
         response = self.client.post(
@@ -52,9 +52,9 @@ class SupabasePasswordRecoverOTPTests(TestCase):
         self.assertGreater(row.expires_at, timezone.now())
         self.assertNotIn(_OTP_SLOT, html)
 
-    @patch("authentication.views.find_supabase_user_id_for_email")
+    @patch("authentication.views.find_supabase_user_id_for_password_reset")
     def test_no_user_returns_ok_without_row(self, mock_find):
-        mock_find.return_value = None
+        mock_find.return_value = (None, False)
         response = self.client.post(
             "/auth/forgot-password/",
             _valid_email_payload("ghost@example.com"),
@@ -74,9 +74,9 @@ class SupabasePasswordRecoverOTPTests(TestCase):
             400,
         )
 
-    @patch("authentication.views.find_supabase_user_id_for_email")
+    @patch("authentication.views.find_supabase_user_id_for_password_reset")
     def test_rejects_templates_without_placeholder(self, mock_find):
-        mock_find.return_value = None
+        mock_find.return_value = (None, False)
         response = self.client.post(
             "/auth/forgot-password/",
             {
@@ -90,9 +90,9 @@ class SupabasePasswordRecoverOTPTests(TestCase):
         self.assertEqual(response.status_code, 400)
 
     @patch("authentication.views.send_email")
-    @patch("authentication.views.find_supabase_user_id_for_email")
+    @patch("authentication.views.find_supabase_user_id_for_password_reset")
     def test_send_failure_returns_503(self, mock_find, mock_send):
-        mock_find.return_value = "00000000-0000-0000-0000-000000000002"
+        mock_find.return_value = ("00000000-0000-0000-0000-000000000002", False)
         mock_send.return_value = (False, "smtp down")
         response = self.client.post(
             "/auth/forgot-password/",
@@ -101,6 +101,16 @@ class SupabasePasswordRecoverOTPTests(TestCase):
         )
         self.assertEqual(response.status_code, 503)
         self.assertFalse(PasswordResetOTP.objects.filter(email__iexact="fail@example.com").exists())
+
+    @patch("authentication.views.find_supabase_user_id_for_password_reset")
+    def test_supabase_admin_list_error_returns_503(self, mock_find):
+        mock_find.return_value = (None, True)
+        response = self.client.post(
+            "/auth/forgot-password/",
+            _valid_email_payload("up@example.com"),
+            format="json",
+        )
+        self.assertEqual(response.status_code, 503)
 
 
 class PasswordResetConfirmOTPTests(TestCase):
@@ -116,7 +126,7 @@ class PasswordResetConfirmOTPTests(TestCase):
         clear=False,
     )
     @patch("authentication.views.admin_update_user_password")
-    @patch("authentication.views.find_supabase_user_id_for_email")
+    @patch("authentication.views.find_supabase_user_id_for_password_reset")
     def test_confirm_with_valid_otp_updates_password(self, mock_find, mock_admin):
         uid = "22222222-2222-2222-2222-222222222222"
         email = "otp@example.com"
@@ -130,7 +140,7 @@ class PasswordResetConfirmOTPTests(TestCase):
             expires_at=timezone.now() + timedelta(minutes=4),
         )
 
-        mock_find.return_value = uid
+        mock_find.return_value = (uid, False)
         mock_admin.return_value = (True, "ok")
 
         response = self.client.post(
@@ -169,10 +179,10 @@ class PasswordResetConfirmOTPTests(TestCase):
         },
         clear=False,
     )
-    @patch("authentication.views.find_supabase_user_id_for_email")
+    @patch("authentication.views.find_supabase_user_id_for_password_reset")
     def test_confirm_rejects_expired_otp(self, mock_find):
         email = "exp@example.com"
-        mock_find.return_value = "33333333-3333-3333-3333-333333333333"
+        mock_find.return_value = ("33333333-3333-3333-3333-333333333333", False)
         PasswordResetOTP.objects.create(
             email=email,
             otp_hash=otp_hmac_digest(email, "111111"),
