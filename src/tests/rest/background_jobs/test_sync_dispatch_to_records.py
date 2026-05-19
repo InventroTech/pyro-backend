@@ -9,7 +9,7 @@ Two layers:
 
 2. ``DispatchSyncEndToEndTests`` / ``SyncDispatchToRecordsJobHandlerTests`` —
    exercise ``run_dispatch_sync`` end-to-end against a real test database
-   with ``_fetch_source_rows`` patched (the Airbyte ``dispatch_dataDispatchData``
+   with ``_fetch_header_and_data_rows`` patched (the Airbyte ``dispatch_dataDispatchData``
    table is not in our schema and is owned by Airbyte). They verify upsert,
    revival of soft-deleted rows, soft-delete of disappeared rows, and the
    handler's job.result payload.
@@ -59,8 +59,8 @@ from tests.factories import BackgroundJobFactory, TenantFactory
 
 def _source_row(**overrides):
     """
-    Build a single source row dict matching what _fetch_source_rows would
-    return. Sensible defaults are used for the fields we don't override so a
+    Build a single source row dict matching what _fetch_header_and_data_rows
+    returns as a data row. Sensible defaults are used for the fields we don't override so a
     test can pass a minimal kwargs and still get a row that round-trips.
     """
     defaults = {
@@ -123,60 +123,12 @@ def _source_row(**overrides):
 
 
 def _sheet_header_row() -> dict:
-    """
-    Row 1 labels as they appear in the Google Sheet (not Airbyte column names).
-    Physical keys match ``_source_row`` defaults for tests.
-    """
-    return {
-        "column_A": "Sr No",
-        "column_B": "DC# No",
-        "column_C": "DC Date",
-        "column_D": "Account Name",
-        "column_E": "Products",
-        "column_F": "Terms",
-        "column_G": "Quantity",
-        "column_H": "Amount",
-        "column_I": "PO Number",
-        "column_J": "PO Date",
-        "column_K": "Engineer",
-        "column_L": "Sales Order Number",
-        "column_M": "Consignee City",
-        "column_N": "Serial Numbers",
-        "column_R": "Remarks",
-        "column_S": "DC Received In Office",
-        "Godown_O1": "Date Of Material Dispatch",
-        "Godown_P1": "Date Dispatch Godown Dc To Office",
-        "Godown_Q1": "Date Scanned Copy Dc To Office",
-        "Godown_U1": "E Way Bill Number",
-        "Godown_W1": "Transporter Name",
-        "Godown_X1": "Vehicle Number",
-        "GODOWN_AU1": "Godown In Time",
-        "GODOWN_AV1": "Godown Out Time",
-        "Godown_AD1": "Date Lr Dispatch To Office",
-        "Godown___Check": "E Way Updated In Server",
-        "ArvindG_Y1": "LR Number",
-        "ArvindG_Z1": "LR Date",
-        "ArvindG_AA1": "Freight Mode",
-        "ArvindG_AB1": "Freight Amount",
-        "ArvindG_AC1": "Date Delivery At Consignee",
-        "ArvindG_AF1": "Date Email Vehicle Dispatch Details",
-        "Umesh_AE1": "LR Received In Office",
-        "Tulsi_AI1": "Date Email Inv Details",
-        "Tulsi_AJ1": "Date Email Tc Details",
-        "Tulsi_AK1": "Date Courier To Customer",
-        "Umesh_AL1": "Sis Ctf Pump Model",
-        "Umesh_AM1": "Sis Ctf Model Serial Number",
-        "Umesh_AN1": "Sis Ctf Crm Number",
-        "Umesh_AO1": "Sis Ctf Date",
-        "Umesh_AP1": "Sis Ctf Done",
-        "Umesh_AQ1": "Sis Ctf Mail",
-        "column_AH": "E Warranty Number",
-        "Akshay": "E Warranty Updated Date",
-        "Umesh_Akshay": "DC In Office",
-        "column_AR": "Note",
-        "DarshanS_AS1": "Checked Gather",
-        "DarshanS_AT1": "Barcode",
-    }
+    """Production row-1 labels (dispatch_dataDispatchData header row)."""
+    from tests.rest.background_jobs.test_production_header_aliases import (
+        PRODUCTION_HEADER_ROW,
+    )
+
+    return dict(PRODUCTION_HEADER_ROW)
 
 
 def _transform_row_for_test(row: dict, synced_at: str):
@@ -361,10 +313,6 @@ class _DispatchTenantPatchMixin:
         self._tenant_patcher.start()
         self.addCleanup(self._tenant_patcher.stop)
 
-
-class DispatchSyncEndToEndTests(_DispatchTenantPatchMixin, TestCase):
-    """End-to-end ``run_dispatch_sync`` runs with the source fetch mocked."""
-
     def _patch_source_rows(self, rows):
         """Patch fetch to return a sheet header row plus data rows."""
         return patch.object(
@@ -372,6 +320,10 @@ class DispatchSyncEndToEndTests(_DispatchTenantPatchMixin, TestCase):
             "_fetch_header_and_data_rows",
             return_value=(_sheet_header_row(), rows),
         )
+
+
+class DispatchSyncEndToEndTests(_DispatchTenantPatchMixin, TestCase):
+    """End-to-end ``run_dispatch_sync`` runs with the source fetch mocked."""
 
     # -----------------------------------------------------------------
     # Insert
@@ -546,7 +498,7 @@ class DispatchSyncEndToEndTests(_DispatchTenantPatchMixin, TestCase):
     # -----------------------------------------------------------------
 
     def test_exception_in_fetch_is_re_raised_for_scheduler(self):
-        with patch.object(ds, "_fetch_source_rows", side_effect=RuntimeError("boom")):
+        with patch.object(ds, "_fetch_header_and_data_rows", side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
                 run_dispatch_sync()
 
@@ -562,7 +514,7 @@ class SyncDispatchToRecordsJobHandlerTests(_DispatchTenantPatchMixin, TestCase):
             payload={},
         )
         rows = [_source_row(column_B="DC-J1"), _source_row(column_B="DC-J2")]
-        with patch.object(ds, "_fetch_source_rows", return_value=rows):
+        with self._patch_source_rows(rows):
             ok = handler.process(job)
         self.assertTrue(ok)
         self.assertTrue(job.result["success"])

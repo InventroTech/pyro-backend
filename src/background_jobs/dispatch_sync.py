@@ -76,9 +76,11 @@ _AIRBYTE_META_COLUMNS = {
 # Sheet header labels (row 1 in Google Sheets) → destination ``data`` keys.
 # Matching is case-insensitive; punctuation/spacing is normalized.
 # Add aliases here when ops rename columns — no need to change Airbyte column names.
+# Aliases match production sheet row 1 (see dispatch_dataDispatchData header row).
+# Normalization: lower case, ``#`` → space, non-alphanumerics → spaces.
 _FIELD_SPECS: List[tuple] = [
     # CORE ORDER INFO
-    (("sr no", "s no"), "sr_no", "str"),
+    (("sr no", "s no", "srno"), "sr_no", "str"),
     (("dc no", "dc number"), "dc_number", "str"),
     (("dc date",), "dc_date", "date"),
     (("account name", "party name", "customer name"), "account_name", "str"),
@@ -86,46 +88,116 @@ _FIELD_SPECS: List[tuple] = [
     (("terms", "payment terms"), "terms", "str"),
     (("quantity", "qty"), "quantity", "int"),
     (("amount", "value"), "amount", "decimal"),
-    (("po number", "po no", "p o number"), "po_number", "str"),
+    (("po number", "po no", "p o number", "po"), "po_number", "str"),
     (("po date",), "po_date", "date"),
-    (("engineer",), "engineer", "str"),
-    (("sales order number", "so number", "sales order no"), "sales_order_number", "str"),
+    (("engineer", "engg"), "engineer", "str"),
+    (
+        ("sales order number", "so number", "sales order no", "salesorder"),
+        "sales_order_number",
+        "str",
+    ),
     (("consignee city", "city"), "consignee_city", "str"),
-    (("serial numbers",), "serial_numbers", "str"),
+    (("serial numbers", "serial"), "serial_numbers", "str"),
     (("remarks", "remark"), "remarks", "str"),
-    (("dc received in office",), "dc_received_in_office", "bool"),
+    (("dc received in office", "dc recd in office"), "dc_received_in_office", "bool"),
     # LOGISTICS / GODOWN
     (("date of material dispatch",), "date_of_material_dispatch", "date"),
-    (("date dispatch godown dc to office",), "date_dispatch_godown_dc_to_office", "date"),
-    (("date scanned copy dc to office",), "date_scanned_copy_dc_to_office", "date"),
-    (("e way bill number", "eway bill number"), "e_way_bill_number", "str"),
-    (("transporter name",), "transporter_name", "str"),
-    (("vehicle number",), "vehicle_number", "str"),
-    (("godown in time",), "godown_in_time", "str"),
-    (("godown out time",), "godown_out_time", "str"),
-    (("date lr dispatch to office",), "date_lr_dispatch_to_office", "date"),
+    (
+        (
+            "date dispatch godown dc to office",
+            "date of dispatch of godown dc to office",
+        ),
+        "date_dispatch_godown_dc_to_office",
+        "date",
+    ),
+    (
+        (
+            "date scanned copy dc to office",
+            "date of scanned copy dc sent to office",
+        ),
+        "date_scanned_copy_dc_to_office",
+        "date",
+    ),
+    (
+        ("e way bill number", "eway bill number", "e way bill no"),
+        "e_way_bill_number",
+        "str",
+    ),
+    (
+        ("transporter name", "transporter courier name"),
+        "transporter_name",
+        "str",
+    ),
+    (("vehicle number", "vehicle no"), "vehicle_number", "str"),
+    (("godown in time", "in time"), "godown_in_time", "str"),
+    (("godown out time", "out time"), "godown_out_time", "str"),
+    (
+        (
+            "date lr dispatch to office",
+            "date of dispatch of l r to office",
+        ),
+        "date_lr_dispatch_to_office",
+        "date",
+    ),
     (("e way updated in server",), "e_way_updated_in_server", "str"),
     # FREIGHT / LR
-    (("lr number",), "lr_number", "str"),
-    (("lr date",), "lr_date", "date"),
+    (("lr number", "l r no"), "lr_number", "str"),
+    (("lr date", "l r date"), "lr_date", "date"),
     (("freight mode",), "freight_mode", "str"),
     (("freight amount",), "freight_amount", "decimal"),
-    (("date delivery at consignee",), "date_delivery_at_consignee", "date"),
-    (("date email vehicle dispatch details",), "date_email_vehicle_dispatch_details", "date"),
-    (("lr received in office",), "lr_received_in_office", "str"),
-    # CUSTOMER COMMUNICATION (person names in Airbyte cols may change; header text should stay stable)
-    (("date email inv details", "invoice email date"), "date_email_inv_details", "date"),
-    (("date email tc details",), "date_email_tc_details", "date"),
-    (("date courier to customer",), "date_courier_to_customer", "date"),
+    (
+        ("date delivery at consignee", "date of delivery at consignee"),
+        "date_delivery_at_consignee",
+        "date",
+    ),
+    (
+        (
+            "date email vehicle dispatch details",
+            "date of email to customer with vehicle dispatch details",
+        ),
+        "date_email_vehicle_dispatch_details",
+        "date",
+    ),
+    (("lr received in office", "lr recd in office"), "lr_received_in_office", "str"),
+    # CUSTOMER COMMUNICATION
+    (
+        (
+            "date email inv details",
+            "invoice email date",
+            "date of email to customer with inv details",
+        ),
+        "date_email_inv_details",
+        "date",
+    ),
+    (
+        (
+            "date email tc details",
+            "date of email to customer with tc details",
+        ),
+        "date_email_tc_details",
+        "date",
+    ),
+    (
+        (
+            "date courier to customer",
+            "date of courier sent to customer",
+        ),
+        "date_courier_to_customer",
+        "date",
+    ),
     # SIS / CTF
     (("sis ctf pump model",), "sis_ctf_pump_model", "str"),
-    (("sis ctf model serial number",), "sis_ctf_model_serial_number", "str"),
-    (("sis ctf crm number",), "sis_ctf_crm_number", "str"),
+    (
+        ("sis ctf model serial number", "model serial no"),
+        "sis_ctf_model_serial_number",
+        "str",
+    ),
+    (("sis ctf crm number", "sis ctf crm no"), "sis_ctf_crm_number", "str"),
     (("sis ctf date",), "sis_ctf_date", "date"),
     (("sis ctf done",), "sis_ctf_done", "str"),
     (("sis ctf mail",), "sis_ctf_mail", "bool"),
     # WARRANTY / CHECKS
-    (("e warranty number", "ewarranty number"), "e_warranty_number", "str"),
+    (("e warranty number", "ewarranty number", "e warranty"), "e_warranty_number", "str"),
     (("e warranty updated date",), "e_warranty_updated_date", "date"),
     (("dc in office",), "dc_in_office", "bool"),
     (("note", "notes"), "note", "str"),
@@ -348,45 +420,63 @@ def _fetch_source_rows() -> List[Dict[str, Any]]:
     return data_rows
 
 
-def _build_column_mapping(header_row: Optional[Dict[str, Any]]) -> Dict[str, tuple]:
-    """
-    Map physical DB column keys (``column_A``, ``Godown_W1``, …) → (dest_key, type).
-
-    Uses header row cell text when available; falls back to legacy Airbyte names.
-    """
-    mapping: Dict[str, tuple] = {}
-    if header_row:
-        for col_key, cell in header_row.items():
-            if col_key in _AIRBYTE_META_COLUMNS:
-                continue
-            label = _normalize_header_label(cell)
-            if not label:
-                continue
-            spec = _HEADER_ALIAS_INDEX.get(label)
-            if spec:
-                mapping[col_key] = spec
-            else:
-                logger.debug(
-                    "[DispatchSync] Unmapped sheet header %r (physical col=%s)",
-                    cell,
-                    col_key,
-                )
-        if mapping:
-            logger.info(
-                "[DispatchSync] Built column mapping from sheet headers (%s columns)",
-                len(mapping),
-            )
-            return mapping
-        logger.warning(
-            "[DispatchSync] Header row present but no columns matched aliases; using legacy map"
-        )
-
-    mapping = {
+def _legacy_column_mapping() -> Dict[str, tuple]:
+    """Physical Airbyte column name → (dest_key, type)."""
+    return {
         src_col: (dest_key, type_tag)
         for src_col, dest_key, type_tag in _LEGACY_FIELD_MAP
         if src_col not in _AIRBYTE_META_COLUMNS
     }
-    logger.info("[DispatchSync] Using legacy Airbyte column-name mapping (%s columns)", len(mapping))
+
+
+def _mapping_from_header_row(header_row: Dict[str, Any]) -> Dict[str, tuple]:
+    """Map physical columns using row-1 sheet labels."""
+    header_map: Dict[str, tuple] = {}
+    for col_key, cell in header_row.items():
+        if col_key in _AIRBYTE_META_COLUMNS:
+            continue
+        label = _normalize_header_label(cell)
+        if not label:
+            continue
+        spec = _HEADER_ALIAS_INDEX.get(label)
+        if spec:
+            header_map[col_key] = spec
+        else:
+            logger.warning(
+                "[DispatchSync] Unmapped sheet header %r (physical col=%s)",
+                cell,
+                col_key,
+            )
+    return header_map
+
+
+def _build_column_mapping(header_row: Optional[Dict[str, Any]]) -> Dict[str, tuple]:
+    """
+    Map physical DB column keys (``column_A``, ``Godown_W1``, …) → (dest_key, type).
+
+    Starts from legacy Airbyte names, then overlays header-row labels when present
+    so renamed person columns still sync while row-1 text drives semantics.
+    """
+    mapping = _legacy_column_mapping()
+
+    if header_row:
+        header_map = _mapping_from_header_row(header_row)
+        if header_map:
+            mapping.update(header_map)
+            logger.info(
+                "[DispatchSync] Column mapping: %s header label(s), %s physical column(s) total",
+                len(header_map),
+                len(mapping),
+            )
+            return mapping
+        logger.warning(
+            "[DispatchSync] Header row present but no columns matched aliases; legacy map only"
+        )
+
+    logger.info(
+        "[DispatchSync] Using legacy Airbyte column-name mapping (%s columns)",
+        len(mapping),
+    )
     return mapping
 
 
@@ -395,15 +485,15 @@ def _find_dc_column_key(
     col_mapping: Dict[str, tuple],
 ) -> Optional[str]:
     """Physical column that holds the DC# / upsert key for data rows."""
-    for col_key, (dest_key, _) in col_mapping.items():
-        if dest_key == "dc_number":
-            return col_key
     if header_row:
         for col_key, cell in header_row.items():
             if col_key in _AIRBYTE_META_COLUMNS:
                 continue
             if _normalize_header_label(cell) in _DC_HEADER_LABELS:
                 return col_key
+    for col_key, (dest_key, _) in col_mapping.items():
+        if dest_key == "dc_number":
+            return col_key
     return "column_B"
 
 
