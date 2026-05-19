@@ -1,0 +1,1137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pyro.ai — Dispatch (Supabase sync data)</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --black: #0a0a0a;
+      --white: #ffffff;
+      --gray-100: #f5f5f7;
+      --gray-300: #c8c8cc;
+      --gray-500: #8e8e93;
+      --gray-700: #48484a;
+      --link: #3b82f6;
+      --purple-glow: #7c3aed;
+      --header-h: 52px;
+      --phone-w: 390px;
+      --phone-h: 844px;
+      --radius: 14px;
+      --card-border: #3d4db7;
+      --blue-hero: #3b449b;
+      --periwinkle: #6b7cff;
+      --gradient-card: linear-gradient(135deg, #5b7cfa 0%, #6f5ce7 55%, #5a4fd4 100%);
+      --gradient-year: linear-gradient(160deg, #5f8cff 0%, #5a52e8 50%, #4f46c8 100%);
+      --section-purple: #d1d5ff;
+      --section-green: #e2f9e1;
+      --section-yellow: #fff9e1;
+      --section-orange: #fff0e1;
+      --section-pink: #ffe8f0;
+      --section-blue: #e3f0ff;
+      --section-tan: #f5e6d3;
+      --shadow: 0 4px 18px rgba(0, 0, 0, 0.08);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #000;
+      color: var(--black);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Stage — matches recording letterboxing */
+    .stage {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 16px 80px;
+      gap: 16px;
+    }
+
+    .stage-hint {
+      color: #666;
+      font-size: 12px;
+      text-align: center;
+      max-width: 420px;
+      line-height: 1.5;
+    }
+
+    .phone-shell {
+      width: var(--phone-w);
+      height: var(--phone-h);
+      max-width: calc(100vw - 32px);
+      max-height: calc(100vh - 120px);
+      aspect-ratio: 390 / 844;
+      background: #111;
+      border-radius: 44px;
+      padding: 12px;
+      box-shadow:
+        0 0 0 2px #222,
+        0 24px 80px rgba(0, 0, 0, 0.65);
+      position: relative;
+    }
+
+    @media (max-height: 900px) {
+      .phone-shell {
+        width: auto;
+        height: min(var(--phone-h), calc(100vh - 140px));
+      }
+    }
+
+    .phone-notch {
+      position: absolute;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 120px;
+      height: 28px;
+      background: #111;
+      border-radius: 0 0 18px 18px;
+      z-index: 200;
+      pointer-events: none;
+    }
+
+    .phone-screen {
+      width: 100%;
+      height: 100%;
+      border-radius: 34px;
+      overflow: hidden;
+      position: relative;
+      background: var(--white);
+    }
+
+    /* Screens */
+    .screen {
+      position: absolute;
+      inset: 0;
+      display: none;
+      flex-direction: column;
+      overflow: hidden;
+      animation: fadeIn 0.22s ease;
+    }
+
+    .screen.active { display: flex; }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .scroll-body {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    /* ——— Dark auth screens ——— */
+    .auth-bg {
+      background: var(--black);
+      color: var(--white);
+      padding: 48px 22px 24px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .auth-bg::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(125deg, transparent 40%, rgba(60, 60, 60, 0.35) 40%, rgba(60, 60, 60, 0.35) 42%, transparent 42%),
+        linear-gradient(55deg, transparent 55%, rgba(45, 45, 45, 0.5) 55%, rgba(45, 45, 45, 0.5) 58%, transparent 58%);
+      pointer-events: none;
+    }
+
+    .logo-mark {
+      font-size: 26px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .logo-mark .p {
+      display: inline-block;
+      font-size: 34px;
+      margin-right: -2px;
+      font-weight: 900;
+    }
+
+    .auth-title {
+      margin-top: 28px;
+      font-size: 22px;
+      font-weight: 700;
+      position: relative;
+      z-index: 1;
+    }
+
+    .auth-sub {
+      margin-top: 8px;
+      font-size: 13px;
+      color: var(--gray-500);
+      line-height: 1.45;
+      position: relative;
+      z-index: 1;
+    }
+
+    .auth-card {
+      margin-top: 28px;
+      background: var(--white);
+      color: var(--black);
+      border-radius: var(--radius);
+      padding: 22px 18px 20px;
+      position: relative;
+      z-index: 1;
+      box-shadow: var(--shadow);
+    }
+
+    .auth-card::after {
+      content: "";
+      position: absolute;
+      left: 12%;
+      right: 12%;
+      bottom: -2px;
+      height: 3px;
+      border-radius: 0 0 8px 8px;
+      background: linear-gradient(90deg, #7c3aed, #3b82f6, #7c3aed);
+      filter: blur(0.5px);
+    }
+
+    .field-label {
+      font-size: 13px;
+      color: var(--gray-700);
+      margin-bottom: 6px;
+      display: block;
+    }
+
+    .field-input {
+      width: 100%;
+      border: 1px solid #e5e5ea;
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 15px;
+      margin-bottom: 16px;
+      font-family: inherit;
+      background: #fafafa;
+    }
+
+    .divider {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 4px 0 16px;
+      color: var(--gray-500);
+      font-size: 12px;
+    }
+
+    .divider::before,
+    .divider::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: #e5e5ea;
+    }
+
+    .btn-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .btn {
+      border: none;
+      border-radius: 10px;
+      padding: 13px 16px;
+      font-size: 15px;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: transform 0.12s, opacity 0.12s;
+    }
+
+    .btn:active { transform: scale(0.98); opacity: 0.92; }
+
+    .btn-ghost {
+      background: var(--white);
+      border: 1px solid #e5e5ea;
+      color: var(--black);
+    }
+
+    .btn-dark {
+      background: var(--black);
+      color: var(--white);
+    }
+
+    .btn-primary {
+      background: #2c2c2e;
+      color: var(--white);
+      width: 100%;
+    }
+
+    .auth-footer-link {
+      text-align: center;
+      margin-top: 16px;
+      font-size: 13px;
+      color: var(--gray-700);
+    }
+
+    .auth-footer-link a,
+    .link-btn {
+      color: var(--link);
+      font-weight: 700;
+      text-decoration: none;
+      cursor: pointer;
+      border: none;
+      background: none;
+      font-family: inherit;
+      font-size: inherit;
+    }
+
+    .copyright {
+      text-align: center;
+      margin-top: auto;
+      padding-top: 24px;
+      font-size: 11px;
+      color: #555;
+      position: relative;
+      z-index: 1;
+    }
+
+    /* ——— App chrome ——— */
+    .app-header {
+      height: var(--header-h);
+      background: var(--black);
+      color: var(--white);
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      gap: 12px;
+      flex-shrink: 0;
+      z-index: 10;
+    }
+
+    .icon-btn {
+      background: none;
+      border: none;
+      color: inherit;
+      cursor: pointer;
+      padding: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 8px;
+    }
+
+    .icon-btn:active { opacity: 0.7; }
+
+    .hamburger span {
+      display: block;
+      width: 20px;
+      height: 2px;
+      background: currentColor;
+      margin: 4px 0;
+      border-radius: 1px;
+    }
+
+    .hamburger.teal span { background: #5eead4; }
+
+    .page-body {
+      flex: 1;
+      overflow-y: auto;
+      background: var(--white);
+      position: relative;
+    }
+
+    .geo-bg {
+      background-image:
+        linear-gradient(35deg, transparent 48%, rgba(200, 200, 210, 0.25) 48%, rgba(200, 200, 210, 0.25) 49%, transparent 49%),
+        linear-gradient(-35deg, transparent 48%, rgba(200, 200, 210, 0.2) 48%, rgba(200, 200, 210, 0.2) 49%, transparent 49%);
+      background-size: 120px 120px;
+    }
+
+    .page-title {
+      padding: 16px 18px 0;
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+    }
+
+    .page-sub {
+      padding: 4px 18px 12px;
+      font-size: 13px;
+      color: var(--gray-500);
+    }
+
+    /* Dashboard */
+    .chart-card {
+      margin: 0 16px 14px;
+      background: var(--white);
+      border-radius: var(--radius);
+      padding: 14px 12px 8px;
+      box-shadow: var(--shadow);
+      border: 1px solid #f0f0f5;
+    }
+
+    .chart-svg { width: 100%; height: 160px; display: block; }
+
+    .stat-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 0 16px 14px;
+    }
+
+    .stat-card {
+      background: var(--white);
+      border-radius: var(--radius);
+      min-height: 88px;
+      box-shadow: var(--shadow);
+      border: 1px solid #f0f0f5;
+    }
+
+    .stat-card.growth {
+      padding: 12px 14px;
+    }
+
+    .growth-icon {
+      width: 28px;
+      height: 28px;
+      background: #ffedd5;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      margin-bottom: 8px;
+    }
+
+    .growth-val { font-size: 28px; font-weight: 800; }
+    .growth-label { font-size: 11px; color: var(--gray-500); margin-top: 2px; }
+    .growth-delta { font-size: 11px; color: #16a34a; margin-top: 4px; font-weight: 600; }
+
+    .cta-btn {
+      margin: 8px 16px 24px;
+      width: calc(100% - 32px);
+      background: var(--periwinkle);
+      color: var(--white);
+      border: none;
+      border-radius: 14px;
+      padding: 16px;
+      font-size: 16px;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      box-shadow: 0 6px 20px rgba(107, 124, 255, 0.35);
+    }
+
+    /* Search bar */
+    .search-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 16px 12px;
+    }
+
+    .search-input-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: #f2f4f8;
+      border-radius: 10px;
+      padding: 10px 12px;
+      border: 1px solid #e8eaf0;
+    }
+
+    .search-input-wrap input {
+      border: none;
+      background: transparent;
+      flex: 1;
+      font-size: 14px;
+      font-family: inherit;
+      outline: none;
+    }
+
+    .search-input-wrap svg { flex-shrink: 0; color: var(--gray-500); }
+
+    /* Year grid */
+    .year-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      padding: 4px 16px 24px;
+    }
+
+    .year-card {
+      aspect-ratio: 1.35;
+      border: none;
+      border-radius: 12px;
+      background: var(--gradient-year);
+      color: var(--white);
+      font-size: 28px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 6px 16px rgba(79, 70, 200, 0.35);
+      font-family: inherit;
+      transition: transform 0.12s;
+    }
+
+    .year-card:active { transform: scale(0.97); }
+
+    /* Dispatch list */
+    .period-label {
+      padding: 0 18px 10px;
+    }
+
+    .period-label .year { font-size: 28px; font-weight: 800; line-height: 1; }
+    .period-label .range { font-size: 13px; font-weight: 700; letter-spacing: 0.06em; margin-top: 2px; }
+
+    .dispatch-card {
+      display: block;
+      width: calc(100% - 32px);
+      margin: 0 16px 10px;
+      text-align: left;
+      background: var(--white);
+      border: 1.5px solid var(--card-border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      cursor: pointer;
+      font-family: inherit;
+      box-shadow: 0 2px 8px rgba(61, 77, 183, 0.12);
+      transition: background 0.15s, transform 0.12s;
+    }
+
+    .dispatch-card:active { transform: scale(0.99); background: #f8f9ff; }
+
+    .dispatch-card .top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 6px;
+    }
+
+    .dispatch-card .sr { font-size: 12px; font-weight: 700; color: var(--gray-700); }
+    .dispatch-card .po { font-size: 11px; color: var(--card-border); text-align: right; max-width: 55%; }
+    .dispatch-card .company { font-size: 13px; font-weight: 800; letter-spacing: 0.01em; }
+    .dispatch-card .ref { font-size: 11px; color: var(--gray-500); text-align: right; margin-top: 2px; }
+
+    /* Detail view */
+    .detail-hero {
+      background: var(--blue-hero);
+      color: var(--white);
+      padding: 14px 16px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px 8px;
+    }
+
+    .detail-hero .lbl { font-size: 11px; opacity: 0.85; }
+    .detail-hero .val { font-size: 14px; font-weight: 700; margin-top: 2px; }
+
+    .section {
+      padding: 12px 14px 14px;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+
+    .section-header .sub {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--gray-500);
+      margin-left: auto;
+    }
+
+    .field-grid {
+      display: grid;
+      gap: 8px;
+    }
+
+    .field-grid.cols-2 { grid-template-columns: 1fr 1fr; }
+    .field-grid.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+
+    .data-field {
+      background: var(--white);
+      border: 1px solid #e0e0e8;
+      border-radius: 8px;
+      padding: 10px 10px;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .data-field .lbl { color: var(--gray-500); font-size: 11px; }
+    .data-field .val { font-weight: 600; margin-top: 2px; }
+
+    .data-field.full { grid-column: 1 / -1; }
+
+    .status-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 6px 10px;
+      border-radius: 20px;
+      background: var(--white);
+      border: 1px solid #86efac;
+      color: #166534;
+    }
+
+    .pill::before { content: "✓"; color: #22c55e; }
+
+    .bg-purple { background: var(--section-purple); }
+    .bg-green { background: var(--section-green); }
+    .bg-yellow { background: var(--section-yellow); }
+    .bg-orange { background: var(--section-orange); }
+    .bg-pink { background: var(--section-pink); }
+    .bg-blue { background: var(--section-blue); }
+    .bg-tan { background: var(--section-tan); }
+
+    .text-green { color: #16a34a; font-weight: 600; }
+
+    .back-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 16px 0;
+      font-size: 13px;
+      color: var(--card-border);
+      cursor: pointer;
+      border: none;
+      background: none;
+      font-family: inherit;
+      font-weight: 600;
+    }
+
+    /* Drawer */
+    .drawer-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      z-index: 50;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s;
+    }
+
+    .drawer-overlay.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .drawer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      bottom: 0;
+      width: 72%;
+      max-width: 280px;
+      background: var(--white);
+      z-index: 60;
+      transform: translateX(-105%);
+      transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+      display: flex;
+      flex-direction: column;
+      padding: 56px 12px 16px;
+      box-shadow: 8px 0 32px rgba(0, 0, 0, 0.2);
+    }
+
+    .drawer.open { transform: translateX(0); }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      border: none;
+      background: #2c2c2e;
+      color: var(--white);
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-bottom: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      font-family: inherit;
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .nav-item:active { opacity: 0.85; }
+
+    .nav-item .ico { width: 20px; text-align: center; opacity: 0.9; font-size: 16px; }
+
+    .nav-spacer { flex: 1; }
+
+    .nav-profile {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: #2c2c2e;
+      color: var(--white);
+      border: none;
+      border-radius: 10px;
+      padding: 10px 12px;
+      width: 100%;
+      font-family: inherit;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #6b7cff, #a78bfa);
+    }
+
+    /* Toast */
+    .toast {
+      position: absolute;
+      bottom: 28px;
+      left: 50%;
+      transform: translateX(-50%) translateY(80px);
+      background: rgba(0, 0, 0, 0.82);
+      color: var(--white);
+      padding: 10px 16px;
+      border-radius: 20px;
+      font-size: 12px;
+      z-index: 100;
+      opacity: 0;
+      transition: transform 0.3s, opacity 0.3s;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    /* Prototype nav bar (outside phone) */
+    .proto-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: center;
+      max-width: 520px;
+    }
+
+    .proto-nav button {
+      background: #1a1a1a;
+      color: #ccc;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 6px 12px;
+      font-size: 11px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+
+    .proto-nav button:hover { background: #252525; color: #fff; }
+    .proto-nav button.active { border-color: var(--periwinkle); color: #fff; }
+
+    .year-card--muted { opacity: 0.45; filter: saturate(0.6); }
+
+    .empty-state {
+      padding: 24px 18px;
+      text-align: center;
+      color: var(--gray-500);
+      font-size: 13px;
+    }
+
+    .sync-banner {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 14px 10px;
+      padding: 10px 12px;
+      background: #ecfdf5;
+      border: 1px solid #86efac;
+      border-radius: 10px;
+      font-size: 12px;
+      color: #166534;
+    }
+
+    .sync-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #22c55e;
+      flex-shrink: 0;
+      box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.25);
+    }
+
+    .sync-id {
+      margin-left: auto;
+      font-weight: 600;
+      opacity: 0.8;
+    }
+
+    .pill-muted {
+      font-size: 11px;
+      color: var(--gray-500);
+      font-style: italic;
+    }
+
+    .dashboard-sync-card {
+      margin: 0 16px 14px;
+      padding: 14px;
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, #ecfdf5, #f0fdf4);
+      border: 1px solid #86efac;
+    }
+
+    .sync-mini-header {
+      font-size: 11px;
+      font-weight: 600;
+      color: #166534;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+
+    .sync-mini-title {
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    .sync-mini-meta {
+      font-size: 12px;
+      color: var(--gray-500);
+      margin-top: 4px;
+    }
+
+    .sync-mini-link {
+      margin-top: 10px;
+      background: none;
+      border: none;
+      color: #166534;
+      font-weight: 600;
+      font-size: 12px;
+      cursor: pointer;
+      font-family: inherit;
+      padding: 0;
+    }
+
+    .sync-status-card {
+      margin: 12px 16px;
+      padding: 16px;
+      border-radius: var(--radius);
+      background: var(--white);
+      border: 1px solid #e5e5ea;
+      box-shadow: var(--shadow);
+    }
+
+    .sync-status-card--ok { border-color: #86efac; background: #f0fdf4; }
+
+    .sync-status-badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #166534;
+      background: #dcfce7;
+      padding: 4px 10px;
+      border-radius: 20px;
+      margin-bottom: 8px;
+    }
+
+    .sync-status-title {
+      font-size: 18px;
+      font-weight: 800;
+      margin-bottom: 4px;
+    }
+
+    .sync-status-meta {
+      font-size: 12px;
+      color: var(--gray-500);
+    }
+
+    .sync-kv-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 0 16px 16px;
+    }
+
+    .sync-kv {
+      background: var(--white);
+      border: 1px solid #eee;
+      border-radius: 8px;
+      padding: 10px;
+    }
+
+    .sync-kv.full { grid-column: 1 / -1; }
+
+    .sync-kv .k {
+      display: block;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--gray-500);
+      margin-bottom: 4px;
+    }
+
+    .sync-kv .v {
+      font-size: 12px;
+      font-weight: 600;
+      word-break: break-word;
+    }
+
+    .sync-kv .v.mono { font-family: ui-monospace, monospace; font-size: 10px; font-weight: 500; }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <p class="stage-hint">
+      Pyro.ai dispatch app — live data from <strong>Supabase sync export</strong> (Indian Oil Corporation · Sr 009).
+      Tap inside the phone to navigate. Re-import CSV: <code>python prototype/scripts/csv_to_data.py</code>
+    </p>
+
+    <div class="phone-shell" id="phone">
+      <div class="phone-notch" aria-hidden="true"></div>
+      <div class="phone-screen">
+
+        <!-- LOGIN -->
+        <section class="screen active auth-bg" id="screen-login" data-screen="login">
+          <div class="logo-mark"><span class="p">P</span>yro.ai</div>
+          <h1 class="auth-title">Log into your account</h1>
+          <p class="auth-sub">Enter your email and password to access your account</p>
+          <div class="auth-card">
+            <label class="field-label" for="login-email">Email</label>
+            <input class="field-input" id="login-email" type="email" placeholder="" />
+            <label class="field-label" for="login-pass">Password</label>
+            <input class="field-input" id="login-pass" type="password" />
+            <div class="divider">Continue With</div>
+            <div class="btn-row">
+              <button type="button" class="btn btn-ghost" data-action="toast" data-msg="Google sign-in (mock)">Google</button>
+              <button type="button" class="btn btn-dark" data-goto="dashboard">Login</button>
+            </div>
+            <p class="auth-footer-link">
+              Don't have an account ?
+              <button type="button" class="link-btn" data-goto="signup">SIGN UP</button>
+            </p>
+          </div>
+          <p class="copyright">© The Pyro.ai All Rights Reserved</p>
+        </section>
+
+        <!-- SIGN UP -->
+        <section class="screen auth-bg" id="screen-signup" data-screen="signup">
+          <div class="logo-mark"><span class="p">P</span>yro.ai</div>
+          <h1 class="auth-title">Sign up</h1>
+          <p class="auth-sub">Enter your email and password to access your account</p>
+          <div class="auth-card">
+            <label class="field-label">Email</label>
+            <input class="field-input" type="email" />
+            <label class="field-label">Password</label>
+            <input class="field-input" type="password" />
+            <label class="field-label">Confirm Password</label>
+            <input class="field-input" type="password" />
+            <button type="button" class="btn btn-primary" data-goto="dashboard">Create Account</button>
+            <p class="auth-footer-link" style="margin-top:14px">
+              Already have an account?
+              <button type="button" class="link-btn" data-goto="login">Log in</button>
+            </p>
+          </div>
+          <p class="copyright">© The Pyro.ai All Rights Reserved</p>
+        </section>
+
+        <!-- DASHBOARD -->
+        <section class="screen" id="screen-dashboard" data-screen="dashboard">
+          <header class="app-header">
+            <button type="button" class="icon-btn hamburger teal" data-drawer="open" aria-label="Menu">
+              <span></span><span></span><span></span>
+            </button>
+            <span class="logo-mark" style="font-size:18px"><span class="p" style="font-size:22px">P</span>yro.ai</span>
+          </header>
+          <div class="page-body geo-bg scroll-body">
+            <h2 class="page-title" style="font-size:20px;font-weight:800;letter-spacing:0">Sales Dashboard</h2>
+            <p class="page-sub">Track your performance</p>
+            <div id="dashboard-sync-card" class="dashboard-sync-card" hidden></div>
+            <div class="chart-card">
+              <svg class="chart-svg" viewBox="0 0 320 160" preserveAspectRatio="none" aria-hidden="true">
+                <defs>
+                  <linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="#6b7cff" stop-opacity="0.55"/>
+                    <stop offset="100%" stop-color="#6b7cff" stop-opacity="0"/>
+                  </linearGradient>
+                </defs>
+                <g stroke="#e8e8ef" stroke-width="0.5" stroke-dasharray="4 4">
+                  <line x1="40" y1="20" x2="310" y2="20"/><line x1="40" y1="50" x2="310" y2="50"/>
+                  <line x1="40" y1="80" x2="310" y2="80"/><line x1="40" y1="110" x2="310" y2="110"/>
+                </g>
+                <text x="4" y="24" fill="#aaa" font-size="9">₹22k</text>
+                <text x="4" y="54" fill="#aaa" font-size="9">₹16.5k</text>
+                <text x="8" y="84" fill="#aaa" font-size="9">₹11k</text>
+                <text x="4" y="114" fill="#aaa" font-size="9">₹5.5k</text>
+                <text x="12" y="148" fill="#aaa" font-size="9">₹0k</text>
+                <path fill="url(#chartFill)" d="M40,95 L70,88 L110,55 L150,72 L190,60 L230,45 L270,28 L310,18 L310,140 L40,140 Z"/>
+                <polyline fill="none" stroke="#6b7cff" stroke-width="2.5" stroke-linejoin="round"
+                  points="40,95 70,88 110,55 150,72 190,60 230,45 270,28 310,18"/>
+                <text x="55" y="155" fill="#999" font-size="9">Jan</text>
+                <text x="95" y="155" fill="#999" font-size="9">Feb</text>
+                <text x="135" y="155" fill="#999" font-size="9">Mar</text>
+                <text x="175" y="155" fill="#999" font-size="9">Apr</text>
+                <text x="215" y="155" fill="#999" font-size="9">May</text>
+                <text x="255" y="155" fill="#999" font-size="9">Jun</text>
+              </svg>
+            </div>
+            <div class="stat-row">
+              <div class="stat-card"></div>
+              <div class="stat-card growth">
+                <div class="growth-icon">📈</div>
+                <div class="growth-val">94%</div>
+                <div class="growth-label">Growth Rate</div>
+                <div class="growth-delta">↑ +2.1%</div>
+              </div>
+            </div>
+            <button type="button" class="cta-btn" data-action="toast" data-msg="Opening email (mock)">Go to Email</button>
+          </div>
+        </section>
+
+        <!-- DISPATCH YEARS -->
+        <section class="screen" id="screen-dispatch-years" data-screen="dispatch-years">
+          <header class="app-header">
+            <button type="button" class="icon-btn hamburger" data-drawer="open" aria-label="Menu">
+              <span></span><span></span><span></span>
+            </button>
+            <span class="logo-mark" style="font-size:18px;color:#fff"><span class="p" style="font-size:22px">P</span>yro.ai</span>
+          </header>
+          <div class="page-body geo-bg scroll-body">
+            <h2 class="page-title">DISPATCH DATA</h2>
+            <div class="search-row">
+              <label class="search-input-wrap">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3-3"/></svg>
+                <input type="search" placeholder="Search" />
+              </label>
+            </div>
+            <div id="year-grid" class="year-grid" aria-live="polite"></div>
+          </div>
+        </section>
+
+        <!-- DISPATCH LIST -->
+        <section class="screen" id="screen-dispatch-list" data-screen="dispatch-list">
+          <header class="app-header">
+            <button type="button" class="icon-btn hamburger" data-drawer="open" aria-label="Menu">
+              <span></span><span></span><span></span>
+            </button>
+            <span class="logo-mark" style="font-size:18px;color:#fff"><span class="p" style="font-size:22px">P</span>yro.ai</span>
+          </header>
+          <div class="page-body geo-bg scroll-body">
+            <button type="button" class="back-bar" data-goto="dispatch-years">← Years</button>
+            <h2 class="page-title">DISPATCH DATA</h2>
+            <div class="search-row">
+              <label class="search-input-wrap">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3-3"/></svg>
+                <input type="search" placeholder="Search" id="dispatch-search" />
+              </label>
+              <button type="button" class="icon-btn" style="color:#333;padding:8px" data-action="toast" data-msg="Filter panel (mock)" aria-label="Filter">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
+              </button>
+            </div>
+            <div class="period-label">
+              <div class="year" id="list-year">2026</div>
+              <div class="range">JAN - MAY</div>
+            </div>
+            <div id="dispatch-cards"></div>
+          </div>
+        </section>
+
+        <!-- DISPATCH DETAIL -->
+        <section class="screen" id="screen-dispatch-detail" data-screen="dispatch-detail">
+          <header class="app-header">
+            <button type="button" class="icon-btn hamburger" data-drawer="open" aria-label="Menu">
+              <span></span><span></span><span></span>
+            </button>
+            <span class="logo-mark" style="font-size:18px;color:#fff"><span class="p" style="font-size:22px">P</span>yro.ai</span>
+          </header>
+          <div class="page-body scroll-body" id="detail-scroll">
+            <button type="button" class="back-bar" data-goto="dispatch-list">← Dispatch list</button>
+            <h2 class="page-title" style="font-weight:800;font-size:18px;letter-spacing:0">Dispatch Data</h2>
+            <p class="page-sub" style="padding-top:0;border-bottom:1px solid #eee;margin-bottom:0;padding-bottom:12px">Complete tracking &amp; documentation</p>
+
+            <div class="detail-hero" id="detail-hero"></div>
+            <div id="detail-sections"></div>
+          </div>
+        </section>
+
+        <!-- SYNC STATUS -->
+        <section class="screen" id="screen-sync-status" data-screen="sync-status">
+          <header class="app-header">
+            <button type="button" class="icon-btn hamburger" data-drawer="open" aria-label="Menu">
+              <span></span><span></span><span></span>
+            </button>
+            <span class="logo-mark" style="font-size:18px;color:#fff"><span class="p" style="font-size:22px">P</span>yro.ai</span>
+          </header>
+          <div class="page-body geo-bg scroll-body">
+            <button type="button" class="back-bar" data-goto="dashboard">← Dashboard</button>
+            <h2 class="page-title">Sync Status</h2>
+            <p class="page-sub">Latest Supabase sync job</p>
+            <div id="sync-status-body"></div>
+          </div>
+        </section>
+
+        <!-- Drawer -->
+        <div class="drawer-overlay" id="drawer-overlay" data-drawer="close"></div>
+        <nav class="drawer" id="drawer" aria-label="Main menu">
+          <button type="button" class="nav-item" data-goto="dashboard" data-drawer="close"><span class="ico">🏠</span> Home</button>
+          <button type="button" class="nav-item" data-goto="dispatch-years" data-drawer="close"><span class="ico">📦</span> Dispatch Data</button>
+          <button type="button" class="nav-item" data-goto="sync-status" data-drawer="close"><span class="ico">🔄</span> Sync Status</button>
+          <button type="button" class="nav-item" data-action="toast" data-msg="Client Summary (mock)" data-drawer="close"><span class="ico">👤</span> Client Summary</button>
+          <button type="button" class="nav-item" data-action="toast" data-msg="Pending (mock)" data-drawer="close"><span class="ico">⏱</span> Pending</button>
+          <button type="button" class="nav-item" data-action="toast" data-msg="Transporter (mock)" data-drawer="close"><span class="ico">🚛</span> Transporter</button>
+          <button type="button" class="nav-item" data-action="toast" data-msg="Day End (mock)" data-drawer="close"><span class="ico">📅</span> Day End</button>
+          <button type="button" class="nav-item" data-action="toast" data-msg="ALC (mock)" data-drawer="close"><span class="ico">📊</span> ALC</button>
+          <button type="button" class="nav-item" data-action="toast" data-msg="Sales Order (mock)" data-drawer="close"><span class="ico">🛒</span> Sales Order</button>
+          <button type="button" class="nav-item" data-action="toast" data-msg="User Setting (mock)" data-drawer="close"><span class="ico">⚙️</span> User Setting</button>
+          <div class="nav-spacer"></div>
+          <button type="button" class="nav-item" data-action="toast" data-msg="Notifications (mock)" data-drawer="close"><span class="ico">🔔</span> Notifications</button>
+          <button type="button" class="nav-profile" data-action="toast" data-msg="Profile (mock)" data-drawer="close">
+            <span class="avatar"></span>
+            Ramesh Kumar Va…
+          </button>
+        </nav>
+
+        <div class="toast" id="toast" role="status"></div>
+      </div>
+    </div>
+
+    <nav class="proto-nav" aria-label="Jump to screen">
+      <button type="button" data-goto="login" class="active">Login</button>
+      <button type="button" data-goto="signup">Sign up</button>
+      <button type="button" data-goto="dashboard">Dashboard</button>
+      <button type="button" data-goto="dispatch-years">Dispatch years</button>
+      <button type="button" data-goto="dispatch-list">Dispatch list</button>
+      <button type="button" data-goto="dispatch-detail">Detail</button>
+      <button type="button" data-goto="sync-status">Sync status</button>
+    </nav>
+  </div>
+
+  <script src="data/dispatch-sync-records.js"></script>
+  <script src="js/dispatch-app.js"></script>
+</body>
+</html>
