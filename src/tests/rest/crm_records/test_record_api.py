@@ -283,9 +283,12 @@ class RecordApiTests(TestCase):
             **headers,
         )
         self.assertEqual(response.status_code, 200)
-        self.assertIsNone(response.data["page_meta"]["total_count"])
-        self.assertIsNone(response.data["page_meta"]["number_of_pages"])
-        self.assertIsNotNone(response.data["page_meta"]["next_page_link"])
+        page_meta = response.data["page_meta"]
+        self.assertIsNone(page_meta["total_count"])
+        self.assertIsNone(page_meta["number_of_pages"])
+        self.assertEqual(page_meta["current_page"], 1)
+        self.assertIsNone(page_meta["next_page_link"])
+        self.assertIsNone(page_meta["previous_page_link"])
 
     def test_lead_list_include_count_true_returns_total(self):
         self.client.force_login(self.user_a)
