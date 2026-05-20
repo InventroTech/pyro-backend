@@ -5,7 +5,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError, NotFound
 from rest_framework.permissions import AllowAny
 from authz.permissions import IsTenantAuthenticated
-from core.pagination import MetaPageNumberPagination
+from core.pagination import MetaPageNumberPagination, RecordListPagination
 from core.models import Tenant
 from django.utils import timezone
 from datetime import datetime, time, timedelta, timezone as std_utc
@@ -328,7 +328,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
     queryset = Record.objects.all()
     serializer_class = RecordSerializer
     permission_classes = [IsTenantAuthenticated]
-    pagination_class = MetaPageNumberPagination
+    pagination_class = RecordListPagination
     
     def get_queryset(self):
         """
@@ -367,7 +367,10 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         
         # Dynamic filtering on data JSON field
         # Get all query params except known model fields
-        model_fields = {'entity_type', 'search', 'search_fields', 'page', 'page_size', 'ordering', 'created_at__gte', 'created_at__lte', 'exclude_events'}
+        model_fields = {
+            'entity_type', 'search', 'search_fields', 'page', 'page_size', 'ordering',
+            'created_at__gte', 'created_at__lte', 'exclude_events', 'include_count',
+        }
         data_filters = {k: v for k, v in query_params.items() if k not in model_fields}
         
         # Build Q objects for JSON field filtering
@@ -949,7 +952,7 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
     queryset = Record.objects.all()
     serializer_class = RecordSerializer
     permission_classes = [IsTenantAuthenticated]
-    pagination_class = MetaPageNumberPagination
+    pagination_class = RecordListPagination
     entity_type = None  # Set this in URL configuration
     
     def get_queryset(self):

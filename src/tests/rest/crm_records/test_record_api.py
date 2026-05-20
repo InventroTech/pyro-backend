@@ -272,3 +272,41 @@ class RecordApiTests(TestCase):
         serializer = RecordSerializer(data=invalid_data)
         self.assertFalse(serializer.is_valid())
         self.assertIn("data", serializer.errors)
+
+    def test_lead_list_skips_count_by_default(self):
+        self.client.force_login(self.user_a)
+        headers = {"HTTP_X_TENANT_SLUG": self.tenant_a.slug}
+
+        response = self.client.get(
+            self.list_url,
+            {"entity_type": "lead"},
+            **headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.data["page_meta"]["total_count"])
+        self.assertIsNone(response.data["page_meta"]["number_of_pages"])
+        self.assertIsNotNone(response.data["page_meta"]["next_page_link"])
+
+    def test_lead_list_include_count_true_returns_total(self):
+        self.client.force_login(self.user_a)
+        headers = {"HTTP_X_TENANT_SLUG": self.tenant_a.slug}
+
+        response = self.client.get(
+            self.list_url,
+            {"entity_type": "lead", "include_count": "true"},
+            **headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["page_meta"]["total_count"], 1)
+
+    def test_non_lead_list_includes_total_count_by_default(self):
+        self.client.force_login(self.user_a)
+        headers = {"HTTP_X_TENANT_SLUG": self.tenant_a.slug}
+
+        response = self.client.get(
+            self.list_url,
+            {"entity_type": "ticket"},
+            **headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["page_meta"]["total_count"], 1)
