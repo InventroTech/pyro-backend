@@ -37,6 +37,11 @@ LOG_RETENTION_ENQUEUE_INTERVAL = 86400  # 24 hours
 SNOOZED_TO_NOT_CONNECTED_ENQUEUE_HOUR = 23
 SNOOZED_TO_NOT_CONNECTED_ENQUEUE_MINUTE = 55
 
+# Enqueue ``sync_dispatch_to_records`` at these UTC hours on the configured minute.
+# Airbyte refreshes the source sheet every 8 hours; we run 5 minutes after each refresh.
+DISPATCH_SYNC_ENQUEUE_HOURS = (0, 8, 16)
+DISPATCH_SYNC_ENQUEUE_MINUTE = 5
+
 
 class JobProcessor:
     """Processes jobs from the BackgroundJob queue"""
@@ -57,6 +62,9 @@ class JobProcessor:
         self._last_snoozed_midnight_enqueue_date = None
         # Last time we enqueued purge_old_log_tables
         self._last_log_retention_enqueue_at = None
+        # (date, hour) of the last sync_dispatch_to_records enqueue — keys
+        # the once-per-window guard.
+        self._last_dispatch_sync_enqueue_bucket = None
         # Circuit breaker state for connection errors
         self._connection_error_count = 0
         self._last_connection_error_time = None
@@ -465,6 +473,43 @@ class JobProcessor:
                 exc_info=True,
             )
 
+    def _maybe_enqueue_dispatch_sync(self):
+        """
+        Enqueue ``sync_dispatch_to_records`` at exactly DISPATCH_SYNC_ENQUEUE_MINUTE
+        on each hour in DISPATCH_SYNC_ENQUEUE_HOURS (UTC). The (date, hour) bucket
+        guard means the worker enqueues at most once per 8-hour window even if the
+        loop ticks several times within that minute.
+        """
+        now = timezone.now()
+        if (
+            now.hour not in DISPATCH_SYNC_ENQUEUE_HOURS
+            or now.minute != DISPATCH_SYNC_ENQUEUE_MINUTE
+        ):
+            return
+
+        bucket = (now.date(), now.hour)
+        if self._last_dispatch_sync_enqueue_bucket == bucket:
+            return
+
+        try:
+            queue = get_queue_service()
+            queue.enqueue_job(
+                job_type=JobType.SYNC_DISPATCH_TO_RECORDS,
+                payload={},
+                priority=0,
+            )
+            self._last_dispatch_sync_enqueue_bucket = bucket
+            logger.info(
+                f"[Worker {self.worker_id}] Enqueued sync_dispatch_to_records "
+                f"(utc_date={now.date()}, hour={now.hour:02d}:"
+                f"{DISPATCH_SYNC_ENQUEUE_MINUTE:02d})"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[Worker {self.worker_id}] Failed to enqueue sync_dispatch_to_records: {e}",
+                exc_info=True,
+            )
+
     def _maybe_enqueue_log_retention(self):
         """
         Enqueue :data:`~background_jobs.models.JobType.PURGE_OLD_LOG_TABLES` at most
@@ -590,6 +635,8 @@ class JobProcessor:
                 self._maybe_enqueue_lead_cron_jobs()
                 # Daily at 23:55 exact minute (TIME_ZONE): SNOOZED → NOT_CONNECTED
                 self._maybe_enqueue_snoozed_to_not_connected_midnight()
+                # Every 8 hours at :05 UTC (5 min after Airbyte sync): dispatch sheet → records
+                self._maybe_enqueue_dispatch_sync()
                 # Periodic purge of object_history, event_logs, rule_exec_logs, finished background_jobs
                 self._maybe_enqueue_log_retention()
 
