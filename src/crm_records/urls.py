@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RecordListCreateView, RecordDetailView, RecordHistoryView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView, GetMyCurrentLeadView, PartnerEventsView, PartnerLeadView, CallAttemptMatrixListCreateView, CallAttemptMatrixDetailView, CallAttemptMatrixByLeadTypeView, LeadAssignmentWebhookProxyView, RMAssignedMixpanelView, ScoringRuleListCreateView, ScoringRuleDetailView, ApiSecretKeySetView, ApiSecretKeyUpdateView
+from .views import RecordListCreateView, RecordDistinctFieldValuesView, RecordDetailView, RecordHistoryView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, PrajaLeadsAPIView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView, GetMyCurrentLeadView, PartnerEventsView, PartnerLeadView, CallAttemptMatrixListCreateView, CallAttemptMatrixDetailView, CallAttemptMatrixByLeadTypeView, LeadAssignmentWebhookProxyView, RMAssignedMixpanelView, ScoringRuleListCreateView, ScoringRuleDetailView, ApiSecretKeySetView, ApiSecretKeyUpdateView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 from .public_views import PublicJobsView, PublicJobApplicationView
 
@@ -8,6 +8,7 @@ app_name = "crm_records"
 
 urlpatterns = [
     # Universal endpoint - supports entity_type filtering
+    path("records/distinct-values/", RecordDistinctFieldValuesView.as_view(), name="record-distinct-values"),
     path("records/", RecordListCreateView.as_view(), name="record-list"),
     # Detail endpoint - supports retrieve/update by ID (including PATCH)
     path("records/<int:pk>/", RecordDetailView.as_view(), name="record-update"),
