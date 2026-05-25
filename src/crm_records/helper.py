@@ -88,3 +88,40 @@ def coerce_date_bound(value):
 
     return None, False
 
+
+def coerce_json_contains_value(value):
+    """
+    Coerce query-string values for JSONB @> filters.
+    Dispatch booleans are stored as true/false, not the strings "true"/"false".
+    """
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, str):
+        return value
+    s = value.strip()
+    lower = s.lower()
+    if lower == "true":
+        return True
+    if lower == "false":
+        return False
+    if s.isdigit():
+        try:
+            return int(s)
+        except ValueError:
+            pass
+    return s
+
+
+def json_field_contains_q(field_name: str, field_value) -> "Q":
+    """
+    Build Q for exact JSON key match; false also matches null/missing (empty sheet cells).
+    """
+    from django.db.models import Q
+
+    match_val = coerce_json_contains_value(field_value)
+    if match_val is False:
+        return Q(data__contains={field_name: False}) | Q(
+            **{f"data__{field_name}__isnull": True}
+        )
+    return Q(data__contains={field_name: match_val})
+
