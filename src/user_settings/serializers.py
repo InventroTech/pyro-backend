@@ -1,46 +1,5 @@
 from rest_framework import serializers
-from .models import UserSettings, RoutingRule, Group, TenantMemberSetting
-
-
-class UserSettingsSerializer(serializers.ModelSerializer):
-    """Serializer for UserSettings model"""
-    
-    class Meta:
-        model = UserSettings
-        fields = ['id', 'tenant', 'tenant_membership', 'key', 'value', 'daily_target', 'daily_limit', 'lead_sources', 'lead_statuses', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'created_at', 'updated_at']
-
-    def validate_key(self, value):
-        """Validate that key is not empty and follows naming conventions"""
-        if not value or not value.strip():
-            raise serializers.ValidationError("Key cannot be empty")
-        return value.strip().upper()
-
-    def validate_value(self, value):
-        """Validate that value is not None"""
-        if value is None:
-            raise serializers.ValidationError("Value cannot be None")
-        return value
-
-
-class UserSettingsCreateSerializer(serializers.ModelSerializer):
-    """Serializer for creating UserSettings"""
-    
-    class Meta:
-        model = UserSettings
-        fields = ['tenant_membership', 'key', 'value', 'daily_target', 'daily_limit']
-
-    def validate_key(self, value):
-        """Validate that key is not empty and follows naming conventions"""
-        if not value or not value.strip():
-            raise serializers.ValidationError("Key cannot be empty")
-        return value.strip().upper()
-
-    def validate_value(self, value):
-        """Validate that value is not None"""
-        if value is None:
-            raise serializers.ValidationError("Value cannot be None")
-        return value
+from .models import Group, TenantMemberSetting
 
 
 class TenantMemberSettingSerializer(serializers.ModelSerializer):
@@ -132,60 +91,6 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
         return value
 
 
-class RoutingRuleSerializer(serializers.ModelSerializer):
-    """
-    Serializer for RoutingRule. Rules are keyed by tenant_membership; user_id is denormalized and may be null.
-    """
-
-    tenant_membership_id = serializers.SerializerMethodField(read_only=True)
-
-    class Meta:
-        model = RoutingRule
-        fields = [
-            "id",
-            "tenant",
-            "tenant_membership",
-            "user_id",
-            "tenant_membership_id",
-            "queue_type",
-            "is_active",
-            "conditions",
-            "name",
-            "description",
-            "created_at",
-            "updated_at",
-        ]
-        read_only_fields = ["id", "tenant", "created_at", "updated_at"]
-        extra_kwargs = {
-            "user_id": {"required": False, "allow_null": True},
-        }
-
-    def get_tenant_membership_id(self, obj):
-        """Expose TenantMembership pk for API consumers."""
-        return getattr(obj, "tenant_membership_id", None)
-
-    def validate_queue_type(self, value: str) -> str:
-        value = (value or "").strip().lower()
-        if value not in {RoutingRule.QUEUE_TYPE_TICKET, RoutingRule.QUEUE_TYPE_LEAD}:
-            raise serializers.ValidationError("queue_type must be 'ticket' or 'lead'")
-        return value
-
-    def validate_conditions(self, value):
-        if value is None:
-            return {}
-        if not isinstance(value, dict):
-            raise serializers.ValidationError("conditions must be a JSON object")
-        filters = value.get("filters")
-        if filters is not None and not isinstance(filters, (list, tuple)):
-            raise serializers.ValidationError("'filters' must be a list when provided")
-        return value
-
-    def validate(self, attrs):
-        if "conditions" not in attrs or attrs.get("conditions") is None:
-            attrs["conditions"] = {}
-        return attrs
-
-
 class GroupSerializer(serializers.ModelSerializer):
     """Serializer for tenant groups."""
 
@@ -206,4 +111,3 @@ class GroupSerializer(serializers.ModelSerializer):
         if not isinstance(value, dict):
             raise serializers.ValidationError("group_data must be a JSON object")
         return value
-

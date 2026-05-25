@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ResolvedUser:
     identifier: str  # supabase_uid or email — used as assigned_to value
-    uuid: Optional[uuid_module.UUID]  # used for routing rule lookup
+    uuid: Optional[uuid_module.UUID]
     membership: Optional[TenantMembership]
     email: Optional[str]
 
