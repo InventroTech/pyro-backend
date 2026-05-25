@@ -39,7 +39,6 @@ from .serializers import (
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
 from .scoring import calculate_and_update_lead_score
-from user_settings.models import UserSettings
 from .permissions import HasAPISecret
 from support_ticket.services import MixpanelService, RMAssignedMixpanelService
 from background_jobs.queue_service import get_queue_service
@@ -1932,9 +1931,9 @@ class GetNextLeadView(APIView):
     @extend_schema(
         summary="Get next lead from queue",
         description="Atomically fetches and assigns the next available lead from the queue for CRM records. "
-                   "Lead filters (party, lead source, lead status, routing rules) are loaded from the database only; "
-                   "no frontend overrides. Logic: 1) Resolve user 2) Load lead filters from DB (UserSettings + routing) "
-                   "3) Filter leads by eligible party/source/status and apply routing 4) Order by score 5) Return first entry.",
+                   "Lead filters (party, lead source, lead status, states) are loaded from Group + KV settings only; "
+                   "no frontend overrides. Logic: 1) Resolve user 2) Load lead filters from DB (Group + KV) "
+                   "3) Filter leads by eligible party/source/status/states 4) Order by score 5) Return first entry.",
         responses={
             200: OpenApiResponse(
                 description="Lead assigned successfully or no leads available",
@@ -2521,7 +2520,6 @@ class GetNextLeadView(APIView):
             queueable_total = Record.objects.filter(
                 tenant=tenant, entity_type='lead'
             ).extra(where=[_queueable_where]).count()
-            rule = None
             sample_leads = list(
                 Record.objects.filter(tenant=tenant, entity_type='lead')[:5]
                 .values('id', 'data')
@@ -2546,10 +2544,6 @@ class GetNextLeadView(APIView):
                     "queueable_total": queueable_total,
                     "after_routing_and_filter": unassigned_cnt,
                     "base_qs_count": total_unassigned_cnt,
-                },
-                "routing_rule": {
-                    "has_rule": rule is not None,
-                    "conditions": rule.conditions if rule else None,
                 },
                 "sample_leads_data": [
                     {"id": s["id"], "lead_stage": (s.get("data") or {}).get("lead_stage"), "affiliated_party": (s.get("data") or {}).get("affiliated_party"), "assigned_to": (s.get("data") or {}).get("assigned_to"), "call_attempts": (s.get("data") or {}).get("call_attempts"), "next_call_at": (s.get("data") or {}).get("next_call_at")}
