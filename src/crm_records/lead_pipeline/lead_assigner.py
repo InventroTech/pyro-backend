@@ -71,67 +71,78 @@ class LeadAssigner:
 
             if not is_fresh_assignment and previous_assigned_to != user_identifier:
                 logger.info(
-                    "[LeadAssigner] aborting — lead already claimed by %s, requested by %s, candidate_pk=%s",
+                    "[LeadAssigner] aborting — record already claimed by %s, requested by %s, candidate_pk=%s",
                     previous_assigned_to,
                     user_identifier,
                     candidate_pk,
                 )
                 return None
 
-            data["assigned_to"] = user_identifier
-            data["lead_stage"] = self.ASSIGNED_STATUS
+            user_email = getattr(user, "email", None) or ""
+            entity_type = candidate_locked.entity_type or "lead"
 
-            if "call_attempts" not in data or data.get("call_attempts") in (None, "", "null"):
-                data["call_attempts"] = 0
+            if entity_type == "support_ticket":
+                data["assigned_to"] = user_identifier
+                data["cse_name"] = user_email
+                data["cse_called_date"] = now.isoformat()
+                if "call_attempts" not in data or data.get("call_attempts") in (None, "", "null"):
+                    data["call_attempts"] = 0
+            else:
+                data["assigned_to"] = user_identifier
+                data["lead_stage"] = self.ASSIGNED_STATUS
 
-            call_attempts = data.get("call_attempts", 0)
-            try:
-                call_attempts_int = int(call_attempts) if call_attempts is not None else 0
-            except (TypeError, ValueError):
-                call_attempts_int = 0
+                if "call_attempts" not in data or data.get("call_attempts") in (None, "", "null"):
+                    data["call_attempts"] = 0
 
-            last_call_outcome = (data.get("last_call_outcome", "") or "").lower()
-            lead_stage = (data.get("lead_stage", "") or "").upper()
+                call_attempts = data.get("call_attempts", 0)
+                try:
+                    call_attempts_int = int(call_attempts) if call_attempts is not None else 0
+                except (TypeError, ValueError):
+                    call_attempts_int = 0
 
-            is_not_connected_retry = (
-                call_attempts_int > 0
-                or last_call_outcome == "not_connected"
-                or lead_stage == "NOT_CONNECTED"
-            )
+                last_call_outcome = (data.get("last_call_outcome", "") or "").lower()
+                lead_stage = (data.get("lead_stage", "") or "").upper()
 
-            if is_fresh_assignment and "first_assigned_at" not in data and not is_not_connected_retry:
-                data["first_assigned_at"] = now.isoformat()
-                data["first_assigned_to"] = user_identifier
-                logger.info(
-                    "[LeadAssigner] Set first_assigned_to=%s and first_assigned_at for lead_id=%d (fresh assignment)",
-                    user_identifier,
-                    candidate_locked.id,
-                )
-            elif is_fresh_assignment and is_not_connected_retry:
-                logger.info(
-                    "[LeadAssigner] Skipping first_assigned tracking for lead_id=%d (retry lead - call_attempts=%d last_call_outcome=%s lead_stage=%s)",
-                    candidate_locked.id,
-                    call_attempts_int,
-                    last_call_outcome,
-                    lead_stage,
+                is_not_connected_retry = (
+                    call_attempts_int > 0
+                    or last_call_outcome == "not_connected"
+                    or lead_stage == "NOT_CONNECTED"
                 )
 
-            if is_fresh_assignment:
-                merge_first_assignment_today_anchor(data, now)
+                if is_fresh_assignment and "first_assigned_at" not in data and not is_not_connected_retry:
+                    data["first_assigned_at"] = now.isoformat()
+                    data["first_assigned_to"] = user_identifier
+                    logger.info(
+                        "[LeadAssigner] Set first_assigned_to=%s and first_assigned_at for lead_id=%d (fresh assignment)",
+                        user_identifier,
+                        candidate_locked.id,
+                    )
+                elif is_fresh_assignment and is_not_connected_retry:
+                    logger.info(
+                        "[LeadAssigner] Skipping first_assigned tracking for lead_id=%d (retry lead - call_attempts=%d last_call_outcome=%s lead_stage=%s)",
+                        candidate_locked.id,
+                        call_attempts_int,
+                        last_call_outcome,
+                        lead_stage,
+                    )
+
+                if is_fresh_assignment:
+                    merge_first_assignment_today_anchor(data, now)
 
             candidate_locked.data = data
             candidate_locked.updated_at = timezone.now()
             candidate_locked.save(update_fields=["data", "updated_at"])
 
-            self.post_actions.run(
-                record=candidate_locked,
-                tenant=tenant,
-                user=user,
-                tenant_membership=tenant_membership,
-                user_identifier=user_identifier,
-                user_uuid=user_uuid,
-                lead_data=data,
-            )
+            if entity_type == "lead":
+                self.post_actions.run(
+                    record=candidate_locked,
+                    tenant=tenant,
+                    user=user,
+                    tenant_membership=tenant_membership,
+                    user_identifier=user_identifier,
+                    user_uuid=user_uuid,
+                    lead_data=data,
+                )
 
             return AssignmentResult(record=candidate_locked, is_fresh_assignment=is_fresh_assignment)
 

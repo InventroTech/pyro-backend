@@ -1374,6 +1374,53 @@ def test_pipeline_retry_does_not_set_first_assigned_tracking():
 
 
 @pytest.mark.django_db
+def test_lead_pipeline_ignores_work_item_tenant_wide_assignments():
+    """Sales LeadPipeline must not pull support/work-item buckets from shared tenant-wide rows."""
+    tenant = TenantFactory()
+    _seed_tenant_buckets(tenant)
+    support_bucket = Bucket.objects.create(
+        tenant=tenant,
+        name="Support In-Trial Attempt 0",
+        slug="support_in_trial_attempt_0",
+        filter_conditions={
+            "entity_type": "support_ticket",
+            "assigned_scope": "unassigned",
+            "atleast_paid_once": False,
+            "call_attempts": {"eq": 0},
+            "resolution_status_in": [None, ""],
+        },
+    )
+    UserBucketAssignment.objects.create(
+        tenant=tenant,
+        user=None,
+        bucket=support_bucket,
+        priority=0,
+        pull_strategy={"order": ["-created_at"], "ignore_score_for_sources": []},
+        is_active=True,
+    )
+    user, _, _ = _make_rm_user(tenant, lead_statuses=["SALES LEAD"])
+    RecordFactory(
+        tenant=tenant,
+        entity_type="support_ticket",
+        data={
+            "user_id": "trial-user",
+            "atleast_paid_once": False,
+            "call_attempts": 0,
+            "resolution_status": None,
+        },
+    )
+    fresh_lead = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="Fresh Sales", lead_stage="IN_QUEUE"),
+    )
+
+    out = LeadPipeline().get_next(tenant=tenant, request_user=user)
+    assert out is not None
+    assert out.pk == fresh_lead.pk
+
+
+@pytest.mark.django_db
 def test_pipeline_returns_none_without_bucket_assignments():
     tenant = TenantFactory()
     user, _, _ = _make_rm_user(tenant, lead_sources=[], lead_statuses=["SALES LEAD"])
