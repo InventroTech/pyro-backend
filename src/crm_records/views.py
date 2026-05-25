@@ -319,8 +319,77 @@ def _notify_team_lead_for_inventory_request(request, record):
         )
 
 
-from .helper import parse_numeric_lookup, coerce_numeric
+from .helper import (
+    parse_numeric_lookup,
+    coerce_numeric,
+    coerce_date_bound,
+    json_field_contains_q,
+)
 from .assignee_display import build_assigned_to_search_q
+
+import re
+
+_RECORD_DISTINCT_FIELD_RE = re.compile(r'^[a-zA-Z0-9_]+$')
+
+
+class RecordDistinctFieldValuesView(TenantScopedMixin, APIView):
+    """
+    Distinct values for a JSON data field on records (filter dropdowns).
+
+    GET /crm-records/records/distinct-values/?entity_type=dispatch_request&field=engineer
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        entity_type = (request.query_params.get('entity_type') or '').strip()
+        field = (request.query_params.get('field') or '').strip()
+
+        if not entity_type or not field:
+            return Response(
+                {'error': 'entity_type and field query parameters are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not _RECORD_DISTINCT_FIELD_RE.match(field):
+            return Response(
+                {'error': 'field must contain only letters, numbers, and underscores'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        json_key = f'data__{field}'
+        qs = Record.objects.filter(tenant=request.tenant, entity_type=entity_type)
+        raw_values = (
+            qs.exclude(**{json_key: None})
+            .exclude(**{json_key: ''})
+            .values_list(json_key, flat=True)
+            .distinct()
+        )
+
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for val in raw_values:
+            if val is None:
+                continue
+            text = str(val).strip()
+            if not text or text.lower() in ('null', 'none'):
+                continue
+            if text in seen:
+                continue
+            seen.add(text)
+            cleaned.append(text)
+
+        cleaned.sort(key=str.casefold)
+        results = [{'label': v, 'value': v} for v in cleaned]
+
+        return Response(
+            {
+                'entity_type': entity_type,
+                'field': field,
+                'values': cleaned,
+                'results': results,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
@@ -403,7 +472,20 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 )
                 q_objects &= field_q
                 continue
-            # Numeric comparison lookups: total_price__gte=50000 -> data__total_price__gte with numeric 50000
+            # Exact match on JSON date/text field: po_date__exact=2026-05-05
+            if field_name.endswith('__exact'):
+                base_key = field_name[: -len('__exact')]
+                if base_key:
+                    date_val, date_ok = coerce_date_bound(field_value)
+                    if date_ok and date_val:
+                        q_objects &= Q(
+                            data__contains={base_key: date_val.isoformat()}
+                        )
+                    else:
+                        q_objects &= json_field_contains_q(base_key, field_value)
+                    continue
+
+            # Lookups like total_price__gte (numeric) or po_date__lte (ISO date in JSON)
             numeric_lookup = parse_numeric_lookup(field_name)
             if numeric_lookup:
                 base_key, lookup_suffix = numeric_lookup
@@ -411,18 +493,24 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 if ok and num_val is not None:
                     q_objects &= Q(**{f'data__{base_key}{lookup_suffix}': num_val})
                 else:
-                    q_objects &= Q(data__contains={field_name: field_value})
+                    date_val, date_ok = coerce_date_bound(field_value)
+                    if date_ok and date_val is not None:
+                        q_objects &= Q(
+                            **{f'data__{base_key}{lookup_suffix}': date_val.isoformat()}
+                        )
+                    else:
+                        q_objects &= json_field_contains_q(base_key, field_value)
                 continue
             # Support multiple values for the same field (comma-separated)
             if ',' in str(field_value):
                 values = [v.strip() for v in str(field_value).split(',') if v.strip()]
                 field_q = Q()
                 for value in values:
-                    field_q |= Q(data__contains={field_name: value})
+                    field_q |= json_field_contains_q(field_name, value)
                 q_objects &= field_q
             else:
                 # Single value - exact match (uses @> operator → GIN index)
-                q_objects &= Q(data__contains={field_name: field_value})
+                q_objects &= json_field_contains_q(field_name, field_value)
         
         if q_objects:
             queryset = queryset.filter(q_objects)
