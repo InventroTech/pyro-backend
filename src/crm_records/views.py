@@ -320,7 +320,12 @@ def _notify_team_lead_for_inventory_request(request, record):
         )
 
 
-from .helper import parse_numeric_lookup, coerce_numeric, coerce_date_bound
+from .helper import (
+    parse_numeric_lookup,
+    coerce_numeric,
+    coerce_date_bound,
+    json_field_contains_q,
+)
 from .assignee_display import build_assigned_to_search_q
 
 import re
@@ -470,8 +475,12 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 base_key = field_name[: -len('__exact')]
                 if base_key:
                     date_val, date_ok = coerce_date_bound(field_value)
-                    match_val = date_val.isoformat() if date_ok and date_val else field_value
-                    q_objects &= Q(data__contains={base_key: match_val})
+                    if date_ok and date_val:
+                        q_objects &= Q(
+                            data__contains={base_key: date_val.isoformat()}
+                        )
+                    else:
+                        q_objects &= json_field_contains_q(base_key, field_value)
                     continue
 
             # Lookups like total_price__gte (numeric) or po_date__lte (ISO date in JSON)
@@ -488,18 +497,18 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                             **{f'data__{base_key}{lookup_suffix}': date_val.isoformat()}
                         )
                     else:
-                        q_objects &= Q(data__contains={base_key: field_value})
+                        q_objects &= json_field_contains_q(base_key, field_value)
                 continue
             # Support multiple values for the same field (comma-separated)
             if ',' in str(field_value):
                 values = [v.strip() for v in str(field_value).split(',') if v.strip()]
                 field_q = Q()
                 for value in values:
-                    field_q |= Q(data__contains={field_name: value})
+                    field_q |= json_field_contains_q(field_name, value)
                 q_objects &= field_q
             else:
                 # Single value - exact match (uses @> operator → GIN index)
-                q_objects &= Q(data__contains={field_name: field_value})
+                q_objects &= json_field_contains_q(field_name, field_value)
         
         if q_objects:
             queryset = queryset.filter(q_objects)
