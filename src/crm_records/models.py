@@ -361,12 +361,7 @@ class Bucket(HistoryTrackedModel, BaseModel):
       for follow-up callbacks).
     - ``lead_stage`` (list[str]): Uppercase stage names matched against
       ``UPPER(data->>'lead_stage')``.
-    - ``{field}_in`` / ``{field}_not_in`` (list): Generic ``data`` attribute filters
-      (e.g. ``poster_in``, ``state_in``). ``resolution_status_in`` also treats null/empty
-      as a match when listed.
-    - ``lead_source`` / ``lead_status`` (list[str]): JSON contains match (GIN-friendly).
-    - ``atleast_paid_once`` (bool): Paid vs in-trial support tickets.
-    - ``call_attempts`` (dict): Range on ``COALESCE((data->>'call_attempts')::numeric::int, 0)``.
+    - ``call_attempts`` (dict): Range on ``COALESCE((data->>'call_attempts')::int, 0)``.
       Supported keys: ``lte``, ``gte``, ``lt``, ``gt`` (int).
     - ``next_call_due`` (bool): If true, require ``next_call_at`` set and ``<= NOW()``
       (and attempts ``< 6`` when combined with snoozed-style buckets).
