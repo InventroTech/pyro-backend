@@ -83,68 +83,10 @@ def get_tenant_events(tenant, event_name: Optional[str] = None, limit: int = 100
     return list(events.order_by('-timestamp')[:limit])
 
 
-def _simulate_support_save_and_continue(
-    resolution_status: str,
-    payload: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Rule-shaped simulation matching work_item_seed_support_rules.sql / SaveAndContinueView."""
-    from django.utils import timezone
-
-    return {
-        "action": "update_fields",
-        "updates": {
-            "resolution_status": resolution_status,
-            "cse_remarks": payload.get("cse_remarks"),
-            "cse_name": payload.get("cse_name"),
-            "call_status": payload.get("call_status"),
-            "resolution_time": payload.get("resolution_time"),
-            "completed_at": payload.get("completed_at") or timezone.now().isoformat(),
-            "other_reasons": payload.get("other_reasons"),
-            "assigned_to": payload.get("assigned_to"),
-            "review_requested": payload.get("review_requested"),
-        },
-        "increments": {"call_attempts": 1},
-    }
-
-
-def _simulate_support_not_connected(record: Record, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Rule-shaped simulation matching work_item_seed_support_rules.sql / UpdateCallStatusView."""
-    attempts = (record.data or {}).get("call_attempts") or 0
-    base_updates: Dict[str, Any] = {
-        "call_status": "Not Connected",
-        "completed_at": payload.get("completed_at"),
-        "assigned_to": None,
-        "cse_name": None,
-        "cse_remarks": payload.get("cse_remarks"),
-        "other_reasons": payload.get("other_reasons"),
-    }
-    if attempts < 1:
-        return {
-            "action": "update_fields",
-            "updates": {**base_updates, "resolution_status": "Snoozed"},
-            "increments": {"call_attempts": 1},
-            "follow_up_actions": ["compute_next_call_from_attempts(snooze_until, 60m)"],
-        }
-    return {
-        "action": "update_fields",
-        "updates": {
-            **base_updates,
-            "resolution_status": payload.get("resolution_status") or "Closed",
-            "snooze_until": payload.get("snooze_until"),
-            "next_call_at": None,
-            "resolution_time": payload.get("resolution_time"),
-        },
-        "increments": {"call_attempts": 1},
-    }
-
-
 def simulate_workflow_actions(event_name: str, record: Record, payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Simulate workflow actions that would be triggered by rules.
-    Uses event names that exist in the system (lead.*, agent.*, support.*).
-
-    Support rules (WorkItemEventView / dispatch_support_event): update_fields + increments
-    on records; support_ticket is mirrored afterward.
+    Uses event names that exist in the system (lead.*, agent.*).
     
     Args:
         event_name (str): The name of the event
@@ -179,27 +121,6 @@ def simulate_workflow_actions(event_name: str, record: Record, payload: Dict[str
             "action": "update_fields",
             "updates": {"lead_stage": "IN_QUEUE", "assigned_to": None},
             "message": "Lead unassigned (agent take break)"
-        },
-        "support.resolved": {
-            **_simulate_support_save_and_continue("Resolved", payload),
-            "message": "Support ticket resolved (SaveAndContinueView / WorkItemEventView)",
-        },
-        "support.cannot_resolve": {
-            **_simulate_support_save_and_continue("Can't Resolve", payload),
-            "message": "Support ticket cannot resolve (SaveAndContinueView / WorkItemEventView)",
-        },
-        "support.call_later": {
-            **_simulate_support_save_and_continue("WIP", payload),
-            "message": "Support ticket WIP (SaveAndContinueView / WorkItemEventView)",
-        },
-        "support.take_break": {
-            "action": "update_fields",
-            "updates": {"assigned_to": None, "cse_name": None},
-            "message": "Support ticket unassigned (TakeBreakView; skipped when WIP)",
-        },
-        "support.not_connected": {
-            **_simulate_support_not_connected(record, payload),
-            "message": "Support not connected (UpdateCallStatusView / WorkItemEventView)",
         },
     }
     
