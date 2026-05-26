@@ -369,7 +369,8 @@ class CloseStaleSubscriptionLeadsJobHandlerTests(TestCase):
         lead.refresh_from_db()
         self.assertEqual(lead.data.get("lead_stage"), "CLOSED")
         self.assertEqual(job.result["updated"], 1)
-        self.assertEqual(job.result["tenant_scope"], "all")
+        self.assertEqual(job.result["tenant_scope"], "single")
+        self.assertEqual(job.result["tenant_id"], str(self.tenant.id))
         self.assertIn("cutoff", job.result)
 
     def test_skips_when_subscription_not_old_enough(self):

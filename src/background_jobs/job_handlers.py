@@ -38,6 +38,13 @@ from .models import BackgroundJob, JobType
 logger = logging.getLogger(__name__)
 
 
+def _filter_records_by_job_tenant(qs, job: BackgroundJob):
+    """Scope a Record queryset to ``job.tenant_id`` when the job row has a tenant."""
+    if job.tenant_id:
+        return qs.filter(tenant_id=job.tenant_id)
+    return qs
+
+
 class JobHandler(ABC):
     """
     Abstract base class for all job handlers.
@@ -951,17 +958,20 @@ class UnassignSnoozedLeadsJobHandler(JobHandler):
         now = timezone.now()
         one_hour_later = (now + timedelta(hours=1)).isoformat()
         # SNOOZED only = no other event clicked; has assigned_to; snooze_unassign_at passed; attempts not exhausted
-        qs = Record.objects.filter(entity_type="lead").extra(
-            where=[
-                "data->>'lead_stage' = 'SNOOZED'",
-                "data->>'assigned_to' IS NOT NULL",
-                "TRIM(COALESCE(data->>'assigned_to', '')) != ''",
-                "data->>'snooze_unassign_at' IS NOT NULL",
-                "data->>'snooze_unassign_at' != ''",
-                "(data->>'snooze_unassign_at')::timestamptz <= %s",
-                "COALESCE((data->>'call_attempts')::int, 0) < 6",
-            ],
-            params=[now],
+        qs = _filter_records_by_job_tenant(
+            Record.objects.filter(entity_type="lead").extra(
+                where=[
+                    "data->>'lead_stage' = 'SNOOZED'",
+                    "data->>'assigned_to' IS NOT NULL",
+                    "TRIM(COALESCE(data->>'assigned_to', '')) != ''",
+                    "data->>'snooze_unassign_at' IS NOT NULL",
+                    "data->>'snooze_unassign_at' != ''",
+                    "(data->>'snooze_unassign_at')::timestamptz <= %s",
+                    "COALESCE((data->>'call_attempts')::int, 0) < 6",
+                ],
+                params=[now],
+            ),
+            job,
         )
         unassigned_count = 0
         for record in qs:
@@ -1089,8 +1099,9 @@ class PurgeOldLogTablesJobHandler(JobHandler):
             days = get_log_retention_days()
         if days < 1:
             raise ValueError("days must be >= 1")
-        stats = purge_old_log_rows(days=days)
-        job.result = {"success": True, **stats}
+        tenant_id = str(job.tenant_id) if job.tenant_id else None
+        stats = purge_old_log_rows(days=days, tenant_id=tenant_id)
+        job.result = {"success": True, "tenant_id": tenant_id, **stats}
         return True
 
     def get_retry_delay(self, attempt: int) -> int:
@@ -1146,8 +1157,8 @@ class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
 
     Payload:
     - ``days`` (int, optional, default 15): minimum age of subscription timestamp in days.
-    - ``tenant_id`` (str UUID, optional): if set, only that tenant; if omitted, all tenants
-      (periodic worker enqueue uses no tenant_id).
+    - ``tenant_id`` (str UUID, optional): if set in payload, only that tenant; if omitted,
+      uses ``job.tenant_id`` when the job row has a tenant (worker enqueues one job per tenant).
     """
 
     def process(self, job: BackgroundJob) -> bool:
@@ -1159,7 +1170,7 @@ class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
         if days < 1:
             raise ValueError("days must be >= 1")
 
-        tid = payload.get("tenant_id")
+        tid = job.tenant_id or payload.get("tenant_id")
         if tid:
             updated, cutoff = _close_stale_subscription_leads_for_tenant(tid, days)
             job.result = {
@@ -1226,20 +1237,23 @@ class SnoozedToNotConnectedMidnightJobHandler(JobHandler):
 
     def process(self, job: BackgroundJob) -> bool:
         tz_name = settings.TIME_ZONE
-        qs = Record.objects.filter(
-            entity_type="lead",
-            data__contains={"lead_stage": "SNOOZED", "lead_status": "SALES LEAD"},
-        ).extra(
-            where=[
-                """
-                (data->>'next_call_at') IS NOT NULL
-                AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
-                AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
-                AND (timezone(%s, (data->>'next_call_at')::timestamptz))::date
-                    = (timezone(%s, NOW()))::date
-                """,
-            ],
-            params=[tz_name, tz_name],
+        qs = _filter_records_by_job_tenant(
+            Record.objects.filter(
+                entity_type="lead",
+                data__contains={"lead_stage": "SNOOZED", "lead_status": "SALES LEAD"},
+            ).extra(
+                where=[
+                    """
+                    (data->>'next_call_at') IS NOT NULL
+                    AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
+                    AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
+                    AND (timezone(%s, (data->>'next_call_at')::timestamptz))::date
+                        = (timezone(%s, NOW()))::date
+                    """,
+                ],
+                params=[tz_name, tz_name],
+            ),
+            job,
         )
         updated = 0
         for record in qs.iterator(chunk_size=500):
@@ -1289,32 +1303,35 @@ class ReleaseLeadsAfter12hJobHandler(JobHandler):
 
         now = timezone.now()
         one_hour_later = (now + timedelta(hours=1)).isoformat()
-        qs = Record.objects.filter(entity_type="lead").extra(
-            where=[
-                "UPPER(COALESCE(data->>'lead_stage','')) = 'NOT_CONNECTED'",
-                "data->>'assigned_to' IS NOT NULL",
-                "TRIM(COALESCE(data->>'assigned_to', '')) != ''",
-                "COALESCE((data->>'call_attempts')::int, 0) < 6",
-                """
-                (
+        qs = _filter_records_by_job_tenant(
+            Record.objects.filter(entity_type="lead").extra(
+                where=[
+                    "UPPER(COALESCE(data->>'lead_stage','')) = 'NOT_CONNECTED'",
+                    "data->>'assigned_to' IS NOT NULL",
+                    "TRIM(COALESCE(data->>'assigned_to', '')) != ''",
+                    "COALESCE((data->>'call_attempts')::int, 0) < 6",
+                    """
                     (
-                        data->>'first_assigned_today_at' IS NOT NULL
-                        AND TRIM(COALESCE(data->>'first_assigned_today_at', '')) != ''
-                        AND (data->>'first_assigned_today_at')::timestamptz + interval '12 hours' <= %s
-                    )
-                    OR (
                         (
-                            data->>'first_assigned_today_at' IS NULL
-                            OR TRIM(COALESCE(data->>'first_assigned_today_at', '')) = ''
+                            data->>'first_assigned_today_at' IS NOT NULL
+                            AND TRIM(COALESCE(data->>'first_assigned_today_at', '')) != ''
+                            AND (data->>'first_assigned_today_at')::timestamptz + interval '12 hours' <= %s
                         )
-                        AND data->>'not_connected_unassign_at' IS NOT NULL
-                        AND TRIM(COALESCE(data->>'not_connected_unassign_at', '')) != ''
-                        AND (data->>'not_connected_unassign_at')::timestamptz <= %s
+                        OR (
+                            (
+                                data->>'first_assigned_today_at' IS NULL
+                                OR TRIM(COALESCE(data->>'first_assigned_today_at', '')) = ''
+                            )
+                            AND data->>'not_connected_unassign_at' IS NOT NULL
+                            AND TRIM(COALESCE(data->>'not_connected_unassign_at', '')) != ''
+                            AND (data->>'not_connected_unassign_at')::timestamptz <= %s
+                        )
                     )
-                )
-                """,
-            ],
-            params=[now, now],
+                    """,
+                ],
+                params=[now, now],
+            ),
+            job,
         )
         released_count = 0
         for record in qs:
