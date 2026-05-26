@@ -7,6 +7,7 @@ from django.utils import timezone
 from django.db.models import QuerySet
 
 from crm_records.models import Record
+from crm_records.record_data_sql import CALL_ATTEMPTS_INT_EXPR
 
 
 @dataclass(frozen=True)
@@ -40,7 +41,7 @@ class DailyLimitChecker:
 
         assigned_today = Record.objects.filter(tenant=tenant, entity_type="lead").extra(
             where=[
-                """
+                f"""
                 (
                     data->>'first_assigned_to' = %s
                     AND data->>'first_assigned_at' IS NOT NULL
@@ -54,7 +55,7 @@ class DailyLimitChecker:
                     AND LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) NOT IN ('null', 'none')
                     AND data->>'assigned_to' = %s
                     AND updated_at >= %s
-                    AND COALESCE((data->>'call_attempts')::int, 0) = 0
+                    AND {CALL_ATTEMPTS_INT_EXPR} = 0
                 )
                 """
             ],

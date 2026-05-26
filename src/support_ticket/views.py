@@ -289,33 +289,41 @@ class SaveAndContinueView(APIView):
             # Always save cse_name for all resolution statuses
             cse_name = user_email
             
-            # Update the current ticket
             logger.info(f'Updating ticket with resolution: {resolution_status}, call status: {call_status}')
-            
-            # Apply memory constraint: don't update assigned_to and tenant_id in staging
-            update_data = {
-                'resolution_status': resolution_status,
+
+            _SUPPORT_EVENT_MAP = {
+                'Resolved': 'support.resolved',
+                "Can't Resolve": 'support.cannot_resolve',
+                'WIP': 'support.call_later',
+            }
+
+            event_payload = {
                 'cse_remarks': cse_remarks,
+                'other_reasons': other_reasons,
+                'review_requested': review_requested,
                 'cse_name': cse_name,
                 'call_status': call_status,
                 'resolution_time': final_resolution_time,
-                'call_attempts': (current_ticket.call_attempts or 0) + 1,
-                'completed_at': current_time,
-                'other_reasons': other_reasons,
-                'assigned_to_id': UUID(user_id)
+                'assigned_to': user_id,
             }
-            
 
-            # Add review_requested if provided
-            if review_requested is not None:
-                update_data['review_requested'] = review_requested
-                
-                # Don't update assigned_to if user_id is not a valid UUID
-            
-            for field, value in update_data.items():
-                setattr(current_ticket, field, value)
-            
-            current_ticket.save()
+            if resolution_status in _SUPPORT_EVENT_MAP:
+                try:
+                    from support_ticket.support_dispatch import dispatch_support_event
+                    dispatch_support_event(
+                        ticket=current_ticket,
+                        event_name=_SUPPORT_EVENT_MAP[resolution_status],
+                        payload=event_payload,
+                        tenant=current_ticket.tenant,
+                        request_user=user,
+                        log_event=True,
+                    )
+                    current_ticket.refresh_from_db()
+                except Exception as dispatch_err:
+                    logger.warning('SaveAndContinue dispatch failed: %s', dispatch_err)
+                    return Response({
+                        'error': 'Failed to update ticket'
+                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             
             # Send Mixpanel events based on resolution status
             mixpanel_service = MixpanelService()
@@ -860,47 +868,60 @@ class UpdateCallStatusView(APIView):
                 if not ticket:
                     return Response({"error": "Ticket not found"}, status=status.HTTP_404_NOT_FOUND)
 
+                if call_status != "Not Connected":
+                    now = timezone.now()
+                    update_fields = {
+                        "call_status": call_status,
+                        "completed_at": now,
+                    }
+                    if resolution_status is not None:
+                        update_fields["resolution_status"] = resolution_status
+                    if cse_remarks is not None:
+                        update_fields["cse_remarks"] = cse_remarks
+                    if resolution_time is not None:
+                        update_fields["resolution_time"] = resolution_time
+                    if other_reasons is not None:
+                        update_fields["other_reasons"] = other_reasons
+
+                    for field, value in update_fields.items():
+                        setattr(ticket, field, value)
+                    ticket.save()
+
+                    from crm_records.support_record_mirror import sync_record_from_ticket
+                    sync_record_from_ticket(ticket, tenant=request.tenant)
+
+            if call_status == "Not Connected":
                 now = timezone.now()
                 snooze_until = None
+                is_first = not ticket.call_attempts
+                if is_first:
+                    snooze_until = now + timedelta(hours=1)
+                    computed_resolution_status = "Snoozed"
+                else:
+                    snooze_until = now + timedelta(days=365 * 10)
+                    computed_resolution_status = resolution_status or "Closed"
 
-                # Snooze / Close logic
-                if call_status == "Not Connected":
-                    is_first = not ticket.call_attempts
-                    if is_first:
-                        snooze_until = now + timedelta(hours=1)
-                        resolution_status = "Snoozed"
-                    else:
-                        snooze_until = now + timedelta(days=365 * 10)
-                        resolution_status = resolution_status or "Closed"
+                try:
+                    from support_ticket.support_dispatch import dispatch_support_event
+                    dispatch_support_event(
+                        ticket=ticket,
+                        event_name='support.not_connected',
+                        payload={
+                            'cse_remarks': cse_remarks,
+                            'other_reasons': other_reasons or [],
+                            'resolution_status': computed_resolution_status,
+                            'resolution_time': resolution_time,
+                            'snooze_until': snooze_until.isoformat() if snooze_until else None,
+                        },
+                        tenant=request.tenant,
+                        request_user=request.user,
+                        log_event=True,
+                    )
+                    ticket.refresh_from_db()
+                except Exception as dispatch_err:
+                    logger.warning('UpdateCallStatus dispatch failed: %s', dispatch_err)
+                    return Response({"error": "Failed to update ticket"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-                # Resolve assignment
-                final_assigned_to = None
-                final_cse_name = None
-
-                # Build update fields
-                update_fields = {
-                    "call_status": call_status,
-                    "call_attempts": (ticket.call_attempts or 0) + 1,
-                    "completed_at": now,
-                    "snooze_until": snooze_until,
-                    "assigned_to_id": str(final_assigned_to) if final_assigned_to else None,
-                    "cse_name": final_cse_name,
-                }
-                if resolution_status is not None:
-                    update_fields["resolution_status"] = resolution_status
-                if cse_remarks is not None:
-                    update_fields["cse_remarks"] = cse_remarks
-                if resolution_time is not None:
-                    update_fields["resolution_time"] = resolution_time
-                if other_reasons is not None:
-                    update_fields["other_reasons"] = other_reasons
-
-                for field, value in update_fields.items():
-                    setattr(ticket, field, value)
-
-                ticket.save()
-
-            # Send Mixpanel event (outside transaction): old properties + all ticket column data
             if call_status == "Not Connected" and ticket.user_id:
                 mixpanel_service = MixpanelService()
                 mixpanel_properties = {
@@ -1057,10 +1078,31 @@ class TakeBreakView(APIView):
                 message = "Ticket is in progress. Taking a break without unassigning."
 
             if should_unassign:
-                # Unassign the ticket
-                ticket.assigned_to = None
-                ticket.cse_name = None
-                ticket.save()
+                try:
+                    from support_ticket.support_dispatch import dispatch_support_event
+                    tenant_obj = getattr(request, 'tenant', None) or ticket.tenant
+                    dispatch_support_event(
+                        ticket=ticket,
+                        event_name='support.take_break',
+                        payload={'resolution_status': resolution_status_payload},
+                        tenant=tenant_obj,
+                        request_user=user,
+                        log_event=True,
+                    )
+                    ticket.refresh_from_db()
+                except Exception as dispatch_err:
+                    logger.warning('TakeBreak dispatch failed: %s', dispatch_err)
+                    return Response({
+                        'error': 'Failed to update ticket'
+                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            else:
+                try:
+                    from crm_records.support_record_mirror import sync_record_from_ticket
+                    tenant_obj = getattr(request, 'tenant', None) or ticket.tenant
+                    if tenant_obj:
+                        sync_record_from_ticket(ticket, tenant=tenant_obj)
+                except Exception as dispatch_err:
+                    logger.warning('TakeBreak mirror sync failed: %s', dispatch_err)
             
             response_data = {
                 'success': True,
@@ -1190,9 +1232,10 @@ class ProcessDumpedTicketsView(APIView):
             # 4. Bulk insert tickets into support_ticket table
             inserted_tickets = SupportTicket.objects.bulk_create(tickets_to_insert, ignore_conflicts=True)
             logger.info(f'ProcessDumpedTicketsView: Inserted {len(inserted_tickets)} tickets into support_ticket table.')
-            
+
             # Send Mixpanel events for each inserted ticket
-            for ticket in inserted_tickets:
+            tickets_for_mixpanel = inserted_tickets
+            for ticket in tickets_for_mixpanel:
                 try:
                     user_id = ticket.user_id or str(ticket.id)
                     event_name = 'pyro_st_ticket_created'

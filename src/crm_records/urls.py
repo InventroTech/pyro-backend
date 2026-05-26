@@ -1,5 +1,6 @@
 from django.urls import path
 from .views import RecordListCreateView, RecordDistinctFieldValuesView, RecordDetailView, RecordHistoryView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView, GetMyCurrentLeadView, PartnerEventsView, PartnerLeadView, CallAttemptMatrixListCreateView, CallAttemptMatrixDetailView, CallAttemptMatrixByLeadTypeView, LeadAssignmentWebhookProxyView, RMAssignedMixpanelView, ScoringRuleListCreateView, ScoringRuleDetailView, ApiSecretKeySetView, ApiSecretKeyUpdateView
+from .work_item_views import WorkItemNextView, WorkItemEventView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 from .public_views import PublicJobsView, PublicJobApplicationView
 
@@ -28,6 +29,10 @@ urlpatterns = [
     
     # Get next lead endpoint
     path("leads/next/", GetNextLeadView.as_view(), name="get-next-lead"),
+
+    # Unified work item (self trial + support) pull and events
+    path("work-item/next/", WorkItemNextView.as_view(), name="work-item-next"),
+    path("work-item/event/", WorkItemEventView.as_view(), name="work-item-event"),
     
     # Get my current assigned lead (always from DB, no cache)
     path("leads/current/", GetMyCurrentLeadView.as_view(), name="get-my-current-lead"),

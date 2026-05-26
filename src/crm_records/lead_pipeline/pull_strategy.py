@@ -5,6 +5,8 @@ from typing import Any, List, Sequence
 from django.conf import settings
 from django.db.models import F, QuerySet
 
+from crm_records.record_data_sql import CALL_ATTEMPTS_INT_EXPR
+
 _DEFAULT_DAY_TIMEZONE = "Asia/Kolkata"
 _DEFAULT_ORDER = ["-lead_score", "-created_at"]
 _MODEL_ORDER_FIELDS = frozenset({"created_at", "updated_at"})
@@ -59,9 +61,9 @@ class PullStrategyApplier:
     ``include_snoozed_due``: when true, due SNOOZED rows sort first (prepends ``is_expired_snoozed`` unless already in ``order``).
     """
 
-    _NEXT_CALL_READY_WHERE = """
+    _NEXT_CALL_READY_WHERE = f"""
         (
-            COALESCE((data->>'call_attempts')::int, 0) = 0
+            {CALL_ATTEMPTS_INT_EXPR} = 0
             OR (
                 (data->>'next_call_at') IS NOT NULL
                 AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
@@ -73,12 +75,13 @@ class PullStrategyApplier:
 
     def apply(self, *, qs: QuerySet, strategy: dict, now_iso: str) -> QuerySet:
         qs = qs.extra(where=[self._NEXT_CALL_READY_WHERE])
+        strategy = strategy if isinstance(strategy, dict) else {}
         tokens = _resolve_order_tokens(strategy)
         return self._apply_order_list(
             qs,
             strategy=strategy,
             tokens=tokens,
-            call_attempts_expr="COALESCE((data->>'call_attempts')::int, 0)",
+            call_attempts_expr=CALL_ATTEMPTS_INT_EXPR,
             score_expr=self._build_score_expr(strategy.get("ignore_score_for_sources") or []),
         )
 
