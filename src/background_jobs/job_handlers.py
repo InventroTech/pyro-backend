@@ -28,6 +28,7 @@ from core.models import Tenant
 from authz.models import TenantMembership
 from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
 from crm_records.models import Record, PartnerEvent
+from crm_records.record_data_sql import CALL_ATTEMPTS_INT_EXPR
 from crm_records.scoring import get_scoring_rules, score_chunk_sql
 from crm_records.services import PrajaService
 from support_ticket.models import SupportTicket
@@ -959,7 +960,7 @@ class UnassignSnoozedLeadsJobHandler(JobHandler):
                 "data->>'snooze_unassign_at' IS NOT NULL",
                 "data->>'snooze_unassign_at' != ''",
                 "(data->>'snooze_unassign_at')::timestamptz <= %s",
-                "COALESCE((data->>'call_attempts')::int, 0) < 6",
+                f"{CALL_ATTEMPTS_INT_EXPR} < 6",
             ],
             params=[now],
         )
@@ -1294,7 +1295,7 @@ class ReleaseLeadsAfter12hJobHandler(JobHandler):
                 "UPPER(COALESCE(data->>'lead_stage','')) = 'NOT_CONNECTED'",
                 "data->>'assigned_to' IS NOT NULL",
                 "TRIM(COALESCE(data->>'assigned_to', '')) != ''",
-                "COALESCE((data->>'call_attempts')::int, 0) < 6",
+                f"{CALL_ATTEMPTS_INT_EXPR} < 6",
                 """
                 (
                     (
