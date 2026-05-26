@@ -6,6 +6,8 @@ Extracted into a dedicated module so the same logic can be reused in multiple vi
 
 from datetime import date, datetime
 
+from django.db.models import Q
+
 try:
     from dateutil import parser as date_parser  # type: ignore
 except ImportError:  # pragma: no cover
@@ -112,12 +114,10 @@ def coerce_json_contains_value(value):
     return s
 
 
-def json_field_contains_q(field_name: str, field_value) -> "Q":
+def json_field_contains_q(field_name: str, field_value) -> Q:
     """
     Build Q for exact JSON key match; false also matches null/missing (empty sheet cells).
     """
-    from django.db.models import Q
-
     match_val = coerce_json_contains_value(field_value)
     if match_val is False:
         return Q(data__contains={field_name: False}) | Q(
