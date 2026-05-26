@@ -1,23 +1,49 @@
 from __future__ import annotations
 
 import logging
+import re
 from functools import reduce
 from operator import or_
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from django.db.models import Q, QuerySet
 
 from crm_records.models import Record
+from crm_records.record_data_sql import CALL_ATTEMPTS_INT_EXPR
 
 logger = logging.getLogger(__name__)
+
+# Pipeline control keys — not Record.data attribute filters.
+_RESERVED_PIPELINE_KEYS = frozenset(
+    {
+        "entity_type",
+        "assigned_scope",
+        "fallback_assigned_scope",
+        "exclude_other_assignees",
+        "call_attempts",
+        "next_call_due",
+        "daily_limit_applies",
+        "apply_routing_rule",
+    }
+)
+
+_DATA_FIELD_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 class BucketQuerysetBuilder:
     """
-    Builds lead querysets from ``Bucket.filter_conditions`` (generic bucket engine).
+    Builds record querysets from ``Bucket.filter_conditions`` (generic bucket engine).
 
     User-specific eligible filters (affiliated_party / lead_source / lead_status)
     are applied here because buckets are system-wide.
+
+    Data attribute filters (any ``data`` JSON key):
+
+    - ``{field}_in`` / ``{field}_not_in`` — list membership on ``data->>'field'``
+    - ``resolution_status_in`` — same as ``_in`` but treats null/empty as a match
+    - ``lead_stage`` — list, matched case-insensitively (legacy key name)
+    - ``lead_source`` / ``lead_status`` — list, JSON ``contains`` match (GIN-friendly)
+    - ``atleast_paid_once`` — bool, true/false parsing for string booleans in JSON
     """
 
     _UNASSIGNED_WHERE = """
@@ -57,28 +83,29 @@ class BucketQuerysetBuilder:
         eligible_states: List[str],
         debug: bool = False,
     ) -> QuerySet:
-        qs = Record.objects.filter(tenant=tenant, entity_type="lead")
+        fc = bucket_filter_conditions
+        entity_type = fc.get("entity_type", "lead")
+        qs = Record.objects.filter(tenant=tenant, entity_type=entity_type)
 
-        scope = bucket_filter_conditions.get("assigned_scope", "unassigned")
+        scope = fc.get("assigned_scope", "unassigned")
         qs = self._apply_assigned_scope(
             qs,
             scope=scope,
             user_identifier=user_identifier,
-            exclude_other_assignees=self._should_exclude_other_assignees(bucket_filter_conditions, scope),
+            exclude_other_assignees=self._should_exclude_other_assignees(fc, scope),
         )
 
-        if stages := bucket_filter_conditions.get("lead_stage"):
-            stage_list = ", ".join(f"'{s.upper()}'" for s in stages)
-            qs = qs.extra(where=[f"UPPER(COALESCE(data->>'lead_stage','')) IN ({stage_list})"])
+        qs = self._apply_data_field_filters(qs, fc)
+
         if debug:
             logger.info(
-                "[BucketQuerysetBuilder] after scope+stages bucket_conditions=%s scope=%s count=%s",
-                {k: bucket_filter_conditions.get(k) for k in ("assigned_scope", "lead_stage", "call_attempts", "next_call_due", "apply_routing_rule", "daily_limit_applies", "fallback_assigned_scope") if k in bucket_filter_conditions},
+                "[BucketQuerysetBuilder] after scope+entity+data_filters bucket_conditions=%s scope=%s count=%s",
+                {k: v for k, v in fc.items() if k not in _RESERVED_PIPELINE_KEYS or k in ("entity_type", "assigned_scope")},
                 scope,
                 qs.count(),
             )
 
-        ca = bucket_filter_conditions.get("call_attempts")
+        ca = fc.get("call_attempts")
         if ca:
             qs = self._apply_call_attempts_range(qs, ca)
         if debug:
@@ -88,12 +115,12 @@ class BucketQuerysetBuilder:
                 qs.count(),
             )
 
-        if bucket_filter_conditions.get("next_call_due"):
+        if fc.get("next_call_due"):
             qs = qs.extra(where=[f"({self._NEXT_CALL_DUE_FRAGMENT.strip()})"])
         if debug:
             logger.info(
                 "[BucketQuerysetBuilder] after next_call_due=%s count=%s",
-                bucket_filter_conditions.get("next_call_due"),
+                fc.get("next_call_due"),
                 qs.count(),
             )
 
@@ -104,7 +131,9 @@ class BucketQuerysetBuilder:
                 qs.count(),
             )
 
-        if eligible_lead_types:
+        is_support = entity_type == "support_ticket"
+
+        if eligible_lead_types and not is_support:
             qs = qs.filter(self._build_contains_in_q("affiliated_party", eligible_lead_types))
             if debug:
                 logger.info(
@@ -112,7 +141,7 @@ class BucketQuerysetBuilder:
                     eligible_lead_types,
                     qs.count(),
                 )
-        if eligible_lead_sources:
+        if eligible_lead_sources and not is_support:
             qs = qs.filter(self._build_contains_in_q("lead_source", eligible_lead_sources))
             if debug:
                 logger.info(
@@ -120,7 +149,7 @@ class BucketQuerysetBuilder:
                     eligible_lead_sources,
                     qs.count(),
                 )
-        if eligible_lead_statuses:
+        if eligible_lead_statuses and not is_support:
             qs = qs.filter(self._build_contains_in_q("lead_status", eligible_lead_statuses))
             if debug:
                 logger.info(
@@ -138,6 +167,54 @@ class BucketQuerysetBuilder:
                 )
 
         return qs
+
+    def _apply_data_field_filters(self, qs: QuerySet, fc: Dict[str, Any]) -> QuerySet:
+        for key, value in fc.items():
+            spec = self._parse_field_filter(key, value)
+            if spec is None:
+                continue
+            field, mode, filter_value = spec
+            qs = self._apply_field_filter(qs, field=field, mode=mode, value=filter_value)
+        return qs
+
+    def _parse_field_filter(self, key: str, value: Any) -> Optional[Tuple[str, str, Any]]:
+        if key in _RESERVED_PIPELINE_KEYS:
+            return None
+        if key == "lead_stage" and isinstance(value, list):
+            return ("lead_stage", "upper_in", value)
+        if key in ("lead_source", "lead_status") and isinstance(value, list):
+            return (key, "contains_in", value)
+        if key == "atleast_paid_once" and isinstance(value, bool):
+            return ("atleast_paid_once", "bool_false_true", value)
+        if key.endswith("_not_in") and isinstance(value, list):
+            return (self._safe_data_field(key[: -len("_not_in")]), "not_in", value)
+        if key.endswith("_in") and isinstance(value, list):
+            field = self._safe_data_field(key[: -len("_in")])
+            mode = "nullable_in" if field == "resolution_status" else "in"
+            return (field, mode, value)
+        return None
+
+    def _apply_field_filter(self, qs: QuerySet, *, field: str, mode: str, value: Any) -> QuerySet:
+        if mode == "upper_in":
+            stage_list = ", ".join(f"'{str(s).upper()}'" for s in value)
+            return qs.extra(where=[f"UPPER(COALESCE(data->>'{field}','')) IN ({stage_list})"])
+        if mode == "contains_in":
+            return qs.filter(self._build_contains_in_q(field, value))
+        if mode == "bool_false_true":
+            return self._apply_atleast_paid_once(qs, value)
+        if mode == "nullable_in":
+            return self._apply_resolution_status_in(qs, value)
+        if mode == "in":
+            return self._apply_string_list_in(qs, field, value)
+        if mode == "not_in":
+            return self._apply_string_list_not_in(qs, field, value)
+        return qs
+
+    @staticmethod
+    def _safe_data_field(field: str) -> str:
+        if not _DATA_FIELD_NAME_RE.match(field):
+            raise ValueError(f"Invalid data field name for bucket filter: {field!r}")
+        return field
 
     def _should_exclude_other_assignees(self, fc: Dict[str, Any], scope: str) -> bool:
         if scope != "unassigned":
@@ -162,7 +239,6 @@ class BucketQuerysetBuilder:
             return qs.extra(where=[where], params=[user_identifier])
         if scope == "any":
             return qs
-        # unassigned (default)
         qs = qs.extra(where=[self._UNASSIGNED_WHERE])
         if exclude_other_assignees:
             qs = qs.extra(where=[self._EXCLUDE_OTHER_ASSIGNEES_WHERE], params=[user_identifier])
@@ -174,9 +250,12 @@ class BucketQuerysetBuilder:
         return reduce(or_, [Q(data__contains={field: v}) for v in values])
 
     def _apply_call_attempts_range(self, qs: QuerySet, ca: Dict[str, Any]) -> QuerySet:
-        col = "COALESCE((data->>'call_attempts')::int, 0)"
+        col = CALL_ATTEMPTS_INT_EXPR
         parts = []
         params: List[int] = []
+        if "eq" in ca:
+            parts.append(f"{col} = %s")
+            params.append(int(ca["eq"]))
         if "lte" in ca:
             parts.append(f"{col} <= %s")
             params.append(int(ca["lte"]))
@@ -192,3 +271,67 @@ class BucketQuerysetBuilder:
         if not parts:
             return qs
         return qs.extra(where=[" AND ".join(parts)], params=params)
+
+    def _apply_atleast_paid_once(self, qs: QuerySet, value: bool) -> QuerySet:
+        if value:
+            return qs.extra(
+                where=[
+                    "LOWER(COALESCE(data->>'atleast_paid_once', '')) IN ('true', 't', '1', 'yes')"
+                ]
+            )
+        return qs.extra(
+            where=[
+                """
+                (
+                    data->>'atleast_paid_once' IS NULL
+                    OR TRIM(COALESCE(data->>'atleast_paid_once', '')) = ''
+                    OR LOWER(TRIM(COALESCE(data->>'atleast_paid_once', ''))) IN ('false', 'f', '0', 'no', 'null', 'none')
+                )
+                """
+            ]
+        )
+
+    def _apply_resolution_status_in(self, qs: QuerySet, values: List[Any]) -> QuerySet:
+        """Match resolution_status; null/empty in values matches open tickets."""
+        normalized = list(values or [])
+        allow_null = any(v is None or v == "" for v in normalized)
+        concrete = [str(v) for v in normalized if v is not None and v != ""]
+        parts = []
+        params: List[str] = []
+        if allow_null:
+            parts.append(
+                """
+                (
+                    data->>'resolution_status' IS NULL
+                    OR TRIM(COALESCE(data->>'resolution_status', '')) = ''
+                    OR LOWER(TRIM(COALESCE(data->>'resolution_status', ''))) IN ('null', 'none')
+                )
+                """
+            )
+        if concrete:
+            placeholders = ", ".join(["%s"] * len(concrete))
+            parts.append(f"COALESCE(data->>'resolution_status', '') IN ({placeholders})")
+            params.extend(concrete)
+        if not parts:
+            return qs
+        return qs.extra(where=[f"({' OR '.join(parts)})"], params=params)
+
+    def _apply_string_list_in(self, qs: QuerySet, field: str, values: List[str]) -> QuerySet:
+        if not values:
+            return qs
+        field = self._safe_data_field(field)
+        placeholders = ", ".join(["%s"] * len(values))
+        return qs.extra(
+            where=[f"COALESCE(data->>'{field}', '') IN ({placeholders})"],
+            params=list(values),
+        )
+
+    def _apply_string_list_not_in(self, qs: QuerySet, field: str, values: List[str]) -> QuerySet:
+        if not values:
+            return qs
+        field = self._safe_data_field(field)
+        placeholders = ", ".join(["%s"] * len(values))
+        return qs.extra(
+            where=[f"COALESCE(data->>'{field}', '') NOT IN ({placeholders})"],
+            params=list(values),
+        )
