@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import Optional
 
 from django.db import transaction
 from django.utils import timezone
 
 from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
-from crm_records.lead_pipeline.bucket_resolver import BucketAssignmentView, BucketResolver
+from crm_records.lead_pipeline.bucket_resolver import BucketResolver
 from crm_records.lead_pipeline.candidate_selector import CandidateSelector
 from crm_records.lead_pipeline.daily_limit import DailyLimitChecker
 from crm_records.lead_pipeline.lead_assigner import LeadAssigner
@@ -16,16 +16,8 @@ from crm_records.lead_pipeline.pull_strategy import PullStrategyApplier
 from crm_records.lead_pipeline.queryset_builder import BucketQuerysetBuilder
 from crm_records.lead_pipeline.user_resolver import UserResolver
 from crm_records.models import Record
-from crm_records.record_data_sql import CALL_ATTEMPTS_INT_EXPR
 
 logger = logging.getLogger(__name__)
-
-# Sales get-next-lead path only; work-item buckets use WorkItemPipeline / SelfTrialPipeline.
-SALES_LEAD_BUCKET_SLUGS: List[str] = [
-    "fresh_leads",
-    "not_connected_retry",
-    "followup_callback",
-]
 
 
 def _tenant_label(tenant) -> str:
@@ -47,21 +39,7 @@ class LeadPipeline:
         self.candidate_selector = CandidateSelector()
         self.assigner = LeadAssigner(candidate_selector=self.candidate_selector)
 
-    def _filter_sales_lead_assignments(
-        self, assignments: List[BucketAssignmentView]
-    ) -> List[BucketAssignmentView]:
-        allowed = set(SALES_LEAD_BUCKET_SLUGS)
-        return [a for a in assignments if a.bucket_slug in allowed]
-
-    def get_next(
-        self,
-        *,
-        tenant,
-        request_user,
-        debug: bool = False,
-        assignments_override=None,
-        skip_daily_limit: bool = False,
-    ) -> Optional[Record]:
+    def get_next(self, *, tenant, request_user, debug: bool = False) -> Optional[Record]:
         now = timezone.now()
         now_iso = now.isoformat()
 
@@ -93,12 +71,7 @@ class LeadPipeline:
         )
 
         limit_status = None
-        if skip_daily_limit:
-            logger.info(
-                "[LeadPipeline] daily_limit_check skipped (work-item pull) user=%s",
-                user_identifier,
-            )
-        elif resolved_user.daily_limit is not None:
+        if resolved_user.daily_limit is not None:
             limit_status = self.daily_limit_checker.check(
                 tenant=tenant,
                 user_identifier=user_identifier,
@@ -124,23 +97,9 @@ class LeadPipeline:
                 debug,
             )
         else:
-            logger.info(
-                "[LeadPipeline] daily_limit_check daily_limit not set — no fresh-bucket cap from UserSettings"
-            )
+            logger.info("[LeadPipeline] daily_limit_check daily_limit not set — no fresh-bucket cap from UserSettings")
 
-        if assignments_override is not None:
-            assignments = assignments_override
-        else:
-            assignments = self._filter_sales_lead_assignments(
-                self.bucket_resolver.resolve(tenant, resolved_user)
-            )
-            if not assignments:
-                logger.info(
-                    "[LeadPipeline] no sales bucket assignments for tenant=%s user=%s",
-                    _tenant_label(tenant),
-                    user_identifier,
-                )
-                return None
+        assignments = self.bucket_resolver.resolve(tenant, resolved_user)
         bucket_order = [(a.bucket_slug, a.priority) for a in assignments]
         logger.info(
             "[LeadPipeline] buckets resolved count=%s order=%s user=%s",
@@ -423,14 +382,14 @@ class LeadPipeline:
         # 1) Assigned-to-me retry candidate (legacy code does NOT apply lead filters here).
         assigned_retry_qs = Record.objects.filter(tenant=tenant, entity_type="lead", data__contains={"assigned_to": user_identifier}).extra(
             select={
-                "call_attempts_int": CALL_ATTEMPTS_INT_EXPR,
+                "call_attempts_int": "COALESCE((data->>'call_attempts')::int, 0)",
                 "lead_stage_norm": "UPPER(COALESCE(data->>'lead_stage',''))",
                 "last_call_outcome_norm": "LOWER(COALESCE(data->>'last_call_outcome',''))",
             },
             where=[
-                f"""
-                {CALL_ATTEMPTS_INT_EXPR} >= 1
-                AND {CALL_ATTEMPTS_INT_EXPR} <= 6
+                """
+                COALESCE((data->>'call_attempts')::int, 0) >= 1
+                AND COALESCE((data->>'call_attempts')::int, 0) <= 6
                 AND UPPER(COALESCE(data->>'lead_stage','')) IN ('NOT_CONNECTED', 'IN_QUEUE')
                 AND (data->>'next_call_at') IS NOT NULL
                 AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
@@ -452,14 +411,14 @@ class LeadPipeline:
             return retry_candidate
 
         # 2) Unassigned retry candidate (apply eligible filters only; no routing rule).
-        _unassigned_not_connected_where = f"""
+        _unassigned_not_connected_where = """
             (
                 (data->>'assigned_to') IS NULL
                 OR TRIM(COALESCE(data->>'assigned_to', '')) = ''
                 OR LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) IN ('null', 'none')
             )
-            AND {CALL_ATTEMPTS_INT_EXPR} >= 1
-            AND {CALL_ATTEMPTS_INT_EXPR} <= 6
+            AND COALESCE((data->>'call_attempts')::int, 0) >= 1
+            AND COALESCE((data->>'call_attempts')::int, 0) <= 6
             AND UPPER(COALESCE(data->>'lead_stage','')) IN ('NOT_CONNECTED', 'IN_QUEUE')
             AND (data->>'next_call_at') IS NOT NULL
             AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
@@ -468,7 +427,7 @@ class LeadPipeline:
         """
 
         unassigned_retry_qs = Record.objects.filter(tenant=tenant, entity_type="lead").extra(
-            select={"call_attempts_int": CALL_ATTEMPTS_INT_EXPR},
+            select={"call_attempts_int": "COALESCE((data->>'call_attempts')::int, 0)"},
             where=[_unassigned_not_connected_where],
         )
 
