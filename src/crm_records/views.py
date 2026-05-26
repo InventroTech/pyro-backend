@@ -24,7 +24,6 @@ import os
 
 logger = logging.getLogger(__name__)
 from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule, PartnerEvent, ApiSecretKey
-from .record_data_sql import CALL_ATTEMPTS_INT_EXPR
 from object_history.models import ObjectHistory
 from .serializers import (
     RecordSerializer,
@@ -1675,9 +1674,9 @@ class GetNextLeadView(APIView):
     permission_classes = [IsTenantAuthenticated]
 
     # Enforce next_call_at cooldown: fresh (0 attempts) always eligible; retry (1+ attempts) only when next_call_at is set and past.
-    _NEXT_CALL_READY_WHERE = f"""
+    _NEXT_CALL_READY_WHERE = """
         (
-            {CALL_ATTEMPTS_INT_EXPR} = 0
+            COALESCE((data->>'call_attempts')::int, 0) = 0
             OR (
                 (data->>'next_call_at') IS NOT NULL
                 AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
@@ -1816,8 +1815,8 @@ class GetNextLeadView(APIView):
         else unassigned (filters + routing), lock-assign, then same JSON shape as a normal assign.
         Returns Response 200 or None.
         """
-        due_nc = f"""
-            {CALL_ATTEMPTS_INT_EXPR} BETWEEN 1 AND 6
+        due_nc = """
+            COALESCE((data->>'call_attempts')::int, 0) BETWEEN 1 AND 6
             AND UPPER(COALESCE(data->>'lead_stage','')) IN ('NOT_CONNECTED', 'IN_QUEUE')
             AND (data->>'next_call_at') IS NOT NULL AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
             AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
@@ -1825,7 +1824,7 @@ class GetNextLeadView(APIView):
         """
         retry_candidate = (
             Record.objects.filter(tenant=tenant, entity_type="lead", data__assigned_to=user_identifier)
-            .extra(select={"call_attempts_int": CALL_ATTEMPTS_INT_EXPR}, where=[due_nc])
+            .extra(select={"call_attempts_int": "COALESCE((data->>'call_attempts')::int, 0)"}, where=[due_nc])
             .order_by("call_attempts_int", "updated_at", "id")
             .first()
         )
@@ -1839,7 +1838,7 @@ class GetNextLeadView(APIView):
                 AND {due_nc}
             """
             qs = Record.objects.filter(tenant=tenant, entity_type="lead").extra(
-                select={"call_attempts_int": CALL_ATTEMPTS_INT_EXPR},
+                select={"call_attempts_int": "COALESCE((data->>'call_attempts')::int, 0)"},
                 where=[unassigned_where],
             )
             if eligible_lead_types:
@@ -1962,7 +1961,7 @@ class GetNextLeadView(APIView):
             qs = qs.extra(
                 select={
                     'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
-                    'call_attempts_int': CALL_ATTEMPTS_INT_EXPR,
+                    'call_attempts_int': "COALESCE((data->>'call_attempts')::int, 0)",
                     'lead_score_for_sort': """
                         CASE
                             WHEN data->>'lead_status' = 'SALES LEAD'
@@ -1997,7 +1996,7 @@ class GetNextLeadView(APIView):
             qs = qs.extra(
                 select={
                     'lead_score': "COALESCE((data->>'lead_score')::float, -1)",
-                    'call_attempts_int': CALL_ATTEMPTS_INT_EXPR,
+                    'call_attempts_int': "COALESCE((data->>'call_attempts')::int, 0)",
                     'lead_score_for_sort': """
                         CASE
                             WHEN data->>'lead_status' = 'SALES LEAD'
@@ -2194,7 +2193,7 @@ class GetNextLeadView(APIView):
                     entity_type='lead',
                 ).extra(
                     where=[
-                        f"""
+                        """
                         -- Count leads first assigned to this user today
                         -- Use first_assigned_to and first_assigned_at (new tracking)
                         -- This counts ALL leads first assigned to this user today, regardless of call_attempts
@@ -2214,7 +2213,7 @@ class GetNextLeadView(APIView):
                             AND LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) NOT IN ('null', 'none')
                             AND data->>'assigned_to' = %s
                             AND updated_at >= %s
-                            AND {CALL_ATTEMPTS_INT_EXPR} = 0
+                            AND COALESCE((data->>'call_attempts')::int, 0) = 0
                         )
                         """
                     ],
@@ -2288,13 +2287,13 @@ class GetNextLeadView(APIView):
 
         # Step 3a: SNOOZED/IN_QUEUE leads with next_call_at due first (before fresh). Priority: (1) assigned to me, (2) unassigned, then main queue.
         candidate = None
-        _snoozed_due_common = f"""
+        _snoozed_due_common = """
                 UPPER(COALESCE(data->>'lead_stage','')) IN ('SNOOZED', 'IN_QUEUE')
                 AND (data->>'next_call_at') IS NOT NULL
                 AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
                 AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
                 AND (data->>'next_call_at')::timestamptz <= NOW()
-                AND {CALL_ATTEMPTS_INT_EXPR} < 6
+                AND COALESCE((data->>'call_attempts')::int, 0) < 6
                 """
         # 3a(i): Assigned to current user (my SNOOZED/IN_QUEUE leads due for callback)
         _assigned_snoozed_where = (
@@ -2370,14 +2369,14 @@ class GetNextLeadView(APIView):
         # Common WHERE conditions for queueable leads: unassigned, lead_stage in (FRESH, IN_QUEUE), 0 call attempts.
         # assigned_to: match JSON null, empty, or string 'null'/'None' (exact data shape)
         # Retry logic for NOT_CONNECTED etc. is handled separately; main queue is pure fresh (call_attempts = 0).
-        _queueable_where = f"""
+        _queueable_where = """
                 (
                     (data->>'assigned_to') IS NULL
                     OR TRIM(COALESCE(data->>'assigned_to', '')) = ''
                     OR LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) IN ('null', 'none')
                 )
                 AND UPPER(COALESCE(data->>'lead_stage','')) IN ('FRESH','IN_QUEUE')
-                AND {CALL_ATTEMPTS_INT_EXPR} = 0
+                AND COALESCE((data->>'call_attempts')::int, 0) = 0
                 """
         # Single queue: queueable leads (unassigned, lead_stage in (FRESH, IN_QUEUE), 0 call_attempts).
         base_qs = Record.objects.filter(
