@@ -220,31 +220,55 @@ class RMAssignedMixpanelJobHandler(JobHandler):
             start_time = time.time()
             praja_id_int = int(praja_id)
             service = RMAssignedMixpanelService()
-            success = service.send_to_mixpanel_sync(praja_id_int, rm_email)
+            outcome = service.send_to_mixpanel_sync(praja_id_int, rm_email)
             execution_time = time.time() - start_time
+            ts = timezone.now().isoformat()
 
-            if success:
+            if outcome == "success":
                 job.result = {
                     "success": True,
                     "praja_id": praja_id_int,
                     "rm_email": rm_email,
                     "execution_time_seconds": round(execution_time, 3),
-                    "timestamp": timezone.now().isoformat(),
+                    "timestamp": ts,
                 }
                 logger.info(
                     f"RM assigned event sent successfully for job {job.id}: "
                     f"praja_id={praja_id_int} rm_email={rm_email}"
                 )
                 return True
-            else:
+
+            if outcome == "skipped_not_found":
                 job.result = {
-                    "success": False,
+                    "success": True,
+                    "skipped": True,
+                    "reason": "praja_user_not_found_404",
                     "praja_id": praja_id_int,
-                    "error": "RMAssignedMixpanelService returned False",
-                    "timestamp": timezone.now().isoformat(),
+                    "rm_email": rm_email,
+                    "execution_time_seconds": round(execution_time, 3),
+                    "timestamp": ts,
                 }
-                logger.warning(f"RM assigned event returned False for job {job.id}")
-                raise Exception("RMAssignedMixpanelService returned False")
+                logger.warning(
+                    "RM assigned event skipped for job %s (Praja user not found): praja_id=%s rm_email=%s",
+                    job.id,
+                    praja_id_int,
+                    rm_email,
+                )
+                return True
+
+            job.result = {
+                "success": False,
+                "praja_id": praja_id_int,
+                "error": "RMAssignedMixpanelService failed",
+                "timestamp": ts,
+            }
+            logger.error(
+                "RM assigned event failed for job %s: praja_id=%s rm_email=%s",
+                job.id,
+                praja_id_int,
+                rm_email,
+            )
+            raise Exception("RMAssignedMixpanelService failed")
         except Exception as e:
             logger.error(
                 f"RM assigned event failed for job {job.id}: praja_id={praja_id} error={e}",
