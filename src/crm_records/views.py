@@ -5110,21 +5110,29 @@ class RMAssignedMixpanelView(TenantScopedMixin, APIView):
             
             # Send to Mixpanel - praja_id is sent as user_id in the payload
             service = RMAssignedMixpanelService()
-            success = service.send_to_mixpanel_sync(
+            outcome = service.send_to_mixpanel_sync(
                 praja_id_int,
                 rm_email
             )
-            
-            if success:
+
+            if outcome == "success":
                 return Response(
                     {'success': True, 'message': 'Event sent to Mixpanel'},
                     status=status.HTTP_200_OK
                 )
-            else:
+            if outcome == "skipped_not_found":
                 return Response(
-                    {'success': False, 'message': 'Failed to send event to Mixpanel'},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    {
+                        'success': True,
+                        'skipped': True,
+                        'message': 'Praja user not found in Mixpanel; event skipped',
+                    },
+                    status=status.HTTP_200_OK
                 )
+            return Response(
+                {'success': False, 'message': 'Failed to send event to Mixpanel'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
                 
         except Exception as e:
             logger.error(f"Error sending RM assigned Mixpanel event: {str(e)}", exc_info=True)

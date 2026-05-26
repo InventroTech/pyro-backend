@@ -3,7 +3,9 @@ import json
 import requests
 import logging
 import base64
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Literal, Optional
+
+RmAssignedSendResult = Literal["success", "skipped_not_found", "failed"]
 
 logger = logging.getLogger(__name__)
 
@@ -145,25 +147,29 @@ class RMAssignedMixpanelService:
         self.mixpanel_token = os.environ.get("MIXPANEL_TOKEN")
         self.mixpanel_api_url = "https://api.thecircleapp.in/pyro/rm_assigned"
     
-    def send_to_mixpanel_sync(self, praja_id: int, rm_email: str) -> bool:
+    def send_to_mixpanel_sync(self, praja_id: int, rm_email: str) -> RmAssignedSendResult:
         """
         Send RM assigned event to Mixpanel via custom API
         
         Args:
             praja_id: Praja ID as integer (will be sent as user_id in payload)
             rm_email: RM email address
+
+        Returns:
+            ``success`` on 2xx, ``skipped_not_found`` on 404 (Praja user missing in Circle),
+            ``failed`` for other errors.
         """
         try:
             if not self.mixpanel_token:
                 logger.warning("MIXPANEL_TOKEN not configured, skipping Mixpanel event")
-                return False
+                return "failed"
             
             # Ensure praja_id is an integer
             praja_id_int = int(praja_id) if praja_id else None
             
             if not praja_id_int or not rm_email:
                 logger.warning("praja_id and rm_email are required for RM assigned Mixpanel event")
-                return False
+                return "failed"
             
             # Payload structure - send praja_id as user_id
             payload = {
@@ -213,23 +219,26 @@ class RMAssignedMixpanelService:
             logger.info("=" * 80)
             
             if not response.ok:
+                if response.status_code == 404:
+                    try:
+                        error_data = response.json()
+                        error_msg = error_data.get("message", "Unknown error")
+                    except Exception:
+                        error_msg = response.text[:200] if response.text else "Not found"
+                    logger.warning(
+                        "[Mixpanel] rm_assigned skipped (404 user not found): praja_id=%s rm_email=%s message=%s",
+                        praja_id_int,
+                        rm_email,
+                        error_msg,
+                    )
+                    return "skipped_not_found"
+
                 logger.error("=" * 80)
                 logger.error(f"❌ [Mixpanel] Failed: rm_assigned status={response.status_code}")
-                
-                # Detailed error handling
+
                 if response.status_code == 401:
                     logger.error(f"   Error: Unauthorized - Check MIXPANEL_TOKEN in .env file")
                     logger.error(f"   Token Preview: {self.mixpanel_token[:20]}...")
-                elif response.status_code == 404:
-                    try:
-                        error_data = response.json()
-                        error_msg = error_data.get('message', 'Unknown error')
-                        logger.error(f"   Error: User Not Found (404)")
-                        logger.error(f"   Message: {error_msg}")
-                        logger.error(f"   Praja ID Sent: {praja_id_int}")
-                        logger.error(f"   Note: User may not exist in Mixpanel yet")
-                    except:
-                        logger.error(f"   Error: 404 Not Found - {response.text[:200]}")
                 elif response.status_code >= 500:
                     logger.error(f"   Error: Server Error ({response.status_code})")
                     logger.error(f"   This is a server-side issue with the Mixpanel API")
@@ -238,19 +247,19 @@ class RMAssignedMixpanelService:
                     try:
                         error_data = response.json()
                         logger.error(f"   Details: {json.dumps(error_data, indent=2, default=str)}")
-                    except:
+                    except Exception:
                         logger.error(f"   Response: {response.text[:200]}")
-                
+
                 logger.error("=" * 80)
-                return False
-            
+                return "failed"
+
             logger.info(f"✅ [Mixpanel] Success: rm_assigned for praja_id={praja_id_int}")
-            return True
-            
+            return "success"
+
         except Exception as error:
             logger.error(f'❌ [Mixpanel] Error: rm_assigned - {error}')
             logger.error(f"   Error Type: {type(error).__name__}")
-            return False
+            return "failed"
 
 
 class TicketTimeService:
