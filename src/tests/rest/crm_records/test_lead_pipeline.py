@@ -37,7 +37,7 @@ from crm_records.lead_pipeline.daily_limit import DailyLimitChecker
 from crm_records.lead_pipeline.pipeline import LeadPipeline
 from crm_records.lead_pipeline.pull_strategy import PullStrategyApplier
 from crm_records.models import Bucket, Record, UserBucketAssignment
-from user_settings.models import Group, RoutingRule, TenantMemberSetting
+from user_settings.models import Group, TenantMemberSetting
 from user_settings.services import USER_KV_DAILY_LIMIT_KEY, USER_KV_GROUP_ID_KEY
 
 from tests.factories import (
@@ -1266,24 +1266,20 @@ def test_pipeline_tenant_isolation():
 
 
 @pytest.mark.django_db
-def test_pipeline_routing_rule_filters_state():
-    """Active lead routing rule narrows the pool (e.g. state)."""
+def test_pipeline_group_states_filter():
+    """Group.states in group_data narrows the pool (e.g. state)."""
     tenant = TenantFactory()
     _seed_tenant_buckets(tenant)
     user, membership, _ = _make_rm_user(tenant, lead_sources=[], lead_statuses=["SALES LEAD"])
 
-    RoutingRule.objects.create(
+    group_id = TenantMemberSetting.objects.get(
         tenant=tenant,
         tenant_membership=membership,
-        user_id=membership.user_id,
-        queue_type=RoutingRule.QUEUE_TYPE_LEAD,
-        is_active=True,
-        conditions={
-            "filters": [
-                {"field": "state", "op": "equals", "value": "Andhra Pradesh"},
-            ]
-        },
-    )
+        key=USER_KV_GROUP_ID_KEY,
+    ).value
+    group = Group.objects.get(id=group_id)
+    group.group_data = {**group.group_data, "states": ["Andhra Pradesh"]}
+    group.save()
 
     RecordFactory(
         tenant=tenant,

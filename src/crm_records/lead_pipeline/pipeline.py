@@ -97,7 +97,7 @@ class LeadPipeline:
                 debug,
             )
         else:
-            logger.info("[LeadPipeline] daily_limit_check daily_limit not set — no fresh-bucket cap from UserSettings")
+            logger.info("[LeadPipeline] daily_limit_check daily_limit not set — no fresh-bucket cap from Group/KV")
 
         assignments = self.bucket_resolver.resolve(tenant, resolved_user)
         bucket_order = [(a.bucket_slug, a.priority) for a in assignments]

@@ -1,7 +1,5 @@
 from django.urls import path
 from .views import (
-    UserSettingsListView,
-    UserSettingsDetailView,
     LeadTypeAssignmentView,
     UserLeadTypesView,
     UserCoreKVSettingsView,
@@ -11,21 +9,11 @@ from .views import (
     LeadStatusesListView,
     LeadStatesListView,
     QueueTypesListView,
-    RoutingRuleListCreateView,
-    RoutingRuleDetailView,
     GroupListCreateView,
     GroupDetailView,
 )
 
 urlpatterns = [
-    # General user settings endpoints
-    path("settings/", UserSettingsListView.as_view(), name="user-settings-list"),
-    path(
-        "settings/<uuid:user_id>/<str:key>/",
-        UserSettingsDetailView.as_view(),
-        name="user-settings-detail",
-    ),
-    # Lead type assignment endpoints
     path(
         "lead-type-assignments/",
         LeadTypeAssignmentView.as_view(),
@@ -51,18 +39,6 @@ urlpatterns = [
     path("lead-statuses/", LeadStatusesListView.as_view(), name="lead-statuses-list"),
     path("lead-states/", LeadStatesListView.as_view(), name="lead-states-list"),
     path("queue-types/", QueueTypesListView.as_view(), name="queue-types-list"),
-    # Routing rules endpoints (GM / tenant admin)
-    path(
-        "routing-rules/",
-        RoutingRuleListCreateView.as_view(),
-        name="routing-rules-list-create",
-    ),
-    path(
-        "routing-rules/<int:pk>/",
-        RoutingRuleDetailView.as_view(),
-        name="routing-rules-detail",
-    ),
     path("groups/", GroupListCreateView.as_view(), name="groups-list-create"),
     path("groups/<int:pk>/", GroupDetailView.as_view(), name="groups-detail"),
 ]
-
