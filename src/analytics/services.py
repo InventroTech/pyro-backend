@@ -9,7 +9,12 @@ from django.utils import timezone
 
 from authz.models import TenantMembership
 from crm_records.models import EventLog, Record
-from user_settings.models import UserSettings
+from user_settings.services import (
+    USER_KV_DAILY_LIMIT_KEY,
+    USER_KV_DAILY_TARGET_KEY,
+    kv_int_by_membership,
+    sum_kv_int_for_memberships,
+)
 from django.db.models.expressions import RawSQL
 from .constants import TRACKED_EVENTS, TERMINAL_EVENTS
 from .utils import get_utc_datetime_range_for_ist_date
@@ -406,7 +411,7 @@ class TeamMetricsService:
     
     def get_trail_target(self, manager_user_id: Optional[str] = None) -> int:
         """
-        Calculate trail target by summing daily_target from user_settings for all team members (excluding manager).
+        Calculate trail target by summing DAILY_TARGET KV values for all team members (excluding manager).
         Returns 0 if no targets are set.
         """
         team_user_ids_to_use = self._get_team_user_ids_excluding_manager(manager_user_id) if manager_user_id else self.team_user_ids
@@ -422,25 +427,10 @@ class TeamMetricsService:
         
         logger.info(f"[TeamMetricsService] Found {memberships.count()} TenantMembership records for team members")
         
-        # Sum daily_target from user_settings for these tenant_memberships
-        # Note: user_settings can have multiple entries per tenant_membership (one per key)
-        # We take the maximum daily_target per tenant_membership to avoid double-counting,
-        # then sum across all memberships
-        from django.db.models import Sum, Max
-        
-        # Get the maximum daily_target per tenant_membership (in case there are multiple entries with different keys)
-        # Then sum them up across all memberships
-        membership_targets = UserSettings.objects.filter(
-            tenant=self.tenant,
-            tenant_membership_id__in=memberships,
-            daily_target__isnull=False
-        ).values('tenant_membership_id').annotate(
-            max_target=Max('daily_target')
-        ).aggregate(
-            total=Sum('max_target')
-        )['total'] or 0
-        
-        target_sum = int(membership_targets)
+        membership_ids = list(memberships)
+        target_sum = sum_kv_int_for_memberships(
+            self.tenant, membership_ids, USER_KV_DAILY_TARGET_KEY
+        )
         
         logger.info(f"[TeamMetricsService] Trail target calculated: {target_sum}")
         return int(target_sum)
@@ -521,7 +511,7 @@ class TeamMetricsService:
 
     def get_allotted_leads(self, manager_user_id: Optional[str] = None) -> int:
         """
-        Calculate allotted leads by summing daily_limit from user_settings for all team members (excluding manager).
+        Calculate allotted leads by summing DAILY_LIMIT KV values for all team members (excluding manager).
         Returns 0 if no limits are set.
         """
         team_user_ids_to_use = self._get_team_user_ids_excluding_manager(manager_user_id) if manager_user_id else self.team_user_ids
@@ -537,25 +527,10 @@ class TeamMetricsService:
         
         logger.info(f"[TeamMetricsService] Found {memberships.count()} TenantMembership records for team members")
         
-        # Sum daily_limit from user_settings for these tenant_memberships
-        # Note: user_settings can have multiple entries per tenant_membership (one per key)
-        # We take the maximum daily_limit per tenant_membership to avoid double-counting,
-        # then sum across all memberships
-        from django.db.models import Sum, Max
-        
-        # Get the maximum daily_limit per tenant_membership (in case there are multiple entries with different keys)
-        # Then sum them up across all memberships
-        membership_limits = UserSettings.objects.filter(
-            tenant=self.tenant,
-            tenant_membership_id__in=memberships,
-            daily_limit__isnull=False
-        ).values('tenant_membership_id').annotate(
-            max_limit=Max('daily_limit')
-        ).aggregate(
-            total=Sum('max_limit')
-        )['total'] or 0
-        
-        limit_sum = int(membership_limits)
+        membership_ids = list(memberships)
+        limit_sum = sum_kv_int_for_memberships(
+            self.tenant, membership_ids, USER_KV_DAILY_LIMIT_KEY
+        )
         
         logger.info(f"[TeamMetricsService] Allotted leads calculated: {limit_sum}")
         return int(limit_sum)
@@ -703,26 +678,21 @@ class TeamMetricsService:
         
         logger.info(f"[TeamMetricsService] Fetched {len(user_id_to_email)} user emails from TenantMembership for {len(all_user_ids)} user_ids")
         
-        # Fetch daily_target from user_settings for these memberships
+        # Fetch daily_target from TenantMemberSetting KV for these memberships
         membership_ids = [m['id'] for m in memberships]
-        from django.db.models import Max
-        user_settings = UserSettings.objects.filter(
-            tenant=self.tenant,
-            tenant_membership_id__in=membership_ids,
-            daily_target__isnull=False
-        ).values('tenant_membership_id').annotate(
-            max_daily_target=Max('daily_target')
+        target_by_membership = kv_int_by_membership(
+            self.tenant, membership_ids, USER_KV_DAILY_TARGET_KEY
         )
-        
-        # Create a mapping of user_id to daily_target
         user_id_to_daily_target = {}
-        for setting in user_settings:
-            membership_id = setting['tenant_membership_id']
+        for membership_id, daily_target in target_by_membership.items():
             user_id_str = membership_id_to_user_id.get(membership_id)
             if user_id_str:
-                user_id_to_daily_target[user_id_str] = setting['max_daily_target']
-        
-        logger.info(f"[TeamMetricsService] Fetched daily_target for {len(user_id_to_daily_target)} users from user_settings")
+                user_id_to_daily_target[user_id_str] = daily_target
+
+        logger.info(
+            "[TeamMetricsService] Fetched daily_target for %d users from TenantMemberSetting KV",
+            len(user_id_to_daily_target),
+        )
         
         # Calculate per-user metrics: attendance, connected_to_trial_ratio, and average_time_spent
         # Add email, daily_target, and calculated metrics to each member's data

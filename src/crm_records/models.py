@@ -365,8 +365,7 @@ class Bucket(HistoryTrackedModel, BaseModel):
       Supported keys: ``lte``, ``gte``, ``lt``, ``gt`` (int).
     - ``next_call_due`` (bool): If true, require ``next_call_at`` set and ``<= NOW()``
       (and attempts ``< 6`` when combined with snoozed-style buckets).
-    - ``apply_routing_rule`` (bool, default True): Apply ``apply_routing_rule_to_queryset``
-      for this RM when ``user_uuid`` is set.
+    - ``apply_routing_rule`` (bool, legacy): Ignored; lead filters come from Group/KV settings.
     - ``daily_limit_applies`` (bool): If true, this bucket is skipped when the user has
       hit their daily pull limit (fresh pool only in typical setups).
     - ``exclude_other_assignees`` (bool, default True when ``assigned_scope`` is

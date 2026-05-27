@@ -1,26 +1,22 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
 from django.shortcuts import get_object_or_404
-from django.db import transaction
 import uuid
 
 from authz.permissions import IsTenantAuthenticated
 
 from authz.models import TenantMembership
-from .models import UserSettings, RoutingRule, Group, TenantMemberSetting
+from .models import Group, TenantMemberSetting
 
 from .serializers import (
-    UserSettingsSerializer,
-    UserSettingsCreateSerializer,
     TenantMemberSettingSerializer,
     LeadTypeAssignmentSerializer,
-    RoutingRuleSerializer,
     GroupSerializer,
 )
 from .services import (
     upsert_user_kv_settings,
+    upsert_user_lead_assignment_kv,
     USER_KV_GROUP_ID_KEY,
     USER_KV_DAILY_LIMIT_KEY,
     USER_KV_DAILY_TARGET_KEY,
@@ -66,105 +62,6 @@ def get_tenant_membership_by_user_id(tenant, user_id, user=None):
             return tenant_membership
     
     return None
-
-
-class UserSettingsListView(APIView):
-    """List and create user settings for the current tenant"""
-    permission_classes = [IsTenantAuthenticated]
-
-    def get(self, request):
-        """Get all user settings for the current tenant"""
-        tenant = request.tenant
-        settings = UserSettings.objects.filter(tenant=tenant)
-        serializer = UserSettingsSerializer(settings, many=True)
-        return Response(serializer.data)
-
-    def post(self, request):
-        """Create a new user setting"""
-        tenant = request.tenant
-        serializer = UserSettingsCreateSerializer(data=request.data)
-        
-        if serializer.is_valid():
-            # Check if setting already exists
-            existing_setting = UserSettings.objects.filter(
-                tenant=tenant,
-                tenant_membership=serializer.validated_data['tenant_membership'],
-                key=serializer.validated_data['key']
-            ).first()
-            
-            if existing_setting:
-                # Update existing setting
-                existing_setting.value = serializer.validated_data['value']
-                if 'daily_target' in serializer.validated_data:
-                    existing_setting.daily_target = serializer.validated_data['daily_target']
-                if 'daily_limit' in serializer.validated_data:
-                    existing_setting.daily_limit = serializer.validated_data['daily_limit']
-                existing_setting.save()
-                response_serializer = UserSettingsSerializer(existing_setting)
-                return Response(response_serializer.data, status=status.HTTP_200_OK)
-            else:
-                # Create new setting
-                setting = serializer.save(tenant=tenant)
-                response_serializer = UserSettingsSerializer(setting)
-                return Response(response_serializer.data, status=status.HTTP_201_CREATED)
-        
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-class UserSettingsDetailView(APIView):
-    """Retrieve, update or delete a specific user setting"""
-    permission_classes = [IsTenantAuthenticated]
-
-    def get_object(self, tenant, user_id, key):
-        """Get a specific user setting"""
-        tenant_membership = get_tenant_membership_by_user_id(tenant, user_id)
-        if not tenant_membership:
-            from django.http import Http404
-            raise Http404("TenantMembership not found for this user")
-        return get_object_or_404(
-            UserSettings,
-            tenant=tenant,
-            tenant_membership=tenant_membership,
-            key=key
-        )
-
-    def get(self, request, user_id, key):
-        """Get a specific user setting"""
-        tenant = request.tenant
-        setting = self.get_object(tenant, user_id, key)
-        serializer = UserSettingsSerializer(setting)
-        return Response(serializer.data)
-
-    def put(self, request, user_id, key):
-        """Update a specific user setting"""
-        tenant = request.tenant
-        setting = self.get_object(tenant, user_id, key)
-        serializer = UserSettingsSerializer(setting, data=request.data, partial=True)
-        
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
-        
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
-    def patch(self, request, user_id, key):
-        """Partially update a specific user setting"""
-        tenant = request.tenant
-        setting = self.get_object(tenant, user_id, key)
-        serializer = UserSettingsSerializer(setting, data=request.data, partial=True)
-        
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
-        
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-    def delete(self, request, user_id, key):
-        """Delete a specific user setting"""
-        tenant = request.tenant
-        setting = self.get_object(tenant, user_id, key)
-        setting.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class LeadTypeAssignmentView(APIView):
@@ -349,60 +246,44 @@ class LeadTypeAssignmentView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            # Create or update the setting in UserSettings
-            setting, created = UserSettings.objects.get_or_create(
+            # Persist assignment via TenantMemberSetting KV only (Group holds filter config).
+            kv_row = TenantMemberSetting.objects.filter(
                 tenant=tenant,
                 tenant_membership=tenant_membership,
-                key='LEAD_TYPE_ASSIGNMENT',
-                defaults={
-                    'value': assignment_value,
-                    'daily_target': daily_target,
-                    'daily_limit': daily_limit,
-                }
-            )
-            if not created:
-                setting.value = assignment_value
-                setting.lead_sources = None
-                if hasattr(setting, 'lead_statuses'):
-                    setting.lead_statuses = None
-                if 'daily_target' in serializer.validated_data:
-                    setting.daily_target = daily_target
-                if 'daily_limit' in serializer.validated_data:
-                    setting.daily_limit = daily_limit
-                setting.save()
+                key=USER_KV_GROUP_ID_KEY,
+            ).first()
+            group_id = kv_row.value if kv_row and isinstance(kv_row.value, int) else None
 
-            if 'daily_target' in serializer.validated_data:
-                UserSettings.objects.filter(
-                    tenant=tenant,
-                    tenant_membership=tenant_membership
-                ).exclude(id=setting.id).update(daily_target=daily_target)
-            if 'daily_limit' in serializer.validated_data:
-                UserSettings.objects.filter(
-                    tenant=tenant,
-                    tenant_membership=tenant_membership
-                ).exclude(id=setting.id).update(daily_limit=daily_limit)
             upsert_user_kv_settings(
                 tenant=tenant,
                 tenant_membership=tenant_membership,
-                group_id=getattr(setting, "group_id", None),
-                daily_target=setting.daily_target,
-                daily_limit=setting.daily_limit,
+                group_id=group_id,
+                daily_target=daily_target,
+                daily_limit=daily_limit,
             )
-            logger.info(f"LeadTypeAssignmentView.post - Returning response: daily_target={setting.daily_target}, daily_limit={setting.daily_limit}")
-            
-            # Return TenantMembership id as user_id (consistent with GET response)
+            upsert_user_lead_assignment_kv(
+                tenant=tenant,
+                tenant_membership=tenant_membership,
+                assignment_value=assignment_value,
+            )
+            logger.info(
+                "LeadTypeAssignmentView.post - Returning response: daily_target=%s, daily_limit=%s",
+                daily_target,
+                daily_limit,
+            )
+
             return Response({
-                'user_id': str(tenant_membership.id),  # TenantMembership ID
+                'user_id': str(tenant_membership.id),
                 'user_name': tenant_membership.email.split('@')[0] if tenant_membership.email else '',
                 'user_email': tenant_membership.email,
                 'tenant_membership_id': tenant_membership.id,
                 'lead_types': lead_types,
                 'lead_sources': lead_sources,
                 'lead_statuses': lead_statuses,
-                'daily_target': setting.daily_target,
-                'daily_limit': setting.daily_limit,
-                'created': created
-            }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+                'daily_target': daily_target,
+                'daily_limit': daily_limit,
+                'created': True,
+            }, status=status.HTTP_200_OK)
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -649,148 +530,6 @@ class QueueTypesListView(APIView):
             },
             status=status.HTTP_200_OK,
         )
-
-
-class RoutingRuleListCreateView(APIView):
-    """
-    List and upsert routing rules for tickets and leads.
-    Rules are keyed by authz.TenantMembership id (not user UUID).
-    Accepts user_id as TenantMembership id (integer) or as user UUID for backward compat.
-    """
-
-    permission_classes = [IsTenantAuthenticated]
-
-    def get(self, request):
-        tenant = request.tenant
-        rules = (
-            RoutingRule.objects.filter(tenant=tenant)
-            .select_related("tenant_membership")
-            .order_by("queue_type", "tenant_membership_id", "id")
-        )
-        serializer = RoutingRuleSerializer(rules, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
-    def post(self, request):
-        """
-        Upsert a routing rule by tenant_membership + queue_type.
-        Request can send user_id as TenantMembership id (integer) or as user UUID;
-        we resolve to TenantMembership and store that. Works even when membership has no linked auth user.
-        """
-        tenant = request.tenant
-        raw_user_id = request.data.get("user_id")
-        if not raw_user_id:
-            return Response(
-                {"user_id": ["This field is required (TenantMembership id or user UUID)."]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        raw_str = str(raw_user_id).strip()
-        tenant_membership = None
-
-        # Prefer TenantMembership id (integer)
-        try:
-            tm_id = int(raw_str)
-            tenant_membership = (
-                TenantMembership.objects.filter(tenant=tenant, id=tm_id)
-                .select_related("role")
-                .first()
-            )
-        except (ValueError, TypeError):
-            pass
-
-        # Fallback: treat as user UUID and resolve to membership
-        if not tenant_membership:
-            try:
-                user_uuid = uuid.UUID(raw_str)
-                tenant_membership = (
-                    TenantMembership.objects.filter(tenant=tenant, user_id=user_uuid)
-                    .select_related("role")
-                    .first()
-                )
-            except (ValueError, AttributeError, TypeError):
-                pass
-
-        if not tenant_membership:
-            return Response(
-                {
-                    "user_id": [
-                        "TenantMembership not found for this id or user UUID in this tenant."
-                    ]
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        data = request.data.copy()
-        data["tenant_membership"] = tenant_membership.id
-        data["user_id"] = (
-            str(tenant_membership.user_id) if tenant_membership.user_id else None
-        )
-
-        serializer = RoutingRuleSerializer(data=data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        validated = serializer.validated_data
-        queue_type = validated["queue_type"]
-
-        with transaction.atomic():
-            rule, created = RoutingRule.objects.select_for_update().get_or_create(
-                tenant=tenant,
-                tenant_membership=tenant_membership,
-                queue_type=queue_type,
-                defaults={
-                    "user_id": tenant_membership.user_id,
-                    "is_active": validated.get("is_active", True),
-                    "conditions": validated.get("conditions", {}),
-                    "name": validated.get("name"),
-                    "description": validated.get("description"),
-                },
-            )
-
-            if not created:
-                rule.user_id = tenant_membership.user_id
-                for field in ["is_active", "conditions", "name", "description"]:
-                    if field in validated:
-                        setattr(rule, field, validated[field])
-                rule.save()
-
-        response_serializer = RoutingRuleSerializer(rule)
-        return Response(
-            response_serializer.data,
-            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
-        )
-
-
-class RoutingRuleDetailView(APIView):
-    """
-    Retrieve, update, or delete a specific routing rule by ID.
-    """
-
-    permission_classes = [IsTenantAuthenticated]
-
-    def get_object(self, tenant, pk: int) -> RoutingRule:
-        return get_object_or_404(RoutingRule, tenant=tenant, pk=pk)
-
-    def get(self, request, pk: int):
-        tenant = request.tenant
-        rule = self.get_object(tenant, pk)
-        serializer = RoutingRuleSerializer(rule)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
-    def put(self, request, pk: int):
-        tenant = request.tenant
-        rule = self.get_object(tenant, pk)
-        serializer = RoutingRuleSerializer(rule, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-    def delete(self, request, pk: int):
-        tenant = request.tenant
-        rule = self.get_object(tenant, pk)
-        rule.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class GroupListCreateView(APIView):

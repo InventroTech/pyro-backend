@@ -11,7 +11,7 @@ from accounts.serializers import TenantMembershipCreateSerializer, TenantMembers
 from authz.permissions import IsTenantAuthenticated, HasTenantRole
 from authz.service import get_authz_role_from_legacy_role  # DEPRECATED: Will be removed
 from authz.models import TenantMembership, Role
-from user_settings.models import Group, UserSettings
+from user_settings.models import Group
 from user_settings.services import upsert_user_kv_settings
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from core.models import Tenant
@@ -32,56 +32,20 @@ def _apply_group_and_assignment(
     daily_target,
     daily_limit,
 ):
-    """Bind user setting to group and sync LEAD_TYPE_ASSIGNMENT filters."""
+    """Bind user to a group and sync core TenantMemberSetting KV rows."""
     group = None
     normalized_group_name = (lead_group_name or "").strip()
     if normalized_group_name:
         group = Group.objects.filter(tenant=tenant, name__iexact=normalized_group_name).first()
         if not group:
             raise serializers.ValidationError({"lead_group_name": "Lead group not found for this tenant."})
-    group_data = group.group_data if group else {}
-    lead_types = group_data.get("party") if isinstance(group_data.get("party"), list) else []
-    lead_sources = group_data.get("lead_sources") if isinstance(group_data.get("lead_sources"), list) else []
-    lead_statuses = group_data.get("lead_statuses") if isinstance(group_data.get("lead_statuses"), list) else []
-    states = group_data.get("states") if isinstance(group_data.get("states"), list) else []
-    queue_type = group_data.get("queue_type") if isinstance(group_data.get("queue_type"), str) else None
-    assignment_value = {
-        "lead_types": lead_types,
-        "lead_sources": lead_sources,
-        "lead_statuses": lead_statuses,
-        "states": states,
-        "queue_type": queue_type,
-        "daily_target": daily_target,
-        "daily_limit": daily_limit,
-    }
-    setting, _ = UserSettings.objects.get_or_create(
-        tenant=tenant,
-        tenant_membership=membership,
-        key="LEAD_TYPE_ASSIGNMENT",
-        defaults={
-            "value": assignment_value,
-            "daily_target": daily_target,
-            "daily_limit": daily_limit,
-        },
-    )
-    setting.value = assignment_value
-    setting.lead_sources = None
-    setting.group_id = group.id if group else None
-    if hasattr(setting, "lead_statuses"):
-        setting.lead_statuses = None
-    if daily_target is not None:
-        setting.daily_target = daily_target
-    if daily_limit is not None:
-        setting.daily_limit = daily_limit
-    setting.save()
 
-    # Maintain simple per-user key/value rows for easy reporting/UI tables.
     upsert_user_kv_settings(
         tenant=tenant,
         tenant_membership=membership,
         group_id=group.id if group else None,
-        daily_target=setting.daily_target,
-        daily_limit=setting.daily_limit,
+        daily_target=daily_target,
+        daily_limit=daily_limit,
     )
 
     return group
