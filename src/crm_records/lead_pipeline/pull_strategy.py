@@ -71,8 +71,16 @@ class PullStrategyApplier:
         )
     """
 
-    def apply(self, *, qs: QuerySet, strategy: dict, now_iso: str) -> QuerySet:
-        qs = qs.extra(where=[self._NEXT_CALL_READY_WHERE])
+    def apply(
+        self,
+        *,
+        qs: QuerySet,
+        strategy: dict,
+        now_iso: str,
+        enforce_next_call_ready: bool = True,
+    ) -> QuerySet:
+        if enforce_next_call_ready:
+            qs = qs.extra(where=[self._NEXT_CALL_READY_WHERE])
         tokens = _resolve_order_tokens(strategy)
         return self._apply_order_list(
             qs,

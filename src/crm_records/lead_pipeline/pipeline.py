@@ -24,6 +24,47 @@ def _tenant_label(tenant) -> str:
     return str(getattr(tenant, "slug", None) or getattr(tenant, "id", "") or tenant)
 
 
+def _bucket_stage_names(filter_conditions: dict) -> set[str]:
+    stages = filter_conditions.get("lead_stage") or []
+    return {str(stage).strip().upper() for stage in stages if str(stage).strip()}
+
+
+def _call_attempts_limited_to_zero(filter_conditions: dict) -> bool:
+    call_attempts = filter_conditions.get("call_attempts") or {}
+    if not isinstance(call_attempts, dict):
+        return False
+
+    try:
+        if "lte" in call_attempts and int(call_attempts["lte"]) <= 0:
+            return True
+        if "lt" in call_attempts and int(call_attempts["lt"]) <= 1:
+            return True
+    except (TypeError, ValueError):
+        return False
+    return False
+
+
+def _pull_strategy_for_bucket(strategy: dict, filter_conditions: dict) -> dict:
+    normalized = dict(strategy or {})
+    stages = _bucket_stage_names(filter_conditions)
+    if stages and "SNOOZED" not in stages:
+        normalized["include_snoozed_due"] = False
+        order = normalized.get("order")
+        if isinstance(order, list):
+            normalized["order"] = [
+                item
+                for item in order
+                if not (isinstance(item, str) and item.lstrip("-").strip().lower() == "is_expired_snoozed")
+            ]
+    return normalized
+
+
+def _should_enforce_next_call_ready(filter_conditions: dict) -> bool:
+    if filter_conditions.get("next_call_due"):
+        return True
+    return not _call_attempts_limited_to_zero(filter_conditions)
+
+
 class LeadPipeline:
     """
     Sales-lead lead retrieval + assignment flow, in bucket priority order.
@@ -165,7 +206,13 @@ class LeadPipeline:
                 #     now=now,
                 # )
 
-                qs = self.strategy_applier.apply(qs=qs, strategy=assignment.pull_strategy, now_iso=now_iso)
+                pull_strategy = _pull_strategy_for_bucket(assignment.pull_strategy, fc_copy)
+                qs = self.strategy_applier.apply(
+                    qs=qs,
+                    strategy=pull_strategy,
+                    now_iso=now_iso,
+                    enforce_next_call_ready=_should_enforce_next_call_ready(fc_copy),
+                )
 
                 # Full COUNT(*) on JSON-heavy lead querysets is slow at scale; only run when debug=1.
                 qs_count = None

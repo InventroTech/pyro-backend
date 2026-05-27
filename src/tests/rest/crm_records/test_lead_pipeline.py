@@ -34,7 +34,12 @@ from django.utils import timezone
 
 from crm_records.lead_pipeline.candidate_selector import CandidateSelector
 from crm_records.lead_pipeline.daily_limit import DailyLimitChecker
-from crm_records.lead_pipeline.pipeline import LeadPipeline
+from crm_records.lead_pipeline.pipeline import (
+    LeadPipeline,
+    _pull_strategy_for_bucket,
+    _should_enforce_next_call_ready,
+)
+from crm_records.lead_pipeline.queryset_builder import BucketQuerysetBuilder
 from crm_records.lead_pipeline.pull_strategy import PullStrategyApplier
 from crm_records.models import Bucket, Record, UserBucketAssignment
 from user_settings.models import Group, RoutingRule, TenantMemberSetting
@@ -264,6 +269,46 @@ def test_candidate_selector_garbage_next_call_at_not_due():
     selector = CandidateSelector()
     now = datetime(2026, 3, 22, 12, 0, 0, tzinfo=std_utc.utc)
     assert selector.is_due_for_call({"call_attempts": 1, "next_call_at": "not-a-date"}, now) is False
+
+
+@pytest.mark.django_db
+def test_fresh_bucket_query_omits_callback_only_sql():
+    """Fresh zero-attempt buckets should not carry snoozed/callback ORDER BY or WHERE fragments."""
+    tenant = TenantFactory()
+    fc = {
+        "lead_stage": ["FRESH", "IN_QUEUE"],
+        "call_attempts": {"lte": 0},
+        "next_call_due": False,
+        "assigned_scope": "unassigned",
+    }
+    strategy = {
+        "order": ["-day(created_at)", "-lead_score", "-created_at"],
+        "day_timezone": "Asia/Kolkata",
+        "include_snoozed_due": True,
+        "ignore_score_for_sources": [],
+    }
+
+    qs = BucketQuerysetBuilder().build(
+        tenant=tenant,
+        bucket_filter_conditions=fc,
+        user_identifier="rm-1",
+        user_uuid=None,
+        eligible_lead_types=[],
+        eligible_lead_sources=[],
+        eligible_lead_statuses=[],
+        eligible_states=[],
+    )
+    qs = PullStrategyApplier().apply(
+        qs=qs,
+        strategy=_pull_strategy_for_bucket(strategy, fc),
+        now_iso=timezone.now().isoformat(),
+        enforce_next_call_ready=_should_enforce_next_call_ready(fc),
+    )
+
+    sql = str(qs.query)
+    assert "is_expired_snoozed" not in sql
+    assert "next_call_at" not in sql
+    assert "call_attempts')::int, 0) <= 0" in sql
 
 
 # ===================================================================
