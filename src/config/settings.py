@@ -345,7 +345,7 @@ if not IS_DEV and SENTRY_DSN:
     integrations=[DjangoIntegration()],
     send_default_pii=False,
     traces_sampler=lambda _: 0.1,   # capture 10% of requests
-    profiles_sample_rate=1.0,       # profile 10% of sampled requests
+    profiles_sample_rate=1.0,       # profile 100% of sampled requests
 )
 
 
