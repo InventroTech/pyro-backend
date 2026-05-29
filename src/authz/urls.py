@@ -5,12 +5,14 @@ from .views_management import (
     CurrentUserRoleView,
     UpdateUserHierarchyView,
     SpoofTenantUserTokenView,
+    TenantMembershipBillingView,
 )
 
 urlpatterns = [
     path("users/", ListTenantUsersView.as_view(), name="authz_list_users"),
     path("users/hierarchy/", UpdateUserHierarchyView.as_view(), name="authz_update_user_hierarchy"),
     path("users/<int:membership_id>/spoof-token/", SpoofTenantUserTokenView.as_view(), name="authz_spoof_user_token"),
+    path("billing/", TenantMembershipBillingView.as_view(), name="authz_membership_billing"),
     path("roles/", RolesView.as_view(), name="authz_roles"),
     path("me/role/", CurrentUserRoleView.as_view(), name="authz_current_user_role"),
 ]
