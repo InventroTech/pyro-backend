@@ -42,7 +42,7 @@ INTERNAL_BILLING_EMAIL_ADDRESSES = (
     "abhsr1987@gmail.com",
 )
 BILLING_ROLE_RATES = {
-    "CSE": Decimal("1800"),
+    "CSE": Decimal("1500"),
     "RM": Decimal("2000"),
 }
 
