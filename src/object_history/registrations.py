@@ -1,3 +1,4 @@
+from authz.models import TenantMembership
 from background_jobs.models import BackgroundJob
 from crm_records.models import (
     ApiSecretKey,
@@ -17,6 +18,24 @@ from support_ticket.models import SupportTicket
 from whatsapp.models import WhatsAppTemplate
 
 from .registry import register
+
+register(
+    TenantMembership,
+    track_fields=[
+        "tenant_id",
+        "user_id",
+        "user_parent_id",
+        "email",
+        "role_id",
+        "is_active",
+        "name",
+        "company_name",
+        "department",
+        "created_at",
+    ],
+    redact_fields=set(),
+    snapshot_strategy="minimal",
+)
 
 register(
     SupportTicket,
