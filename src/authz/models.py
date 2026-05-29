@@ -5,6 +5,7 @@ from django.db.models.functions import Lower
 
 from core.models import SoftDeleteMixin
 from core.soft_delete import alive_q
+from object_history.models import HistoryTrackedModel
 
 
 class Permission(SoftDeleteMixin):
@@ -56,7 +57,7 @@ class RolePermission(SoftDeleteMixin):
         ]
 
 
-class TenantMembership(SoftDeleteMixin):
+class TenantMembership(HistoryTrackedModel, SoftDeleteMixin):
     class Meta:
         db_table = "authz_tenantmembership"
         constraints = [

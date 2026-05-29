@@ -32,6 +32,8 @@ def _coerce_json_safe(v):
         return None if (math.isinf(v) or math.isnan(v)) else v
     if isinstance(v, UUID):
         return str(v)
+    if isinstance(v, models.Model):
+        return str(v.pk) if v.pk is not None else None
     if isinstance(v, (list, tuple)):
         return [_coerce_json_safe(x) for x in v]
     if isinstance(v, dict):
@@ -51,7 +53,15 @@ def serialize_instance(instance: models.Model, config: HistoryConfig) -> Dict[st
 
     tracked = {}
     for field_name in config.track_fields:
-        value = getattr(instance, field_name, None)
+        try:
+            field = instance._meta.get_field(field_name)
+        except models.FieldDoesNotExist:
+            value = getattr(instance, field_name, None)
+        else:
+            if getattr(field, "is_relation", False) and field.many_to_one:
+                value = field.value_from_object(instance)
+            else:
+                value = getattr(instance, field_name, None)
         tracked[field_name] = _coerce_json_safe(value)
     if config.snapshot_strategy == "minimal":
         # minimal strategy defers to diff computation to prune unchanged fields
