@@ -54,13 +54,13 @@ class MembershipBillingCalculationTests(SimpleTestCase):
         days, amount = calculate_membership_billing(
             joined_at,
             date(2026, 5, 1),
-            Decimal("1800"),
+            Decimal("1500"),
             31,
             date(2026, 5, 29),
         )
 
         self.assertEqual(days, 17)
-        self.assertEqual(amount, Decimal("987.10"))
+        self.assertEqual(amount, Decimal("822.58"))
 
     def test_cse_and_rm_role_rates_are_fixed(self):
         cse_membership = type("Membership", (), {
@@ -70,7 +70,7 @@ class MembershipBillingCalculationTests(SimpleTestCase):
             "role": type("Role", (), {"key": "RM", "name": "Relationship Manager"})()
         })()
 
-        self.assertEqual(get_membership_monthly_amount(cse_membership), ("CSE", Decimal("1800")))
+        self.assertEqual(get_membership_monthly_amount(cse_membership), ("CSE", Decimal("1500")))
         self.assertEqual(get_membership_monthly_amount(rm_membership), ("RM", Decimal("2000")))
 
 
@@ -116,19 +116,19 @@ class TenantMembershipBillingAPITests(BaseAPITestCase):
         self.assertEqual(response.data["summary"]["member_count"], 1)
         self.assertEqual(response.data["summary"]["excluded_internal_member_count"], 2)
         self.assertEqual(response.data["summary"]["total_billable_days"], 17)
-        self.assertEqual(response.data["summary"]["total_amount"], "987.10")
+        self.assertEqual(response.data["summary"]["total_amount"], "822.58")
         self.assertEqual(response.data["cycle_days"], 31)
         self.assertEqual(response.data["period_end"], "2026-05-29")
         self.assertEqual(response.data["excluded_email_domain"], "@thepyro.ai")
         self.assertEqual(response.data["excluded_email_addresses_count"], 18)
-        self.assertEqual(response.data["role_rates"]["CSE"], "1800.00")
+        self.assertEqual(response.data["role_rates"]["CSE"], "1500.00")
         self.assertEqual(response.data["role_rates"]["RM"], "2000.00")
         self.assertEqual(response.data["results"][0]["billable_days"], 17)
         self.assertEqual(len(response.data["results"]), 1)
         self.assertNotIn("@thepyro.ai", response.data["results"][0]["email"])
         self.assertEqual(response.data["results"][0]["billing_role_key"], "CSE")
-        self.assertEqual(response.data["results"][0]["monthly_amount"], "1800.00")
-        self.assertEqual(response.data["results"][0]["billing_amount"], "987.10")
+        self.assertEqual(response.data["results"][0]["monthly_amount"], "1500.00")
+        self.assertEqual(response.data["results"][0]["billing_amount"], "822.58")
 
     def test_invalid_month_returns_400(self):
         response = self.client.get(
