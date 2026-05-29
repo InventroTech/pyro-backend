@@ -1,9 +1,14 @@
+from calendar import monthrange
+from datetime import date
+from decimal import Decimal, ROUND_HALF_UP
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from django.db.models import Q
 from django.db.models.functions import Lower
 from django.conf import settings
+from django.utils import timezone
 import jwt
 
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -13,6 +18,140 @@ from .serializers import RoleListSerializer, CreateSyncedRoleSerializer, TenantM
 from .service import create_or_sync_role
 from user_settings.models import Group, TenantMemberSetting
 from user_settings.services import USER_KV_GROUP_ID_KEY
+
+
+INTERNAL_BILLING_EMAIL_DOMAIN = "@thepyro.ai"
+INTERNAL_BILLING_EMAIL_ADDRESSES = (
+    "ritammajumder0@gmail.com",
+    "ritammajumder2025@gmail.com",
+    "ritam.majumder.21@aot.edu.in",
+    "bibhab.mukhopadhyay.21@aot.edu.in",
+    "ritamcoding@gmail.com",
+    "ritamvlog@mail.com",
+    "aquiveda@gmail.com",
+    "beguntalajagaranisangha@gmail.com",
+    "bibhabindia@gmail.com",
+    "bibhab1208@gmail.com",
+    "bibhabindia2@gmail.com",
+    "ritam.pyro@thecircleapp.in",
+    "bibhab.pyro@thecircleapp.in",
+    "dinesh.pyro@thecircleapp.in",
+    "ranjith1610@gmail.com",
+    "ranji.nitt@gmail.com",
+    "harisudhan.nandhu@gmail.com",
+    "abhsr1987@gmail.com",
+)
+BILLING_ROLE_RATES = {
+    "CSE": Decimal("1500"),
+    "RM": Decimal("2000"),
+}
+
+
+def _parse_billing_month(value):
+    if not value:
+        today = _today()
+        return date(today.year, today.month, 1)
+
+    try:
+        year_text, month_text = str(value).split("-", 1)
+        return date(int(year_text), int(month_text), 1)
+    except (TypeError, ValueError):
+        raise ValueError("month must be in YYYY-MM format")
+
+
+def _current_billing_month():
+    today = _today()
+    return date(today.year, today.month, 1)
+
+
+def _today():
+    return timezone.now().date()
+
+
+def _calendar_days_for_month(billing_month):
+    return monthrange(billing_month.year, billing_month.month)[1]
+
+
+def _billing_period_end(billing_month):
+    if billing_month == _current_billing_month():
+        return _today()
+
+    calendar_days = _calendar_days_for_month(billing_month)
+    return date(billing_month.year, billing_month.month, calendar_days)
+
+
+def _parse_cycle_days(value, billing_month):
+    raw = _calendar_days_for_month(billing_month) if value in (None, "") else value
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("cycle_days must be a valid integer")
+
+    if parsed <= 0:
+        raise ValueError("cycle_days must be greater than 0")
+    return parsed
+
+
+def _date_from_datetime(value):
+    return timezone.localtime(value).date() if timezone.is_aware(value) else value.date()
+
+
+def _internal_billing_email_q():
+    query = Q(email__iendswith=INTERNAL_BILLING_EMAIL_DOMAIN)
+    for email in INTERNAL_BILLING_EMAIL_ADDRESSES:
+        query |= Q(email__iexact=email)
+    return query
+
+
+def _role_billing_key(role):
+    if not role:
+        return None
+
+    role_key = (getattr(role, "key", "") or "").strip().upper()
+    if role_key in BILLING_ROLE_RATES:
+        return role_key
+
+    role_name = (getattr(role, "name", "") or "").strip().upper()
+    if role_name in BILLING_ROLE_RATES:
+        return role_name
+
+    return None
+
+
+def get_membership_monthly_amount(membership):
+    billing_key = _role_billing_key(getattr(membership, "role", None))
+    return billing_key, BILLING_ROLE_RATES.get(billing_key, Decimal("0"))
+
+
+def calculate_membership_billing(joined_at, billing_month, monthly_amount, cycle_days=None, period_end=None):
+    """
+    Prorate seat billing for a monthly cycle.
+
+    Billable days are counted within the selected billing window. For the current
+    month, the billing window ends today; for past months it ends on month-end.
+    """
+    cycle_days = cycle_days or _calendar_days_for_month(billing_month)
+    period_end = period_end or date(
+        billing_month.year,
+        billing_month.month,
+        min(cycle_days, _calendar_days_for_month(billing_month)),
+    )
+    joined_date = _date_from_datetime(joined_at)
+    join_month_index = joined_date.year * 12 + joined_date.month
+    billing_month_index = billing_month.year * 12 + billing_month.month
+
+    if joined_date > period_end or join_month_index > billing_month_index:
+        billable_days = 0
+    elif join_month_index < billing_month_index or joined_date <= billing_month:
+        billable_days = min(cycle_days, period_end.day)
+    else:
+        billable_days = max(period_end.day - joined_date.day + 1, 0)
+
+    amount = ((monthly_amount * Decimal(billable_days)) / Decimal(cycle_days)).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+    return billable_days, amount
 
 
 class RolesView(APIView):
@@ -119,6 +258,95 @@ class ListTenantUsersView(APIView):
             item["lead_group_name"] = groups_by_id.get(setting_map.get(membership.id))
         
         return Response({"count": len(data), "results": data}, status=status.HTTP_200_OK)
+
+
+class TenantMembershipBillingView(APIView):
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        try:
+            billing_month = _parse_billing_month(request.query_params.get("month"))
+            if billing_month > _current_billing_month():
+                raise ValueError("Cannot calculate billing for a future month")
+            cycle_days = _parse_cycle_days(request.query_params.get("cycle_days"), billing_month)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        period_end = _billing_period_end(billing_month)
+
+        base_memberships = (
+            TenantMembership.objects
+            .select_related("role")
+            .filter(tenant=request.tenant)
+        )
+        internal_email_query = _internal_billing_email_q()
+        excluded_internal_member_count = base_memberships.filter(internal_email_query).count()
+        memberships = list(
+            base_memberships
+            .exclude(internal_email_query)
+            .order_by("created_at", "email")
+        )
+
+        rows = []
+        total_amount = Decimal("0.00")
+        total_billable_days = 0
+
+        for membership in memberships:
+            billing_role_key, monthly_amount = get_membership_monthly_amount(membership)
+            daily_rate = (monthly_amount / Decimal(cycle_days)).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
+            billable_days, amount = calculate_membership_billing(
+                membership.created_at,
+                billing_month,
+                monthly_amount,
+                cycle_days,
+                period_end,
+            )
+            total_billable_days += billable_days
+            total_amount += amount
+            joined_date = _date_from_datetime(membership.created_at)
+
+            rows.append({
+                "membership_id": membership.id,
+                "name": membership.name or "",
+                "email": membership.email,
+                "role": {
+                    "id": str(membership.role.id),
+                    "key": membership.role.key,
+                    "name": membership.role.name,
+                } if membership.role_id else None,
+                "is_active": membership.is_active,
+                "joined_at": membership.created_at.isoformat(),
+                "joined_date": joined_date.isoformat(),
+                "billable_days": billable_days,
+                "cycle_days": cycle_days,
+                "billing_role_key": billing_role_key,
+                "monthly_amount": str(monthly_amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+                "daily_rate": str(daily_rate),
+                "billing_amount": str(amount),
+            })
+
+        return Response({
+            "month": billing_month.strftime("%Y-%m"),
+            "period_start": billing_month.isoformat(),
+            "period_end": period_end.isoformat(),
+            "cycle_days": cycle_days,
+            "excluded_email_domain": INTERNAL_BILLING_EMAIL_DOMAIN,
+            "excluded_email_addresses_count": len(INTERNAL_BILLING_EMAIL_ADDRESSES),
+            "role_rates": {
+                role_key: str(amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                for role_key, amount in BILLING_ROLE_RATES.items()
+            },
+            "summary": {
+                "member_count": len(rows),
+                "excluded_internal_member_count": excluded_internal_member_count,
+                "total_billable_days": total_billable_days,
+                "total_amount": str(total_amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            },
+            "results": rows,
+        }, status=status.HTTP_200_OK)
 
 
 class SpoofTenantUserTokenView(APIView):
