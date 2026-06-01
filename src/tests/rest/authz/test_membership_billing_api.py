@@ -1,6 +1,7 @@
 from unittest.mock import patch
 from datetime import date, datetime
 from decimal import Decimal
+import json
 
 from django.test import SimpleTestCase
 from authz.models import TenantMembership
@@ -73,6 +74,16 @@ class MembershipBillingCalculationTests(SimpleTestCase):
         self.assertEqual(get_membership_monthly_amount(cse_membership), ("CSE", Decimal("1500")))
         self.assertEqual(get_membership_monthly_amount(rm_membership), ("RM", Decimal("2000")))
 
+    def test_role_rates_can_be_overridden_for_report(self):
+        cse_membership = type("Membership", (), {
+            "role": type("Role", (), {"key": "CSE", "name": "Customer Support Executive"})()
+        })()
+
+        self.assertEqual(
+            get_membership_monthly_amount(cse_membership, {"CSE": Decimal("1750"), "RM": Decimal("2200")}),
+            ("CSE", Decimal("1750")),
+        )
+
 
 class TenantMembershipBillingAPITests(BaseAPITestCase):
     def setUp(self):
@@ -129,6 +140,66 @@ class TenantMembershipBillingAPITests(BaseAPITestCase):
         self.assertEqual(response.data["results"][0]["billing_role_key"], "CSE")
         self.assertEqual(response.data["results"][0]["monthly_amount"], "1500.00")
         self.assertEqual(response.data["results"][0]["billing_amount"], "822.58")
+
+    @patch("authz.views_management._today", return_value=date(2026, 5, 29))
+    def test_rate_overrides_are_used_for_report_calculation(self, _mock_today):
+        cse_role = RoleFactory(tenant=self.tenant, key="CSE", name="Customer Support Executive")
+        TenantMembership.objects.filter(id=self.membership.id).update(
+            role_id=cse_role.id,
+            created_at=datetime(2026, 5, 13, 9, 0, 0),
+        )
+
+        response = self.client.get(
+            self.url,
+            {
+                "month": "2026-05",
+                "role_rates": json.dumps({str(cse_role.id): "1800"}),
+                "rm_rate": "2100",
+            },
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        billing_role = next(
+            role for role in response.data["billing_roles"]
+            if role["id"] == str(cse_role.id)
+        )
+        self.assertEqual(billing_role["rate"], "1800.00")
+        self.assertEqual(response.data["role_rates"]["CSE"], "1800.00")
+        self.assertEqual(response.data["results"][0]["monthly_amount"], "1800.00")
+        self.assertEqual(response.data["results"][0]["billing_amount"], "987.10")
+
+    @patch("authz.views_management._today", return_value=date(2026, 5, 29))
+    def test_includes_deleted_memberships_that_existed_during_billing_period(self, _mock_today):
+        cse_role = RoleFactory(tenant=self.tenant, key="CSE", name="Customer Support Executive")
+        deleted_membership = TenantMembershipFactory(
+            tenant=self.tenant,
+            role=cse_role,
+            email="deleted-cse@example.com",
+            name="Deleted CSE",
+        )
+        TenantMembership.all_objects.filter(id=deleted_membership.id).update(
+            created_at=datetime(2026, 5, 10, 9, 0, 0),
+            is_deleted=True,
+            deleted_at=datetime(2026, 5, 20, 18, 0, 0),
+        )
+
+        response = self.client.get(
+            self.url,
+            {"month": "2026-05"},
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        row = next(
+            item for item in response.data["results"]
+            if item["email"] == "deleted-cse@example.com"
+        )
+        self.assertTrue(row["is_deleted"])
+        self.assertEqual(row["billable_days"], 11)
+        self.assertEqual(row["billing_end_date"], "2026-05-20")
+        self.assertEqual(row["monthly_amount"], "1500.00")
+        self.assertEqual(row["billing_amount"], "532.26")
 
     def test_invalid_month_returns_400(self):
         response = self.client.get(
