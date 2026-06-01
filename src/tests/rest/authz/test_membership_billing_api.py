@@ -106,16 +106,19 @@ class TenantMembershipBillingAPITests(BaseAPITestCase):
             role=other_role,
             email="other@example.com",
         )
-        TenantMembershipFactory(
+        internal_domain_membership = TenantMembershipFactory(
             tenant=self.tenant,
             role=cse_role,
             email="internal@thepyro.ai",
         )
-        TenantMembershipFactory(
+        internal_configured_membership = TenantMembershipFactory(
             tenant=self.tenant,
             role=cse_role,
             email="RitamCoding@gmail.com",
         )
+        TenantMembership.objects.filter(
+            id__in=[internal_domain_membership.id, internal_configured_membership.id]
+        ).update(created_at=datetime(2026, 5, 1, 9, 0, 0))
 
         response = self.client.get(
             self.url,
@@ -132,8 +135,13 @@ class TenantMembershipBillingAPITests(BaseAPITestCase):
         self.assertEqual(response.data["period_end"], "2026-05-29")
         self.assertEqual(response.data["excluded_email_domain"], "@thepyro.ai")
         self.assertEqual(response.data["excluded_email_addresses_count"], 18)
+        cse_billing_role = next(
+            role for role in response.data["billing_roles"]
+            if role["key"] == "CSE"
+        )
+        self.assertEqual(cse_billing_role["rate"], "1500.00")
         self.assertEqual(response.data["role_rates"]["CSE"], "1500.00")
-        self.assertEqual(response.data["role_rates"]["RM"], "2000.00")
+        self.assertNotIn("RM", response.data["role_rates"])
         self.assertEqual(response.data["results"][0]["billable_days"], 17)
         self.assertEqual(len(response.data["results"]), 1)
         self.assertNotIn("@thepyro.ai", response.data["results"][0]["email"])
