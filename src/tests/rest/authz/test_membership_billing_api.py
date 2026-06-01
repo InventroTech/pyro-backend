@@ -5,7 +5,11 @@ import json
 
 from django.test import SimpleTestCase
 from authz.models import TenantMembership
-from authz.views_management import calculate_membership_billing, get_membership_monthly_amount
+from authz.views_management import (
+    INTERNAL_BILLING_EMAIL_ADDRESSES,
+    calculate_membership_billing,
+    get_membership_monthly_amount,
+)
 from tests.base.test_setup import BaseAPITestCase
 from tests.factories import RoleFactory, TenantFactory, TenantMembershipFactory
 
@@ -134,7 +138,10 @@ class TenantMembershipBillingAPITests(BaseAPITestCase):
         self.assertEqual(response.data["cycle_days"], 31)
         self.assertEqual(response.data["period_end"], "2026-05-29")
         self.assertEqual(response.data["excluded_email_domain"], "@thepyro.ai")
-        self.assertEqual(response.data["excluded_email_addresses_count"], 18)
+        self.assertEqual(
+            response.data["excluded_email_addresses_count"],
+            len(INTERNAL_BILLING_EMAIL_ADDRESSES),
+        )
         cse_billing_role = next(
             role for role in response.data["billing_roles"]
             if role["key"] == "CSE"
