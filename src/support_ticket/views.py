@@ -233,7 +233,10 @@ class SaveAndContinueView(APIView):
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # Validate request data
-            serializer = SaveAndContinueSerializer(data=request.data)
+            serializer = SaveAndContinueSerializer(
+                data=request.data,
+                context={'request': request},
+            )
             if not serializer.is_valid():
                 return Response({
                     'error': 'Invalid request data',
