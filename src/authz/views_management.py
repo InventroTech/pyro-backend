@@ -1,6 +1,7 @@
 from calendar import monthrange
 from datetime import date
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import json
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -40,6 +41,7 @@ INTERNAL_BILLING_EMAIL_ADDRESSES = (
     "ranji.nitt@gmail.com",
     "harisudhan.nandhu@gmail.com",
     "abhsr1987@gmail.com",
+    "ritam.pyro@circleapp.in",
 )
 BILLING_ROLE_RATES = {
     "CSE": Decimal("1500"),
@@ -80,6 +82,15 @@ def _billing_period_end(billing_month):
     return date(billing_month.year, billing_month.month, calendar_days)
 
 
+def _membership_billing_end(membership, period_end):
+    deleted_at = getattr(membership, "deleted_at", None)
+    if not deleted_at:
+        return period_end
+
+    deleted_date = _date_from_datetime(deleted_at)
+    return min(period_end, deleted_date)
+
+
 def _parse_cycle_days(value, billing_month):
     raw = _calendar_days_for_month(billing_month) if value in (None, "") else value
     try:
@@ -90,6 +101,71 @@ def _parse_cycle_days(value, billing_month):
     if parsed <= 0:
         raise ValueError("cycle_days must be greater than 0")
     return parsed
+
+
+def _parse_non_negative_decimal(value, field_name):
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"{field_name} must be a valid number")
+
+    if parsed < 0:
+        raise ValueError(f"{field_name} must be greater than or equal to 0")
+    return parsed
+
+
+def _default_rate_for_role(role):
+    role_key = (getattr(role, "key", "") or "").strip().upper()
+    if role_key in BILLING_ROLE_RATES:
+        return BILLING_ROLE_RATES[role_key]
+
+    role_name = (getattr(role, "name", "") or "").strip().upper()
+    if role_name in BILLING_ROLE_RATES:
+        return BILLING_ROLE_RATES[role_name]
+
+    return Decimal("0")
+
+
+def _tenant_billing_roles(tenant):
+    return list(Role.objects.filter(tenant=tenant).order_by("name", "key", "id"))
+
+
+def _billing_role_rates_from_request(query_params, tenant):
+    roles = _tenant_billing_roles(tenant)
+    rates_by_role_id = {
+        str(role.id): _default_rate_for_role(role)
+        for role in roles
+    }
+
+    raw_role_rates = query_params.get("role_rates")
+    if raw_role_rates not in (None, ""):
+        try:
+            role_rate_overrides = json.loads(raw_role_rates)
+        except (TypeError, ValueError):
+            raise ValueError("role_rates must be a valid JSON object")
+
+        if not isinstance(role_rate_overrides, dict):
+            raise ValueError("role_rates must be a valid JSON object")
+
+        for role_id, raw_rate in role_rate_overrides.items():
+            role_id = str(role_id)
+            if role_id in rates_by_role_id and raw_rate not in (None, ""):
+                rates_by_role_id[role_id] = _parse_non_negative_decimal(raw_rate, f"role_rates.{role_id}")
+
+    # Backward-compatible query params used by older BillingPage versions.
+    for role in roles:
+        role_key = (role.key or "").strip().upper()
+        role_name = (role.name or "").strip().upper()
+        for legacy_key in BILLING_ROLE_RATES:
+            if role_key == legacy_key or role_name == legacy_key:
+                raw_value = query_params.get(f"{legacy_key.lower()}_rate")
+                if raw_value not in (None, ""):
+                    rates_by_role_id[str(role.id)] = _parse_non_negative_decimal(
+                        raw_value,
+                        f"{legacy_key.lower()}_rate",
+                    )
+
+    return roles, rates_by_role_id
 
 
 def _date_from_datetime(value):
@@ -103,24 +179,33 @@ def _internal_billing_email_q():
     return query
 
 
-def _role_billing_key(role):
+def _role_billing_key(role, role_rates=None):
+    role_rates = role_rates or BILLING_ROLE_RATES
     if not role:
         return None
 
     role_key = (getattr(role, "key", "") or "").strip().upper()
-    if role_key in BILLING_ROLE_RATES:
+    if role_key in role_rates:
         return role_key
 
     role_name = (getattr(role, "name", "") or "").strip().upper()
-    if role_name in BILLING_ROLE_RATES:
+    if role_name in role_rates:
         return role_name
 
     return None
 
 
-def get_membership_monthly_amount(membership):
-    billing_key = _role_billing_key(getattr(membership, "role", None))
-    return billing_key, BILLING_ROLE_RATES.get(billing_key, Decimal("0"))
+def get_membership_monthly_amount(membership, role_rates=None):
+    role = getattr(membership, "role", None)
+    role_rates = role_rates or BILLING_ROLE_RATES
+    if role is not None:
+        role_id = str(getattr(role, "id", "") or "")
+        if role_id in role_rates:
+            billing_key = (getattr(role, "key", "") or getattr(role, "name", "") or role_id).strip()
+            return billing_key, role_rates.get(role_id, Decimal("0"))
+
+    billing_key = _role_billing_key(role, role_rates)
+    return billing_key, role_rates.get(billing_key, Decimal("0"))
 
 
 def calculate_membership_billing(joined_at, billing_month, monthly_amount, cycle_days=None, period_end=None):
@@ -269,15 +354,18 @@ class TenantMembershipBillingView(APIView):
             if billing_month > _current_billing_month():
                 raise ValueError("Cannot calculate billing for a future month")
             cycle_days = _parse_cycle_days(request.query_params.get("cycle_days"), billing_month)
+            billing_roles, role_rates = _billing_role_rates_from_request(request.query_params, request.tenant)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         period_end = _billing_period_end(billing_month)
 
         base_memberships = (
-            TenantMembership.objects
+            TenantMembership.all_objects
             .select_related("role")
             .filter(tenant=request.tenant)
+            .filter(created_at__date__lte=period_end)
+            .filter(Q(deleted_at__isnull=True) | Q(deleted_at__date__gte=billing_month))
         )
         internal_email_query = _internal_billing_email_q()
         excluded_internal_member_count = base_memberships.filter(internal_email_query).count()
@@ -292,7 +380,8 @@ class TenantMembershipBillingView(APIView):
         total_billable_days = 0
 
         for membership in memberships:
-            billing_role_key, monthly_amount = get_membership_monthly_amount(membership)
+            billing_role_key, monthly_amount = get_membership_monthly_amount(membership, role_rates)
+            membership_period_end = _membership_billing_end(membership, period_end)
             daily_rate = (monthly_amount / Decimal(cycle_days)).quantize(
                 Decimal("0.01"),
                 rounding=ROUND_HALF_UP,
@@ -302,7 +391,7 @@ class TenantMembershipBillingView(APIView):
                 billing_month,
                 monthly_amount,
                 cycle_days,
-                period_end,
+                membership_period_end,
             )
             total_billable_days += billable_days
             total_amount += amount
@@ -318,8 +407,11 @@ class TenantMembershipBillingView(APIView):
                     "name": membership.role.name,
                 } if membership.role_id else None,
                 "is_active": membership.is_active,
+                "is_deleted": membership.is_deleted,
                 "joined_at": membership.created_at.isoformat(),
                 "joined_date": joined_date.isoformat(),
+                "billing_end_date": membership_period_end.isoformat(),
+                "deleted_at": membership.deleted_at.isoformat() if membership.deleted_at else None,
                 "billable_days": billable_days,
                 "cycle_days": cycle_days,
                 "billing_role_key": billing_role_key,
@@ -335,9 +427,24 @@ class TenantMembershipBillingView(APIView):
             "cycle_days": cycle_days,
             "excluded_email_domain": INTERNAL_BILLING_EMAIL_DOMAIN,
             "excluded_email_addresses_count": len(INTERNAL_BILLING_EMAIL_ADDRESSES),
+            "billing_roles": [
+                {
+                    "id": str(role.id),
+                    "key": role.key,
+                    "name": role.name,
+                    "rate": str(role_rates.get(str(role.id), Decimal("0")).quantize(
+                        Decimal("0.01"),
+                        rounding=ROUND_HALF_UP,
+                    )),
+                }
+                for role in billing_roles
+            ],
             "role_rates": {
-                role_key: str(amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-                for role_key, amount in BILLING_ROLE_RATES.items()
+                role.key: str(role_rates.get(str(role.id), Decimal("0")).quantize(
+                    Decimal("0.01"),
+                    rounding=ROUND_HALF_UP,
+                ))
+                for role in billing_roles
             },
             "summary": {
                 "member_count": len(rows),
