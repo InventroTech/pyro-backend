@@ -380,14 +380,11 @@ def process_dumped_tickets(
         logger.info("process_dumped_tickets: No new tickets in dump table to process.")
         return ProcessDumpedTicketsResult(0, 0, 0, 0, 0, 0)
 
+    skipped = sum(1 for dump in dumped_tickets_list if not dump.user_id)
     unique_tickets = _dedupe_dumps_latest_wins(dumped_tickets_list)
     candidates: List[SupportTicketDump] = []
-    skipped = 0
 
     for dump_ticket in unique_tickets:
-        if not dump_ticket.user_id:
-            skipped += 1
-            continue
         if not dump_ticket.tenant_id:
             skipped += 1
             continue
