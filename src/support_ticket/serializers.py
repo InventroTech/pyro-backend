@@ -101,8 +101,13 @@ class SaveAndContinueSerializer(serializers.Serializer):
     reviewRequested = serializers.BooleanField(required=False, allow_null=True)
 
     def validate_ticketId(self, value):
-        """Validate that the ticket exists"""
-        if not SupportTicket.objects.filter(id=value).exists():
+        """Validate that the ticket exists for the current tenant."""
+        request = self.context.get('request')
+        qs = SupportTicket.objects.filter(id=value)
+        tenant = getattr(request, 'tenant', None) if request else None
+        if tenant is not None:
+            qs = qs.filter(tenant_id=tenant.id)
+        if not qs.exists():
             raise serializers.ValidationError("Ticket not found")
         return value
 
