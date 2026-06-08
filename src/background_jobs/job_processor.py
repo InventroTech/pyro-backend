@@ -22,6 +22,7 @@ from django.db.utils import InterfaceError, OperationalError
 from .models import BackgroundJob, JobStatus, JobType
 from .queue_service import get_queue_service
 from .job_handlers import get_handler_registry
+from .tenant_jobs import enqueue_for_all_tenants
 
 logger = logging.getLogger(__name__)
 
@@ -409,16 +410,21 @@ class JobProcessor:
                 return
         try:
             queue = get_queue_service()
-            queue.enqueue_job(job_type=JobType.UNASSIGN_SNOOZED_LEADS, payload={}, priority=0)
-            queue.enqueue_job(job_type=JobType.RELEASE_LEADS_AFTER_12H, payload={}, priority=0)
-            queue.enqueue_job(
+            enqueue_for_all_tenants(
+                queue, job_type=JobType.UNASSIGN_SNOOZED_LEADS, payload={}, priority=0
+            )
+            enqueue_for_all_tenants(
+                queue, job_type=JobType.RELEASE_LEADS_AFTER_12H, payload={}, priority=0
+            )
+            enqueue_for_all_tenants(
+                queue,
                 job_type=JobType.CLOSE_STALE_SUBSCRIPTION_LEADS,
                 payload={"days": 15},
                 priority=0,
             )
             self._last_lead_cron_enqueue_at = now
             logger.debug(
-                f"[Worker {self.worker_id}] Enqueued lead maintenance jobs "
+                f"[Worker {self.worker_id}] Enqueued lead maintenance jobs per tenant "
                 f"(unassign_snoozed_leads, release_leads_after_12h, close_stale_subscription_leads)"
             )
         except Exception as e:
@@ -456,7 +462,8 @@ class JobProcessor:
 
         try:
             queue = get_queue_service()
-            queue.enqueue_job(
+            enqueue_for_all_tenants(
+                queue,
                 job_type=JobType.SNOOZED_TO_NOT_CONNECTED_MIDNIGHT,
                 payload={},
                 priority=0,
@@ -525,7 +532,8 @@ class JobProcessor:
         try:
             days = int(getattr(settings, "LOG_RETENTION_DAYS", 30))
             queue = get_queue_service()
-            queue.enqueue_job(
+            enqueue_for_all_tenants(
+                queue,
                 job_type=JobType.PURGE_OLD_LOG_TABLES,
                 payload={"days": days},
                 priority=0,

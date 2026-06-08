@@ -31,6 +31,7 @@ def purge_old_log_rows(
     *,
     days: int | None = None,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
+    tenant_id: str | None = None,
 ) -> dict[str, int | str]:
     """
     Permanently remove rows with ``created_at`` strictly before
@@ -50,25 +51,29 @@ def purge_old_log_rows(
     from background_jobs.models import BackgroundJob, JobStatus
 
     before = timezone.now() - timedelta(days=days)
+    tenant_filter: dict = {}
+    if tenant_id:
+        tenant_filter = {"tenant_id": tenant_id}
     out: dict[str, int | str] = {
         "cutoff": before.isoformat(),
         "days": days,
         "object_history": _chunked_hard_delete(
             ObjectHistory,
-            {"created_at__lt": before, "persistent_history": False},
+            {"created_at__lt": before, "persistent_history": False, **tenant_filter},
             chunk_size,
         ),
         "event_logs": _chunked_hard_delete(
-            EventLog, {"created_at__lt": before}, chunk_size
+            EventLog, {"created_at__lt": before, **tenant_filter}, chunk_size
         ),
         "rule_exec_logs": _chunked_hard_delete(
-            RuleExecutionLog, {"created_at__lt": before}, chunk_size
+            RuleExecutionLog, {"created_at__lt": before, **tenant_filter}, chunk_size
         ),
         "background_jobs": _chunked_hard_delete(
             BackgroundJob,
             {
                 "created_at__lt": before,
                 "status__in": [JobStatus.COMPLETED, JobStatus.FAILED],
+                **tenant_filter,
             },
             chunk_size,
         ),

@@ -463,7 +463,7 @@ def action_send_mixpanel_event(
                 "event_name": str(resolved_event_name),
                 "properties": mixpanel_properties,  # Send ALL data, not just resolved_properties
             },
-            tenant_id=tenant_id,
+            tenant_id=str(tenant_id) if tenant_id else None,
         )
         
         logger.info(
