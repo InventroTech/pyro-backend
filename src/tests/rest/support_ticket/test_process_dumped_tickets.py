@@ -144,8 +144,13 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
             with self.assertRaises(IntegrityError):
                 process_dumped_tickets(tenant_id=self.tenant_id)
 
-        self.assertTrue(SupportTicket.objects.filter(id=open_ticket.id).exists())
-        self.assertFalse(SupportTicket.objects.filter(user_id="cust_rollback").exists())
+        open_ticket.refresh_from_db()
+        self.assertEqual(
+            SupportTicket.objects.filter(user_id="cust_rollback").count(),
+            1,
+        )
+        self.assertEqual(open_ticket.id, SupportTicket.objects.get(user_id="cust_rollback").id)
+        self.assertNotEqual(open_ticket.name, "Replacement")
         self.assertTrue(
             SupportTicketDump.objects.filter(
                 tenant_id=self.tenant_id,
