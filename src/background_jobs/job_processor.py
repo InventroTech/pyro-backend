@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 # Interval (seconds) between enqueueing lead cron jobs from the worker (no external cron needed)
 LEAD_CRON_ENQUEUE_INTERVAL = 900  # 15 minutes
 
+# Support ticket dump processing (replaces Supabase process-dumped-tickets cron)
+SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL = 300  # 5 minutes
+
 # How often the worker enqueues log retention (object_history, event_logs, rule_exec_logs)
 LOG_RETENTION_ENQUEUE_INTERVAL = 86400  # 24 hours
 
@@ -65,6 +68,8 @@ class JobProcessor:
         # (date, hour) of the last sync_dispatch_to_records enqueue — keys
         # the once-per-window guard.
         self._last_dispatch_sync_enqueue_bucket = None
+        # Last time we enqueued process_dumped_tickets for pending dump rows
+        self._last_support_ticket_dump_enqueue_at = None
         # Circuit breaker state for connection errors
         self._connection_error_count = 0
         self._last_connection_error_time = None
@@ -396,6 +401,38 @@ class JobProcessor:
         
         return count
 
+    def _maybe_enqueue_process_dumped_tickets(self):
+        """
+        Every SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL seconds, enqueue
+        process_dumped_tickets for each tenant with unprocessed dump rows.
+        """
+        now = timezone.now()
+        if self._last_support_ticket_dump_enqueue_at is not None:
+            elapsed = (now - self._last_support_ticket_dump_enqueue_at).total_seconds()
+            if elapsed < SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL:
+                return
+        try:
+            from support_ticket.views import enqueue_process_dumped_tickets_for_pending_dumps
+
+            result = enqueue_process_dumped_tickets_for_pending_dumps()
+            self._last_support_ticket_dump_enqueue_at = now
+            enqueued = result.get("enqueued") or []
+            if enqueued:
+                logger.info(
+                    f"[Worker {self.worker_id}] Enqueued process_dumped_tickets for "
+                    f"{len(enqueued)} tenant(s)"
+                )
+            else:
+                logger.debug(
+                    f"[Worker {self.worker_id}] process_dumped_tickets tick: "
+                    "no tenants with pending dumps (or jobs already active)"
+                )
+        except Exception as e:
+            logger.warning(
+                f"[Worker {self.worker_id}] Failed to enqueue process_dumped_tickets: {e}",
+                exc_info=True,
+            )
+
     def _maybe_enqueue_lead_cron_jobs(self):
         """
         Every LEAD_CRON_ENQUEUE_INTERVAL seconds, enqueue unassign_snoozed_leads,
@@ -631,6 +668,8 @@ class JobProcessor:
                     self.cleanup_stale_locks()
                     iteration_count = 0
 
+                # Every 5 min: process support_ticket_dump → support_ticket + records
+                self._maybe_enqueue_process_dumped_tickets()
                 # Periodically enqueue lead cron jobs (unassign snoozed, release after 12h) so no external cron is needed
                 self._maybe_enqueue_lead_cron_jobs()
                 # Daily at 23:55 exact minute (TIME_ZONE): SNOOZED → NOT_CONNECTED

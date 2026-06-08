@@ -16,14 +16,17 @@ from django.db import IntegrityError
 from config.supabase_auth import SupabaseJWTAuthentication
 from authz.permissions import IsTenantAuthenticated
 import os
-from typing import Any, Dict
+from dataclasses import asdict, dataclass
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Union
 
 from .models import SupportTicketDump
 from .models import SupportTicket
 from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, SupportTicketResponseSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer,UpdateCallStatusRequestSerializer
 from .services import MixpanelService, TicketTimeService
 from background_jobs.queue_service import get_queue_service
-from background_jobs.models import JobType
+from background_jobs.models import BackgroundJob, JobStatus, JobType
+from core.models import Tenant
+from crm_records.models import Record
 from user_settings.models import Group, TenantMemberSetting
 from user_settings.services import USER_KV_GROUP_ID_KEY
 from authz.permissions import IsTenantAuthenticated
@@ -34,6 +37,9 @@ from analytics.serializers import SupportTicketSerializer
 from .utils import send_to_mixpanel, ticket_to_mixpanel_data
 
 logger = logging.getLogger(__name__)
+
+SUPPORT_TICKET_ENTITY_TYPE = "support_ticket"
+DUMP_BATCH_LIMIT = 5000
 
 
 def _enqueue_mixpanel_event(
@@ -61,6 +67,330 @@ def _enqueue_mixpanel_event(
         )
     except Exception as e:
         logger.error("Failed to enqueue Mixpanel event=%s user_id=%s error=%s", event_name, user_id, e, exc_info=True)
+
+
+def _dedupe_dumps_latest_wins(
+    dumped_tickets: Sequence[SupportTicketDump],
+) -> List[SupportTicketDump]:
+    """One row per user_id; later rows in the batch win."""
+    unique: Dict[str, SupportTicketDump] = {}
+    for dump in dumped_tickets:
+        if dump.user_id:
+            unique[dump.user_id] = dump
+    return list(unique.values())
+
+
+def _build_support_record_data(ticket: SupportTicket) -> Dict[str, Any]:
+    snooze_until = ticket.snooze_until
+    tenant_id = str(ticket.tenant_id) if ticket.tenant_id else None
+    assigned_to = str(ticket.assigned_to_id) if ticket.assigned_to_id else None
+
+    data: Dict[str, Any] = {
+        "support_ticket_id": ticket.id,
+        "ticket_id": ticket.id,
+        "created_at": ticket.created_at.isoformat() if ticket.created_at else None,
+        "ticket_date": ticket.ticket_date.isoformat() if ticket.ticket_date else None,
+        "user_id": ticket.user_id,
+        "name": ticket.name,
+        "phone": ticket.phone,
+        "source": ticket.source,
+        "subscription_status": ticket.subscription_status,
+        "atleast_paid_once": ticket.atleast_paid_once,
+        "reason": ticket.reason,
+        "other_reasons": ticket.other_reasons or [],
+        "badge": ticket.badge,
+        "poster": ticket.poster,
+        "tenant_id": tenant_id,
+        "assigned_to": assigned_to,
+        "layout_status": ticket.layout_status,
+        "state": ticket.state,
+        "resolution_status": ticket.resolution_status,
+        "resolution_time": ticket.resolution_time,
+        "cse_name": ticket.cse_name,
+        "cse_remarks": ticket.cse_remarks,
+        "call_status": ticket.call_status or "Call Waiting",
+        "call_attempts": ticket.call_attempts if ticket.call_attempts is not None else 0,
+        "rm_name": ticket.rm_name,
+        "completed_at": ticket.completed_at.isoformat() if ticket.completed_at else None,
+        "snooze_until": snooze_until.isoformat() if snooze_until else None,
+        "praja_dashboard_user_link": ticket.praja_dashboard_user_link,
+        "display_pic_url": ticket.display_pic_url,
+        "dumped_at": ticket.dumped_at.isoformat() if ticket.dumped_at else None,
+        "review_requested": bool(ticket.review_requested),
+    }
+    if snooze_until:
+        data["next_call_at"] = snooze_until.isoformat()
+    return data
+
+
+def _delete_open_support_records_for_user(
+    *,
+    user_id: str,
+    tenant_id: Optional[Any] = None,
+) -> int:
+    qs = Record.objects.filter(
+        entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+        data__user_id=str(user_id),
+    ).filter(
+        Q(data__resolution_status__isnull=True) | Q(data__resolution_status="")
+    )
+    if tenant_id:
+        qs = qs.filter(tenant_id=tenant_id)
+    count, _ = qs.delete()
+    return count
+
+
+def _delete_open_support_tickets_for_user(
+    user_id: str,
+    tenant_id: Optional[Union[str, UUID]] = None,
+) -> int:
+    qs = SupportTicket.objects.filter(user_id=user_id, resolution_status__isnull=True)
+    if tenant_id is not None:
+        qs = qs.filter(tenant_id=tenant_id)
+    count, _ = qs.delete()
+    return count
+
+
+def enqueue_ticket_created_mixpanel(ticket: SupportTicket) -> None:
+    user_id = ticket.user_id or str(ticket.id)
+    properties = {
+        "ticket_id": ticket.id,
+        "tenant_id": str(ticket.tenant.id) if ticket.tenant else None,
+        "created_at": ticket.created_at.isoformat() if ticket.created_at else None,
+        "ticket_date": ticket.ticket_date.isoformat() if ticket.ticket_date else None,
+        "user_id": ticket.user_id,
+        "name": ticket.name,
+        "phone": ticket.phone,
+        "source": ticket.source,
+        "subscription_status": ticket.subscription_status,
+        "atleast_paid_once": ticket.atleast_paid_once,
+        "reason": ticket.reason,
+        "other_reasons": ticket.other_reasons or [],
+        "badge": ticket.badge,
+        "poster": ticket.poster,
+        "assigned_to": str(ticket.assigned_to.id) if ticket.assigned_to else None,
+        "layout_status": ticket.layout_status,
+        "state": ticket.state,
+        "resolution_status": ticket.resolution_status,
+        "resolution_time": ticket.resolution_time,
+        "cse_name": ticket.cse_name,
+        "cse_remarks": ticket.cse_remarks,
+        "call_status": ticket.call_status,
+        "call_attempts": ticket.call_attempts,
+        "rm_name": ticket.rm_name,
+        "completed_at": ticket.completed_at.isoformat() if ticket.completed_at else None,
+        "snooze_until": ticket.snooze_until.isoformat() if ticket.snooze_until else None,
+        "praja_dashboard_user_link": ticket.praja_dashboard_user_link,
+        "display_pic_url": ticket.display_pic_url,
+        "dumped_at": ticket.dumped_at.isoformat() if ticket.dumped_at else None,
+        "review_requested": ticket.review_requested,
+    }
+    get_queue_service().enqueue_job(
+        job_type=JobType.SEND_MIXPANEL_EVENT,
+        payload={
+            "user_id": str(user_id),
+            "event_name": "pyro_st_ticket_created",
+            "properties": properties,
+        },
+        tenant_id=str(ticket.tenant_id) if ticket.tenant_id else None,
+        priority=0,
+    )
+
+
+def enqueue_process_dumped_tickets_job(
+    tenant_id: Union[str, UUID],
+    *,
+    priority: int = 0,
+) -> Optional[BackgroundJob]:
+    tid = str(tenant_id)
+    active = BackgroundJob.objects.filter(
+        job_type=JobType.PROCESS_DUMPED_TICKETS,
+        tenant_id=tid,
+        status__in=[JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.RETRYING],
+    ).exists()
+    if active:
+        logger.info(
+            "enqueue_process_dumped_tickets_job: active job already exists for tenant=%s",
+            tid,
+        )
+        return None
+
+    job = get_queue_service().enqueue_job(
+        job_type=JobType.PROCESS_DUMPED_TICKETS,
+        payload={},
+        tenant_id=tid,
+        priority=priority,
+    )
+    logger.info(
+        "enqueue_process_dumped_tickets_job: enqueued job_id=%s tenant=%s",
+        job.id,
+        tid,
+    )
+    return job
+
+
+def enqueue_process_dumped_tickets_for_pending_dumps() -> Dict[str, Any]:
+    """
+    Enqueue one ``process_dumped_tickets`` job per tenant with unprocessed dump rows.
+    Called by the background worker every 5 minutes (same cadence as the old cron).
+    """
+    tenant_ids = (
+        SupportTicketDump.objects.filter(
+            Q(is_processed__isnull=True) | Q(is_processed=False)
+        )
+        .values_list("tenant_id", flat=True)
+        .distinct()
+    )
+    enqueued = []
+    skipped = []
+    for tid in tenant_ids:
+        job = enqueue_process_dumped_tickets_job(tid)
+        if job:
+            enqueued.append({"tenant_id": str(tid), "job_id": job.id})
+        else:
+            skipped.append(str(tid))
+    return {"enqueued": enqueued, "skipped_active_job": skipped}
+
+
+def _mirror_tickets_to_records(tickets: Iterable[SupportTicket]) -> int:
+    mirrored = 0
+    for ticket in tickets:
+        if not ticket.id or not ticket.tenant_id:
+            logger.warning(
+                "Skipping records mirror for ticket %s: missing id or tenant_id",
+                ticket.id,
+            )
+            continue
+        Record.objects.create(
+            tenant_id=ticket.tenant_id,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data=_build_support_record_data(ticket),
+        )
+        mirrored += 1
+    return mirrored
+
+
+def _support_ticket_from_dump(dump_ticket: SupportTicketDump, tenant: Tenant) -> SupportTicket:
+    return SupportTicket(
+        ticket_date=dump_ticket.ticket_date,
+        user_id=dump_ticket.user_id,
+        name=dump_ticket.name,
+        phone=dump_ticket.phone,
+        source=dump_ticket.source,
+        subscription_status=dump_ticket.subscription_status,
+        atleast_paid_once=dump_ticket.atleast_paid_once,
+        reason=dump_ticket.reason,
+        badge=dump_ticket.badge,
+        poster=dump_ticket.poster,
+        tenant=tenant,
+        layout_status=dump_ticket.layout_status,
+        state=dump_ticket.state,
+        praja_dashboard_user_link=dump_ticket.praja_dashboard_user_link,
+        display_pic_url=dump_ticket.display_pic_url,
+        dumped_at=timezone.now(),
+    )
+
+
+@dataclass
+class ProcessDumpedTicketsResult:
+    total_dumped_tickets: int
+    unique_tickets: int
+    inserted_tickets: int
+    mirrored_records: int
+    skipped_tickets: int
+    marked_processed: int
+
+
+def process_dumped_tickets(
+    *,
+    tenant_id: Optional[Union[str, UUID]] = None,
+    on_ticket_created: Optional[Callable[[SupportTicket], None]] = None,
+    batch_limit: int = DUMP_BATCH_LIMIT,
+) -> ProcessDumpedTicketsResult:
+    dumped_qs = SupportTicketDump.objects.filter(
+        Q(is_processed__isnull=True) | Q(is_processed=False)
+    )
+    if tenant_id is not None:
+        dumped_qs = dumped_qs.filter(tenant_id=tenant_id)
+    dumped_qs = dumped_qs.order_by("id")[:batch_limit]
+    dumped_tickets_list = list(dumped_qs)
+
+    if not dumped_tickets_list:
+        logger.info("process_dumped_tickets: No new tickets in dump table to process.")
+        return ProcessDumpedTicketsResult(0, 0, 0, 0, 0, 0)
+
+    unique_tickets = _dedupe_dumps_latest_wins(dumped_tickets_list)
+    tickets_to_insert: List[SupportTicket] = []
+    skipped = 0
+
+    for dump_ticket in unique_tickets:
+        if not dump_ticket.user_id:
+            skipped += 1
+            continue
+        if not dump_ticket.tenant_id:
+            skipped += 1
+            continue
+        try:
+            tenant = Tenant.objects.get(id=dump_ticket.tenant_id)
+        except Tenant.DoesNotExist:
+            skipped += 1
+            continue
+
+        with transaction.atomic():
+            _delete_open_support_tickets_for_user(
+                dump_ticket.user_id,
+                tenant_id=dump_ticket.tenant_id,
+            )
+            _delete_open_support_records_for_user(
+                user_id=dump_ticket.user_id,
+                tenant_id=dump_ticket.tenant_id,
+            )
+            tickets_to_insert.append(_support_ticket_from_dump(dump_ticket, tenant))
+
+    dump_ids = [t.id for t in dumped_tickets_list]
+
+    if not tickets_to_insert:
+        marked = SupportTicketDump.objects.filter(id__in=dump_ids).update(is_processed=True)
+        return ProcessDumpedTicketsResult(
+            total_dumped_tickets=len(dumped_tickets_list),
+            unique_tickets=len(unique_tickets),
+            inserted_tickets=0,
+            mirrored_records=0,
+            skipped_tickets=skipped,
+            marked_processed=marked,
+        )
+
+    inserted_tickets = SupportTicket.objects.bulk_create(
+        tickets_to_insert,
+        ignore_conflicts=True,
+    )
+    mirrored = _mirror_tickets_to_records(inserted_tickets)
+
+    if on_ticket_created:
+        for ticket in inserted_tickets:
+            try:
+                on_ticket_created(ticket)
+            except Exception as exc:
+                logger.error(
+                    "process_dumped_tickets: on_ticket_created failed for ticket %s: %s",
+                    ticket.id,
+                    exc,
+                    exc_info=True,
+                )
+
+    marked = SupportTicketDump.objects.filter(id__in=dump_ids).update(is_processed=True)
+    return ProcessDumpedTicketsResult(
+        total_dumped_tickets=len(dumped_tickets_list),
+        unique_tickets=len(unique_tickets),
+        inserted_tickets=len(inserted_tickets),
+        mirrored_records=mirrored,
+        skipped_tickets=skipped,
+        marked_processed=marked,
+    )
+
+
+def process_dumped_tickets_job_result(result: ProcessDumpedTicketsResult) -> Dict[str, Any]:
+    return asdict(result)
 
 
 class GetWIPTicketsView(APIView):
@@ -182,16 +512,15 @@ class DumpTicketWebhookView(APIView):
             if not cleaned_data.get('ticket_date'):
                 cleaned_data['ticket_date'] = timezone.now()
             
-            # Set default is_processed status for the cron job
+            # Staging row for background job processor
             cleaned_data['is_processed'] = False
             
-            # 4. Insert the cleaned data into the dump table
+            # 4. Insert the cleaned data into the dump table (processed every 5 min by worker)
             dump_ticket = SupportTicketDump.objects.create(**cleaned_data)
-            
-            # 5. Success response
+
             return Response({
                 'message': 'Ticket created successfully in dump table',
-                'ticket_id': dump_ticket.id
+                'ticket_id': dump_ticket.id,
             }, status=status.HTTP_200_OK)
             
         except Exception as error:
@@ -1084,191 +1413,43 @@ class TakeBreakView(APIView):
 
 
 class ProcessDumpedTicketsView(APIView):
-    permission_classes = [AllowAny]  # Allow cron jobs to call this endpoint
-    
+    """
+    Manual / ops trigger: enqueue ``process_dumped_tickets`` background job(s).
+
+    Normal flow: background worker enqueues every 5 minutes for tenants with
+    unprocessed dumps. POST body may include ``tenant_id`` for a single tenant.
+    """
+    permission_classes = [AllowAny]
+
     def post(self, request):
         try:
-            logger.info('ProcessDumpedTicketsView: Function invoked. Starting ticket processing...')
-            
-            # 1. Fetch Unprocessed Tickets
-            # Fetch tickets that have not been processed yet (is_processed is False or None)
-            dumped_tickets = SupportTicketDump.objects.filter(
-                Q(is_processed__isnull=True) | Q(is_processed=False)
-            )[:5000]  # Limit to 5000 tickets per run
-            
-            if not dumped_tickets.exists():
-                logger.info('ProcessDumpedTicketsView: No new tickets in dump table to process.')
+            tenant_id = (request.data or {}).get('tenant_id')
+            if tenant_id:
+                job = enqueue_process_dumped_tickets_job(tenant_id)
+                if not job:
+                    return Response({
+                        'message': 'Job already queued or running for tenant',
+                        'tenant_id': str(tenant_id),
+                    }, status=status.HTTP_200_OK)
                 return Response({
-                    'message': 'No tickets to process'
-                }, status=status.HTTP_200_OK)
-            
-            dumped_tickets_list = list(dumped_tickets)
-            logger.info(f'ProcessDumpedTicketsView: Found {len(dumped_tickets_list)} unprocessed tickets to process from dump.')
-            
-            # 2. Deduplicate Tickets based on user_id
-            # Use a dictionary to keep only the first occurrence of each user_id
-            unique_tickets_map = {}
-            for ticket in dumped_tickets_list:
-                user_id = ticket.user_id
-                if user_id and user_id not in unique_tickets_map:
-                    unique_tickets_map[user_id] = ticket
-            
-            unique_tickets = list(unique_tickets_map.values())
-            logger.info(f'ProcessDumpedTicketsView: Deduplicated to {len(unique_tickets)} unique tickets based on user_id.')
-            
-            # 3. For each dump ticket: replace any existing open/snoozed ticket for same user, then insert the new one
-            # "Open or snoozed" = same user_id and (resolution_status is null OR resolution_status = 'Snoozed')
-            tickets_to_insert = []
-            skipped_tickets = []
-            from core.models import Tenant
+                    'message': 'Job enqueued',
+                    'job_id': job.id,
+                    'tenant_id': str(tenant_id),
+                }, status=status.HTTP_202_ACCEPTED)
 
-            for dump_ticket in unique_tickets:
-                # Skip if user_id is missing
-                if not dump_ticket.user_id:
-                    logger.warning(f'ProcessDumpedTicketsView: Ticket {dump_ticket.id} has no user_id. Skipping.')
-                    skipped_tickets.append(dump_ticket.id)
-                    continue
-
-                # Delete any existing open or snoozed tickets for this user (replace old with new)
-                existing_active = SupportTicket.objects.filter(
-                    user_id=dump_ticket.user_id,
-                ).filter(
-                    Q(resolution_status__isnull=True) | Q(resolution_status='Snoozed')
-                )
-                deleted_count = existing_active.count()
-                if deleted_count:
-                    existing_active.delete()
-                    logger.info(
-                        f'ProcessDumpedTicketsView: Replaced {deleted_count} existing open/snoozed ticket(s) '
-                        f'for user_id {dump_ticket.user_id} with new ticket from dump {dump_ticket.id}.'
-                    )
-
-                # Get tenant object if tenant_id exists
-                tenant = None
-                if dump_ticket.tenant_id:
-                    try:
-                        tenant = Tenant.objects.get(id=dump_ticket.tenant_id)
-                    except Tenant.DoesNotExist:
-                        logger.warning(f'ProcessDumpedTicketsView: Tenant {dump_ticket.tenant_id} not found for ticket {dump_ticket.id}. Skipping.')
-                        skipped_tickets.append(dump_ticket.id)
-                        continue
-                
-                # Create SupportTicket instance with fields from dump
-                ticket_data = {
-                    'ticket_date': dump_ticket.ticket_date,
-                    'user_id': dump_ticket.user_id,
-                    'name': dump_ticket.name,
-                    'phone': dump_ticket.phone,
-                    'source': dump_ticket.source,
-                    'subscription_status': dump_ticket.subscription_status,
-                    'atleast_paid_once': dump_ticket.atleast_paid_once,
-                    'reason': dump_ticket.reason,
-                    'badge': dump_ticket.badge,
-                    'poster': dump_ticket.poster,
-                    'tenant': tenant,
-                    'layout_status': dump_ticket.layout_status,
-                    'praja_dashboard_user_link': dump_ticket.praja_dashboard_user_link,
-                    'display_pic_url': dump_ticket.display_pic_url,
-                }
-                
-                tickets_to_insert.append(SupportTicket(**ticket_data))
-            
-            if not tickets_to_insert:
-                logger.warning('ProcessDumpedTicketsView: No valid tickets to insert after processing.')
-                # Still mark dumped tickets as processed
-                dump_ids = [ticket.id for ticket in dumped_tickets_list]
-                updated_count = SupportTicketDump.objects.filter(id__in=dump_ids).update(is_processed=True)
-                return Response({
-                    'message': 'No valid tickets to process',
-                    'total_dumped_tickets': len(dumped_tickets_list),
-                    'unique_tickets': len(unique_tickets),
-                    'inserted_tickets': 0,
-                    'skipped_tickets': len(skipped_tickets),
-                    'marked_processed': updated_count
-                }, status=status.HTTP_200_OK)
-            
-            # 4. Bulk insert tickets into support_ticket table
-            inserted_tickets = SupportTicket.objects.bulk_create(tickets_to_insert, ignore_conflicts=True)
-            logger.info(f'ProcessDumpedTicketsView: Inserted {len(inserted_tickets)} tickets into support_ticket table.')
-            
-            # Send Mixpanel events for each inserted ticket
-            for ticket in inserted_tickets:
-                try:
-                    user_id = ticket.user_id or str(ticket.id)
-                    event_name = 'pyro_st_ticket_created'
-                    
-                    logger.info("=" * 80)
-                    logger.info(f"🎫 [Mixpanel] Creating ticket {ticket.id}, sending to Mixpanel")
-                    logger.info(f"   Ticket ID: {ticket.id}")
-                    logger.info(f"   Tenant: {ticket.tenant.name if ticket.tenant else 'None'} ({ticket.tenant.id if ticket.tenant else None})")
-                    logger.info(f"   User ID: {user_id} (from ticket.user_id={ticket.user_id})")
-                    logger.info(f"   Event: {event_name}")
-                    logger.info(f"   Name: {ticket.name or 'N/A'}")
-                    logger.info(f"   Phone: {ticket.phone or 'N/A'}")
-                    logger.info(f"   Source: {ticket.source or 'N/A'}")
-                    logger.info(f"   Reason: {ticket.reason or 'N/A'}")
-                    logger.info(f"   State: {ticket.state or 'N/A'}")
-                    logger.info("=" * 80)
-                    
-                    properties = {
-                        'ticket_id': ticket.id,
-                        'tenant_id': str(ticket.tenant.id) if ticket.tenant else None,
-                        'created_at': ticket.created_at.isoformat() if ticket.created_at else None,
-                        'ticket_date': ticket.ticket_date.isoformat() if ticket.ticket_date else None,
-                        'user_id': ticket.user_id,
-                        'name': ticket.name,
-                        'phone': ticket.phone,
-                        'source': ticket.source,
-                        'subscription_status': ticket.subscription_status,
-                        'atleast_paid_once': ticket.atleast_paid_once,
-                        'reason': ticket.reason,
-                        'other_reasons': ticket.other_reasons or [],
-                        'badge': ticket.badge,
-                        'poster': ticket.poster,
-                        'assigned_to': str(ticket.assigned_to.id) if ticket.assigned_to else None,
-                        'layout_status': ticket.layout_status,
-                        'state': ticket.state,
-                        'resolution_status': ticket.resolution_status,
-                        'resolution_time': ticket.resolution_time,
-                        'cse_name': ticket.cse_name,
-                        'cse_remarks': ticket.cse_remarks,
-                        'call_status': ticket.call_status,
-                        'call_attempts': ticket.call_attempts,
-                        'rm_name': ticket.rm_name,
-                        'completed_at': ticket.completed_at.isoformat() if ticket.completed_at else None,
-                        'snooze_until': ticket.snooze_until.isoformat() if ticket.snooze_until else None,
-                        'praja_dashboard_user_link': ticket.praja_dashboard_user_link,
-                        'display_pic_url': ticket.display_pic_url,
-                        'dumped_at': ticket.dumped_at.isoformat() if ticket.dumped_at else None,
-                        'review_requested': ticket.review_requested,
-                    }
-                    
-                    _enqueue_mixpanel_event(
-                        user_id=user_id,
-                        event_name=event_name,
-                        properties=properties
-                    )
-                except Exception as e:
-                    logger.error(f"❌ [Mixpanel] Error sending ticket {ticket.id}: {e}")
-            
-            # 5. Mark dumped tickets as processed
-            # Update all dumped tickets (not just unique ones) to mark them as processed
-            dump_ids = [ticket.id for ticket in dumped_tickets_list]
-            updated_count = SupportTicketDump.objects.filter(id__in=dump_ids).update(is_processed=True)
-            logger.info(f'ProcessDumpedTicketsView: Marked {updated_count} dumped tickets as processed.')
-            
+            result = enqueue_process_dumped_tickets_for_pending_dumps()
             return Response({
-                'message': 'Tickets processed successfully',
-                'total_dumped_tickets': len(dumped_tickets_list),
-                'unique_tickets': len(unique_tickets),
-                'inserted_tickets': len(inserted_tickets),
-                'skipped_tickets': len(skipped_tickets),
-                'marked_processed': updated_count
-            }, status=status.HTTP_200_OK)
-            
+                'message': 'Jobs enqueued for tenants with unprocessed dumps',
+                **result,
+            }, status=status.HTTP_202_ACCEPTED)
+
         except Exception as error:
-            logger.error(f'ProcessDumpedTicketsView: Critical error during ticket processing: {error}', exc_info=True)
+            logger.error(
+                'ProcessDumpedTicketsView: Failed to enqueue jobs: %s',
+                error,
+                exc_info=True,
+            )
             return Response({
                 'error': str(error),
-                'message': 'Failed to process dumped tickets'
+                'message': 'Failed to enqueue process dumped tickets jobs',
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
