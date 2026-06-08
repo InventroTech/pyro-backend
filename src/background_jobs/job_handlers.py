@@ -1174,6 +1174,52 @@ class SyncDispatchToRecordsJobHandler(JobHandler):
         return True
 
 
+class ProcessDumpedTicketsJobHandler(JobHandler):
+    """
+    Process ``support_ticket_dump`` rows for the job's tenant: dedupe, replace open
+    tickets, insert ``support_ticket``, mirror to ``records``.
+
+    ``tenant_id`` is set on the :class:`~background_jobs.models.BackgroundJob` row
+    (not in payload). Enqueued by the worker every 5 minutes when dumps are pending.
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        from support_ticket.views import (
+            enqueue_ticket_created_mixpanel,
+            process_dumped_tickets,
+            process_dumped_tickets_job_result,
+        )
+
+        if not job.tenant_id:
+            raise ValueError("process_dumped_tickets job requires tenant_id on BackgroundJob")
+
+        result = process_dumped_tickets(
+            tenant_id=job.tenant_id,
+            on_ticket_created=enqueue_ticket_created_mixpanel,
+        )
+        job.result = {
+            "success": True,
+            **process_dumped_tickets_job_result(result),
+            "timestamp": timezone.now().isoformat(),
+        }
+        logger.info(
+            "[ProcessDumpedTickets] tenant=%s inserted=%s mirrored=%s marked=%s",
+            job.tenant_id,
+            result.inserted_tickets,
+            result.mirrored_records,
+            result.marked_processed,
+        )
+
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+    def validate_payload(self, payload: Dict[str, Any]) -> bool:
+        return True
+
+
 class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
     """
     Set ``data.lead_stage`` to CLOSED for **SELF TRIAL** leads (``lead_status``) whose
@@ -1421,6 +1467,10 @@ class JobHandlerRegistry:
         self.register_handler(
             JobType.SYNC_DISPATCH_TO_RECORDS,
             SyncDispatchToRecordsJobHandler(),
+        )
+        self.register_handler(
+            JobType.PROCESS_DUMPED_TICKETS,
+            ProcessDumpedTicketsJobHandler(),
         )
         # Praja handler removed - now using MixpanelService instead
         # self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())

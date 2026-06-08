@@ -19,7 +19,7 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
         import os
         
         # 👇 ADD THIS LINE: Clean up thread pollution before every test! 👇
-        SupportTicketDump.objects.all().delete() 
+        SupportTicketDump.objects.all().delete()
         
         self.url = reverse('support_ticket:dump-ticket-webhook')
         self.webhook_secret = 'test_webhook_secret_123'

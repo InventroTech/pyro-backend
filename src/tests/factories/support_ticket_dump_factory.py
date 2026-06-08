@@ -28,7 +28,7 @@ class SupportTicketDumpFactory(factory.django.DjangoModelFactory):
     poster = factory.Faker('random_element', elements=('support_agent', 'customer', 'system'))
     layout_status = factory.Faker('random_element', elements=('pending', 'in_progress', 'completed'))
     praja_dashboard_user_link = factory.LazyAttribute(
-        lambda obj: f"https://www.thecircleapp.in/admin/users/{factory.Faker('uuid4').generate()}"
+        lambda obj: f"https://www.thecircleapp.in/admin/users/{uuid.uuid4()}"
     )
     display_pic_url = factory.Faker('image_url')
     is_processed = False
