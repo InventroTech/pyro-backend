@@ -1,3 +1,4 @@
+import jwt
 from django.test import TestCase, override_settings
 from unittest.mock import patch
 from rest_framework.test import APIRequestFactory
@@ -71,8 +72,17 @@ class SpoofTenantUserTokenApiTestCase(TestCase):
         self.assertIn("token", body)
         self.assertTrue(body["token"])
         self.assertEqual(body["membership_id"], self.agent_membership.id)
+        self.assertEqual(body["tenant_membership_id"], self.agent_membership.id)
         self.assertEqual(body["email"], self.agent_membership.email)
         self.assertEqual(body["tenant_id"], str(self.tenant.id))
+
+        claims = jwt.decode(body["token"], "test-secret-key", algorithms=["HS256"], options={"verify_aud": False})
+        self.assertEqual(claims["sub"], str(self.agent_membership.user_id))
+        self.assertEqual(claims["tenant_membership_id"], str(self.agent_membership.id))
+        self.assertEqual(claims["membership_id"], str(self.agent_membership.id))
+        self.assertEqual(claims["user_data"]["tenant_membership_id"], str(self.agent_membership.id))
+        self.assertEqual(claims["user_data"]["membership_id"], str(self.agent_membership.id))
+        self.assertEqual(claims["user_data"]["role_key"], self.role_agent.key)
 
         # Audit metadata presence
         self.assertIn("audit", body)

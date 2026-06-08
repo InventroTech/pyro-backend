@@ -75,6 +75,10 @@ def _page_filter_is_role_preview(request):
     if not tenant:
         return False
 
+    preview_q = (request.query_params.get('role_preview') or '').strip().lower()
+    if preview_q in {'1', 'true', 'yes'}:
+        return True
+
     role_q = (request.query_params.get('role_id') or '').strip()
     user_q = (request.query_params.get('user_id') or '').strip()
 

@@ -425,11 +425,16 @@ class SpoofTenantUserTokenView(APIView):
             "sub": str(membership.user_id),
             "email": membership.email.lower(),
             "tenant_id": str(tenant.id),
+            "tenant_membership_id": str(membership.id),
+            "membership_id": str(membership.id),
             "role": "authenticated",
             "aud": "authenticated",
             "user_data": {
                 "tenant_id": str(tenant.id),
+                "tenant_membership_id": str(membership.id),
+                "membership_id": str(membership.id),
                 "role_id": str(membership.role.id),
+                "role_key": membership.role.key,
                 "user_id": str(membership.user_id),
             },
         }
@@ -450,6 +455,7 @@ class SpoofTenantUserTokenView(APIView):
             {
                 "token": token,
                 "membership_id": membership_id,
+                "tenant_membership_id": membership.id,
                 "email": membership.email,
                 "name": membership.name or "",
                 "tenant_id": str(tenant.id),
