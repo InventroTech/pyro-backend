@@ -100,6 +100,24 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         self.assertEqual(record.data["name"], "Mirror Me")
         self.assertEqual(record.data["call_status"], "Call Waiting")
 
+    def test_process_counts_dumps_without_user_id_as_skipped(self):
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            user_id=None,
+            name="No user",
+        )
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            user_id="valid_user",
+            name="Valid",
+        )
+
+        result = process_dumped_tickets(tenant_id=self.tenant_id)
+
+        self.assertEqual(result.skipped_tickets, 1)
+        self.assertEqual(result.inserted_tickets, 1)
+        self.assertTrue(SupportTicket.objects.filter(user_id="valid_user").exists())
+
     def test_process_scoped_to_tenant(self):
         other_tenant = TenantFactory()
         SupportTicketDumpFactory.create(
