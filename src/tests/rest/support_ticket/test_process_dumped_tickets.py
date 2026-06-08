@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+from django.db.models import Max
 from django.urls import reverse
 from rest_framework import status
 
@@ -44,6 +45,35 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         result = _dedupe_dumps_latest_wins([first, second])
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].name, "Second")
+
+    @patch.object(SupportTicket.objects, "bulk_create", wraps=SupportTicket.objects.bulk_create)
+    def test_bulk_create_ignores_conflicts(self, mock_bulk_create):
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            user_id="cust_conflict",
+            name="Conflict Test",
+        )
+
+        process_dumped_tickets(tenant_id=self.tenant_id)
+
+        mock_bulk_create.assert_called_once()
+        self.assertTrue(mock_bulk_create.call_args.kwargs.get("ignore_conflicts"))
+        inserted = mock_bulk_create.call_args.args[0]
+        self.assertEqual(len(inserted), 1)
+        self.assertIsNotNone(inserted[0].id)
+
+    def test_process_assigns_monotonic_support_ticket_ids(self):
+        max_before = SupportTicket.all_objects.aggregate(m=Max("id"))["m"] or 0
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            user_id="cust_id_alloc",
+            name="Id Alloc",
+        )
+
+        process_dumped_tickets(tenant_id=self.tenant_id)
+
+        ticket = SupportTicket.objects.get(user_id="cust_id_alloc")
+        self.assertEqual(ticket.id, max_before + 1)
 
     def test_process_inserts_support_ticket_and_mirrors_records(self):
         SupportTicketDumpFactory.create(
