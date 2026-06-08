@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+from django.db.models import Max
 from django.urls import reverse
 from rest_framework import status
 
@@ -57,6 +58,22 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
 
         mock_bulk_create.assert_called_once()
         self.assertTrue(mock_bulk_create.call_args.kwargs.get("ignore_conflicts"))
+        inserted = mock_bulk_create.call_args.args[0]
+        self.assertEqual(len(inserted), 1)
+        self.assertIsNotNone(inserted[0].id)
+
+    def test_process_assigns_monotonic_support_ticket_ids(self):
+        max_before = SupportTicket.all_objects.aggregate(m=Max("id"))["m"] or 0
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            user_id="cust_id_alloc",
+            name="Id Alloc",
+        )
+
+        process_dumped_tickets(tenant_id=self.tenant_id)
+
+        ticket = SupportTicket.objects.get(user_id="cust_id_alloc")
+        self.assertEqual(ticket.id, max_before + 1)
 
     def test_process_inserts_support_ticket_and_mirrors_records(self):
         SupportTicketDumpFactory.create(
