@@ -381,7 +381,7 @@ def process_dumped_tickets(
         return ProcessDumpedTicketsResult(0, 0, 0, 0, 0, 0)
 
     unique_tickets = _dedupe_dumps_latest_wins(dumped_tickets_list)
-    tickets_to_insert: List[SupportTicket] = []
+    candidates: List[SupportTicketDump] = []
     skipped = 0
 
     for dump_ticket in unique_tickets:
@@ -394,21 +394,11 @@ def process_dumped_tickets(
         if not Tenant.objects.filter(id=dump_ticket.tenant_id).exists():
             skipped += 1
             continue
-
-        with transaction.atomic():
-            _delete_open_support_tickets_for_user(
-                dump_ticket.user_id,
-                tenant_id=dump_ticket.tenant_id,
-            )
-            _delete_open_support_records_for_user(
-                user_id=dump_ticket.user_id,
-                tenant_id=dump_ticket.tenant_id,
-            )
-            tickets_to_insert.append(_support_ticket_from_dump(dump_ticket))
+        candidates.append(dump_ticket)
 
     dump_ids = [t.id for t in dumped_tickets_list]
 
-    if not tickets_to_insert:
+    if not candidates:
         marked = SupportTicketDump.objects.filter(id__in=dump_ids).update(is_processed=True)
         return ProcessDumpedTicketsResult(
             total_dumped_tickets=len(dumped_tickets_list),
@@ -419,10 +409,26 @@ def process_dumped_tickets(
             marked_processed=marked,
         )
 
-    _assign_support_ticket_ids(tickets_to_insert)
-    SupportTicket.objects.bulk_create(tickets_to_insert, ignore_conflicts=True)
-    inserted_tickets = _load_inserted_support_tickets(tickets_to_insert)
-    mirrored = _mirror_tickets_to_records(inserted_tickets)
+    # Deletes, inserts, mirror, and dump marking must commit together so a failed
+    # bulk_create does not leave users without an open ticket.
+    with transaction.atomic():
+        tickets_to_insert: List[SupportTicket] = []
+        for dump_ticket in candidates:
+            _delete_open_support_tickets_for_user(
+                dump_ticket.user_id,
+                tenant_id=dump_ticket.tenant_id,
+            )
+            _delete_open_support_records_for_user(
+                user_id=dump_ticket.user_id,
+                tenant_id=dump_ticket.tenant_id,
+            )
+            tickets_to_insert.append(_support_ticket_from_dump(dump_ticket))
+
+        _assign_support_ticket_ids(tickets_to_insert)
+        SupportTicket.objects.bulk_create(tickets_to_insert, ignore_conflicts=True)
+        inserted_tickets = _load_inserted_support_tickets(tickets_to_insert)
+        mirrored = _mirror_tickets_to_records(inserted_tickets)
+        marked = SupportTicketDump.objects.filter(id__in=dump_ids).update(is_processed=True)
 
     if on_ticket_created:
         for ticket in inserted_tickets:
@@ -435,8 +441,6 @@ def process_dumped_tickets(
                     exc,
                     exc_info=True,
                 )
-
-    marked = SupportTicketDump.objects.filter(id__in=dump_ids).update(is_processed=True)
     return ProcessDumpedTicketsResult(
         total_dumped_tickets=len(dumped_tickets_list),
         unique_tickets=len(unique_tickets),

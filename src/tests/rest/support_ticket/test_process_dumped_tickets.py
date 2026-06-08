@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+from django.db import IntegrityError
 from django.db.models import Max
 from django.urls import reverse
 from rest_framework import status
@@ -120,6 +121,36 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         self.assertTrue(
             SupportTicketDump.objects.filter(
                 tenant_id=other_tenant.id, is_processed=False
+            ).exists()
+        )
+
+    def test_bulk_create_failure_rollbacks_open_ticket_deletions(self):
+        open_ticket = UnassignedSupportTicketFactory.create(
+            tenant=self.tenant,
+            user_id="cust_rollback",
+            resolution_status=None,
+        )
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            user_id="cust_rollback",
+            name="Replacement",
+        )
+
+        with patch.object(
+            SupportTicket.objects,
+            "bulk_create",
+            side_effect=IntegrityError("simulated bulk_create failure"),
+        ):
+            with self.assertRaises(IntegrityError):
+                process_dumped_tickets(tenant_id=self.tenant_id)
+
+        self.assertTrue(SupportTicket.objects.filter(id=open_ticket.id).exists())
+        self.assertFalse(SupportTicket.objects.filter(user_id="cust_rollback").exists())
+        self.assertTrue(
+            SupportTicketDump.objects.filter(
+                tenant_id=self.tenant_id,
+                user_id="cust_rollback",
+                is_processed=False,
             ).exists()
         )
 
