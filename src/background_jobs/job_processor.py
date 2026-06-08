@@ -411,11 +411,13 @@ class JobProcessor:
             elapsed = (now - self._last_support_ticket_dump_enqueue_at).total_seconds()
             if elapsed < SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL:
                 return
+        # Advance throttle before the attempt so persistent enqueue errors cannot
+        # retry on every worker loop iteration.
+        self._last_support_ticket_dump_enqueue_at = now
         try:
             from support_ticket.views import enqueue_process_dumped_tickets_for_pending_dumps
 
             result = enqueue_process_dumped_tickets_for_pending_dumps()
-            self._last_support_ticket_dump_enqueue_at = now
             enqueued = result.get("enqueued") or []
             if enqueued:
                 logger.info(
