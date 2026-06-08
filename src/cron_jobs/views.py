@@ -131,14 +131,27 @@ class UnassignSnoozedLeadsCronView(APIView):
     def post(self, request):
         try:
             queue = get_queue_service()
-            job = queue.enqueue_job(
+            from background_jobs.tenant_jobs import enqueue_for_all_tenants
+
+            jobs = enqueue_for_all_tenants(
+                queue,
                 job_type=JobType.UNASSIGN_SNOOZED_LEADS,
                 payload={},
                 priority=0,
             )
-            logger.info(f"[Cron] Enqueued unassign_snoozed_leads job id={job.id}")
+            job_ids = [j.id for j in jobs]
+            logger.info(
+                "[Cron] Enqueued unassign_snoozed_leads for %s tenant(s) job_ids=%s",
+                len(job_ids),
+                job_ids[:10],
+            )
             return Response(
-                {"ok": True, "job_id": job.id, "message": "Unassign snoozed leads job enqueued"},
+                {
+                    "ok": True,
+                    "job_ids": job_ids,
+                    "tenants": len(job_ids),
+                    "message": "Unassign snoozed leads jobs enqueued (one per tenant)",
+                },
                 status=status.HTTP_200_OK,
             )
         except Exception as e:
@@ -163,14 +176,27 @@ class ReleaseLeadsAfter12hCronView(APIView):
     def post(self, request):
         try:
             queue = get_queue_service()
-            job = queue.enqueue_job(
+            from background_jobs.tenant_jobs import enqueue_for_all_tenants
+
+            jobs = enqueue_for_all_tenants(
+                queue,
                 job_type=JobType.RELEASE_LEADS_AFTER_12H,
                 payload={},
                 priority=0,
             )
-            logger.info(f"[Cron] Enqueued release_leads_after_12h job id={job.id}")
+            job_ids = [j.id for j in jobs]
+            logger.info(
+                "[Cron] Enqueued release_leads_after_12h for %s tenant(s) job_ids=%s",
+                len(job_ids),
+                job_ids[:10],
+            )
             return Response(
-                {"ok": True, "job_id": job.id, "message": "Release leads after 12h job enqueued"},
+                {
+                    "ok": True,
+                    "job_ids": job_ids,
+                    "tenants": len(job_ids),
+                    "message": "Release leads after 12h jobs enqueued (one per tenant)",
+                },
                 status=status.HTTP_200_OK,
             )
         except Exception as e:

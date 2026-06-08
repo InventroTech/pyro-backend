@@ -232,8 +232,9 @@ class TestPurgeOldLogTablesJobHandler:
             ok = handler.process(job)
 
         assert ok is True
-        mock_purge.assert_called_once_with(days=30)
+        mock_purge.assert_called_once_with(days=30, tenant_id=str(job.tenant_id))
         assert job.result["success"] is True
+        assert job.result["tenant_id"] == str(job.tenant_id)
         assert job.result["object_history"] == 1
         assert job.result["event_logs"] == 2
 
