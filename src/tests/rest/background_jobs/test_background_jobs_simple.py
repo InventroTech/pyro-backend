@@ -279,6 +279,7 @@ class SimpleBackgroundJobsTest(TestCase):
         self.assertTrue(registry.has_handler(JobType.SEND_WEBHOOK))
         self.assertTrue(registry.has_handler(JobType.EXECUTE_FUNCTION))
         self.assertTrue(registry.has_handler(JobType.PURGE_OLD_LOG_TABLES))
+        self.assertTrue(registry.has_handler(JobType.PROCESS_DUMPED_TICKETS))
         
         # Verify we can get handlers
         handler = registry.get_handler(JobType.SEND_MIXPANEL_EVENT)
