@@ -376,6 +376,7 @@ else:
 CORS_ALLOW_HEADERS = list(default_headers) + [
     "X-Tenant-Slug",  # custom tenant header
     "X-Secret-Pyro",  # Pyro API secret header
+    "x-webhook-secret",  # support ticket dump webhook
 ]
 
 # Email configuration
