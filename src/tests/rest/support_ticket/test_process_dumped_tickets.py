@@ -1,5 +1,7 @@
 from unittest.mock import patch
 
+from django.db import IntegrityError
+from django.db.models import Max
 from django.urls import reverse
 from rest_framework import status
 
@@ -57,6 +59,22 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
 
         mock_bulk_create.assert_called_once()
         self.assertTrue(mock_bulk_create.call_args.kwargs.get("ignore_conflicts"))
+        inserted = mock_bulk_create.call_args.args[0]
+        self.assertEqual(len(inserted), 1)
+        self.assertIsNotNone(inserted[0].id)
+
+    def test_process_assigns_monotonic_support_ticket_ids(self):
+        max_before = SupportTicket.all_objects.aggregate(m=Max("id"))["m"] or 0
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            user_id="cust_id_alloc",
+            name="Id Alloc",
+        )
+
+        process_dumped_tickets(tenant_id=self.tenant_id)
+
+        ticket = SupportTicket.objects.get(user_id="cust_id_alloc")
+        self.assertEqual(ticket.id, max_before + 1)
 
     def test_process_inserts_support_ticket_and_mirrors_records(self):
         SupportTicketDumpFactory.create(
@@ -103,6 +121,41 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         self.assertTrue(
             SupportTicketDump.objects.filter(
                 tenant_id=other_tenant.id, is_processed=False
+            ).exists()
+        )
+
+    def test_bulk_create_failure_rollbacks_open_ticket_deletions(self):
+        open_ticket = UnassignedSupportTicketFactory.create(
+            tenant=self.tenant,
+            user_id="cust_rollback",
+            resolution_status=None,
+        )
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            user_id="cust_rollback",
+            name="Replacement",
+        )
+
+        with patch.object(
+            SupportTicket.objects,
+            "bulk_create",
+            side_effect=IntegrityError("simulated bulk_create failure"),
+        ):
+            with self.assertRaises(IntegrityError):
+                process_dumped_tickets(tenant_id=self.tenant_id)
+
+        open_ticket.refresh_from_db()
+        self.assertEqual(
+            SupportTicket.objects.filter(user_id="cust_rollback").count(),
+            1,
+        )
+        self.assertEqual(open_ticket.id, SupportTicket.objects.get(user_id="cust_rollback").id)
+        self.assertNotEqual(open_ticket.name, "Replacement")
+        self.assertTrue(
+            SupportTicketDump.objects.filter(
+                tenant_id=self.tenant_id,
+                user_id="cust_rollback",
+                is_processed=False,
             ).exists()
         )
 

@@ -10,8 +10,8 @@ from rest_framework import status
 from uuid import UUID
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
-from django.db import transaction
-from django.db.models import Q
+from django.db import connection, transaction
+from django.db.models import Max, Q
 from django.db import IntegrityError
 from config.supabase_auth import SupabaseJWTAuthentication
 from authz.permissions import IsTenantAuthenticated
@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 
 SUPPORT_TICKET_ENTITY_TYPE = "support_ticket"
 DUMP_BATCH_LIMIT = 5000
+# Legacy support_ticket.id has no DB sequence; ids must be allocated before bulk_create.
+_SUPPORT_TICKET_ID_ALLOC_LOCK = 874215903
 
 
 def _enqueue_mixpanel_event(
@@ -291,16 +293,51 @@ def _support_ticket_from_dump(dump_ticket: SupportTicketDump) -> SupportTicket:
     )
 
 
+def _allocate_support_ticket_ids(count: int) -> List[int]:
+    """
+    Allocate monotonic primary keys for support_ticket.
+
+    The table predates Django migrations and has no serial/identity on ``id``,
+    so bulk_create cannot rely on the database to generate keys.
+    """
+    if count <= 0:
+        return []
+    with transaction.atomic():
+        if connection.vendor == "postgresql":
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(%s)",
+                    [_SUPPORT_TICKET_ID_ALLOC_LOCK],
+                )
+        start = (SupportTicket.all_objects.aggregate(m=Max("id"))["m"] or 0) + 1
+        return list(range(start, start + count))
+
+
+def _assign_support_ticket_ids(tickets_to_insert: List[SupportTicket]) -> None:
+    ids = _allocate_support_ticket_ids(len(tickets_to_insert))
+    for ticket, pk in zip(tickets_to_insert, ids):
+        ticket.id = pk
+
+
 def _load_inserted_support_tickets(
     tickets_to_insert: List[SupportTicket],
 ) -> List[SupportTicket]:
     """
-    Reload rows after bulk_create so pk/tenant_id are set for mirror + Mixpanel.
+    Return support_ticket rows persisted by bulk_create.
 
-    bulk_create uses ignore_conflicts=True; the ORM may return objects without PKs.
+    IDs are pre-assigned before insert (legacy table has no id sequence). Rows
+    skipped via ignore_conflicts are omitted.
     """
     if not tickets_to_insert:
         return []
+    allocated_ids = [t.id for t in tickets_to_insert if t.id]
+    if allocated_ids:
+        found = {
+            t.id: t
+            for t in SupportTicket.objects.filter(id__in=allocated_ids)
+        }
+        return [found[pk] for pk in allocated_ids if pk in found]
+
     user_ids = [t.user_id for t in tickets_to_insert if t.user_id]
     tenant_id = tickets_to_insert[0].tenant_id
     if not user_ids or not tenant_id:
@@ -344,7 +381,7 @@ def process_dumped_tickets(
         return ProcessDumpedTicketsResult(0, 0, 0, 0, 0, 0)
 
     unique_tickets = _dedupe_dumps_latest_wins(dumped_tickets_list)
-    tickets_to_insert: List[SupportTicket] = []
+    candidates: List[SupportTicketDump] = []
     skipped = 0
 
     for dump_ticket in unique_tickets:
@@ -357,21 +394,11 @@ def process_dumped_tickets(
         if not Tenant.objects.filter(id=dump_ticket.tenant_id).exists():
             skipped += 1
             continue
-
-        with transaction.atomic():
-            _delete_open_support_tickets_for_user(
-                dump_ticket.user_id,
-                tenant_id=dump_ticket.tenant_id,
-            )
-            _delete_open_support_records_for_user(
-                user_id=dump_ticket.user_id,
-                tenant_id=dump_ticket.tenant_id,
-            )
-            tickets_to_insert.append(_support_ticket_from_dump(dump_ticket))
+        candidates.append(dump_ticket)
 
     dump_ids = [t.id for t in dumped_tickets_list]
 
-    if not tickets_to_insert:
+    if not candidates:
         marked = SupportTicketDump.objects.filter(id__in=dump_ids).update(is_processed=True)
         return ProcessDumpedTicketsResult(
             total_dumped_tickets=len(dumped_tickets_list),
@@ -382,9 +409,26 @@ def process_dumped_tickets(
             marked_processed=marked,
         )
 
-    SupportTicket.objects.bulk_create(tickets_to_insert, ignore_conflicts=True)
-    inserted_tickets = _load_inserted_support_tickets(tickets_to_insert)
-    mirrored = _mirror_tickets_to_records(inserted_tickets)
+    # Deletes, inserts, mirror, and dump marking must commit together so a failed
+    # bulk_create does not leave users without an open ticket.
+    with transaction.atomic():
+        tickets_to_insert: List[SupportTicket] = []
+        for dump_ticket in candidates:
+            _delete_open_support_tickets_for_user(
+                dump_ticket.user_id,
+                tenant_id=dump_ticket.tenant_id,
+            )
+            _delete_open_support_records_for_user(
+                user_id=dump_ticket.user_id,
+                tenant_id=dump_ticket.tenant_id,
+            )
+            tickets_to_insert.append(_support_ticket_from_dump(dump_ticket))
+
+        _assign_support_ticket_ids(tickets_to_insert)
+        SupportTicket.objects.bulk_create(tickets_to_insert, ignore_conflicts=True)
+        inserted_tickets = _load_inserted_support_tickets(tickets_to_insert)
+        mirrored = _mirror_tickets_to_records(inserted_tickets)
+        marked = SupportTicketDump.objects.filter(id__in=dump_ids).update(is_processed=True)
 
     if on_ticket_created:
         for ticket in inserted_tickets:
@@ -397,8 +441,6 @@ def process_dumped_tickets(
                     exc,
                     exc_info=True,
                 )
-
-    marked = SupportTicketDump.objects.filter(id__in=dump_ids).update(is_processed=True)
     return ProcessDumpedTicketsResult(
         total_dumped_tickets=len(dumped_tickets_list),
         unique_tickets=len(unique_tickets),
