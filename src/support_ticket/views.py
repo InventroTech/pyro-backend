@@ -270,7 +270,7 @@ def _mirror_tickets_to_records(tickets: Iterable[SupportTicket]) -> int:
     return mirrored
 
 
-def _support_ticket_from_dump(dump_ticket: SupportTicketDump, tenant: Tenant) -> SupportTicket:
+def _support_ticket_from_dump(dump_ticket: SupportTicketDump) -> SupportTicket:
     return SupportTicket(
         ticket_date=dump_ticket.ticket_date,
         user_id=dump_ticket.user_id,
@@ -282,13 +282,40 @@ def _support_ticket_from_dump(dump_ticket: SupportTicketDump, tenant: Tenant) ->
         reason=dump_ticket.reason,
         badge=dump_ticket.badge,
         poster=dump_ticket.poster,
-        tenant=tenant,
+        tenant_id=dump_ticket.tenant_id,
         layout_status=dump_ticket.layout_status,
         state=dump_ticket.state,
         praja_dashboard_user_link=dump_ticket.praja_dashboard_user_link,
         display_pic_url=dump_ticket.display_pic_url,
         dumped_at=timezone.now(),
     )
+
+
+def _load_inserted_support_tickets(
+    tickets_to_insert: List[SupportTicket],
+) -> List[SupportTicket]:
+    """
+    Reload rows after bulk_create so pk/tenant_id are set for mirror + Mixpanel.
+
+    bulk_create (especially with ignore_conflicts) may return in-memory objects
+    without primary keys on some backends.
+    """
+    if not tickets_to_insert:
+        return []
+    user_ids = [t.user_id for t in tickets_to_insert if t.user_id]
+    tenant_id = tickets_to_insert[0].tenant_id
+    if not user_ids or not tenant_id:
+        return []
+    by_user: Dict[str, SupportTicket] = {}
+    for ticket in (
+        SupportTicket.objects.filter(
+            tenant_id=tenant_id,
+            user_id__in=user_ids,
+        ).order_by("-id")
+    ):
+        if ticket.user_id not in by_user:
+            by_user[ticket.user_id] = ticket
+    return [by_user[uid] for uid in user_ids if uid in by_user]
 
 
 @dataclass
@@ -330,9 +357,7 @@ def process_dumped_tickets(
         if not dump_ticket.tenant_id:
             skipped += 1
             continue
-        try:
-            tenant = Tenant.objects.get(id=dump_ticket.tenant_id)
-        except Tenant.DoesNotExist:
+        if not Tenant.objects.filter(id=dump_ticket.tenant_id).exists():
             skipped += 1
             continue
 
@@ -345,7 +370,7 @@ def process_dumped_tickets(
                 user_id=dump_ticket.user_id,
                 tenant_id=dump_ticket.tenant_id,
             )
-            tickets_to_insert.append(_support_ticket_from_dump(dump_ticket, tenant))
+            tickets_to_insert.append(_support_ticket_from_dump(dump_ticket))
 
     dump_ids = [t.id for t in dumped_tickets_list]
 
@@ -360,10 +385,8 @@ def process_dumped_tickets(
             marked_processed=marked,
         )
 
-    inserted_tickets = SupportTicket.objects.bulk_create(
-        tickets_to_insert,
-        ignore_conflicts=True,
-    )
+    SupportTicket.objects.bulk_create(tickets_to_insert)
+    inserted_tickets = _load_inserted_support_tickets(tickets_to_insert)
     mirrored = _mirror_tickets_to_records(inserted_tickets)
 
     if on_ticket_created:
