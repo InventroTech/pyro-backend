@@ -1,0 +1,70 @@
+from django.urls import reverse
+from rest_framework import status
+
+from crm_records.models import EventLog, Record
+from support_ticket.constants import (
+    SUPPORT_EVENT_NOT_CONNECTED,
+    SUPPORT_EVENT_RESOLVED,
+    SUPPORT_TICKET_ENTITY_TYPE,
+)
+from support_ticket.events import dispatch_support_ticket_event
+from tests.rest.support_ticket.support_rules import seed_support_ticket_rules
+from tests.base.test_setup import BaseAPITestCase
+from tests.factories.support_ticket_dump_factory import dump_data
+
+
+class SupportTicketEventHandlerTest(BaseAPITestCase):
+    def setUp(self):
+        super().setUp()
+        seed_support_ticket_rules(self.tenant)
+        self.record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data=dump_data(
+                user_id="cust_1",
+                poster="Self Trail",
+                call_attempts=0,
+                assigned_to=self.supabase_uid,
+                cse_name=self.email,
+            ),
+        )
+
+    def test_not_connected_snoozes_then_closes_per_rules(self):
+        dispatch_support_ticket_event(
+            SUPPORT_EVENT_NOT_CONNECTED,
+            self.record,
+            {"cse_remarks": "no answer"},
+        )
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.data["call_attempts"], 1)
+        self.assertEqual(self.record.data["resolution_status"], "Snoozed")
+        self.assertIsNone(self.record.data.get("assigned_to"))
+        self.assertIsNotNone(self.record.data.get("snooze_until"))
+
+        dispatch_support_ticket_event(
+            SUPPORT_EVENT_NOT_CONNECTED,
+            self.record,
+            {},
+        )
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.data["call_attempts"], 2)
+        self.assertEqual(self.record.data["resolution_status"], "Closed")
+
+    def test_record_event_api_dispatches_support_rules(self):
+        url = reverse("crm_records:record-events")
+        payload = {
+            "record_id": self.record.id,
+            "event": SUPPORT_EVENT_RESOLVED,
+            "payload": {
+                "reason": "Self Trial completion",
+                "resolutionTime": "1:00",
+                "callStatus": "Answered",
+            },
+        }
+        response = self.client.post(url, payload, format="json", **self.auth_headers)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.data["resolution_status"], "Resolved")
+        self.assertEqual(self.record.data["resolution_time"], "1:00")
+        self.assertEqual(EventLog.objects.filter(record=self.record).count(), 1)

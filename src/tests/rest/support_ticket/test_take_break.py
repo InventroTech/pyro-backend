@@ -6,10 +6,14 @@ from uuid import uuid4
 from unittest.mock import patch
 
 from core.models import Tenant
+from crm_records.models import Record
+from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
 from support_ticket.models import SupportTicket
 from tests.factories.user_factory import UserFactory
 from tests.factories.core_factory import TenantFactory
 from tests.factories.support_ticket_factory import SupportTicketFactory
+from tests.factories.support_ticket_dump_factory import dump_data
+from tests.rest.support_ticket.support_rules import seed_support_ticket_rules
 
 @pytest.mark.django_db
 class TestTakeBreakView:
@@ -119,82 +123,107 @@ class TestTakeBreakView:
             assigned_to=None,
         )
 
-    def test_take_break_unassigns_ticket_successfully(self, authenticated_client, test_ticket):
+    @pytest.fixture
+    def test_record(self, authenticated_client, test_ticket):
+        seed_support_ticket_rules(self.test_tenant)
+        return Record.objects.create(
+            tenant=self.test_tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data=dump_data(
+                support_ticket_id=test_ticket.id,
+                cse_name=test_ticket.cse_name,
+                resolution_status=test_ticket.resolution_status,
+            ),
+        )
+
+    def test_take_break_unassigns_ticket_successfully(self, authenticated_client, test_record):
         client, user_id, user_email = authenticated_client
         url = reverse('support_ticket:take-break')
-        
-        # Set initial state to a non-WIP status to test unassignment.
-        test_ticket.resolution_status = "Resolved"
-        test_ticket.save()
-        
+
+        test_record.data = {
+            **test_record.data,
+            "resolution_status": "Resolved",
+            "assigned_to": user_id,
+            "cse_name": user_email,
+        }
+        test_record.save(update_fields=["data"])
+
         payload = {
-            'ticketId': test_ticket.id,
+            'ticketId': test_record.id,
             'resolutionStatus': 'Resolved'
         }
-        
+
         response = client.post(url, payload, format='json')
-        
+
         assert response.status_code == status.HTTP_200_OK
         assert response.json()['success'] is True
         assert "Ticket unassigned" in response.json()['message']
         assert response.json()['ticketUnassigned'] is True
         assert response.json()['userId'] == user_id
         assert response.json()['userEmail'] == user_email
-        
-        test_ticket.refresh_from_db()
-        assert test_ticket.assigned_to is None
-        assert test_ticket.cse_name is None
-        assert test_ticket.resolution_status == "Resolved" 
 
-    def test_take_break_does_not_unassign_wip_ticket(self, authenticated_client, test_ticket):
+        test_record.refresh_from_db()
+        assert test_record.data.get("assigned_to") is None
+        assert test_record.data.get("cse_name") is None
+        assert test_record.data.get("resolution_status") == "Resolved"
+
+    def test_take_break_does_not_unassign_wip_ticket(self, authenticated_client, test_record):
         client, user_id, user_email = authenticated_client
         url = reverse('support_ticket:take-break')
-        
-        test_ticket.resolution_status = "WIP"
-        test_ticket.save()
 
-        initial_assigned_to = test_ticket.assigned_to
-        initial_cse_name = test_ticket.cse_name
-        
+        test_record.data = {
+            **test_record.data,
+            "resolution_status": "WIP",
+            "assigned_to": user_id,
+            "cse_name": user_email,
+        }
+        test_record.save(update_fields=["data"])
+        initial_assigned_to = test_record.data.get("assigned_to")
+        initial_cse_name = test_record.data.get("cse_name")
+
         payload = {
-            'ticketId': test_ticket.id,
+            'ticketId': test_record.id,
             'resolutionStatus': 'WIP'
         }
-        
+
         response = client.post(url, payload, format='json')
-        
+
         assert response.status_code == status.HTTP_200_OK
         assert response.json()['success'] is True
         assert "in progress" in response.json()['message']
         assert response.json()['ticketUnassigned'] is False
-        
-        test_ticket.refresh_from_db()
-        assert test_ticket.assigned_to == initial_assigned_to
-        assert test_ticket.cse_name == initial_cse_name
-        assert test_ticket.resolution_status == "WIP"
 
-    def test_take_break_with_payload_wip_status(self, authenticated_client, test_ticket):
+        test_record.refresh_from_db()
+        assert test_record.data.get("assigned_to") == initial_assigned_to
+        assert test_record.data.get("cse_name") == initial_cse_name
+        assert test_record.data.get("resolution_status") == "WIP"
+
+    def test_take_break_with_payload_wip_status(self, authenticated_client, test_record):
         client, user_id, user_email = authenticated_client
         url = reverse('support_ticket:take-break')
-        
-        test_ticket.resolution_status = "New"
-        test_ticket.save()
-        initial_assigned_to = test_ticket.assigned_to
-        
+
+        test_record.data = {
+            **test_record.data,
+            "resolution_status": "New",
+            "assigned_to": user_id,
+        }
+        test_record.save(update_fields=["data"])
+        initial_assigned_to = test_record.data.get("assigned_to")
+
         payload = {
-            'ticketId': test_ticket.id,
+            'ticketId': test_record.id,
             'resolutionStatus': 'WIP'
         }
-        
+
         response = client.post(url, payload, format='json')
-        
+
         assert response.status_code == status.HTTP_200_OK
         assert response.json()['success'] is True
         assert "in progress" in response.json()['message']
         assert response.json()['ticketUnassigned'] is False
-        
-        test_ticket.refresh_from_db()
-        assert test_ticket.assigned_to == initial_assigned_to
+
+        test_record.refresh_from_db()
+        assert test_record.data.get("assigned_to") == initial_assigned_to
         
     def test_take_break_with_non_existent_ticket(self, authenticated_client):
         client, _, _ = authenticated_client
@@ -225,12 +254,12 @@ class TestTakeBreakView:
         assert "Invalid request data" in response.json()['error']
         assert "ticketId" in response.json()['details']
 
-    def test_take_break_without_authentication(self, test_ticket):
+    def test_take_break_without_authentication(self, test_record):
         client = APIClient()
         url = reverse('support_ticket:take-break')
-        
+
         payload = {
-            'ticketId': test_ticket.id,
+            'ticketId': test_record.id,
             'resolutionStatus': 'Resolved'
         }
         
@@ -238,7 +267,7 @@ class TestTakeBreakView:
         
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
-    def test_take_break_with_no_user_id_in_token(self, test_ticket):
+    def test_take_break_with_no_user_id_in_token(self, test_record):
         client = APIClient()
         url = reverse('support_ticket:take-break')
 
@@ -253,11 +282,11 @@ class TestTakeBreakView:
         client.force_authenticate(user=user, token=bad_jwt_payload)
             
         payload = {
-            'ticketId': test_ticket.id,
+            'ticketId': test_record.id,
             'resolutionStatus': 'Resolved'
         }
-        
+
         response = client.post(url, payload, format='json')
-        
+
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         assert "No user id in JWT" in response.json()['error']

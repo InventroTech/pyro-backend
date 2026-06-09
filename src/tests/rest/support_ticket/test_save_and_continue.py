@@ -4,8 +4,12 @@ from django.urls import reverse
 from rest_framework import status
 from django.utils import timezone
 
+from crm_records.models import EventLog, Record
+from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
+from tests.rest.support_ticket.support_rules import seed_support_ticket_rules
 from tests.base.test_setup import BaseAPITestCase
 from tests.factories.support_ticket_factory import SupportTicketFactory
+from tests.factories.support_ticket_dump_factory import dump_data
 from support_ticket.models import SupportTicket
 from support_ticket.services import TicketTimeService, MixpanelService
 
@@ -133,15 +137,28 @@ class SaveAndContinueViewTest(BaseAPITestCase):
             resolution_time="0:00",
             call_attempts=0
         )
-        
+        seed_support_ticket_rules(self.tenant)
+        self.record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data=dump_data(
+                user_id="test_user_123",
+                name="Test User",
+                phone="1234567890",
+                support_ticket_id=self.support_ticket.id,
+                resolution_time="0:00",
+                call_attempts=0,
+            ),
+        )
+
         self.url = reverse('support_ticket:save-and-continue')
     
-    @patch("support_ticket.views._enqueue_mixpanel_event")
+    @patch("support_ticket.events._enqueue_mixpanel_event")
     def test_save_and_continue_success(self, mock_enqueue_mixpanel):
         """Test successful save and continue operation"""
         
         data = {
-            'ticketId': self.support_ticket.id,
+            'ticketId': self.record.id,
             'resolutionStatus': 'Resolved',
             'callStatus': 'Answered',
             'cseRemarks': 'Issue resolved successfully',
@@ -159,16 +176,21 @@ class SaveAndContinueViewTest(BaseAPITestCase):
         self.assertEqual(response.data['userEmail'], self.email)
         self.assertEqual(response.data['totalResolutionTime'], '5:30')
         
-        # Verify ticket was updated
-        updated_ticket = SupportTicket.objects.get(id=self.support_ticket.id)
-        self.assertEqual(updated_ticket.resolution_status, 'Resolved')
-        self.assertEqual(updated_ticket.call_status, 'Answered')
-        self.assertEqual(updated_ticket.cse_remarks, 'Issue resolved successfully')
-        self.assertEqual(updated_ticket.cse_name, self.email)
-        self.assertEqual(updated_ticket.resolution_time, '5:30')
-        self.assertEqual(updated_ticket.call_attempts, 1)
-        self.assertEqual(updated_ticket.other_reasons, ['Network issue'])
-        self.assertIsNotNone(updated_ticket.completed_at)
+        self.record.refresh_from_db()
+        data = self.record.data
+        self.assertEqual(data['resolution_status'], 'Resolved')
+        self.assertEqual(data['call_status'], 'Answered')
+        self.assertEqual(data['cse_remarks'], 'Issue resolved successfully')
+        self.assertEqual(data['cse_name'], self.email)
+        self.assertEqual(data['resolution_time'], '5:30')
+        self.assertEqual(data['call_attempts'], 1)
+        self.assertEqual(data['other_reasons'], ['Network issue'])
+        self.assertIsNotNone(data['completed_at'])
+        self.assertEqual(EventLog.objects.filter(record=self.record).count(), 1)
+        self.assertEqual(
+            EventLog.objects.filter(record=self.record).first().event,
+            'support.resolved',
+        )
         
         # Verify Mixpanel enqueue (pyro_st_connected + pyro_st_resolve)
         self.assertEqual(mock_enqueue_mixpanel.call_count, 2)
@@ -177,26 +199,24 @@ class SaveAndContinueViewTest(BaseAPITestCase):
     
     def test_save_and_continue_time_accumulation(self):
         """Test time accumulation functionality"""
-        # Set initial resolution time
-        self.support_ticket.resolution_time = "3:15"
-        self.support_ticket.save()
-        
+        self.record.data = {**self.record.data, "resolution_time": "3:15"}
+        self.record.save(update_fields=["data"])
+
         data = {
-            'ticketId': self.support_ticket.id,
+            'ticketId': self.record.id,
             'resolutionStatus': 'WIP',
             'resolutionTime': '2:30',
             'isReadOnly': False
         }
-        
-        with patch("support_ticket.views._enqueue_mixpanel_event"):
+
+        with patch("support_ticket.events._enqueue_mixpanel_event"):
             response = self.client.post(self.url, data, format='json', **self.auth_headers)
-        
+
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['totalResolutionTime'], '5:45')
-        
-        # Verify database update
-        updated_ticket = SupportTicket.objects.get(id=self.support_ticket.id)
-        self.assertEqual(updated_ticket.resolution_time, '5:45')
+
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.data['resolution_time'], '5:45')
     
     def test_ticket_not_found(self):
         """Test handling of non-existent ticket"""
@@ -214,7 +234,7 @@ class SaveAndContinueViewTest(BaseAPITestCase):
     def test_read_only_ticket(self):
         """Test handling of read-only tickets"""
         data = {
-            'ticketId': self.support_ticket.id,
+            'ticketId': self.record.id,
             'resolutionStatus': 'Resolved',
             'isReadOnly': True
         }
@@ -239,7 +259,7 @@ class SaveAndContinueViewTest(BaseAPITestCase):
     def test_unauthorized_request(self):
         """Test handling of unauthorized requests"""
         data = {
-            'ticketId': self.support_ticket.id,
+            'ticketId': self.record.id,
             'resolutionStatus': 'Resolved',
             'isReadOnly': False
         }
@@ -249,7 +269,7 @@ class SaveAndContinueViewTest(BaseAPITestCase):
         
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
     
-    @patch("support_ticket.views._enqueue_mixpanel_event")
+    @patch("support_ticket.events._enqueue_mixpanel_event")
     def test_mixpanel_events_for_different_statuses(self, mock_enqueue_mixpanel):
         """Test that correct Mixpanel events are sent for different resolution statuses"""
         
@@ -264,7 +284,7 @@ class SaveAndContinueViewTest(BaseAPITestCase):
                 mock_enqueue_mixpanel.reset_mock()
                 
                 data = {
-                    'ticketId': self.support_ticket.id,
+                    'ticketId': self.record.id,
                     'resolutionStatus': resolution_status,
                     'isReadOnly': False
                 }
@@ -278,20 +298,20 @@ class SaveAndContinueViewTest(BaseAPITestCase):
                 self.assertEqual(names[0], "pyro_st_connected")
                 self.assertEqual(names[1], expected_event)
 
-    @patch("support_ticket.views._enqueue_mixpanel_event")
+    @patch("support_ticket.events._enqueue_mixpanel_event")
     def test_no_mixpanel_event_without_user_id(self, mock_enqueue_mixpanel):
         """Test that no Mixpanel events are sent when ticket has no user_id"""
-        
-        # Create ticket without user_id
-        ticket_without_user = SupportTicketFactory.create(
-            user_id=None,  # No user_id
-            tenant_id=self.tenant_id,
-            resolution_time="0:00",
-            call_attempts=0
+        record_without_user = Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data=dump_data(
+                resolution_time="0:00",
+                call_attempts=0,
+            ),
         )
-        
+
         data = {
-            'ticketId': ticket_without_user.id,
+            'ticketId': record_without_user.id,
             'resolutionStatus': 'Resolved',
             'isReadOnly': False
         }

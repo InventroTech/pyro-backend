@@ -33,8 +33,16 @@ def dispatch_event(event_name: str, record: Record, payload: Dict[str, Any]) -> 
     logger.debug(f"[DISPATCH] Payload: {payload}")
     
     try:
-        # Execute rules for this event
-        execute_rules(event_name, record, payload, str(record.tenant.id))
+        from support_ticket.constants import SUPPORT_TICKET_BUTTON_EVENTS, SUPPORT_TICKET_ENTITY_TYPE
+        from support_ticket.events import dispatch_support_ticket_event
+
+        if (
+            record.entity_type == SUPPORT_TICKET_ENTITY_TYPE
+            and event_name in SUPPORT_TICKET_BUTTON_EVENTS
+        ):
+            dispatch_support_ticket_event(event_name, record, payload)
+        else:
+            execute_rules(event_name, record, payload, str(record.tenant.id))
         
         logger.info(f"[DISPATCH] Successfully processed event '{event_name}' for Record {record.id}")
         return True

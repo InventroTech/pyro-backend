@@ -6,15 +6,23 @@ from django.db import connection
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from support_ticket.models import SupportTicket
+from support_ticket.records import (
+    TICKET_DATA_SEARCH_FIELDS,
+    annotate_ticket_datetimes,
+    distinct_data_values,
+    extract_date_range_from_ticket_data,
+    filter_records_by_tenant_param,
+    q_data_json_null,
+    q_record_pending_resolution,
+    q_record_unassigned,
+    support_ticket_records_qs,
+)
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from datetime import datetime, time
 from django.utils import timezone
 from django.db.models import Count, Sum, Avg
 import uuid
 from .utils import (
-    extract_date_range_from_request,
-    filter_by_tenant,
     get_date_range,
     convert_seconds,
     convert_timedelta,
@@ -46,7 +54,6 @@ from .utils import tenant_scoped_qs
 from django.db import models
 from django.contrib.auth import get_user_model
 from authz.permissions import IsTenantAuthenticated
-from .utils import _distinct_list
 from crm_records.mixins import TenantScopedMixin
 from .services import TeamResolver, TeamMetricsService
 from .serializers import (
@@ -75,36 +82,43 @@ class StackedBarResolvedUnresolvedView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = SupportTicket.objects.filter(dumped_at__isnull=False)
-        qs = filter_by_tenant(qs, request)
-        start_date, end_date = extract_date_range_from_request(qs, request, created_field='dumped_at')
+        qs = annotate_ticket_datetimes(
+            support_ticket_records_qs()
+        ).filter(ticket_dumped_at__isnull=False)
+        qs = filter_records_by_tenant_param(qs, request)
+        start_date, end_date = extract_date_range_from_ticket_data(
+            qs, request, data_field_name="dumped_at"
+        )
         date_range = list(get_date_range(start_date, end_date))
         if not date_range:
             today = datetime.today().date()
             return Response([{'x': today.strftime("%Y-%m-%d"), 'y1': 0, 'y2': 0}])
         
         # Filter by date range
-        qs = qs.filter(dumped_at__date__gte=start_date, dumped_at__date__lte=end_date)
+        qs = qs.filter(
+            ticket_dumped_at__date__gte=start_date,
+            ticket_dumped_at__date__lte=end_date,
+        )
         
         # Aggregate resolved and unresolved counts per day in a single query
         aggregated_data = (
-            qs.annotate(date=TruncDate('dumped_at'))
+            qs.annotate(date=TruncDate("ticket_dumped_at"))
             .values('date')
             .annotate(
                 resolved=Count(
                     'id',
                     filter=Q(
-                completed_at__isnull=False,
-                resolution_status__iexact='resolved'
-                    )
+                        ticket_completed_at__isnull=False,
+                        data__resolution_status__iexact='resolved',
+                    ),
                 ),
                 unresolved=Count(
                     'id',
                     filter=~Q(
-                        completed_at__isnull=False,
-                        resolution_status__iexact='resolved'
-                    )
-                )
+                        ticket_completed_at__isnull=False,
+                        data__resolution_status__iexact='resolved',
+                    ),
+                ),
             )
         )
         
@@ -148,18 +162,32 @@ class DailyPercentileResolutionTimeView(APIView):
             )
         unit = request.query_params.get('unit', 'minutes').lower()
 
-        qs = SupportTicket.objects.filter(completed_at__isnull=False, dumped_at__isnull=False, tenant_id=request.tenant.id, resolution_status__in=['Resolved', "Can't Resolve"])
+        qs = annotate_ticket_datetimes(
+            support_ticket_records_qs(tenant=request.tenant)
+        ).filter(
+            ticket_completed_at__isnull=False,
+            ticket_dumped_at__isnull=False,
+            data__resolution_status__in=['Resolved', "Can't Resolve"],
+        )
         if not qs.exists():
             today = datetime.today().date()
             logger.warning("No support tickets found for given filters. Returning today's date with y=0.")
             return Response([{"x": today.strftime("%Y-%m-%d"), "y": 0}])
 
-        start_date, end_date = extract_date_range_from_request(qs, request, created_field='completed_at')
-        qs = qs.filter(completed_at__date__gte=start_date, completed_at__date__lte=end_date)
-        qs = qs.annotate(resolved_date=TruncDate('completed_at'))
+        start_date, end_date = extract_date_range_from_ticket_data(
+            qs, request, data_field_name="completed_at"
+        )
+        qs = qs.filter(
+            ticket_completed_at__date__gte=start_date,
+            ticket_completed_at__date__lte=end_date,
+        )
+        qs = qs.annotate(
+            resolved_date=TruncDate("ticket_completed_at"),
+            resolution_time=F("data__resolution_time"),
+        )
 
         # Filter out tickets without resolution_time
-        qs = qs.filter(resolution_time__isnull=False, resolution_status__in=['Resolved', "Can't Resolve"]).exclude(resolution_time='')
+        qs = qs.exclude(data__resolution_time__isnull=True).exclude(data__resolution_time="")
         
         data_by_day = {}
         for ticket in qs:
@@ -205,23 +233,32 @@ class DailyAverageResolutionTimeView(APIView):
 
         unit = request.query_params.get('unit', 'minutes').lower()
 
-        qs = SupportTicket.objects.filter(
-            completed_at__isnull=False,
-            dumped_at__isnull=False,
-            tenant_id=request.tenant.id,
-            resolution_status__in=['Resolved', "Can't Resolve"]
+        qs = annotate_ticket_datetimes(
+            support_ticket_records_qs(tenant=request.tenant)
+        ).filter(
+            ticket_completed_at__isnull=False,
+            ticket_dumped_at__isnull=False,
+            data__resolution_status__in=['Resolved', "Can't Resolve"],
         )
         if not qs.exists():
             today = datetime.today().date()
             logger.warning("No support tickets found for given filters. Returning today's date with y=0.")
             return Response([{"x": today.strftime("%Y-%m-%d"), "y": 0}])
 
-        start_date, end_date = extract_date_range_from_request(qs, request, created_field='completed_at')
-        qs = qs.filter(completed_at__date__gte=start_date, completed_at__date__lte=end_date)
-        qs = qs.annotate(resolved_date=TruncDate('completed_at'))
+        start_date, end_date = extract_date_range_from_ticket_data(
+            qs, request, data_field_name="completed_at"
+        )
+        qs = qs.filter(
+            ticket_completed_at__date__gte=start_date,
+            ticket_completed_at__date__lte=end_date,
+        )
+        qs = qs.annotate(
+            resolved_date=TruncDate("ticket_completed_at"),
+            resolution_time=F("data__resolution_time"),
+        )
 
         # Filter out tickets without resolution_time
-        qs = qs.filter(resolution_time__isnull=False, resolution_status__in=['Resolved', "Can't Resolve"]).exclude(resolution_time='')
+        qs = qs.exclude(data__resolution_time__isnull=True).exclude(data__resolution_time="")
 
         data_by_day = {}
         for ticket in qs:
@@ -258,16 +295,23 @@ class DailyResolvedTicketsView(APIView):
     permission_classes = []
 
     def get(self, request):
-        qs = SupportTicket.objects.filter(completed_at__isnull=False)
-        qs = filter_by_tenant(qs, request)
-        start_date, end_date = extract_date_range_from_request(qs, request, created_field='completed_at')
+        qs = annotate_ticket_datetimes(
+            support_ticket_records_qs()
+        ).filter(ticket_completed_at__isnull=False)
+        qs = filter_records_by_tenant_param(qs, request)
+        start_date, end_date = extract_date_range_from_ticket_data(
+            qs, request, data_field_name="completed_at"
+        )
         if not start_date or not end_date:
             today = datetime.today().date()
             return Response([{"x": today.strftime("%Y-%m-%d"), "y": 0}])
 
-        qs = qs.filter(completed_at__date__gte=start_date, completed_at__date__lte=end_date)
+        qs = qs.filter(
+            ticket_completed_at__date__gte=start_date,
+            ticket_completed_at__date__lte=end_date,
+        )
         resolved_data = (
-            qs.annotate(date=TruncDate('completed_at'))
+            qs.annotate(date=TruncDate("ticket_completed_at"))
             .values('date')
             .annotate(count=Count('id'))
         )
@@ -287,20 +331,30 @@ class TicketClosureTimeAnalytics(APIView):
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
-        qs = SupportTicket.objects.filter(completed_at__isnull=False, dumped_at__isnull=False, tenant_id=request.tenant.id)
+        qs = annotate_ticket_datetimes(
+            support_ticket_records_qs(tenant=request.tenant)
+        ).filter(
+            ticket_completed_at__isnull=False,
+            ticket_dumped_at__isnull=False,
+        )
         
-        start_date, end_date = extract_date_range_from_request(qs, request, created_field='completed_at')
+        start_date, end_date = extract_date_range_from_ticket_data(
+            qs, request, data_field_name="completed_at"
+        )
         if not start_date or not end_date:
             today = datetime.today().date()
             return Response([{"x": today.strftime("%Y-%m-%d"), "y": 0}])
 
-        qs = qs.filter(completed_at__date__gte=start_date, completed_at__date__lte=end_date)
+        qs = qs.filter(
+            ticket_completed_at__date__gte=start_date,
+            ticket_completed_at__date__lte=end_date,
+        )
         qs = qs.annotate(
             closure_time=ExpressionWrapper(
-                F('completed_at') - F('dumped_at'),
-                output_field=DurationField()
+                F("ticket_completed_at") - F("ticket_dumped_at"),
+                output_field=DurationField(),
             ),
-            day=TruncDate('completed_at')
+            day=TruncDate("ticket_completed_at"),
         )
 
         aggregated = (
@@ -351,12 +405,14 @@ class AnalyticsQueryView(APIView):
         # 3. Prompt Build (no DB save of prompt/examples)
         try:
             extra_instruction = ""
-            if "resolution_time" in schema_str:
+            if "resolution_time" in schema_str or "records" in schema_str:
                 extra_instruction = (
-                    "IMPORTANT: The field 'resolution_time' in the support_ticket table is stored as a string in 'MM:SS' format. "
-                    "To calculate averages or aggregates, convert it to seconds in SQL using: "
-                    "(SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int). "
-                    "Use this conversion in your SQL. Do NOT use CAST(resolution_time AS INTEGER) or CAST(resolution_time AS DOUBLE PRECISION)."
+                    "IMPORTANT: Support tickets live in the records table with entity_type = 'support_ticket'. "
+                    "Ticket fields are in the JSONB data column (e.g. data->>'resolution_time'). "
+                    "resolution_time is stored as 'MM:SS' text; convert to seconds using "
+                    "(SPLIT_PART(data->>'resolution_time', ':', 1)::int * 60 + "
+                    "SPLIT_PART(data->>'resolution_time', ':', 2)::int). "
+                    "Datetime fields in data are ISO strings — cast with (data->>'completed_at')::timestamptz."
                 )
             extra_instruction += (
                 "\n\nWhen a time range or date is needed, use parameterized placeholders "
@@ -369,30 +425,34 @@ class AnalyticsQueryView(APIView):
             examples = (
     "Example:\n"
     "Q: Which agent resolved the most support tickets last month?\n"
-    "A: SELECT cse_name, COUNT(*) AS tickets_resolved "
-    "FROM support_ticket "
-    "WHERE resolution_status = 'Resolved' "
-    "  AND completed_at >= %(start)s "
-    "  AND completed_at < %(end)s "
-    "GROUP BY cse_name "
+    "A: SELECT data->>'cse_name' AS cse_name, COUNT(*) AS tickets_resolved "
+    "FROM records "
+    "WHERE entity_type = 'support_ticket' "
+    "  AND data->>'resolution_status' = 'Resolved' "
+    "  AND (data->>'completed_at')::timestamptz >= %(start)s "
+    "  AND (data->>'completed_at')::timestamptz < %(end)s "
+    "GROUP BY data->>'cse_name' "
     "ORDER BY tickets_resolved DESC "
     "LIMIT 5;\n"
     "\n"
     "Example:\n"
     "Q: How many tickets remain unresolved as of today?\n"
     "A: SELECT COUNT(*) AS unresolved_tickets "
-    "FROM support_ticket "
-    "WHERE resolution_status != 'Resolved' "
-    "  AND dumped_at <= %(today)s;\n"
+    "FROM records "
+    "WHERE entity_type = 'support_ticket' "
+    "  AND data->>'resolution_status' != 'Resolved' "
+    "  AND (data->>'dumped_at')::timestamptz <= %(today)s;\n"
     "\n"
     "Example:\n"
     "Q: What is the average resolution time (in seconds) for resolved tickets for each agent?\n"
-    "A: SELECT cse_name, "
-    "AVG(CASE WHEN resolution_status = 'Resolved' THEN "
-    "(SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int) END) "
+    "A: SELECT data->>'cse_name' AS cse_name, "
+    "AVG(CASE WHEN data->>'resolution_status' = 'Resolved' THEN "
+    "(SPLIT_PART(data->>'resolution_time', ':', 1)::int * 60 + "
+    "SPLIT_PART(data->>'resolution_time', ':', 2)::int) END) "
     "AS avg_resolution_time_seconds "
-    "FROM support_ticket "
-    "GROUP BY cse_name;\n"
+    "FROM records "
+    "WHERE entity_type = 'support_ticket' "
+    "GROUP BY data->>'cse_name';\n"
 )
 
 
@@ -436,7 +496,7 @@ class AnalyticsQueryView(APIView):
             return Response({"error": "LLM service error. Please try again later."}, status=500)
 
         # 5. SQL Validation (save validation fields)
-        allowed_tables = {"support_ticket"}
+        allowed_tables = {"records"}
         try:
             is_safe, reason = is_safe_sql(sql_query, allowed_tables)
             run.validation_ok = bool(is_safe)
@@ -502,7 +562,12 @@ class SupportTicketView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        count = SupportTicket.objects.filter(tenant_id=request.user.tenant_id).filter(poster__in=["paid", "in_trial"]).filter(resolution_status__not__in=["Resolved"]).count()
+        count = (
+            support_ticket_records_qs(tenant_id=request.user.tenant_id)
+            .filter(data__poster__in=["paid", "in_trial"])
+            .exclude(data__resolution_status__in=["Resolved"])
+            .count()
+        )
         return Response({"count": count}, status=status.HTTP_200_OK)
 
 class CSEAverageResolutionTimeView(APIView):
@@ -538,42 +603,35 @@ class CSEAverageResolutionTimeView(APIView):
         # Debug: Print the date range
         print(f"Date range: {start_date} to {end_date}")
         
-        # Use Django ORM instead of raw SQL
-        qs = SupportTicket.objects.filter(
-            completed_at__isnull=False,
-            resolution_time__isnull=False
-        ).exclude(
-            resolution_time=''
-        ).exclude(
-            cse_name__isnull=True
-        ).exclude(
-            cse_name=''
-        )
+        qs = annotate_ticket_datetimes(support_ticket_records_qs()).filter(
+            ticket_completed_at__isnull=False,
+        ).exclude(data__resolution_time__isnull=True).exclude(
+            data__resolution_time=""
+        ).exclude(data__cse_name__isnull=True).exclude(data__cse_name="")
         
-        # Apply date filters if provided
         if start_date:
-            qs = qs.filter(completed_at__date__gte=start_date)
+            qs = qs.filter(ticket_completed_at__date__gte=start_date)
         if end_date:
-            qs = qs.filter(completed_at__date__lte=end_date)
+            qs = qs.filter(ticket_completed_at__date__lte=end_date)
         
-        # Apply tenant filter if provided
         tenant_id = request.query_params.get('tenant_id')
         if tenant_id:
             qs = qs.filter(tenant_id=tenant_id)
         
-        # Create a custom function to convert MM:SS to seconds
         class TimeToSeconds(Func):
             function = 'CAST'
-            template = "CAST(SPLIT_PART(%(expressions)s, ':', 1) AS INTEGER) * 60 + CAST(SPLIT_PART(%(expressions)s, ':', 2) AS INTEGER)"
+            template = (
+                "CAST(SPLIT_PART(%(expressions)s, ':', 1) AS INTEGER) * 60 + "
+                "CAST(SPLIT_PART(%(expressions)s, ':', 2) AS INTEGER)"
+            )
             output_field = IntegerField()
         
-        # Annotate with resolution time in seconds using Django ORM
         qs = qs.annotate(
-            resolution_seconds=TimeToSeconds('resolution_time')
-        ).values('cse_name').annotate(
-            avg_resolution_seconds=Avg('resolution_seconds'),
-            ticket_count=Count('id')
-        ).order_by('cse_name')
+            resolution_seconds=TimeToSeconds("data__resolution_time"),
+        ).values("data__cse_name").annotate(
+            avg_resolution_seconds=Avg("resolution_seconds"),
+            ticket_count=Count("id"),
+        ).order_by("data__cse_name")
         
         # Debug: Print the number of results
         print(f"Found {qs.count()} CSEs with data")
@@ -585,7 +643,7 @@ class CSEAverageResolutionTimeView(APIView):
             if item['avg_resolution_seconds'] is not None:
                 avg_time = convert_seconds(item['avg_resolution_seconds'], unit)
                 result.append({
-                    'cse_name': item['cse_name'],
+                    'cse_name': item['data__cse_name'],
                     'average_resolution_time': round(avg_time, 2),
                     'ticket_count': item['ticket_count'],
                     'unit': unit
@@ -626,38 +684,28 @@ class SLATimeView(APIView):
                 print(f"Invalid end date format: {end_param}")
                 end_date = None
         
-        # Base queryset: only tickets that have been completed/resolved
-        qs = SupportTicket.objects.filter(
-            completed_at__isnull=False,
-            created_at__isnull=False
+        qs = annotate_ticket_datetimes(support_ticket_records_qs()).filter(
+            ticket_completed_at__isnull=False,
         )
         
-        # Apply date filters if provided (filter by completed_at date)
         if start_date:
-            qs = qs.filter(completed_at__date__gte=start_date)
+            qs = qs.filter(ticket_completed_at__date__gte=start_date)
         if end_date:
-            qs = qs.filter(completed_at__date__lte=end_date)
+            qs = qs.filter(ticket_completed_at__date__lte=end_date)
         
-        # Apply tenant filter if provided
         tenant_id = request.query_params.get('tenant_id')
         if tenant_id:
             qs = qs.filter(tenant_id=tenant_id)
         
-        # Calculate SLA time as difference between completed_at and created_at
-        # Using ExpressionWrapper to calculate duration
         qs_with_sla = qs.annotate(
             sla_seconds=ExpressionWrapper(
-                F('completed_at') - F('created_at'),
-                output_field=DurationField()
+                F("ticket_completed_at") - F("created_at"),
+                output_field=DurationField(),
             )
         )
         
-        # Separate into Non-Snoozed and Snoozed tickets
-        # Non-Snoozed: tickets that were never snoozed (snooze_until is null)
-        non_snoozed_qs = qs_with_sla.filter(snooze_until__isnull=True)
-        
-        # Snoozed: tickets that were snoozed at some point (snooze_until is not null)
-        snoozed_qs = qs_with_sla.filter(snooze_until__isnull=False)
+        non_snoozed_qs = qs_with_sla.filter(ticket_snooze_until__isnull=True)
+        snoozed_qs = qs_with_sla.filter(ticket_snooze_until__isnull=False)
         
         # Calculate average SLA time for Non-Snoozed tickets
         non_snoozed_avg = non_snoozed_qs.aggregate(
@@ -701,13 +749,6 @@ class SLATimeView(APIView):
         return Response(result, status=status.HTTP_200_OK)
 
 
-# Default fields to search when no search_fields param is provided
-SUPPORT_TICKET_SEARCH_FIELDS = [
-    "name", "phone", "user_id", "reason", "poster", "resolution_status",
-    "cse_name", "cse_remarks", "badge", "source", "subscription_status"
-]
-
-
 class SupportTicketListView(ListAPIView):
     serializer_class = SupportTicketSerializer
     permission_classes = [IsTenantAuthenticated]
@@ -716,61 +757,63 @@ class SupportTicketListView(ListAPIView):
     ordering = "-created_at"
 
     def get_queryset(self):
-        qs = SupportTicket.objects.filter(tenant_id=self.request.tenant.id)
+        qs = support_ticket_records_qs(tenant=self.request.tenant)
         qp = self.request.query_params
 
-        # Use "search" param for the search term (search_fields = which fields to search in)
         search_term = (qp.get("search") or "").strip()
         if search_term:
-            # Optional: comma-separated list of fields to search (e.g. name,phone,reason)
             raw_fields = (qp.get("search_fields") or "").strip()
             if raw_fields:
                 field_list = [f.strip() for f in raw_fields.split(",") if f.strip()]
             else:
-                field_list = SUPPORT_TICKET_SEARCH_FIELDS
+                field_list = list(TICKET_DATA_SEARCH_FIELDS)
 
-            ALLOWED_SEARCH_FIELDS = frozenset(SUPPORT_TICKET_SEARCH_FIELDS + [
-                "layout_status", "state", "call_status", "rm_name"
-            ])
+            allowed_search_fields = frozenset(
+                TICKET_DATA_SEARCH_FIELDS + ("layout_status", "state", "call_status", "rm_name")
+            )
             q_search = Q()
             for field in field_list:
-                if field not in ALLOWED_SEARCH_FIELDS:
+                if field not in allowed_search_fields:
                     continue
+                path = f"data__{field}"
                 if field == "phone":
-                    # For phone: also match digits-only to handle "+91 98765" -> "98765"
                     digits = "".join(ch for ch in search_term if ch.isdigit())
                     if digits:
-                        q_search |= Q(phone__icontains=digits) | Q(phone__icontains=search_term)
+                        q_search |= Q(**{f"{path}__icontains": digits}) | Q(**{f"{path}__icontains": search_term})
                     else:
-                        q_search |= Q(phone__icontains=search_term)
+                        q_search |= Q(**{f"{path}__icontains": search_term})
                 else:
-                    q_search |= Q(**{f"{field}__icontains": search_term})
-            # Fallback to default fields if none were valid
+                    q_search |= Q(**{f"{path}__icontains": search_term})
             if not q_search.children:
-                field_list = SUPPORT_TICKET_SEARCH_FIELDS
+                field_list = list(TICKET_DATA_SEARCH_FIELDS)
                 q_search = Q()
                 for field in field_list:
+                    path = f"data__{field}"
                     if field == "phone":
                         digits = "".join(ch for ch in search_term if ch.isdigit())
                         if digits:
-                            q_search |= Q(phone__icontains=digits) | Q(phone__icontains=search_term)
+                            q_search |= Q(**{f"{path}__icontains": digits}) | Q(**{f"{path}__icontains": search_term})
                         else:
-                            q_search |= Q(phone__icontains=search_term)
+                            q_search |= Q(**{f"{path}__icontains": search_term})
                     else:
-                        q_search |= Q(**{f"{field}__icontains": search_term})
+                        q_search |= Q(**{f"{path}__icontains": search_term})
             qs = qs.filter(q_search)
 
         res_vals = get_multi_values(qp, "resolution_status", "resolution_status__in")
         if res_vals:
-            qs = qs.filter(build_nullable_in_q("resolution_status", res_vals, allowed=RESOLUTION_CHOICES))
+            qs = qs.filter(
+                build_nullable_in_q("data__resolution_status", res_vals, allowed=RESOLUTION_CHOICES)
+            )
 
         poster_vals = get_multi_values(qp, "poster", "poster__in")
         if poster_vals:
             include_null = any(v.lower() == "null" for v in poster_vals)
             vals = [v for v in poster_vals if v.lower() != "null"]
             q = Q()
-            if vals: q |= Q(poster__in=vals)
-            if include_null: q |= Q(poster__isnull=True)
+            if vals:
+                q |= Q(data__poster__in=vals)
+            if include_null:
+                q |= q_data_json_null("poster")
             qs = qs.filter(q)
 
         assigned_vals = get_multi_values(qp, "assigned_to", "assigned_to__in")
@@ -778,8 +821,10 @@ class SupportTicketListView(ListAPIView):
             include_null = any(v.lower() == "null" for v in assigned_vals)
             ids = [v for v in assigned_vals if v.lower() != "null"]
             q = Q()
-            if ids: q |= Q(assigned_to__in=ids)
-            if include_null: q |= Q(assigned_to__isnull=True)
+            if ids:
+                q |= Q(data__assigned_to__in=ids)
+            if include_null:
+                q |= q_record_unassigned()
             qs = qs.filter(q)
 
         state_vals = get_multi_values(qp, "state", "state__in")
@@ -788,9 +833,9 @@ class SupportTicketListView(ListAPIView):
             vals = [v for v in state_vals if v.lower() != "null"]
             q = Q()
             if vals:
-                q |= Q(state__in=vals)
+                q |= Q(data__state__in=vals)
             if include_null:
-                q |= Q(state__isnull=True) | Q(state="")
+                q |= q_data_json_null("state") | Q(data__state="")
             qs = qs.filter(q)
 
         ca_vals = get_multi_values(qp, "call_attempts", "call_attempts__in")
@@ -802,24 +847,24 @@ class SupportTicketListView(ListAPIView):
                 except ValueError:
                     raise ValidationError({"call_attempts": f"Invalid integer: {v!r}"})
             if ints:
-                qs = qs.filter(call_attempts__in=ints)
+                qs = qs.filter(data__call_attempts__in=ints)
 
         gte = qp.get("created_at__gte")
         lte = qp.get("created_at__lte")
-        if gte: qs = qs.filter(created_at__gte=gte)
-        if lte: qs = qs.filter(created_at__lte=lte)
+        if gte:
+            qs = qs.filter(created_at__gte=gte)
+        if lte:
+            qs = qs.filter(created_at__lte=lte)
 
-        # Use select_related for foreign keys to avoid N+1 queries
-        # Note: removed .only() as it was causing N+1 queries for state and review_requested fields
-        return qs.select_related('tenant', 'assigned_to')
+        return qs
 
 class SupportTicketFilterOptionsView(APIView):
     permission_classes = [IsTenantAuthenticated]
     def get(self, request):
         tenant = request.tenant
-        qs = SupportTicket.objects.filter(tenant_id=tenant.id)
-        resolution_statuses = _distinct_list(qs, "resolution_status")
-        poster_statuses = _distinct_list(qs, "poster")
+        qs = support_ticket_records_qs(tenant=tenant)
+        resolution_statuses = distinct_data_values(qs, "resolution_status")
+        poster_statuses = distinct_data_values(qs, "poster")
         return Response({
             "resolution_statuses": resolution_statuses,
             "poster_statuses": poster_statuses,
@@ -857,28 +902,28 @@ class GetTicketStatusView(APIView):
             end_of_day = timezone.make_aware(datetime.combine(today, time.max))
 
 
-            # ---- Single aggregated query for all scalar counts ----
-            agg = SupportTicket.objects.aggregate(
+            user_id = str(user_supabase_uid)
+            ticket_qs = annotate_ticket_datetimes(
+                support_ticket_records_qs(tenant=request.tenant)
+            )
+
+            agg = ticket_qs.aggregate(
                 resolved_today=Count(
                     "id",
                     filter=Q(
-                        assigned_to=user_supabase_uid,
-                        resolution_status="Resolved",
-                        completed_at__gte=start_of_day,
-                        completed_at__lte=end_of_day,
+                        data__assigned_to=user_id,
+                        data__resolution_status="Resolved",
+                        ticket_completed_at__gte=start_of_day,
+                        ticket_completed_at__lte=end_of_day,
                     ),
                 ),
-                # Include unassigned pending tickets plus snoozed tickets owned by this CSE
                 total_pending=Count(
                     "id",
                     filter=(
-                        Q(
-                            resolution_status__isnull=True,
-                            assigned_to__isnull=True,
-                        )
+                        Q(q_record_pending_resolution(), q_record_unassigned())
                         | Q(
-                            resolution_status="Snoozed",
-                            assigned_to=user_supabase_uid,
+                            data__resolution_status="Snoozed",
+                            data__assigned_to=user_id,
                         )
                     ),
                 ),
@@ -886,32 +931,33 @@ class GetTicketStatusView(APIView):
                 wip=Count(
                     "id",
                     filter=Q(
-                        assigned_to=user_supabase_uid,
-                        resolution_status="WIP",
+                        data__assigned_to=user_id,
+                        data__resolution_status="WIP",
                     ),
                 ),
                 cant_resolve_today=Count(
                     "id",
                     filter=Q(
-                        assigned_to=user_supabase_uid,
-                        resolution_status="Can't Resolve",
-                        completed_at__gte=start_of_day,
-                        completed_at__lte=end_of_day,
+                        data__assigned_to=user_id,
+                        data__resolution_status="Can't Resolve",
+                        ticket_completed_at__gte=start_of_day,
+                        ticket_completed_at__lte=end_of_day,
                     ),
                 ),
             )
 
-            # ---- One grouped query for the poster breakdown (no N+1) ----
-            # Fix: Only count unassigned pending tickets to match GetNextTicketView logic
-            pending_by_poster_array = list(
-                SupportTicket.objects.filter(
-                    resolution_status__isnull=True,
-                    assigned_to__isnull=True,poster__isnull=False
+            pending_by_poster_array = [
+                {"poster": row["data__poster"], "count": row["count"]}
+                for row in (
+                    support_ticket_records_qs(tenant=request.tenant)
+                    .filter(q_record_pending_resolution())
+                    .filter(q_record_unassigned())
+                    .exclude(q_data_json_null("poster"))
+                    .values("data__poster")
+                    .annotate(count=Count("id"))
+                    .order_by("-count")
                 )
-                .values("poster")
-                .annotate(count=Count("id"))
-                .order_by("-count")
-            )
+            ]
             
             # Prepare response
             ticket_stats = {
@@ -936,7 +982,7 @@ class GetTicketStatusView(APIView):
             )
 
         except Exception as error:
-            logger.error('Error in get-ticket-status function: %s', error)
+            logger.exception("Error in get-ticket-status function: %s", error)
             return Response({
                 "error": "Internal server error"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -1010,87 +1056,72 @@ class GetCseStatsView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Base queryset - filter for CSE activity under this tenant
-        qs = SupportTicket.objects.filter(
-            tenant_id=tenant.id,      # Filter by tenant from X-Tenant-Slug
-            cse_name__isnull=False,   # Only tickets assigned to a CSE
-        ).exclude(cse_name='')
+        qs = annotate_ticket_datetimes(
+            support_ticket_records_qs(tenant=tenant)
+        ).exclude(data__cse_name__isnull=True).exclude(data__cse_name="")
         
-        # Apply date filter based on CSE activity date
-        # For resolved/not-resolved tickets, use completed_at (when CSE completed work)
-        # For other tickets, use dumped_at (when ticket was assigned/created)
-        date_filter = Q()
-        
-        # Tickets completed by CSE in date range
-        date_filter |= Q(
-            completed_at__isnull=False,
-            completed_at__date__gte=start_date,
-            completed_at__date__lte=end_date
+        date_filter = Q(
+            ticket_completed_at__isnull=False,
+            ticket_completed_at__date__gte=start_date,
+            ticket_completed_at__date__lte=end_date,
+        ) | Q(
+            ticket_completed_at__isnull=True,
+            ticket_dumped_at__isnull=False,
+            ticket_dumped_at__date__gte=start_date,
+            ticket_dumped_at__date__lte=end_date,
         )
-        
-        # Active/pending tickets assigned to CSE (use dumped_at for assignment date)
-        date_filter |= Q(
-            completed_at__isnull=True,
-            dumped_at__isnull=False,
-            dumped_at__date__gte=start_date,
-            dumped_at__date__lte=end_date
-        )
-        
         qs = qs.filter(date_filter)
         
-        # Apply optional CSE name filter
         cse_name_filter = request.query_params.get('cse_name', '').strip()
         if cse_name_filter:
-            qs = qs.filter(cse_name__icontains=cse_name_filter)
+            qs = qs.filter(data__cse_name__icontains=cse_name_filter)
         
-        # Aggregate data by CSE (no daily breakdown, just totals per CSE)
         stats = (
-            qs.values('cse_name')
+            qs.values("data__cse_name")
             .annotate(
                 resolved=Count(
                     Case(
-                        When(resolution_status__iexact='resolved', then=1),
-                        output_field=IntegerField()
+                        When(data__resolution_status__iexact="resolved", then=1),
+                        output_field=IntegerField(),
                     )
                 ),
                 not_resolved=Count(
                     Case(
-                        When(resolution_status__iexact="can't resolve", then=1),
-                        output_field=IntegerField()
+                        When(data__resolution_status__iexact="can't resolve", then=1),
+                        output_field=IntegerField(),
                     )
                 ),
                 wip=Count(
                     Case(
-                        When(resolution_status__iexact='wip', then=1),
-                        output_field=IntegerField()
+                        When(data__resolution_status__iexact="wip", then=1),
+                        output_field=IntegerField(),
                     )
                 ),
                 not_connected=Count(
                     Case(
-                        When(call_status__icontains='not connected', then=1),
-                        When(call_status__icontains='no answer', then=1),
-                        When(call_status__icontains='unreachable', then=1),
-                        output_field=IntegerField()
+                        When(data__call_status__icontains="not connected", then=1),
+                        When(data__call_status__icontains="no answer", then=1),
+                        When(data__call_status__icontains="unreachable", then=1),
+                        output_field=IntegerField(),
                     )
                 ),
                 call_later=Count(
                     Case(
-                        When(call_status__icontains='call later', then=1),
-                        When(call_status__icontains='callback', then=1),
-                        When(snooze_until__isnull=False, then=1),
-                        output_field=IntegerField()
+                        When(data__call_status__icontains="call later", then=1),
+                        When(data__call_status__icontains="callback", then=1),
+                        When(ticket_snooze_until__isnull=False, then=1),
+                        output_field=IntegerField(),
                     )
                 ),
-                total_tickets=Count('id')
+                total_tickets=Count("id"),
             )
-            .order_by('cse_name')
+            .order_by("data__cse_name")
         )
         
-        # Format response data - simple list of CSEs with their stats
         cse_list = []
         for stat in stats:
             cse_list.append({
-                'cse_name': stat['cse_name'],
+                'cse_name': stat['data__cse_name'],
                 'resolved': stat['resolved'],
                 'not_connected': stat['not_connected'],
                 'not_resolved': stat['not_resolved'],
