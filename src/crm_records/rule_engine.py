@@ -140,9 +140,9 @@ def action_update_fields(
 
     # Check if this is a call back later event BEFORE template resolution
     event_name = ctx.get("event", "")
-    button_type = payload.get("button_type", "")
-    call_status = payload.get("call_status", "")
-    last_call_outcome = payload.get("last_call_outcome", "")
+    button_type = payload.get("button_type") or ""
+    call_status = payload.get("call_status") or ""
+    last_call_outcome = payload.get("last_call_outcome") or ""
     
     is_call_back_later_event = (
         event_name == "call_back_later" or 
@@ -809,6 +809,14 @@ def _evaluate_simple_condition(condition: Dict[str, Any], ctx: Dict[str, Any]) -
             right = _resolve_operand(args[1])
             return left == right
 
+    # Inequality
+    if "!=" in condition:
+        args = condition["!="]
+        if isinstance(args, list) and len(args) == 2:
+            left = _resolve_operand(args[0])
+            right = _resolve_operand(args[1])
+            return left != right
+
     # Less than
     if "<" in condition:
         args = condition["<"]
@@ -862,7 +870,7 @@ def _is_simple_condition(condition: Any) -> bool:
     if not isinstance(condition, dict) or len(condition) != 1:
         return False
     (op, value), = condition.items()
-    simple_ops = {"==", "<", ">", "<=", ">=", "and", "or", "!"}
+    simple_ops = {"==", "!=", "<", ">", "<=", ">=", "and", "or", "!"}
     if op not in simple_ops:
         return False
     if op in {"and", "or"}:

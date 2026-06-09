@@ -54,7 +54,8 @@ def _accumulate_resolution_time(
     record: Record,
     payload: Dict[str, Any],
 ) -> Optional[str]:
-    incoming = _payload_get(payload, "resolution_time", "resolutionTime")
+    # Only accumulate from the API field; prepared payloads already have snake_case.
+    incoming = payload.get("resolutionTime")
     if incoming is None:
         return None
     if not str(incoming).strip() or ":" not in str(incoming):
@@ -75,6 +76,12 @@ def prepare_support_ticket_event_payload(
     """
     out = dict(payload or {})
 
+    # Accumulate session time before camelCase→snake_case (resolutionTime is removed there).
+    accumulated = _accumulate_resolution_time(record, out)
+    if accumulated is not None:
+        out["resolution_time"] = accumulated
+        out.pop("resolutionTime", None)
+
     for camel, snake in _CAMEL_TO_SNAKE.items():
         if camel not in out:
             continue
@@ -92,10 +99,6 @@ def prepare_support_ticket_event_payload(
             out["assigned_to"] = str(UUID(str(assignee)))
         except (ValueError, AttributeError, TypeError):
             out["assigned_to"] = str(assignee)
-
-    accumulated = _accumulate_resolution_time(record, out)
-    if accumulated is not None:
-        out["resolution_time"] = accumulated
 
     reason = _payload_get(out, "reason")
     if reason is not None:

@@ -305,6 +305,7 @@ class SaveAndContinueViewTest(BaseAPITestCase):
             tenant=self.tenant,
             entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data=dump_data(
+                user_id=None,
                 resolution_time="0:00",
                 call_attempts=0,
             ),
