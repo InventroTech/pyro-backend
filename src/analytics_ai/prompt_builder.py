@@ -98,7 +98,7 @@ def build_llm_prompt(
     sections.append("Database schema:\n" + schema_trimmed)
 
     # 3) Field-specific safety/transform hints (conditional)
-    if _has_field(schema_str, "support_ticket", "resolution_time"):
+    if _has_field(schema_str, "records", "data") or _has_field(schema_str, "support_ticket", "resolution_time"):
         sections.append(
             "IMPORTANT FIELD NOTE:\n"
             "- support_ticket.resolution_time is a string in 'MM:SS'. To aggregate, convert to seconds using:\n"

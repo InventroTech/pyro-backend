@@ -30,7 +30,6 @@ from crm_records.lead_assignment_tracking import merge_first_assignment_today_an
 from crm_records.models import Record, PartnerEvent
 from crm_records.scoring import get_scoring_rules, score_chunk_sql
 from crm_records.services import PrajaService
-from support_ticket.models import SupportTicket
 from support_ticket.services import MixpanelService, RMAssignedMixpanelService
 
 from .models import BackgroundJob, JobType
@@ -763,16 +762,32 @@ class PrajaJobHandler(JobHandler):
                     logger.error(f"Praja job {job.id} failed: {error_msg}")
                     raise Exception(error_msg)
             elif object_type == "ticket":
-                # For tickets, we need to reconstruct the ticket object
-                try:
-                    ticket = SupportTicket.objects.get(id=object_id)
-                    print(f"📋 [PRAJA JOB] Found ticket {object_id}, sending to Praja server...")
-                    success = praja_service.send_ticket_to_praja(ticket)
-                except SupportTicket.DoesNotExist:
-                    error_msg = f"SupportTicket {object_id} not found"
+                from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
+                from support_ticket.events import resolve_support_ticket_record
+
+                record = Record.objects.filter(
+                    id=object_id,
+                    entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                ).first()
+                if record is None and job.tenant_id:
+                    from core.models import Tenant
+
+                    tenant = Tenant.objects.filter(id=job.tenant_id).first()
+                    if tenant is not None:
+                        record = resolve_support_ticket_record(
+                            tenant=tenant,
+                            ticket_id=object_id,
+                        )
+                if record is None:
+                    error_msg = f"Support ticket record {object_id} not found"
                     print(f"❌ [PRAJA JOB] {error_msg}")
                     logger.error(f"Praja job {job.id} failed: {error_msg}")
                     raise Exception(error_msg)
+                print(
+                    f"📋 [PRAJA JOB] Found support ticket record {record.id}, "
+                    "sending to Praja server..."
+                )
+                success = praja_service.send_record_to_praja(record)
             else:
                 error_msg = f"Invalid object_type: {object_type}. Must be 'record' or 'ticket'"
                 print(f"❌ [PRAJA JOB] {error_msg}")
