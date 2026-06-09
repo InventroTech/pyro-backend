@@ -24,6 +24,31 @@ def _schema_fingerprint(schema_str: str) -> str:
     except Exception:
         return "na"
 
+def _resolution_time_field_note(schema_str: str) -> Optional[str]:
+    """Return SQL guidance for resolution_time based on which table is in the schema."""
+    has_records = _has_field(schema_str, "records", "data")
+    has_support_ticket = _has_field(schema_str, "support_ticket", "resolution_time")
+
+    if has_records:
+        return (
+            "IMPORTANT FIELD NOTE:\n"
+            "- Support tickets live in the records table with entity_type = 'support_ticket'.\n"
+            "- Ticket fields are in the JSONB data column (e.g. data->>'resolution_time').\n"
+            "- resolution_time is stored as 'MM:SS' text; convert to seconds using:\n"
+            "  (SPLIT_PART(data->>'resolution_time', ':', 1)::int * 60 + "
+            "SPLIT_PART(data->>'resolution_time', ':', 2)::int)\n"
+            "- Datetime fields in data are ISO strings — cast with (data->>'completed_at')::timestamptz."
+        )
+    if has_support_ticket:
+        return (
+            "IMPORTANT FIELD NOTE:\n"
+            "- support_ticket.resolution_time is a string in 'MM:SS'. To aggregate, convert to seconds using:\n"
+            "  (SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int)\n"
+            "  Use this inside AVG/SUM as needed."
+        )
+    return None
+
+
 def _maybe_trim_schema(schema_str: str) -> str:
     if not schema_str:
         return ""
@@ -98,13 +123,9 @@ def build_llm_prompt(
     sections.append("Database schema:\n" + schema_trimmed)
 
     # 3) Field-specific safety/transform hints (conditional)
-    if _has_field(schema_str, "records", "data") or _has_field(schema_str, "support_ticket", "resolution_time"):
-        sections.append(
-            "IMPORTANT FIELD NOTE:\n"
-            "- support_ticket.resolution_time is a string in 'MM:SS'. To aggregate, convert to seconds using:\n"
-            "  (SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int)\n"
-            "  Use this inside AVG/SUM as needed."
-        )
+    resolution_note = _resolution_time_field_note(schema_str)
+    if resolution_note:
+        sections.append(resolution_note)
 
     # 4) User question
     sections.append(f'User question:\n"{user_question}"')
