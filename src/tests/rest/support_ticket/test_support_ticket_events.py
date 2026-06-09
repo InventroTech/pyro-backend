@@ -5,6 +5,7 @@ from crm_records.models import EventLog, Record
 from support_ticket.constants import (
     SUPPORT_EVENT_NOT_CONNECTED,
     SUPPORT_EVENT_RESOLVED,
+    SUPPORT_EVENT_TAKE_BREAK,
     SUPPORT_TICKET_ENTITY_TYPE,
 )
 from support_ticket.events import dispatch_support_ticket_event
@@ -49,6 +50,42 @@ class SupportTicketEventHandlerTest(BaseAPITestCase):
         self.record.refresh_from_db()
         self.assertEqual(self.record.data["call_attempts"], 2)
         self.assertEqual(self.record.data["resolution_status"], "Closed")
+
+    def test_take_break_unassigns_per_rules(self):
+        self.record.data = {
+            **self.record.data,
+            "resolution_status": "Resolved",
+            "assigned_to": self.supabase_uid,
+            "cse_name": self.email,
+        }
+        self.record.save(update_fields=["data"])
+
+        dispatch_support_ticket_event(
+            SUPPORT_EVENT_TAKE_BREAK,
+            self.record,
+            {"resolutionStatus": "Resolved"},
+        )
+        self.record.refresh_from_db()
+        self.assertIsNone(self.record.data.get("assigned_to"))
+        self.assertIsNone(self.record.data.get("cse_name"))
+        self.assertEqual(self.record.data["resolution_status"], "Resolved")
+
+    def test_record_event_api_dispatches_take_break(self):
+        url = reverse("crm_records:record-events")
+        payload = {
+            "record_id": self.record.id,
+            "event": SUPPORT_EVENT_TAKE_BREAK,
+            "payload": {"resolutionStatus": "Resolved"},
+        }
+        response = self.client.post(url, payload, format="json", **self.auth_headers)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.record.refresh_from_db()
+        self.assertIsNone(self.record.data.get("assigned_to"))
+        self.assertIsNone(self.record.data.get("cse_name"))
+        event_log = EventLog.objects.filter(record=self.record).order_by("-id").first()
+        self.assertIsNotNone(event_log)
+        self.assertEqual(event_log.event, SUPPORT_EVENT_TAKE_BREAK)
 
     def test_record_event_api_dispatches_support_rules(self):
         url = reverse("crm_records:record-events")

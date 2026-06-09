@@ -130,6 +130,11 @@ def simulate_workflow_actions(event_name: str, record: Record, payload: Dict[str
             "updates": {"lead_stage": "IN_QUEUE", "assigned_to": None},
             "message": "Lead unassigned (agent take break)"
         },
+        "support.take_break": {
+            "action": "update_fields",
+            "updates": {"assigned_to": None, "cse_name": None},
+            "message": "Support ticket unassigned (CSE take break)"
+        },
     }
     
     return simulated_actions.get(event_name, {

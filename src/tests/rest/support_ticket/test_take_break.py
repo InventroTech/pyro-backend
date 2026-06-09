@@ -6,8 +6,8 @@ from uuid import uuid4
 from unittest.mock import patch
 
 from core.models import Tenant
-from crm_records.models import Record
-from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
+from crm_records.models import EventLog, Record
+from support_ticket.constants import SUPPORT_EVENT_TAKE_BREAK, SUPPORT_TICKET_ENTITY_TYPE
 from support_ticket.models import SupportTicket
 from tests.factories.user_factory import UserFactory
 from tests.factories.core_factory import TenantFactory
@@ -166,6 +166,10 @@ class TestTakeBreakView:
         assert test_record.data.get("assigned_to") is None
         assert test_record.data.get("cse_name") is None
         assert test_record.data.get("resolution_status") == "Resolved"
+
+        event_log = EventLog.objects.filter(record=test_record).order_by("-id").first()
+        assert event_log is not None
+        assert event_log.event == SUPPORT_EVENT_TAKE_BREAK
 
     def test_take_break_does_not_unassign_wip_ticket(self, authenticated_client, test_record):
         client, user_id, user_email = authenticated_client

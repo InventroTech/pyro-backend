@@ -657,9 +657,9 @@ class SLATimeView(APIView):
     Returns average SLA (Service Level Agreement) time for Non-Snoozed and Snoozed tickets separately.
     SLA time is calculated as the time from ticket creation to resolution (completed_at - created_at).
     This helps track first contact resolution time.
-    Query params: start, end, unit, tenant_id
+    Query params: start, end, unit
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
         # Get date parameters directly and clean them
@@ -684,7 +684,9 @@ class SLATimeView(APIView):
                 print(f"Invalid end date format: {end_param}")
                 end_date = None
         
-        qs = annotate_ticket_datetimes(support_ticket_records_qs()).filter(
+        qs = annotate_ticket_datetimes(
+            support_ticket_records_qs(tenant=request.tenant)
+        ).filter(
             ticket_completed_at__isnull=False,
         )
         
@@ -692,10 +694,6 @@ class SLATimeView(APIView):
             qs = qs.filter(ticket_completed_at__date__gte=start_date)
         if end_date:
             qs = qs.filter(ticket_completed_at__date__lte=end_date)
-        
-        tenant_id = request.query_params.get('tenant_id')
-        if tenant_id:
-            qs = qs.filter(tenant_id=tenant_id)
         
         qs_with_sla = qs.annotate(
             sla_seconds=ExpressionWrapper(
@@ -920,7 +918,7 @@ class GetTicketStatusView(APIView):
                 total_pending=Count(
                     "id",
                     filter=(
-                        Q(q_record_pending_resolution(), q_record_unassigned())
+                        q_record_pending_resolution() & q_record_unassigned()
                         | Q(
                             data__resolution_status="Snoozed",
                             data__assigned_to=user_id,
