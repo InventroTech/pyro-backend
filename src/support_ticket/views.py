@@ -584,17 +584,17 @@ def process_dumped_tickets_job_result(result: ProcessDumpedTicketsResult) -> Dic
     return asdict(result)
 
 
-_EXPIRED_SUPPORT_POSTERS = frozenset({
+_EXPIRED_SUPPORT_TICKET_TYPES = frozenset({
     "Trial Expired",
     "Premium Expired",
     "trial_expired",
     "premium_expired",
 })
 
-# Queue routing: priority-1 posters share one LIFO pool; rest is priority 0 (also LIFO).
+# Queue routing: priority-1 ``support_ticket_type`` values share one LIFO pool; rest is priority 0.
 @dataclass(frozen=True)
 class _SupportTicketRoutingRule:
-    poster_key: str
+    ticket_type_key: str
     priority: int
     max_attempts: int
 
@@ -608,42 +608,55 @@ _SUPPORT_TICKET_ROUTING_RULES: Tuple[_SupportTicketRoutingRule, ...] = (
     _SupportTicketRoutingRule("rest", 0, 3),
 )
 
-_POSTER_KEY_TO_ROUTING_RULE: Dict[str, _SupportTicketRoutingRule] = {
-    rule.poster_key: rule for rule in _SUPPORT_TICKET_ROUTING_RULES
+_TICKET_TYPE_KEY_TO_ROUTING_RULE: Dict[str, _SupportTicketRoutingRule] = {
+    rule.ticket_type_key: rule for rule in _SUPPORT_TICKET_ROUTING_RULES
 }
 
-_POSTER_ROUTING_ALIASES: Dict[str, str] = {
+_TICKET_TYPE_ROUTING_ALIASES: Dict[str, str] = {
     "self trail": "self_trail",
     "self trial": "self_trail",
+    "self_trial": "self_trail",
     "selftrail": "self_trail",
     "in trial": "in_trial",
     "intrial": "in_trial",
     "trial extension": "trial_extension",
+    "in trial extension": "trial_extension",
+    "in_trial_extension": "trial_extension",
     "premium extension": "premium_extension",
+    "in premium extension": "premium_extension",
+    "in_premium_extension": "premium_extension",
 }
 
 _ROUTING_PICK_BATCH_SIZE = 500
 
 
-def _normalize_support_poster_key(value: Any) -> str:
+def _normalize_support_ticket_type_key(value: Any) -> str:
     if value is None:
         return ""
     normalized = str(value).strip().lower().replace("-", " ").replace("_", " ")
     return " ".join(normalized.split())
 
 
-def _canonical_support_poster_key(poster: Any) -> str:
-    normalized = _normalize_support_poster_key(poster)
+def _canonical_support_ticket_type_key(ticket_type: Any) -> str:
+    normalized = _normalize_support_ticket_type_key(ticket_type)
     if not normalized:
         return "rest"
     slug = normalized.replace(" ", "_")
-    if slug in _POSTER_KEY_TO_ROUTING_RULE:
+    if slug in _TICKET_TYPE_KEY_TO_ROUTING_RULE:
         return slug
-    return _POSTER_ROUTING_ALIASES.get(normalized, "rest")
+    return _TICKET_TYPE_ROUTING_ALIASES.get(normalized, "rest")
 
 
-def _record_poster_key(record: Record) -> str:
-    return _canonical_support_poster_key((record.data or {}).get("poster"))
+def _record_support_ticket_type_raw(record: Record) -> Any:
+    data = record.data or {}
+    ticket_type = data.get("support_ticket_type")
+    if ticket_type is not None and str(ticket_type).strip():
+        return ticket_type
+    return data.get("poster")
+
+
+def _record_ticket_type_key(record: Record) -> str:
+    return _canonical_support_ticket_type_key(_record_support_ticket_type_raw(record))
 
 
 def _record_call_attempts(record: Record) -> int:
@@ -655,7 +668,7 @@ def _record_call_attempts(record: Record) -> int:
 
 
 def _routing_rule_for_record(record: Record) -> _SupportTicketRoutingRule:
-    return _POSTER_KEY_TO_ROUTING_RULE[_record_poster_key(record)]
+    return _TICKET_TYPE_KEY_TO_ROUTING_RULE[_record_ticket_type_key(record)]
 
 
 def _record_eligible_for_routing_queue(record: Record) -> bool:
@@ -672,10 +685,10 @@ def _pick_routed_support_record(
     """
     Pick the next ticket for the queue.
 
-    Priority-1 posters (self_trail, in_trial, paid, trial_extension,
-    premium_extension) compete in a single LIFO pool (newest ``created_at`` wins).
-    Rest (priority 0) is only considered when no priority-1 ticket is eligible.
-    Records at or above their poster's max call attempts are skipped.
+    Priority-1 ``support_ticket_type`` values (self_trail, in_trial, paid,
+    trial_extension, premium_extension) compete in a single LIFO pool (newest
+    ``created_at`` wins). Rest (priority 0) is only considered when no
+    priority-1 ticket is eligible. Records at or above max call attempts are skipped.
     """
     pool: List[Record] = []
     for record in candidates:
@@ -713,8 +726,11 @@ def _support_ticket_records_qs(tenant: Tenant):
     )
 
 
-def _exclude_expired_support_posters(qs):
-    return qs.exclude(data__poster__in=list(_EXPIRED_SUPPORT_POSTERS))
+def _exclude_expired_support_ticket_types(qs):
+    expired = list(_EXPIRED_SUPPORT_TICKET_TYPES)
+    return qs.exclude(
+        Q(data__support_ticket_type__in=expired) | Q(data__poster__in=expired)
+    )
 
 
 def _parse_record_data_datetime(value: Any) -> Optional[datetime]:
@@ -776,6 +792,7 @@ def _enqueue_support_assignment_mixpanel(
         "assigned_to": str(user_uuid),
         "cse_name": user_email,
         "cse_email": user_email,
+        "support_ticket_type": _record_support_ticket_type_raw(record),
         "poster": data.get("poster"),
         "source": data.get("source"),
         "resolution_status": data.get("resolution_status"),
@@ -810,12 +827,17 @@ def _apply_support_record_group_filters(qs, *, tenant, request_user):
     group = Group.objects.filter(tenant=tenant, id=group_id).first()
     group_data = group.group_data if group and isinstance(group.group_data, dict) else {}
     states = group_data.get("states") if isinstance(group_data.get("states"), list) else []
-    posters = group_data.get("posters") if isinstance(group_data.get("posters"), list) else []
+    ticket_types = group_data.get("support_ticket_types")
+    if not isinstance(ticket_types, list):
+        ticket_types = group_data.get("posters") if isinstance(group_data.get("posters"), list) else []
 
     if states:
         qs = qs.filter(data__state__in=states)
-    if posters:
-        qs = qs.filter(data__poster__in=posters)
+    if ticket_types:
+        qs = qs.filter(
+            Q(data__support_ticket_type__in=ticket_types)
+            | Q(data__poster__in=ticket_types)
+        )
     return qs
 
 
@@ -1153,7 +1175,7 @@ class GetNextTicketView(APIView):
         Assign the next support ticket ``Record`` to the CSE.
 
         1. Open or snoozed ticket already assigned to this user
-        2. Unassigned open ticket (poster priority routing, LIFO within bucket)
+        2. Unassigned open ticket (support_ticket_type priority routing, LIFO)
         3. Due snoozed unassigned ticket (same routing order)
         """
         current_time = timezone.now()
@@ -1171,7 +1193,7 @@ class GetNextTicketView(APIView):
         assignee_id = str(user.supabase_uid)
 
         # Step 1: ticket already assigned to this CSE (open or snoozed).
-        already_assigned_qs = _exclude_expired_support_posters(
+        already_assigned_qs = _exclude_expired_support_ticket_types(
             _support_ticket_records_qs(tenant)
             .select_for_update(skip_locked=True, of=("self",))
             .filter(data__assigned_to=assignee_id)
@@ -1205,7 +1227,7 @@ class GetNextTicketView(APIView):
             return record
 
         # Step 2: newest unassigned open ticket.
-        unassigned_qs = _exclude_expired_support_posters(
+        unassigned_qs = _exclude_expired_support_ticket_types(
             _support_ticket_records_qs(tenant)
             .select_for_update(skip_locked=True, of=("self",))
             .filter(q_record_unassigned())
@@ -1241,7 +1263,7 @@ class GetNextTicketView(APIView):
             return record
 
         # Step 3: due snoozed tickets (unassigned).
-        snoozed_qs = _exclude_expired_support_posters(
+        snoozed_qs = _exclude_expired_support_ticket_types(
             _support_ticket_records_qs(tenant)
             .select_for_update(skip_locked=True, of=("self",))
             .filter(data__resolution_status="Snoozed")

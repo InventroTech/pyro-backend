@@ -23,7 +23,7 @@ class SupportTicketEventHandlerTest(BaseAPITestCase):
             entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data=dump_data(
                 user_id="cust_1",
-                poster="Self Trail",
+                support_ticket_type="Self_Trial",
                 call_attempts=0,
                 assigned_to=self.supabase_uid,
                 cse_name=self.email,
