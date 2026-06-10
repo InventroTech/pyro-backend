@@ -120,6 +120,26 @@ def annotate_ticket_datetimes(qs: QuerySet[Record]) -> QuerySet[Record]:
     )
 
 
+def filter_records_callback_due(
+    qs: QuerySet[Record],
+    *,
+    at: Optional[datetime] = None,
+) -> QuerySet[Record]:
+    """
+    Records whose callback time has passed.
+
+    Matches when ``data.snooze_until`` or ``data.next_call_at`` (ISO strings) is
+    set and ``<= at``. Used by get-next-ticket so due retries are not buried
+    behind a large batch of not-yet-due snoozed rows.
+    """
+    at = at or timezone.now()
+    return annotate_ticket_datetimes(qs).annotate(
+        ticket_next_call_at=_cast_data_timestamp("next_call_at"),
+    ).filter(
+        Q(ticket_snooze_until__lte=at) | Q(ticket_next_call_at__lte=at),
+    )
+
+
 def _iso_or_none(value: Any) -> Optional[str]:
     if value is None:
         return None

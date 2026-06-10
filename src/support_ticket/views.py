@@ -33,10 +33,10 @@ from user_settings.services import USER_KV_GROUP_ID_KEY
 from authz.permissions import IsTenantAuthenticated
 from authz.models import TenantMembership
 from accounts.models import SupabaseAuthUser
-from datetime import date, datetime
+from datetime import date, datetime, timezone as dt_timezone
 from .records import (
     apply_record_data_updates,
-    q_data_json_has_value,
+    filter_records_callback_due,
     q_record_open_or_snoozed_resolution,
     q_record_pending_resolution,
     q_record_unassigned,
@@ -695,8 +695,13 @@ def _pick_routed_support_record(
         if only_due_snoozed:
             if current_time is None:
                 continue
+            compare_at = current_time
+            if not timezone.is_aware(compare_at):
+                compare_at = timezone.make_aware(compare_at, dt_timezone.utc)
             snooze_until = _parse_record_data_datetime((record.data or {}).get("snooze_until"))
-            if snooze_until is None or snooze_until > current_time:
+            next_call_at = _parse_record_data_datetime((record.data or {}).get("next_call_at"))
+            due_at = snooze_until or next_call_at
+            if due_at is None or due_at > compare_at:
                 continue
         if not _record_eligible_for_routing_queue(record):
             continue
@@ -737,13 +742,18 @@ def _parse_record_data_datetime(value: Any) -> Optional[datetime]:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value if timezone.is_aware(value) else timezone.make_aware(value)
-    if isinstance(value, str):
+        dt = value
+    elif isinstance(value, str):
         parsed = parse_datetime(value)
         if parsed is None:
             return None
-        return parsed if timezone.is_aware(parsed) else timezone.make_aware(parsed)
-    return None
+        dt = parsed
+    else:
+        return None
+    if timezone.is_aware(dt):
+        return dt
+    # Rule engine stores UTC via timezone.now(); treat naive ISO as UTC.
+    return timezone.make_aware(dt, dt_timezone.utc)
 
 
 def _iso_or_none(value: Any) -> Optional[str]:
@@ -1175,8 +1185,8 @@ class GetNextTicketView(APIView):
         Assign the next support ticket ``Record`` to the CSE.
 
         1. Open or snoozed ticket already assigned to this user
-        2. Unassigned open ticket (support_ticket_type priority routing, LIFO)
-        3. Due snoozed unassigned ticket (same routing order)
+        2. Due snoozed unassigned ticket (``snooze_until`` / ``next_call_at`` passed)
+        3. Unassigned open ticket (support_ticket_type priority routing, LIFO)
         """
         current_time = timezone.now()
         tenant = getattr(request, "tenant", None)
@@ -1226,7 +1236,48 @@ class GetNextTicketView(APIView):
             )
             return record
 
-        # Step 2: newest unassigned open ticket.
+        # Step 2: due snoozed retries (before fresh open queue — same as get-next-lead).
+        snoozed_qs = filter_records_callback_due(
+            _exclude_expired_support_ticket_types(
+                _support_ticket_records_qs(tenant)
+                .select_for_update(skip_locked=True, of=("self",))
+                .filter(data__resolution_status="Snoozed")
+                .filter(q_record_unassigned())
+            ),
+            at=current_time,
+        )
+        try:
+            snoozed_qs = _apply_support_record_group_filters(
+                snoozed_qs,
+                tenant=tenant,
+                request_user=request.user,
+            )
+        except Exception as routing_error:
+            logger.error(
+                "[_get_and_assign_ticket] Step 2 snoozed routing filter failed: %s",
+                routing_error,
+                exc_info=True,
+            )
+
+        snoozed = _pick_routed_support_record(
+            snoozed_qs.order_by("-created_at")[:_ROUTING_PICK_BATCH_SIZE],
+            current_time=current_time,
+            only_due_snoozed=True,
+        )
+        if snoozed:
+            record = _assign_support_record(
+                snoozed,
+                user_uuid=user_uuid_obj,
+                user_email=user_email,
+            )
+            _enqueue_support_assignment_mixpanel(
+                record,
+                user_uuid=user_uuid_obj,
+                user_email=user_email,
+            )
+            return record
+
+        # Step 3: newest unassigned open ticket.
         unassigned_qs = _exclude_expired_support_ticket_types(
             _support_ticket_records_qs(tenant)
             .select_for_update(skip_locked=True, of=("self",))
@@ -1241,7 +1292,7 @@ class GetNextTicketView(APIView):
             )
         except Exception as routing_error:
             logger.error(
-                "[_get_and_assign_ticket] Step 2 routing filter failed: %s",
+                "[_get_and_assign_ticket] Step 3 open routing filter failed: %s",
                 routing_error,
                 exc_info=True,
             )
@@ -1252,45 +1303,6 @@ class GetNextTicketView(APIView):
         if unassigned:
             record = _assign_support_record(
                 unassigned,
-                user_uuid=user_uuid_obj,
-                user_email=user_email,
-            )
-            _enqueue_support_assignment_mixpanel(
-                record,
-                user_uuid=user_uuid_obj,
-                user_email=user_email,
-            )
-            return record
-
-        # Step 3: due snoozed tickets (unassigned).
-        snoozed_qs = _exclude_expired_support_ticket_types(
-            _support_ticket_records_qs(tenant)
-            .select_for_update(skip_locked=True, of=("self",))
-            .filter(data__resolution_status="Snoozed")
-            .filter(q_record_unassigned())
-            .filter(q_data_json_has_value("snooze_until"))
-        )
-        try:
-            snoozed_qs = _apply_support_record_group_filters(
-                snoozed_qs,
-                tenant=tenant,
-                request_user=request.user,
-            )
-        except Exception as routing_error:
-            logger.error(
-                "[_get_and_assign_ticket] Step 3 routing filter failed: %s",
-                routing_error,
-                exc_info=True,
-            )
-
-        snoozed = _pick_routed_support_record(
-            snoozed_qs.order_by("-created_at")[:_ROUTING_PICK_BATCH_SIZE],
-            current_time=current_time,
-            only_due_snoozed=True,
-        )
-        if snoozed:
-            record = _assign_support_record(
-                snoozed,
                 user_uuid=user_uuid_obj,
                 user_email=user_email,
             )

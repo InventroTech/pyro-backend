@@ -212,6 +212,69 @@ class GetNextTicketAPITest(BaseAPITestCase):
         )
         self.assertEqual(_record_ticket_type_key(record), "paid")
 
+    def test_get_next_ticket_returns_due_snoozed_before_fresh_open(self):
+        """Due not-connected retries must surface before new open tickets (lead parity)."""
+        past = (timezone.now() - timedelta(minutes=10)).isoformat()
+        snoozed = Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data={
+                **dump_data(
+                    user_id="snoozed_user",
+                    name="Snoozed Retry",
+                    support_ticket_type="in_trial",
+                ),
+                "resolution_status": "Snoozed",
+                "call_status": "Not Connected",
+                "call_attempts": 1,
+                "snooze_until": past,
+                "next_call_at": past,
+                "assigned_to": None,
+                "cse_name": None,
+            },
+        )
+        _open_record(
+            tenant=self.tenant,
+            user_id="fresh_user",
+            name="Fresh Open",
+            support_ticket_type="in_trial",
+        )
+
+        response = self.client.get(self.url, **self.auth_headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["ticket"]["id"], snoozed.id)
+        self.assertEqual(response.data["ticket"]["resolution_status"], "Snoozed")
+
+    def test_get_next_ticket_skips_snoozed_not_yet_due(self):
+        future = (timezone.now() + timedelta(hours=1)).isoformat()
+        Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data={
+                **dump_data(
+                    user_id="future_snooze",
+                    name="Not Due Yet",
+                    support_ticket_type="in_trial",
+                ),
+                "resolution_status": "Snoozed",
+                "snooze_until": future,
+                "next_call_at": future,
+                "assigned_to": None,
+            },
+        )
+        fresh = _open_record(
+            tenant=self.tenant,
+            user_id="fresh_user",
+            name="Fresh Open",
+            support_ticket_type="in_trial",
+        )
+
+        response = self.client.get(self.url, **self.auth_headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["ticket"]["id"], fresh.id)
+
     def test_get_next_ticket_includes_jatra_link(self):
         jatra_link = "https://www.thecircleapp.in/jatra/98obia11ve"
         record = Record.objects.create(
