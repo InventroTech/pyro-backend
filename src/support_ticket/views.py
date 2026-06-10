@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 from .models import SupportTicketDump
 from .models import SupportTicket
-from .serializers import SaveAndContinueSerializer, SaveAndContinueResponseSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer,UpdateCallStatusRequestSerializer
+from .serializers import SaveAndContinueSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer,UpdateCallStatusRequestSerializer
 from .services import MixpanelService, TicketTimeService
 from background_jobs.queue_service import get_queue_service
 from background_jobs.models import BackgroundJob, JobStatus, JobType
@@ -34,7 +34,7 @@ from user_settings.services import USER_KV_GROUP_ID_KEY
 from authz.permissions import IsTenantAuthenticated
 from authz.models import TenantMembership
 from accounts.models import SupabaseAuthUser
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from .records import (
     apply_record_data_updates,
     q_data_json_has_value,
@@ -1485,7 +1485,7 @@ class TakeBreakView(APIView):
                 return Response({'error': 'Ticket not found'}, status=status.HTTP_404_NOT_FOUND)
 
             was_wip = (record.data or {}).get('resolution_status') == 'WIP' or resolution_status_payload == 'WIP'
-            record = log_and_dispatch_support_ticket_event(
+            log_and_dispatch_support_ticket_event(
                 record=record,
                 tenant=request.tenant,
                 event_name=SUPPORT_EVENT_TAKE_BREAK,
