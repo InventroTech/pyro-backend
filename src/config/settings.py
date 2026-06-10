@@ -331,6 +331,11 @@ SPECTACULAR_SETTINGS = {
 # (see core.log_retention and purge_old_log_tables job).
 LOG_RETENTION_DAYS = env.int("LOG_RETENTION_DAYS", default=30)
 
+# Background job throughput (threads per Gunicorn/runserver process; not Gunicorn --threads)
+BACKGROUND_JOB_WORKER_THREADS = env.int("BACKGROUND_JOB_WORKER_THREADS", default=3)
+BACKGROUND_JOB_POLL_INTERVAL = float(env("BACKGROUND_JOB_POLL_INTERVAL", default="1"))
+BACKGROUND_JOB_BATCH_SIZE = env.int("BACKGROUND_JOB_BATCH_SIZE", default=20)
+
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 
 # Staging environment flag - used to control certain behaviors like assigned_to field updates

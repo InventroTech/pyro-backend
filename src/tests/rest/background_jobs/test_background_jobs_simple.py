@@ -355,3 +355,22 @@ class SimpleBackgroundJobsTest(TestCase):
         mock_enqueue.reset_mock()
         processor._maybe_enqueue_process_dumped_tickets()
         mock_enqueue.assert_not_called()
+
+    @patch("background_jobs.worker_bootstrap.settings")
+    @patch("background_jobs.worker_bootstrap.threading.Thread")
+    @patch("background_jobs.worker_bootstrap.JobProcessor")
+    def test_start_background_job_worker_threads_spawns_configured_count(
+        self, mock_processor_cls, mock_thread_cls, mock_settings
+    ):
+        from background_jobs.worker_bootstrap import start_background_job_worker_threads
+
+        mock_settings.BACKGROUND_JOB_WORKER_THREADS = 4
+        mock_settings.BACKGROUND_JOB_POLL_INTERVAL = 0.25
+        mock_settings.BACKGROUND_JOB_BATCH_SIZE = 25
+
+        threads = start_background_job_worker_threads(process_label="test-proc")
+
+        self.assertEqual(len(threads), 4)
+        self.assertEqual(mock_processor_cls.call_count, 4)
+        self.assertTrue(mock_thread_cls.call_args_list[0].kwargs["kwargs"]["run_schedulers"])
+        self.assertFalse(mock_thread_cls.call_args_list[3].kwargs["kwargs"]["run_schedulers"])

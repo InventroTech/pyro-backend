@@ -22,6 +22,14 @@ from django.db.utils import InterfaceError, OperationalError
 from .models import BackgroundJob, JobStatus, JobType
 from .queue_service import get_queue_service
 from .job_handlers import get_handler_registry
+from .scheduler_locks import (
+    SCHEDULER_LOCK_DISPATCH_SYNC,
+    SCHEDULER_LOCK_DUMP_TICKETS,
+    SCHEDULER_LOCK_LEAD_CRON,
+    SCHEDULER_LOCK_LOG_RETENTION,
+    SCHEDULER_LOCK_SNOOZED_MIDNIGHT,
+    scheduler_lock,
+)
 from .tenant_jobs import enqueue_for_all_tenants
 
 logger = logging.getLogger(__name__)
@@ -71,6 +79,7 @@ class JobProcessor:
         self._last_dispatch_sync_enqueue_bucket = None
         # Last time we enqueued process_dumped_tickets for pending dump rows
         self._last_support_ticket_dump_enqueue_at = None
+        self._run_schedulers = True
         # Circuit breaker state for connection errors
         self._connection_error_count = 0
         self._last_connection_error_time = None
@@ -416,9 +425,12 @@ class JobProcessor:
         # retry on every worker loop iteration.
         self._last_support_ticket_dump_enqueue_at = now
         try:
-            from support_ticket.views import enqueue_process_dumped_tickets_for_pending_dumps
+            with scheduler_lock(SCHEDULER_LOCK_DUMP_TICKETS) as acquired:
+                if not acquired:
+                    return
+                from support_ticket.views import enqueue_process_dumped_tickets_for_pending_dumps
 
-            result = enqueue_process_dumped_tickets_for_pending_dumps()
+                result = enqueue_process_dumped_tickets_for_pending_dumps()
             enqueued = result.get("enqueued") or []
             if enqueued:
                 logger.info(
@@ -447,21 +459,24 @@ class JobProcessor:
             elapsed = (now - self._last_lead_cron_enqueue_at).total_seconds()
             if elapsed < LEAD_CRON_ENQUEUE_INTERVAL:
                 return
+        self._last_lead_cron_enqueue_at = now
         try:
-            queue = get_queue_service()
-            enqueue_for_all_tenants(
-                queue, job_type=JobType.UNASSIGN_SNOOZED_LEADS, payload={}, priority=0
-            )
-            enqueue_for_all_tenants(
-                queue, job_type=JobType.RELEASE_LEADS_AFTER_12H, payload={}, priority=0
-            )
-            enqueue_for_all_tenants(
-                queue,
-                job_type=JobType.CLOSE_STALE_SUBSCRIPTION_LEADS,
-                payload={"days": 15},
-                priority=0,
-            )
-            self._last_lead_cron_enqueue_at = now
+            with scheduler_lock(SCHEDULER_LOCK_LEAD_CRON) as acquired:
+                if not acquired:
+                    return
+                queue = get_queue_service()
+                enqueue_for_all_tenants(
+                    queue, job_type=JobType.UNASSIGN_SNOOZED_LEADS, payload={}, priority=0
+                )
+                enqueue_for_all_tenants(
+                    queue, job_type=JobType.RELEASE_LEADS_AFTER_12H, payload={}, priority=0
+                )
+                enqueue_for_all_tenants(
+                    queue,
+                    job_type=JobType.CLOSE_STALE_SUBSCRIPTION_LEADS,
+                    payload={"days": 15},
+                    priority=0,
+                )
             logger.debug(
                 f"[Worker {self.worker_id}] Enqueued lead maintenance jobs per tenant "
                 f"(unassign_snoozed_leads, release_leads_after_12h, close_stale_subscription_leads)"
@@ -500,14 +515,17 @@ class JobProcessor:
             return
 
         try:
-            queue = get_queue_service()
-            enqueue_for_all_tenants(
-                queue,
-                job_type=JobType.SNOOZED_TO_NOT_CONNECTED_MIDNIGHT,
-                payload={},
-                priority=0,
-            )
-            self._last_snoozed_midnight_enqueue_date = today
+            with scheduler_lock(SCHEDULER_LOCK_SNOOZED_MIDNIGHT) as acquired:
+                if not acquired:
+                    return
+                queue = get_queue_service()
+                enqueue_for_all_tenants(
+                    queue,
+                    job_type=JobType.SNOOZED_TO_NOT_CONNECTED_MIDNIGHT,
+                    payload={},
+                    priority=0,
+                )
+                self._last_snoozed_midnight_enqueue_date = today
             logger.info(
                 f"[Worker {self.worker_id}] Enqueued snoozed_to_not_connected_midnight "
                 f"(local_date={today}, tz={tz_name}, at={SNOOZED_TO_NOT_CONNECTED_ENQUEUE_HOUR:02d}:"
@@ -538,13 +556,16 @@ class JobProcessor:
             return
 
         try:
-            queue = get_queue_service()
-            queue.enqueue_job(
-                job_type=JobType.SYNC_DISPATCH_TO_RECORDS,
-                payload={},
-                priority=0,
-            )
-            self._last_dispatch_sync_enqueue_bucket = bucket
+            with scheduler_lock(SCHEDULER_LOCK_DISPATCH_SYNC) as acquired:
+                if not acquired:
+                    return
+                queue = get_queue_service()
+                queue.enqueue_job(
+                    job_type=JobType.SYNC_DISPATCH_TO_RECORDS,
+                    payload={},
+                    priority=0,
+                )
+                self._last_dispatch_sync_enqueue_bucket = bucket
             logger.info(
                 f"[Worker {self.worker_id}] Enqueued sync_dispatch_to_records "
                 f"(utc_date={now.date()}, hour={now.hour:02d}:"
@@ -568,16 +589,19 @@ class JobProcessor:
             elapsed = (now - self._last_log_retention_enqueue_at).total_seconds()
             if elapsed < LOG_RETENTION_ENQUEUE_INTERVAL:
                 return
+        self._last_log_retention_enqueue_at = now
         try:
-            days = int(getattr(settings, "LOG_RETENTION_DAYS", 30))
-            queue = get_queue_service()
-            enqueue_for_all_tenants(
-                queue,
-                job_type=JobType.PURGE_OLD_LOG_TABLES,
-                payload={"days": days},
-                priority=0,
-            )
-            self._last_log_retention_enqueue_at = now
+            with scheduler_lock(SCHEDULER_LOCK_LOG_RETENTION) as acquired:
+                if not acquired:
+                    return
+                days = int(getattr(settings, "LOG_RETENTION_DAYS", 30))
+                queue = get_queue_service()
+                enqueue_for_all_tenants(
+                    queue,
+                    job_type=JobType.PURGE_OLD_LOG_TABLES,
+                    payload={"days": days},
+                    priority=0,
+                )
             logger.debug(
                 f"[Worker {self.worker_id}] Enqueued purge_old_log_tables (days={days})"
             )
@@ -625,7 +649,8 @@ class JobProcessor:
         self,
         poll_interval: float = 1.0,
         batch_size: int = 10,
-        stale_cleanup_interval: int = 10
+        stale_cleanup_interval: int = 10,
+        run_schedulers: bool = True,
     ):
         """
         Start the worker loop in the current thread.
@@ -635,8 +660,13 @@ class JobProcessor:
             poll_interval: Seconds to wait between polls when no jobs available
             batch_size: Number of jobs to process per batch
             stale_cleanup_interval: Number of iterations between stale lock cleanups
+            run_schedulers: When False, only process jobs (no cron enqueue ticks)
         """
-        logger.info(f"[Worker {self.worker_id}] Starting background job processor")
+        self._run_schedulers = run_schedulers
+        logger.info(
+            f"[Worker {self.worker_id}] Starting background job processor "
+            f"(schedulers={'on' if run_schedulers else 'off'})"
+        )
         
         consecutive_empty_polls = 0
         max_empty_polls = 10  # After 10 empty polls, increase wait time
@@ -678,16 +708,12 @@ class JobProcessor:
                     self.cleanup_stale_locks()
                     iteration_count = 0
 
-                # Every 5 min: process support_ticket_dump → support_ticket + records
-                self._maybe_enqueue_process_dumped_tickets()
-                # Periodically enqueue lead cron jobs (unassign snoozed, release after 12h) so no external cron is needed
-                self._maybe_enqueue_lead_cron_jobs()
-                # Daily at 23:55 exact minute (TIME_ZONE): SNOOZED → NOT_CONNECTED
-                self._maybe_enqueue_snoozed_to_not_connected_midnight()
-                # Every 8 hours at :05 UTC (5 min after Airbyte sync): dispatch sheet → records
-                self._maybe_enqueue_dispatch_sync()
-                # Periodic purge of object_history, event_logs, rule_exec_logs, finished background_jobs
-                self._maybe_enqueue_log_retention()
+                if self._run_schedulers:
+                    self._maybe_enqueue_process_dumped_tickets()
+                    self._maybe_enqueue_lead_cron_jobs()
+                    self._maybe_enqueue_snoozed_to_not_connected_midnight()
+                    self._maybe_enqueue_dispatch_sync()
+                    self._maybe_enqueue_log_retention()
 
                 if jobs_processed > 0:
                     logger.debug(
