@@ -96,7 +96,7 @@ def preview_result(results: dict, limit: int = 50):
 def tenant_scoped_qs(user):
     tenant_id = getattr(user, "tenant_id", None)
     if not tenant_id:
-        return support_ticket_records_qs()
+        return support_ticket_records_qs().none()
     try:
         return support_ticket_records_qs(tenant_id=UUID(str(tenant_id)))
     except Exception:
