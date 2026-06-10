@@ -1447,6 +1447,58 @@ class ReleaseLeadsAfter12hJobHandler(JobHandler):
         delays = [60, 300, 900]
         return delays[min(attempt - 1, len(delays) - 1)]
 
+
+class DiscoverEntityTypesJobHandler(JobHandler):
+    """
+    Incrementally discover tenant entity types and data fields from records.
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        from crm_records.entity_type_discovery import discover_entity_types_from_records
+
+        payload = job.payload or {}
+        batch_size = int(payload.get("batch_size") or 1000)
+        max_runtime_seconds = payload.get("max_runtime_seconds")
+        if max_runtime_seconds is not None:
+            max_runtime_seconds = int(max_runtime_seconds)
+
+        result = discover_entity_types_from_records(
+            batch_size=batch_size,
+            max_runtime_seconds=max_runtime_seconds,
+        )
+        job.result = {
+            "success": True,
+            "processed": result.processed,
+            "entity_types_touched": result.entity_types_touched,
+            "schemas_updated": result.schemas_updated,
+            "last_processed_record_id": result.last_processed_record_id,
+            "last_processed_updated_at": result.last_processed_updated_at,
+            "has_more": result.has_more,
+            "timestamp": timezone.now().isoformat(),
+        }
+        logger.info(
+            "[DiscoverEntityTypes] processed=%s touched=%s updated=%s has_more=%s",
+            result.processed,
+            result.entity_types_touched,
+            result.schemas_updated,
+            result.has_more,
+        )
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+    def validate_payload(self, payload: Dict[str, Any]) -> bool:
+        for key in ("batch_size", "max_runtime_seconds"):
+            if key in payload:
+                try:
+                    if int(payload[key]) <= 0:
+                        return False
+                except (TypeError, ValueError):
+                    return False
+        return True
+
 class JobHandlerRegistry:
     """
     Registry for job handlers.
@@ -1486,6 +1538,10 @@ class JobHandlerRegistry:
         self.register_handler(
             JobType.PROCESS_DUMPED_TICKETS,
             ProcessDumpedTicketsJobHandler(),
+        )
+        self.register_handler(
+            JobType.DISCOVER_ENTITY_TYPES,
+            DiscoverEntityTypesJobHandler(),
         )
         # Praja handler removed - now using MixpanelService instead
         # self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())

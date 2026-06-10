@@ -32,6 +32,9 @@ LEAD_CRON_ENQUEUE_INTERVAL = 900  # 15 minutes
 # Support ticket dump processing (replaces Supabase process-dumped-tickets cron)
 SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL = 300  # 5 minutes
 
+# Entity type discovery from records.
+ENTITY_TYPE_DISCOVERY_ENQUEUE_INTERVAL = 300  # 5 minutes
+
 # How often the worker enqueues log retention (object_history, event_logs, rule_exec_logs)
 LOG_RETENTION_ENQUEUE_INTERVAL = 86400  # 24 hours
 
@@ -71,6 +74,8 @@ class JobProcessor:
         self._last_dispatch_sync_enqueue_bucket = None
         # Last time we enqueued process_dumped_tickets for pending dump rows
         self._last_support_ticket_dump_enqueue_at = None
+        # Last time we enqueued entity type discovery
+        self._last_entity_type_discovery_enqueue_at = None
         # Circuit breaker state for connection errors
         self._connection_error_count = 0
         self._last_connection_error_time = None
@@ -436,6 +441,42 @@ class JobProcessor:
                 exc_info=True,
             )
 
+    def _maybe_enqueue_entity_type_discovery(self):
+        """
+        Periodically enqueue one global entity type discovery job.
+        """
+        now = timezone.now()
+        if self._last_entity_type_discovery_enqueue_at is not None:
+            elapsed = (now - self._last_entity_type_discovery_enqueue_at).total_seconds()
+            if elapsed < ENTITY_TYPE_DISCOVERY_ENQUEUE_INTERVAL:
+                return
+        self._last_entity_type_discovery_enqueue_at = now
+
+        try:
+            active_exists = BackgroundJob.objects.filter(
+                job_type=JobType.DISCOVER_ENTITY_TYPES,
+                status__in=[JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.RETRYING],
+            ).exists()
+            if active_exists:
+                logger.debug(
+                    f"[Worker {self.worker_id}] Entity type discovery job already active"
+                )
+                return
+
+            queue = get_queue_service()
+            queue.enqueue_job(
+                job_type=JobType.DISCOVER_ENTITY_TYPES,
+                payload={"batch_size": 1000},
+                priority=-1,
+                max_attempts=3,
+            )
+            logger.debug(f"[Worker {self.worker_id}] Enqueued entity type discovery")
+        except Exception as e:
+            logger.warning(
+                f"[Worker {self.worker_id}] Failed to enqueue entity type discovery: {e}",
+                exc_info=True,
+            )
+
     def _maybe_enqueue_lead_cron_jobs(self):
         """
         Every LEAD_CRON_ENQUEUE_INTERVAL seconds, enqueue unassign_snoozed_leads,
@@ -680,6 +721,8 @@ class JobProcessor:
 
                 # Every 5 min: process support_ticket_dump → support_ticket + records
                 self._maybe_enqueue_process_dumped_tickets()
+                # Every 5 min: discover tenant entity types and fields from changed records
+                self._maybe_enqueue_entity_type_discovery()
                 # Periodically enqueue lead cron jobs (unassign snoozed, release after 12h) so no external cron is needed
                 self._maybe_enqueue_lead_cron_jobs()
                 # Daily at 23:55 exact minute (TIME_ZONE): SNOOZED → NOT_CONNECTED
