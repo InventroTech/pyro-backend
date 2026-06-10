@@ -1,5 +1,8 @@
 from datetime import timedelta
 
+import jwt
+from django.conf import settings
+from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
@@ -44,6 +47,30 @@ class GetNextTicketAPITest(BaseAPITestCase):
         response = self.client.get(self.url, **self.auth_headers)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data, {})
+
+    @override_settings(DEFAULT_TENANT_SLUG="missing-tenant-slug-for-get-next-test")
+    def test_get_next_ticket_forbidden_when_tenant_unresolved(self):
+        """Reject unresolved tenant instead of returning an empty ticket payload."""
+        _open_record(tenant=self.tenant, user_id="queued", name="Queued")
+        self.membership.delete()
+        token = jwt.encode(
+            {
+                "sub": self.supabase_uid,
+                "email": self.email,
+                "aud": "authenticated",
+            },
+            settings.SUPABASE_JWT_SECRET,
+            algorithm="HS256",
+        )
+        if isinstance(token, bytes):
+            token = token.decode("utf-8")
+
+        response = self.client.get(
+            self.url,
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_get_next_ticket_assigns_newest_unassigned_record(self):
         older = _open_record(tenant=self.tenant, user_id="old_user", name="Older")
