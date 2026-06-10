@@ -211,3 +211,22 @@ class GetNextTicketAPITest(BaseAPITestCase):
             data=dump_data(user_id="legacy_user", name="Legacy", poster="paid"),
         )
         self.assertEqual(_record_ticket_type_key(record), "paid")
+
+    def test_get_next_ticket_includes_jatra_link(self):
+        jatra_link = "https://www.thecircleapp.in/jatra/98obia11ve"
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data=dump_data(
+                user_id="jatra_user",
+                name="Arjun Patel",
+                support_ticket_type="in_trial",
+                Jatra_link=jatra_link,
+            ),
+        )
+
+        response = self.client.get(self.url, **self.auth_headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["ticket"]["id"], record.id)
+        self.assertEqual(response.data["ticket"]["Jatra_link"], jatra_link)

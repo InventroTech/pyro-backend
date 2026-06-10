@@ -257,6 +257,7 @@ def record_to_ticket_dict(record: Record) -> Dict[str, Any]:
         "snooze_until": _iso_or_none(data.get("snooze_until")),
         "review_requested": bool(data.get("review_requested")),
         "praja_dashboard_user_link": data.get("praja_dashboard_user_link"),
+        "Jatra_link": data.get("Jatra_link") or data.get("jatra_link"),
         "display_pic_url": data.get("display_pic_url"),
         "rm_name": data.get("rm_name"),
         "tasks": _parse_ticket_tasks_raw(data.get("tasks")),
