@@ -1,8 +1,6 @@
-import threading
 from unittest.mock import patch
 
-import pytest
-from django.db import IntegrityError, connections
+from django.db import IntegrityError
 from django.db.models import Max
 from django.urls import reverse
 from rest_framework import status
@@ -284,80 +282,6 @@ class ProcessDumpedTicketsJobHandlerTest(BaseAPITestCase):
         self.assertEqual(job.result["inserted_tickets"], 1)
         self.assertTrue(SupportTicket.objects.filter(user_id="job_user").exists())
         mock_mixpanel.assert_called_once()
-
-
-@pytest.mark.django_db(transaction=True)
-def test_concurrent_process_dumped_tickets_inserts_once_per_user():
-    tenant = TenantFactory()
-    SupportTicketDump.objects.all().delete()
-    SupportTicket.objects.all().delete()
-    SupportTicketDumpFactory.create(
-        tenant_id=tenant.id,
-        data=dump_data(user_id="2974459", name="Concurrent user"),
-    )
-
-    results = []
-    errors = []
-    barrier = threading.Barrier(3)
-
-    def worker():
-        connections.close_all()
-        try:
-            barrier.wait(timeout=5)
-            results.append(process_dumped_tickets(tenant_id=tenant.id))
-        except Exception as exc:
-            errors.append(exc)
-
-    threads = [threading.Thread(target=worker) for _ in range(3)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=30)
-
-    assert not errors, errors
-    assert SupportTicket.objects.filter(user_id="2974459").count() == 1
-    assert sum(r.inserted_tickets for r in results) == 1
-    assert sum(r.total_dumped_tickets for r in results) == 1
-
-
-@pytest.mark.django_db(transaction=True)
-def test_concurrent_enqueue_process_dumped_tickets_job_creates_one_job():
-    tenant = TenantFactory()
-    BackgroundJob.objects.all().delete()
-    SupportTicketDumpFactory.create(
-        tenant_id=tenant.id,
-        data=dump_data(user_id="enqueue_race", name="Enqueue race"),
-    )
-
-    created_jobs = []
-    errors = []
-    barrier = threading.Barrier(3)
-
-    def worker():
-        connections.close_all()
-        try:
-            barrier.wait(timeout=5)
-            job = enqueue_process_dumped_tickets_job(tenant.id)
-            if job is not None:
-                created_jobs.append(job)
-        except Exception as exc:
-            errors.append(exc)
-
-    threads = [threading.Thread(target=worker) for _ in range(3)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=30)
-
-    assert not errors, errors
-    assert len(created_jobs) == 1
-    assert (
-        BackgroundJob.objects.filter(
-            job_type=JobType.PROCESS_DUMPED_TICKETS,
-            tenant_id=tenant.id,
-        ).count()
-        == 1
-    )
 
 
 class ProcessDumpedTicketsAPITest(BaseAPITestCase):

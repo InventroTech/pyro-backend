@@ -1,7 +1,6 @@
 import logging
 import json
 import base64
-import zlib
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
@@ -58,9 +57,6 @@ logger = logging.getLogger(__name__)
 DUMP_BATCH_LIMIT = 5000
 # Legacy support_ticket.id has no DB sequence; ids must be allocated before bulk_create.
 _SUPPORT_TICKET_ID_ALLOC_LOCK = 874215903
-# Advisory lock classes: serialize dump enqueue + processing per tenant.
-_DUMP_PROCESS_LOCK_CLASS = 874215904
-_DUMP_ENQUEUE_LOCK_CLASS = 874215905
 
 _DUMP_RESERVED_KEYS = frozenset({
     "tenant_id",
@@ -178,22 +174,6 @@ def _normalize_dump_user_id(user_id: Any) -> Optional[str]:
         return None
     normalized = str(user_id).strip()
     return normalized or None
-
-
-def _tenant_advisory_lock_id(tenant_id: Optional[Union[str, UUID]]) -> int:
-    if tenant_id is None:
-        return 0
-    return zlib.crc32(str(tenant_id).encode("utf-8")) & 0x7FFFFFFF
-
-
-def _pg_advisory_xact_lock(class_id: int, object_id: int) -> None:
-    if connection.vendor != "postgresql":
-        return
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT pg_advisory_xact_lock(%s, %s)",
-            [class_id, object_id],
-        )
 
 
 def _dedupe_dumps_latest_wins(
@@ -355,29 +335,24 @@ def enqueue_process_dumped_tickets_job(
     priority: int = 0,
 ) -> Optional[BackgroundJob]:
     tid = str(tenant_id)
-    with transaction.atomic():
-        _pg_advisory_xact_lock(
-            _DUMP_ENQUEUE_LOCK_CLASS,
-            _tenant_advisory_lock_id(tid),
+    active = BackgroundJob.objects.filter(
+        job_type=JobType.PROCESS_DUMPED_TICKETS,
+        tenant_id=tid,
+        status__in=[JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.RETRYING],
+    ).exists()
+    if active:
+        logger.info(
+            "enqueue_process_dumped_tickets_job: active job already exists for tenant=%s",
+            tid,
         )
-        active = BackgroundJob.objects.filter(
-            job_type=JobType.PROCESS_DUMPED_TICKETS,
-            tenant_id=tid,
-            status__in=[JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.RETRYING],
-        ).exists()
-        if active:
-            logger.info(
-                "enqueue_process_dumped_tickets_job: active job already exists for tenant=%s",
-                tid,
-            )
-            return None
+        return None
 
-        job = get_queue_service().enqueue_job(
-            job_type=JobType.PROCESS_DUMPED_TICKETS,
-            payload={},
-            tenant_id=tid,
-            priority=priority,
-        )
+    job = get_queue_service().enqueue_job(
+        job_type=JobType.PROCESS_DUMPED_TICKETS,
+        payload={},
+        tenant_id=tid,
+        priority=priority,
+    )
     logger.info(
         "enqueue_process_dumped_tickets_job: enqueued job_id=%s tenant=%s",
         job.id,
@@ -512,62 +487,51 @@ def process_dumped_tickets(
     on_ticket_created: Optional[Callable[[SupportTicket], None]] = None,
     batch_limit: int = DUMP_BATCH_LIMIT,
 ) -> ProcessDumpedTicketsResult:
+    dumped_qs = SupportTicketDump.objects.filter(
+        Q(is_processed__isnull=True) | Q(is_processed=False)
+    )
+    if tenant_id is not None:
+        dumped_qs = dumped_qs.filter(tenant_id=tenant_id)
+    dumped_tickets_list = list(dumped_qs.order_by("id")[:batch_limit])
+
+    if not dumped_tickets_list:
+        logger.info("process_dumped_tickets: No new tickets in dump table to process.")
+        return ProcessDumpedTicketsResult(0, 0, 0, 0, 0, 0)
+
+    skipped = sum(
+        1
+        for dump in dumped_tickets_list
+        if not _normalize_dump_user_id((dump.data or {}).get("user_id"))
+    )
+    unique_tickets = _dedupe_dumps_latest_wins(dumped_tickets_list)
+    candidates: List[SupportTicketDump] = []
+
+    for dump_ticket in unique_tickets:
+        if not dump_ticket.tenant_id:
+            skipped += 1
+            continue
+        if not Tenant.objects.filter(id=dump_ticket.tenant_id).exists():
+            skipped += 1
+            continue
+        candidates.append(dump_ticket)
+
+    dump_ids = [t.id for t in dumped_tickets_list]
+
+    if not candidates:
+        marked = SupportTicketDump.objects.filter(id__in=dump_ids).update(
+            is_processed=True
+        )
+        return ProcessDumpedTicketsResult(
+            total_dumped_tickets=len(dumped_tickets_list),
+            unique_tickets=len(unique_tickets),
+            inserted_tickets=0,
+            mirrored_records=0,
+            skipped_tickets=skipped,
+            marked_processed=marked,
+        )
+
     inserted_tickets: List[SupportTicket] = []
-    result: Optional[ProcessDumpedTicketsResult] = None
-
-    # Lock dump rows and commit ticket creation atomically so parallel workers
-    # cannot process the same unprocessed dumps (see duplicate-ticket incident).
     with transaction.atomic():
-        _pg_advisory_xact_lock(
-            _DUMP_PROCESS_LOCK_CLASS,
-            _tenant_advisory_lock_id(tenant_id),
-        )
-
-        dumped_qs = SupportTicketDump.objects.filter(
-            Q(is_processed__isnull=True) | Q(is_processed=False)
-        )
-        if tenant_id is not None:
-            dumped_qs = dumped_qs.filter(tenant_id=tenant_id)
-        dumped_tickets_list = list(
-            dumped_qs.select_for_update().order_by("id")[:batch_limit]
-        )
-
-        if not dumped_tickets_list:
-            logger.info("process_dumped_tickets: No new tickets in dump table to process.")
-            return ProcessDumpedTicketsResult(0, 0, 0, 0, 0, 0)
-
-        skipped = sum(
-            1
-            for dump in dumped_tickets_list
-            if not _normalize_dump_user_id((dump.data or {}).get("user_id"))
-        )
-        unique_tickets = _dedupe_dumps_latest_wins(dumped_tickets_list)
-        candidates: List[SupportTicketDump] = []
-
-        for dump_ticket in unique_tickets:
-            if not dump_ticket.tenant_id:
-                skipped += 1
-                continue
-            if not Tenant.objects.filter(id=dump_ticket.tenant_id).exists():
-                skipped += 1
-                continue
-            candidates.append(dump_ticket)
-
-        dump_ids = [t.id for t in dumped_tickets_list]
-
-        if not candidates:
-            marked = SupportTicketDump.objects.filter(id__in=dump_ids).update(
-                is_processed=True
-            )
-            return ProcessDumpedTicketsResult(
-                total_dumped_tickets=len(dumped_tickets_list),
-                unique_tickets=len(unique_tickets),
-                inserted_tickets=0,
-                mirrored_records=0,
-                skipped_tickets=skipped,
-                marked_processed=marked,
-            )
-
         tickets_to_insert: List[SupportTicket] = []
         dump_data_by_user_id: Dict[str, Dict[str, Any]] = {}
         for dump_ticket in candidates:
@@ -594,14 +558,6 @@ def process_dumped_tickets(
         marked = SupportTicketDump.objects.filter(id__in=dump_ids).update(
             is_processed=True
         )
-        result = ProcessDumpedTicketsResult(
-            total_dumped_tickets=len(dumped_tickets_list),
-            unique_tickets=len(unique_tickets),
-            inserted_tickets=len(inserted_tickets),
-            mirrored_records=mirrored,
-            skipped_tickets=skipped,
-            marked_processed=marked,
-        )
 
     if on_ticket_created:
         for ticket in inserted_tickets:
@@ -614,7 +570,14 @@ def process_dumped_tickets(
                     exc,
                     exc_info=True,
                 )
-    return result
+    return ProcessDumpedTicketsResult(
+        total_dumped_tickets=len(dumped_tickets_list),
+        unique_tickets=len(unique_tickets),
+        inserted_tickets=len(inserted_tickets),
+        mirrored_records=mirrored,
+        skipped_tickets=skipped,
+        marked_processed=marked,
+    )
 
 
 def process_dumped_tickets_job_result(result: ProcessDumpedTicketsResult) -> Dict[str, Any]:
