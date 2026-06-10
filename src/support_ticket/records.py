@@ -343,8 +343,16 @@ def extract_date_range_from_ticket_data(
 
 
 def filter_records_by_tenant_param(qs: QuerySet[Record], request) -> QuerySet[Record]:
-    tenant_id = request.query_params.get("tenant_id")
-    return qs.filter(tenant_id=tenant_id) if tenant_id else qs
+    """
+    Scope *qs* to ``request.tenant`` (from tenant middleware).
+
+    Does not trust ``tenant_id`` query params — returns an empty queryset when
+    tenant context is missing so analytics cannot leak cross-tenant rows.
+    """
+    tenant = getattr(request, "tenant", None)
+    if tenant is not None:
+        return qs.filter(tenant=tenant)
+    return qs.none()
 
 
 def records_to_ticket_dicts(records: Iterable[Record]) -> List[Dict[str, Any]]:

@@ -11,7 +11,6 @@ from support_ticket.records import (
     annotate_ticket_datetimes,
     distinct_data_values,
     extract_date_range_from_ticket_data,
-    filter_records_by_tenant_param,
     q_data_json_null,
     q_record_pending_resolution,
     q_record_unassigned,
@@ -50,10 +49,10 @@ from .filters import (
     RESOLUTION_CHOICES,
     SafeSearchFilter, SafeOrderingFilter
 )
-from .utils import tenant_scoped_qs
 from django.db import models
 from django.contrib.auth import get_user_model
 from authz.permissions import IsTenantAuthenticated
+from config.supabase_auth import SupabaseJWTAuthentication
 from crm_records.mixins import TenantScopedMixin
 from .services import TeamResolver, TeamMetricsService
 from .serializers import (
@@ -79,13 +78,13 @@ logger = logging.getLogger(__name__)
 
 class StackedBarResolvedUnresolvedView(APIView):
     """Stacked bar data for resolved/unresolved support tickets per day."""
-    permission_classes = [IsAuthenticated]
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
         qs = annotate_ticket_datetimes(
-            support_ticket_records_qs()
+            support_ticket_records_qs(tenant=request.tenant)
         ).filter(ticket_dumped_at__isnull=False)
-        qs = filter_records_by_tenant_param(qs, request)
         start_date, end_date = extract_date_range_from_ticket_data(
             qs, request, data_field_name="dumped_at"
         )
@@ -292,13 +291,13 @@ class DailyAverageResolutionTimeView(APIView):
         logger.info("Returning %d data points", len(result))
         return Response(result)
 class DailyResolvedTicketsView(APIView):
-    permission_classes = []
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
         qs = annotate_ticket_datetimes(
-            support_ticket_records_qs()
+            support_ticket_records_qs(tenant=request.tenant)
         ).filter(ticket_completed_at__isnull=False)
-        qs = filter_records_by_tenant_param(qs, request)
         start_date, end_date = extract_date_range_from_ticket_data(
             qs, request, data_field_name="completed_at"
         )
@@ -573,9 +572,10 @@ class SupportTicketView(APIView):
 class CSEAverageResolutionTimeView(APIView):
     """
     Returns average resolution time for each CSE (Customer Support Executive) for a given date range.
-    Query params: start, end, unit, tenant_id
+    Query params: start, end, unit
     """
-    permission_classes = [IsAuthenticated]
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
         # Get date parameters directly and clean them
@@ -603,7 +603,9 @@ class CSEAverageResolutionTimeView(APIView):
         # Debug: Print the date range
         print(f"Date range: {start_date} to {end_date}")
         
-        qs = annotate_ticket_datetimes(support_ticket_records_qs()).filter(
+        qs = annotate_ticket_datetimes(
+            support_ticket_records_qs(tenant=request.tenant)
+        ).filter(
             ticket_completed_at__isnull=False,
         ).exclude(data__resolution_time__isnull=True).exclude(
             data__resolution_time=""
@@ -613,10 +615,6 @@ class CSEAverageResolutionTimeView(APIView):
             qs = qs.filter(ticket_completed_at__date__gte=start_date)
         if end_date:
             qs = qs.filter(ticket_completed_at__date__lte=end_date)
-        
-        tenant_id = request.query_params.get('tenant_id')
-        if tenant_id:
-            qs = qs.filter(tenant_id=tenant_id)
         
         class TimeToSeconds(Func):
             function = 'CAST'

@@ -339,29 +339,32 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
                 response = getattr(self.client, method.lower())(self.url)
                 self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
     
-    @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
-    def test_dump_ticket_webhook_default_ticket_date(self):
-        """Test that ticket_date defaults to current time when not provided"""
-        payload_no_date = self.valid_payload.copy()
-        del payload_no_date['ticket_date']
-        
-        # Get the real time BEFORE mocking so we don't save a MagicMock to the DB!
+    def _post_dump_and_get_ticket_date(self, payload):
         real_time = timezone.now()
-        
-        # Note: Depending on how timezone is imported in views.py, you might need to patch 'support_ticket.views.timezone.now'
-        with patch('django.utils.timezone.now') as mock_now:
+        with patch("django.utils.timezone.now") as mock_now:
             mock_now.return_value = real_time
-            
             response = self.client.post(
                 self.url,
-                data=json.dumps(payload_no_date),
-                content_type='application/json',
-                **{'HTTP_X_WEBHOOK_SECRET': self.webhook_secret}
+                data=json.dumps(payload),
+                content_type="application/json",
+                **{"HTTP_X_WEBHOOK_SECRET": self.webhook_secret},
             )
-        
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
-        self.assertIsNotNone(ticket_dump.data.get('ticket_date'))
+        ticket_dump = SupportTicketDump.objects.get(id=response.data["ticket_id"])
+        return ticket_dump.data.get("ticket_date"), real_time
+
+    @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
+    def test_dump_ticket_webhook_default_ticket_date(self):
+        """ticket_date defaults to now when missing or falsy (matches legacy webhook)."""
+        payload_no_date = self.valid_payload.copy()
+        del payload_no_date["ticket_date"]
+        ticket_date, expected = self._post_dump_and_get_ticket_date(payload_no_date)
+        self.assertEqual(ticket_date, expected.isoformat())
+
+        payload_empty_date = self.valid_payload.copy()
+        payload_empty_date["ticket_date"] = ""
+        ticket_date, expected = self._post_dump_and_get_ticket_date(payload_empty_date)
+        self.assertEqual(ticket_date, expected.isoformat())
     
     @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
     def test_dump_ticket_webhook_concurrent_requests(self):

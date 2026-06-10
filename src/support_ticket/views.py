@@ -927,9 +927,9 @@ class DumpTicketWebhookView(APIView):
                 raise Exception("Missing required field: tenant_id")
 
             dump_payload = _extract_dump_payload(payload)
-            if 'ticket_date' not in dump_payload:
+            if not dump_payload.get("ticket_date"):
                 dump_payload = _serialize_dump_payload(
-                    {**dump_payload, 'ticket_date': timezone.now()}
+                    {**dump_payload, "ticket_date": timezone.now()}
                 )
 
             dump_ticket = SupportTicketDump.objects.create(
@@ -1044,7 +1044,8 @@ class GetNextTicketView(APIView):
     Reads and assigns support tickets from ``records`` (``entity_type=support_ticket``).
     """
     authentication_classes = [SupabaseJWTAuthentication]
-    
+    permission_classes = [IsTenantAuthenticated]
+
     def options(self, request):
         """Handle CORS preflight requests"""
         response = Response('ok', status=status.HTTP_200_OK)
