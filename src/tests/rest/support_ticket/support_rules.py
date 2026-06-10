@@ -79,8 +79,8 @@ SUPPORT_TICKET_TEST_RULES: List[Dict[str, Any]] = [
     },
     {
         "event_name": "support.not_connected",
-        "condition": {"<": [{"var": "record_data.call_attempts"}, 1]},
-        "description": "Support not connected — first attempt: snooze 1h (UpdateCallStatusView)",
+        "condition": {"<": [{"var": "record_data.call_attempts"}, 2]},
+        "description": "Support not connected — attempts 1–2: snooze 1h (UpdateCallStatusView)",
         "actions": [
             {
                 "action": "update_fields",
@@ -117,8 +117,8 @@ SUPPORT_TICKET_TEST_RULES: List[Dict[str, Any]] = [
     },
     {
         "event_name": "support.not_connected",
-        "condition": {">=": [{"var": "record_data.call_attempts"}, 1]},
-        "description": "Support not connected — repeat attempt: close (UpdateCallStatusView)",
+        "condition": {">=": [{"var": "record_data.call_attempts"}, 2]},
+        "description": "Support not connected — 3rd attempt: close (UpdateCallStatusView)",
         "actions": [
             {
                 "action": "update_fields",

@@ -52,8 +52,8 @@ class SupportTicketRuleEngineTests(TestCase):
         for camel in ("cseRemarks", "callStatus", "resolutionTime"):
             self.assertNotIn(camel, prepared)
 
-    def test_not_connected_first_attempt_rule_actions(self):
-        """Mirrors production rule: snooze + 60m next_call_at / snooze_until."""
+    def test_not_connected_first_two_attempts_snooze_one_hour(self):
+        """Mirrors production rule: attempts 1–2 snooze 60m; 3rd closes."""
         ctx = {
             "record": self.record,
             "payload": {"cse_remarks": "no answer"},
