@@ -591,7 +591,7 @@ _EXPIRED_SUPPORT_POSTERS = frozenset({
     "premium_expired",
 })
 
-# Queue routing order (PDF spec): poster bucket → priority → max attempts → LIFO within bucket.
+# Queue routing: priority-1 posters share one LIFO pool; rest is priority 0 (also LIFO).
 @dataclass(frozen=True)
 class _SupportTicketRoutingRule:
     poster_key: str
@@ -600,12 +600,12 @@ class _SupportTicketRoutingRule:
 
 
 _SUPPORT_TICKET_ROUTING_RULES: Tuple[_SupportTicketRoutingRule, ...] = (
-    _SupportTicketRoutingRule("self_trail", 1, 4),
-    _SupportTicketRoutingRule("in_trial", 1, 2),
-    _SupportTicketRoutingRule("paid", 1, 2),
-    _SupportTicketRoutingRule("trial_extension", 1, 2),
-    _SupportTicketRoutingRule("premium_extension", 1, 2),
-    _SupportTicketRoutingRule("rest", 0, 2),
+    _SupportTicketRoutingRule("self_trail", 1, 3),
+    _SupportTicketRoutingRule("in_trial", 1, 3),
+    _SupportTicketRoutingRule("paid", 1, 3),
+    _SupportTicketRoutingRule("trial_extension", 1, 3),
+    _SupportTicketRoutingRule("premium_extension", 1, 3),
+    _SupportTicketRoutingRule("rest", 0, 3),
 )
 
 _POSTER_KEY_TO_ROUTING_RULE: Dict[str, _SupportTicketRoutingRule] = {
@@ -670,10 +670,11 @@ def _pick_routed_support_record(
     only_due_snoozed: bool = False,
 ) -> Optional[Record]:
     """
-    Pick the next ticket using poster priority order.
+    Pick the next ticket for the queue.
 
-    Priority-1 buckets (Self Trail → In Trial → Paid → extensions) are served
-    before Rest (priority 0). Within each bucket, newest ticket wins (LIFO).
+    Priority-1 posters (self_trail, in_trial, paid, trial_extension,
+    premium_extension) compete in a single LIFO pool (newest ``created_at`` wins).
+    Rest (priority 0) is only considered when no priority-1 ticket is eligible.
     Records at or above their poster's max call attempts are skipped.
     """
     pool: List[Record] = []
@@ -691,22 +692,16 @@ def _pick_routed_support_record(
     if not pool:
         return None
 
-    has_priority_one = any(
-        _routing_rule_for_record(record).priority == 1 for record in pool
-    )
-
-    for rule in _SUPPORT_TICKET_ROUTING_RULES:
-        if has_priority_one and rule.priority == 0:
-            continue
-        bucket = [
+    for priority in (1, 0):
+        tier = [
             record
             for record in pool
-            if _routing_rule_for_record(record).poster_key == rule.poster_key
+            if _routing_rule_for_record(record).priority == priority
         ]
-        if not bucket:
+        if not tier:
             continue
-        bucket.sort(key=lambda record: record.created_at, reverse=True)
-        return bucket[0]
+        tier.sort(key=lambda record: record.created_at, reverse=True)
+        return tier[0]
 
     return None
 
@@ -994,7 +989,7 @@ class SaveAndContinueView(APIView):
                 'success': True,
                 'message': 'Ticket updated successfully',
                 'updatedTicket': updated_ticket,
-                'userId': user_id,
+                'userId': str(user_id) if user_id is not None else None,
                 'userEmail': user_email,
                 'totalResolutionTime': updated_ticket.get('resolution_time') or '0:00',
             }

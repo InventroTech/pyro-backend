@@ -31,16 +31,17 @@ class SupportTicketEventHandlerTest(BaseAPITestCase):
         )
 
     def test_not_connected_snoozes_then_closes_per_rules(self):
-        dispatch_support_ticket_event(
-            SUPPORT_EVENT_NOT_CONNECTED,
-            self.record,
-            {"cse_remarks": "no answer"},
-        )
-        self.record.refresh_from_db()
-        self.assertEqual(self.record.data["call_attempts"], 1)
-        self.assertEqual(self.record.data["resolution_status"], "Snoozed")
-        self.assertIsNone(self.record.data.get("assigned_to"))
-        self.assertIsNotNone(self.record.data.get("snooze_until"))
+        for expected_attempts in (1, 2):
+            dispatch_support_ticket_event(
+                SUPPORT_EVENT_NOT_CONNECTED,
+                self.record,
+                {"cse_remarks": "no answer"} if expected_attempts == 1 else {},
+            )
+            self.record.refresh_from_db()
+            self.assertEqual(self.record.data["call_attempts"], expected_attempts)
+            self.assertEqual(self.record.data["resolution_status"], "Snoozed")
+            self.assertIsNone(self.record.data.get("assigned_to"))
+            self.assertIsNotNone(self.record.data.get("snooze_until"))
 
         dispatch_support_ticket_event(
             SUPPORT_EVENT_NOT_CONNECTED,
@@ -48,7 +49,7 @@ class SupportTicketEventHandlerTest(BaseAPITestCase):
             {},
         )
         self.record.refresh_from_db()
-        self.assertEqual(self.record.data["call_attempts"], 2)
+        self.assertEqual(self.record.data["call_attempts"], 3)
         self.assertEqual(self.record.data["resolution_status"], "Closed")
 
     def test_take_break_unassigns_per_rules(self):

@@ -74,29 +74,38 @@ class GetNextTicketAPITest(BaseAPITestCase):
         self.assertEqual(response.data["ticket"]["id"], assigned.id)
         self.assertEqual(response.data["ticket"]["user_id"], "mine")
 
-    def test_get_next_ticket_prefers_self_trail_over_newer_in_trial(self):
-        in_trial = _open_record(
-            tenant=self.tenant,
-            user_id="trial_user",
-            name="In Trial",
-            poster="In Trial",
-        )
+    def test_get_next_ticket_lifo_across_priority_one_posters(self):
+        """All five priority-1 posters share one LIFO pool (newest wins)."""
         self_trail = _open_record(
             tenant=self.tenant,
             user_id="self_user",
             name="Self Trail",
             poster="Self Trail",
         )
-        in_trial.created_at = timezone.now() - timedelta(hours=1)
-        in_trial.save(update_fields=["created_at"])
-        self_trail.created_at = timezone.now() - timedelta(hours=2)
+        in_trial = _open_record(
+            tenant=self.tenant,
+            user_id="trial_user",
+            name="In Trial",
+            poster="In Trial",
+        )
+        paid = _open_record(
+            tenant=self.tenant,
+            user_id="paid_user",
+            name="Paid",
+            poster="paid",
+        )
+        self_trail.created_at = timezone.now() - timedelta(hours=3)
         self_trail.save(update_fields=["created_at"])
+        in_trial.created_at = timezone.now() - timedelta(hours=2)
+        in_trial.save(update_fields=["created_at"])
+        paid.created_at = timezone.now() - timedelta(hours=1)
+        paid.save(update_fields=["created_at"])
 
         response = self.client.get(self.url, **self.auth_headers)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["ticket"]["id"], self_trail.id)
-        self.assertEqual(response.data["ticket"]["poster"], "Self Trail")
+        self.assertEqual(response.data["ticket"]["id"], paid.id)
+        self.assertEqual(response.data["ticket"]["poster"], "paid")
 
     def test_get_next_ticket_defers_rest_until_priority_one_exhausted(self):
         rest = _open_record(
@@ -169,7 +178,7 @@ class GetNextTicketAPITest(BaseAPITestCase):
             name="Exhausted",
             poster="in_trial",
         )
-        exhausted.data = {**exhausted.data, "call_attempts": 2}
+        exhausted.data = {**exhausted.data, "call_attempts": 3}
         exhausted.save(update_fields=["data"])
         available = _open_record(
             tenant=self.tenant,
