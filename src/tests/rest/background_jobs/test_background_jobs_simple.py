@@ -339,14 +339,17 @@ class SimpleBackgroundJobsTest(TestCase):
         self.assertEqual(count, 2)
         mock_objects.filter.assert_called_once()
 
+    @patch("background_jobs.job_processor.scheduler_lock")
     @patch(
         "support_ticket.views.enqueue_process_dumped_tickets_for_pending_dumps",
         side_effect=RuntimeError("enqueue failed"),
     )
     def test_maybe_enqueue_process_dumped_tickets_throttles_after_error(
-        self, mock_enqueue
+        self, mock_enqueue, mock_scheduler_lock
     ):
         """Failed enqueue ticks still advance the 5-minute throttle."""
+        mock_scheduler_lock.return_value.__enter__.return_value = True
+        mock_scheduler_lock.return_value.__exit__.return_value = False
         processor = JobProcessor(worker_id="test-throttle")
         processor._maybe_enqueue_process_dumped_tickets()
         self.assertIsNotNone(processor._last_support_ticket_dump_enqueue_at)
