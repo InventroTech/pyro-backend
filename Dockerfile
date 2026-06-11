@@ -7,8 +7,13 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y build-essential libpq-dev && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements to container and install
+ENV PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 COPY requirements.txt .
-RUN pip install --upgrade pip && pip install -r requirements.txt
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install --index-url https://pypi.org/simple \
+    --default-timeout=120 --retries 10 --prefer-binary -r requirements.txt
 
 # Copy app code ./src code to container's /app
 COPY ./src /app
