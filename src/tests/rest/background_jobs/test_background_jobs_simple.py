@@ -400,8 +400,13 @@ class SimpleBackgroundJobsTest(TestCase):
         )
 
         self.assertEqual(len(threads), 2)
-        mock_processor_cls.assert_called_with(
+        mock_processor_cls.assert_any_call(
             worker_id="mixpanel-t0",
+            job_types=MIXPANEL_JOB_TYPES,
+            exclude_job_types=None,
+        )
+        mock_processor_cls.assert_any_call(
+            worker_id="mixpanel-t1",
             job_types=MIXPANEL_JOB_TYPES,
             exclude_job_types=None,
         )
