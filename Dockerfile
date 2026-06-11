@@ -19,5 +19,5 @@ RUN python manage.py collectstatic --noinput
 # Set environment variables
 ENV DJANGO_SETTINGS_MODULE=config.settings
 
-# Command to run Gunicorn with multiple workers and threads
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--timeout", "30", "--keep-alive", "2"]
+# gunicorn_config post_fork starts general + optional Mixpanel background job threads
+CMD ["gunicorn", "config.wsgi:application", "-c", "config/gunicorn_config.py", "--bind", "0.0.0.0:8000"]
