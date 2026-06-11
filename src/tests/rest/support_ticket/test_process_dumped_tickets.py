@@ -1,7 +1,9 @@
+import threading
 from unittest.mock import patch
 
-from django.db import IntegrityError
+from django.db import IntegrityError, close_old_connections
 from django.db.models import Max
+from django.test import TransactionTestCase
 from django.urls import reverse
 from rest_framework import status
 
@@ -255,6 +257,122 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
             ).count(),
             1,
         )
+
+    def test_enqueue_skips_when_job_is_processing(self):
+        enqueue_process_dumped_tickets_job(self.tenant_id)
+        job = BackgroundJob.objects.get(
+            job_type=JobType.PROCESS_DUMPED_TICKETS,
+            tenant_id=self.tenant_id,
+        )
+        job.status = JobStatus.PROCESSING
+        job.save(update_fields=["status"])
+
+        self.assertIsNone(enqueue_process_dumped_tickets_job(self.tenant_id))
+        self.assertEqual(
+            BackgroundJob.objects.filter(
+                job_type=JobType.PROCESS_DUMPED_TICKETS,
+                tenant_id=self.tenant_id,
+            ).count(),
+            1,
+        )
+
+    def test_enqueue_skips_when_job_is_retrying(self):
+        enqueue_process_dumped_tickets_job(self.tenant_id)
+        job = BackgroundJob.objects.get(
+            job_type=JobType.PROCESS_DUMPED_TICKETS,
+            tenant_id=self.tenant_id,
+        )
+        job.status = JobStatus.RETRYING
+        job.save(update_fields=["status"])
+
+        self.assertIsNone(enqueue_process_dumped_tickets_job(self.tenant_id))
+
+
+class ProcessDumpedTicketsEnqueueRaceTest(TransactionTestCase):
+    """
+    TransactionTestCase is required so concurrent threads each commit
+    independently (advisory locks are transaction-scoped).
+    """
+
+    def setUp(self):
+        self.tenant = TenantFactory()
+        self.tenant_id = str(self.tenant.id)
+        BackgroundJob.objects.all().delete()
+
+    def test_concurrent_enqueue_creates_only_one_job(self):
+        worker_count = 8
+        results: list = []
+        errors: list = []
+        barrier = threading.Barrier(worker_count)
+
+        def worker():
+            close_old_connections()
+            try:
+                barrier.wait(timeout=5)
+                job = enqueue_process_dumped_tickets_job(self.tenant_id)
+                results.append(job.id if job else None)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        threads = [threading.Thread(target=worker) for _ in range(worker_count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        created_ids = [job_id for job_id in results if job_id is not None]
+        self.assertEqual(len(created_ids), 1)
+        self.assertEqual(sum(1 for job_id in results if job_id is None), worker_count - 1)
+        self.assertEqual(
+            BackgroundJob.objects.filter(
+                job_type=JobType.PROCESS_DUMPED_TICKETS,
+                tenant_id=self.tenant_id,
+            ).count(),
+            1,
+        )
+
+    def test_concurrent_scheduler_tick_creates_only_one_job(self):
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            user_id="race_user",
+        )
+        worker_count = 4
+        results: list = []
+        errors: list = []
+        barrier = threading.Barrier(worker_count)
+
+        def worker():
+            close_old_connections()
+            try:
+                barrier.wait(timeout=5)
+                result = enqueue_process_dumped_tickets_for_pending_dumps()
+                results.append(result)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        threads = [threading.Thread(target=worker) for _ in range(worker_count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            BackgroundJob.objects.filter(
+                job_type=JobType.PROCESS_DUMPED_TICKETS,
+                tenant_id=self.tenant_id,
+            ).count(),
+            1,
+        )
+        enqueued_counts = [len(r.get("enqueued") or []) for r in results]
+        self.assertEqual(sum(enqueued_counts), 1)
+        skipped_counts = [len(r.get("skipped_active_job") or []) for r in results]
+        self.assertEqual(sum(skipped_counts), worker_count - 1)
 
 
 class ProcessDumpedTicketsJobHandlerTest(BaseAPITestCase):
