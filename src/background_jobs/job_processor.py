@@ -9,7 +9,7 @@ import time
 import threading
 from datetime import datetime
 from datetime import timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Sequence
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
@@ -58,14 +58,24 @@ DISPATCH_SYNC_ENQUEUE_MINUTE = 5
 class JobProcessor:
     """Processes jobs from the BackgroundJob queue"""
     
-    def __init__(self, worker_id: str = "default"):
+    def __init__(
+        self,
+        worker_id: str = "default",
+        *,
+        job_types: Optional[Sequence[str]] = None,
+        exclude_job_types: Optional[Sequence[str]] = None,
+    ):
         """
         Initialize the job processor.
         
         Args:
             worker_id: Unique identifier for this worker instance
+            job_types: When set, only lock jobs of these types (dedicated worker).
+            exclude_job_types: When set, skip these job types (general worker pool).
         """
         self.worker_id = worker_id
+        self._job_types = tuple(job_types) if job_types else None
+        self._exclude_job_types = tuple(exclude_job_types) if exclude_job_types else None
         self._stop_event = threading.Event()
         self._handler_registry = get_handler_registry()
         # Last time we enqueued lead cron jobs (unassign snoozed, release after 12h)
@@ -173,7 +183,12 @@ class JobProcessor:
         
         if tenant_id:
             query &= Q(tenant_id=tenant_id)
-        
+
+        if self._job_types:
+            query &= Q(job_type__in=self._job_types)
+        if self._exclude_job_types:
+            query &= ~Q(job_type__in=self._exclude_job_types)
+
         # Use select_for_update to lock the row
         try:
             with transaction.atomic():

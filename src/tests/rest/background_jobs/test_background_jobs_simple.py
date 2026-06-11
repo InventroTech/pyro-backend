@@ -370,6 +370,7 @@ class SimpleBackgroundJobsTest(TestCase):
         mock_settings.BACKGROUND_JOB_WORKER_THREADS = 4
         mock_settings.BACKGROUND_JOB_POLL_INTERVAL = 0.25
         mock_settings.BACKGROUND_JOB_BATCH_SIZE = 25
+        mock_settings.BACKGROUND_JOB_EXCLUDE_JOB_TYPES = ""
 
         threads = start_background_job_worker_threads(process_label="test-proc")
 
@@ -377,3 +378,31 @@ class SimpleBackgroundJobsTest(TestCase):
         self.assertEqual(mock_processor_cls.call_count, 4)
         self.assertTrue(mock_thread_cls.call_args_list[0].kwargs["kwargs"]["run_schedulers"])
         self.assertFalse(mock_thread_cls.call_args_list[3].kwargs["kwargs"]["run_schedulers"])
+
+    @patch("background_jobs.worker_bootstrap.settings")
+    @patch("background_jobs.worker_bootstrap.threading.Thread")
+    @patch("background_jobs.worker_bootstrap.JobProcessor")
+    def test_start_mixpanel_workers_only_process_mixpanel_job_types(
+        self, mock_processor_cls, mock_thread_cls, mock_settings
+    ):
+        from background_jobs.worker_bootstrap import start_background_job_worker_threads
+        from background_jobs.worker_types import MIXPANEL_JOB_TYPES
+
+        mock_settings.MIXPANEL_JOB_WORKER_THREADS = 2
+        mock_settings.MIXPANEL_JOB_POLL_INTERVAL = 0.1
+        mock_settings.MIXPANEL_JOB_BATCH_SIZE = 40
+
+        threads = start_background_job_worker_threads(
+            process_label="mixpanel",
+            run_schedulers=False,
+            job_types=MIXPANEL_JOB_TYPES,
+            settings_prefix="MIXPANEL_JOB",
+        )
+
+        self.assertEqual(len(threads), 2)
+        mock_processor_cls.assert_called_with(
+            worker_id="mixpanel-t0",
+            job_types=MIXPANEL_JOB_TYPES,
+            exclude_job_types=None,
+        )
+        self.assertFalse(mock_thread_cls.call_args_list[0].kwargs["kwargs"]["run_schedulers"])

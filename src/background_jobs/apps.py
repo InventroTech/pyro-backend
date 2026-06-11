@@ -19,7 +19,18 @@ class BackgroundJobsConfig(AppConfig):
         The actual worker threads are started in gunicorn_config.py post_fork hook.
         """
         # Skip if running migrations or other management commands
-        if len(sys.argv) > 1 and any(cmd in sys.argv for cmd in ['migrate', 'makemigrations', 'collectstatic', 'shell', 'test']):
+        if len(sys.argv) > 1 and any(
+            cmd in sys.argv
+            for cmd in [
+                'migrate',
+                'makemigrations',
+                'collectstatic',
+                'shell',
+                'test',
+                'run_background_workers',
+                'run_mixpanel_workers',
+            ]
+        ):
             return
         
         # If we're running under Gunicorn with --preload, skip here

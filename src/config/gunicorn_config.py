@@ -6,13 +6,19 @@ not in the master process (important when using --preload flag).
 """
 
 import logging
+import os
 import sys
 
 logger = logging.getLogger("background_jobs")
 
+workers = int(os.environ.get("WEB_CONCURRENCY", "2"))
+bind = os.environ.get("GUNICORN_BIND", "0.0.0.0:8000")
+timeout = int(os.environ.get("GUNICORN_TIMEOUT", "30"))
+keepalive = int(os.environ.get("GUNICORN_KEEPALIVE", "2"))
+
 
 def post_fork(server, worker):
-    """Start background job processor threads after Gunicorn forks a worker."""
+    """Start general background job threads (Mixpanel runs on Render Background Worker)."""
     try:
         from background_jobs.worker_bootstrap import start_background_job_worker_threads
 
