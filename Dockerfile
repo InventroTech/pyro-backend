@@ -13,11 +13,13 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 # Copy app code ./src code to container's /app
 COPY ./src /app
 
-# Collect static files
-RUN python manage.py collectstatic --noinput
-
-# Set environment variables
 ENV DJANGO_SETTINGS_MODULE=config.settings
+
+# Placeholders only for image build; Render injects real secrets at runtime.
+RUN DJANGO_SECRET_KEY=collectstatic-build-placeholder \
+    SUPABASE_JWT_SECRET=collectstatic-build-placeholder \
+    DB_NAME=build DB_USER=build DB_PASSWORD=build DB_HOST=localhost DB_PORT=5432 \
+    python manage.py collectstatic --noinput
 
 # gunicorn_config post_fork starts general + optional Mixpanel background job threads
 CMD ["gunicorn", "config.wsgi:application", "-c", "config/gunicorn_config.py", "--bind", "0.0.0.0:8000"]
