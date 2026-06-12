@@ -798,6 +798,7 @@ class JobProcessor:
 
                 if self._run_schedulers:
                     self._maybe_enqueue_process_dumped_tickets()
+                    self._maybe_enqueue_entity_type_discovery()
                     self._maybe_enqueue_lead_cron_jobs()
                     self._maybe_enqueue_snoozed_to_not_connected_midnight()
                     self._maybe_enqueue_dispatch_sync()
