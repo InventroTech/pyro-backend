@@ -1,7 +1,9 @@
+import threading
 from unittest.mock import patch
 
-from django.db import IntegrityError
+from django.db import IntegrityError, close_old_connections
 from django.db.models import Max
+from django.test import TransactionTestCase
 from django.urls import reverse
 from rest_framework import status
 
@@ -18,7 +20,10 @@ from support_ticket.views import (
 from support_ticket.models import SupportTicket, SupportTicketDump
 from tests.base.test_setup import BaseAPITestCase
 from tests.factories import TenantFactory
-from tests.factories.support_ticket_dump_factory import SupportTicketDumpFactory
+from tests.factories.support_ticket_dump_factory import (
+    SupportTicketDumpFactory,
+    dump_data,
+)
 from tests.factories.support_ticket_factory import (
     SnoozedSupportTicketFactory,
     UnassignedSupportTicketFactory,
@@ -35,24 +40,34 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
     def test_dedupe_latest_wins(self):
         first = SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
-            user_id="user_a",
-            name="First",
+            data=dump_data(user_id="user_a", name="First"),
         )
         second = SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
-            user_id="user_a",
-            name="Second",
+            data=dump_data(user_id="user_a", name="Second"),
         )
         result = _dedupe_dumps_latest_wins([first, second])
         self.assertEqual(len(result), 1)
-        self.assertEqual(result[0].name, "Second")
+        self.assertEqual(result[0].data.get("name"), "Second")
+
+    def test_dedupe_collapses_int_and_str_user_id(self):
+        first = SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            data=dump_data(user_id=2974459, name="Numeric id"),
+        )
+        second = SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            data=dump_data(user_id="2974459", name="String id"),
+        )
+        result = _dedupe_dumps_latest_wins([first, second])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].data.get("name"), "String id")
 
     @patch.object(SupportTicket.objects, "bulk_create", wraps=SupportTicket.objects.bulk_create)
     def test_bulk_create_ignores_conflicts(self, mock_bulk_create):
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
-            user_id="cust_conflict",
-            name="Conflict Test",
+            data=dump_data(user_id="cust_conflict", name="Conflict Test"),
         )
 
         process_dumped_tickets(tenant_id=self.tenant_id)
@@ -67,8 +82,7 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         max_before = SupportTicket.all_objects.aggregate(m=Max("id"))["m"] or 0
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
-            user_id="cust_id_alloc",
-            name="Id Alloc",
+            data=dump_data(user_id="cust_id_alloc", name="Id Alloc"),
         )
 
         process_dumped_tickets(tenant_id=self.tenant_id)
@@ -76,12 +90,30 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         ticket = SupportTicket.objects.get(user_id="cust_id_alloc")
         self.assertEqual(ticket.id, max_before + 1)
 
+    def test_process_maps_dump_fields_to_ticket_and_record(self):
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            data=dump_data(
+                user_id="cust_extra",
+                name="Extra Fields",
+                rm_name="RM One",
+                custom_segment="vip_trial",
+            ),
+        )
+
+        process_dumped_tickets(tenant_id=self.tenant_id)
+
+        ticket = SupportTicket.objects.get(user_id="cust_extra")
+        self.assertEqual(ticket.rm_name, "RM One")
+
+        record = Record.objects.get(entity_type=SUPPORT_TICKET_ENTITY_TYPE, tenant=self.tenant)
+        self.assertEqual(record.data["rm_name"], "RM One")
+        self.assertEqual(record.data["custom_segment"], "vip_trial")
+
     def test_process_inserts_support_ticket_and_mirrors_records(self):
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
-            user_id="cust_1",
-            name="Mirror Me",
-            poster="in_trial",
+            data=dump_data(user_id="cust_1", name="Mirror Me", poster="in_trial"),
         )
 
         result = process_dumped_tickets(tenant_id=self.tenant_id)
@@ -103,13 +135,11 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
     def test_process_counts_dumps_without_user_id_as_skipped(self):
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
-            user_id=None,
-            name="No user",
+            data={"name": "No user"},
         )
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
-            user_id="valid_user",
-            name="Valid",
+            data=dump_data(user_id="valid_user", name="Valid"),
         )
 
         result = process_dumped_tickets(tenant_id=self.tenant_id)
@@ -122,13 +152,11 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         other_tenant = TenantFactory()
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
-            user_id="tenant_a",
-            name="Mine",
+            data=dump_data(user_id="tenant_a", name="Mine"),
         )
         SupportTicketDumpFactory.create(
             tenant_id=other_tenant.id,
-            user_id="tenant_b",
-            name="Other",
+            data=dump_data(user_id="tenant_b", name="Other"),
         )
 
         result = process_dumped_tickets(tenant_id=self.tenant_id)
@@ -150,8 +178,7 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         )
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
-            user_id="cust_rollback",
-            name="Replacement",
+            data=dump_data(user_id="cust_rollback", name="Replacement"),
         )
 
         with patch.object(
@@ -172,7 +199,7 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         self.assertTrue(
             SupportTicketDump.objects.filter(
                 tenant_id=self.tenant_id,
-                user_id="cust_rollback",
+                data__user_id="cust_rollback",
                 is_processed=False,
             ).exists()
         )
@@ -190,13 +217,11 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         )
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
-            user_id="cust_2",
-            name="Replacement",
+            data=dump_data(user_id="cust_2", name="Replacement"),
         )
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
-            user_id="cust_3",
-            name="Should not replace snoozed",
+            data=dump_data(user_id="cust_3", name="Should not replace snoozed"),
         )
 
         process_dumped_tickets(tenant_id=self.tenant_id)
@@ -210,7 +235,7 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
     def test_enqueue_for_pending_dumps_only_when_unprocessed_exist(self):
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
-            user_id="pending_user",
+            data=dump_data(user_id="pending_user"),
         )
         result = enqueue_process_dumped_tickets_for_pending_dumps()
         self.assertEqual(len(result["enqueued"]), 1)
@@ -233,6 +258,122 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
             1,
         )
 
+    def test_enqueue_skips_when_job_is_processing(self):
+        enqueue_process_dumped_tickets_job(self.tenant_id)
+        job = BackgroundJob.objects.get(
+            job_type=JobType.PROCESS_DUMPED_TICKETS,
+            tenant_id=self.tenant_id,
+        )
+        job.status = JobStatus.PROCESSING
+        job.save(update_fields=["status"])
+
+        self.assertIsNone(enqueue_process_dumped_tickets_job(self.tenant_id))
+        self.assertEqual(
+            BackgroundJob.objects.filter(
+                job_type=JobType.PROCESS_DUMPED_TICKETS,
+                tenant_id=self.tenant_id,
+            ).count(),
+            1,
+        )
+
+    def test_enqueue_skips_when_job_is_retrying(self):
+        enqueue_process_dumped_tickets_job(self.tenant_id)
+        job = BackgroundJob.objects.get(
+            job_type=JobType.PROCESS_DUMPED_TICKETS,
+            tenant_id=self.tenant_id,
+        )
+        job.status = JobStatus.RETRYING
+        job.save(update_fields=["status"])
+
+        self.assertIsNone(enqueue_process_dumped_tickets_job(self.tenant_id))
+
+
+class ProcessDumpedTicketsEnqueueRaceTest(TransactionTestCase):
+    """
+    TransactionTestCase is required so concurrent threads each commit
+    independently (advisory locks are transaction-scoped).
+    """
+
+    def setUp(self):
+        self.tenant = TenantFactory()
+        self.tenant_id = str(self.tenant.id)
+        BackgroundJob.objects.all().delete()
+
+    def test_concurrent_enqueue_creates_only_one_job(self):
+        worker_count = 8
+        results: list = []
+        errors: list = []
+        barrier = threading.Barrier(worker_count)
+
+        def worker():
+            close_old_connections()
+            try:
+                barrier.wait(timeout=5)
+                job = enqueue_process_dumped_tickets_job(self.tenant_id)
+                results.append(job.id if job else None)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        threads = [threading.Thread(target=worker) for _ in range(worker_count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        created_ids = [job_id for job_id in results if job_id is not None]
+        self.assertEqual(len(created_ids), 1)
+        self.assertEqual(sum(1 for job_id in results if job_id is None), worker_count - 1)
+        self.assertEqual(
+            BackgroundJob.objects.filter(
+                job_type=JobType.PROCESS_DUMPED_TICKETS,
+                tenant_id=self.tenant_id,
+            ).count(),
+            1,
+        )
+
+    def test_concurrent_scheduler_tick_creates_only_one_job(self):
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            user_id="race_user",
+        )
+        worker_count = 4
+        results: list = []
+        errors: list = []
+        barrier = threading.Barrier(worker_count)
+
+        def worker():
+            close_old_connections()
+            try:
+                barrier.wait(timeout=5)
+                result = enqueue_process_dumped_tickets_for_pending_dumps()
+                results.append(result)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        threads = [threading.Thread(target=worker) for _ in range(worker_count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            BackgroundJob.objects.filter(
+                job_type=JobType.PROCESS_DUMPED_TICKETS,
+                tenant_id=self.tenant_id,
+            ).count(),
+            1,
+        )
+        enqueued_counts = [len(r.get("enqueued") or []) for r in results]
+        self.assertEqual(sum(enqueued_counts), 1)
+        skipped_counts = [len(r.get("skipped_active_job") or []) for r in results]
+        self.assertEqual(sum(skipped_counts), worker_count - 1)
+
 
 class ProcessDumpedTicketsJobHandlerTest(BaseAPITestCase):
     def setUp(self):
@@ -244,8 +385,7 @@ class ProcessDumpedTicketsJobHandlerTest(BaseAPITestCase):
     def test_job_handler_processes_tenant_dumps(self, mock_mixpanel):
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
-            user_id="job_user",
-            name="From job",
+            data=dump_data(user_id="job_user", name="From job"),
         )
         job = BackgroundJob.objects.create(
             job_type=JobType.PROCESS_DUMPED_TICKETS,

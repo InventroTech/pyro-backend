@@ -2,6 +2,7 @@ from typing import Optional
 
 from rest_framework import serializers
 from object_history.models import ObjectHistory
+from core.models import TenantEntityType
 from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule
 from .assignee_display import build_assigned_to_display_map, _is_empty_assigned
 
@@ -106,6 +107,16 @@ class RecordSerializer(serializers.ModelSerializer):
             one = build_assigned_to_display_map(tenant, [key])
             return one.get(key, key)
         return key
+
+
+class TenantEntityTypeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TenantEntityType
+        fields = [
+            "entity_type",
+            "schema_json",
+            "fields_count",
+        ]
 
 
 class EventLogSerializer(serializers.ModelSerializer):

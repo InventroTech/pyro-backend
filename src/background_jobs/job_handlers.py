@@ -30,7 +30,6 @@ from crm_records.lead_assignment_tracking import merge_first_assignment_today_an
 from crm_records.models import Record, PartnerEvent
 from crm_records.scoring import get_scoring_rules, score_chunk_sql
 from crm_records.services import PrajaService
-from support_ticket.models import SupportTicket
 from support_ticket.services import MixpanelService, RMAssignedMixpanelService
 
 from .models import BackgroundJob, JobType
@@ -763,16 +762,32 @@ class PrajaJobHandler(JobHandler):
                     logger.error(f"Praja job {job.id} failed: {error_msg}")
                     raise Exception(error_msg)
             elif object_type == "ticket":
-                # For tickets, we need to reconstruct the ticket object
-                try:
-                    ticket = SupportTicket.objects.get(id=object_id)
-                    print(f"📋 [PRAJA JOB] Found ticket {object_id}, sending to Praja server...")
-                    success = praja_service.send_ticket_to_praja(ticket)
-                except SupportTicket.DoesNotExist:
-                    error_msg = f"SupportTicket {object_id} not found"
+                from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
+                from support_ticket.events import resolve_support_ticket_record
+
+                record = Record.objects.filter(
+                    id=object_id,
+                    entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                ).first()
+                if record is None and job.tenant_id:
+                    from core.models import Tenant
+
+                    tenant = Tenant.objects.filter(id=job.tenant_id).first()
+                    if tenant is not None:
+                        record = resolve_support_ticket_record(
+                            tenant=tenant,
+                            ticket_id=object_id,
+                        )
+                if record is None:
+                    error_msg = f"Support ticket record {object_id} not found"
                     print(f"❌ [PRAJA JOB] {error_msg}")
                     logger.error(f"Praja job {job.id} failed: {error_msg}")
                     raise Exception(error_msg)
+                print(
+                    f"📋 [PRAJA JOB] Found support ticket record {record.id}, "
+                    "sending to Praja server..."
+                )
+                success = praja_service.send_record_to_praja(record)
             else:
                 error_msg = f"Invalid object_type: {object_type}. Must be 'record' or 'ticket'"
                 print(f"❌ [PRAJA JOB] {error_msg}")
@@ -1432,6 +1447,58 @@ class ReleaseLeadsAfter12hJobHandler(JobHandler):
         delays = [60, 300, 900]
         return delays[min(attempt - 1, len(delays) - 1)]
 
+
+class DiscoverEntityTypesJobHandler(JobHandler):
+    """
+    Incrementally discover tenant entity types and data fields from records.
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        from crm_records.entity_type_discovery import discover_entity_types_from_records
+
+        payload = job.payload or {}
+        batch_size = int(payload.get("batch_size") or 1000)
+        max_runtime_seconds = payload.get("max_runtime_seconds")
+        if max_runtime_seconds is not None:
+            max_runtime_seconds = int(max_runtime_seconds)
+
+        result = discover_entity_types_from_records(
+            batch_size=batch_size,
+            max_runtime_seconds=max_runtime_seconds,
+        )
+        job.result = {
+            "success": True,
+            "processed": result.processed,
+            "entity_types_touched": result.entity_types_touched,
+            "schemas_updated": result.schemas_updated,
+            "last_processed_record_id": result.last_processed_record_id,
+            "last_processed_updated_at": result.last_processed_updated_at,
+            "has_more": result.has_more,
+            "timestamp": timezone.now().isoformat(),
+        }
+        logger.info(
+            "[DiscoverEntityTypes] processed=%s touched=%s updated=%s has_more=%s",
+            result.processed,
+            result.entity_types_touched,
+            result.schemas_updated,
+            result.has_more,
+        )
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+    def validate_payload(self, payload: Dict[str, Any]) -> bool:
+        for key in ("batch_size", "max_runtime_seconds"):
+            if key in payload:
+                try:
+                    if int(payload[key]) <= 0:
+                        return False
+                except (TypeError, ValueError):
+                    return False
+        return True
+
 class JobHandlerRegistry:
     """
     Registry for job handlers.
@@ -1471,6 +1538,10 @@ class JobHandlerRegistry:
         self.register_handler(
             JobType.PROCESS_DUMPED_TICKETS,
             ProcessDumpedTicketsJobHandler(),
+        )
+        self.register_handler(
+            JobType.DISCOVER_ENTITY_TYPES,
+            DiscoverEntityTypesJobHandler(),
         )
         # Praja handler removed - now using MixpanelService instead
         # self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())

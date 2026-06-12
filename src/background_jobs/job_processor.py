@@ -40,6 +40,9 @@ LEAD_CRON_ENQUEUE_INTERVAL = 900  # 15 minutes
 # Support ticket dump processing (replaces Supabase process-dumped-tickets cron)
 SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL = 300  # 5 minutes
 
+# Entity type discovery from records.
+ENTITY_TYPE_DISCOVERY_ENQUEUE_INTERVAL = 300  # 5 minutes
+
 # How often the worker enqueues log retention (object_history, event_logs, rule_exec_logs)
 LOG_RETENTION_ENQUEUE_INTERVAL = 86400  # 24 hours
 
@@ -460,6 +463,42 @@ class JobProcessor:
         except Exception as e:
             logger.warning(
                 f"[Worker {self.worker_id}] Failed to enqueue process_dumped_tickets: {e}",
+                exc_info=True,
+            )
+
+    def _maybe_enqueue_entity_type_discovery(self):
+        """
+        Periodically enqueue one global entity type discovery job.
+        """
+        now = timezone.now()
+        if self._last_entity_type_discovery_enqueue_at is not None:
+            elapsed = (now - self._last_entity_type_discovery_enqueue_at).total_seconds()
+            if elapsed < ENTITY_TYPE_DISCOVERY_ENQUEUE_INTERVAL:
+                return
+        self._last_entity_type_discovery_enqueue_at = now
+
+        try:
+            active_exists = BackgroundJob.objects.filter(
+                job_type=JobType.DISCOVER_ENTITY_TYPES,
+                status__in=[JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.RETRYING],
+            ).exists()
+            if active_exists:
+                logger.debug(
+                    f"[Worker {self.worker_id}] Entity type discovery job already active"
+                )
+                return
+
+            queue = get_queue_service()
+            queue.enqueue_job(
+                job_type=JobType.DISCOVER_ENTITY_TYPES,
+                payload={"batch_size": 1000},
+                priority=-1,
+                max_attempts=3,
+            )
+            logger.debug(f"[Worker {self.worker_id}] Enqueued entity type discovery")
+        except Exception as e:
+            logger.warning(
+                f"[Worker {self.worker_id}] Failed to enqueue entity type discovery: {e}",
                 exc_info=True,
             )
 
