@@ -42,6 +42,18 @@ SUPPORT_TICKET_ENTITY_TYPE = "support_ticket"
 DUMP_BATCH_LIMIT = 5000
 # Legacy support_ticket.id has no DB sequence; ids must be allocated before bulk_create.
 _SUPPORT_TICKET_ID_ALLOC_LOCK = 874215903
+# Per-tenant advisory lock so only one process_dumped_tickets job is enqueued at a time.
+_PROCESS_DUMPED_TICKETS_LOCK_BASE = 874216000
+_INCOMPLETE_DUMP_JOB_STATUSES = (
+    JobStatus.PENDING,
+    JobStatus.PROCESSING,
+    JobStatus.RETRYING,
+)
+
+
+def _process_dumped_tickets_lock_key(tenant_id: Union[str, UUID]) -> int:
+    uid = UUID(str(tenant_id))
+    return _PROCESS_DUMPED_TICKETS_LOCK_BASE + (uid.int % 1_000_000)
 
 
 def _enqueue_mixpanel_event(
@@ -199,20 +211,27 @@ def enqueue_ticket_created_mixpanel(ticket: SupportTicket) -> None:
     )
 
 
+@transaction.atomic
 def enqueue_process_dumped_tickets_job(
     tenant_id: Union[str, UUID],
     *,
     priority: int = 0,
 ) -> Optional[BackgroundJob]:
     tid = str(tenant_id)
-    active = BackgroundJob.objects.filter(
+    if connection.vendor == "postgresql":
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                [_process_dumped_tickets_lock_key(tid)],
+            )
+
+    if BackgroundJob.objects.filter(
         job_type=JobType.PROCESS_DUMPED_TICKETS,
         tenant_id=tid,
-        status__in=[JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.RETRYING],
-    ).exists()
-    if active:
+        status__in=_INCOMPLETE_DUMP_JOB_STATUSES,
+    ).exists():
         logger.info(
-            "enqueue_process_dumped_tickets_job: active job already exists for tenant=%s",
+            "enqueue_process_dumped_tickets_job: skipped — incomplete job exists for tenant=%s",
             tid,
         )
         return None

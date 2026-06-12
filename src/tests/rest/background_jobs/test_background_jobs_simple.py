@@ -339,14 +339,17 @@ class SimpleBackgroundJobsTest(TestCase):
         self.assertEqual(count, 2)
         mock_objects.filter.assert_called_once()
 
+    @patch("background_jobs.job_processor.scheduler_lock")
     @patch(
         "support_ticket.views.enqueue_process_dumped_tickets_for_pending_dumps",
         side_effect=RuntimeError("enqueue failed"),
     )
     def test_maybe_enqueue_process_dumped_tickets_throttles_after_error(
-        self, mock_enqueue
+        self, mock_enqueue, mock_scheduler_lock
     ):
         """Failed enqueue ticks still advance the 5-minute throttle."""
+        mock_scheduler_lock.return_value.__enter__.return_value = True
+        mock_scheduler_lock.return_value.__exit__.return_value = False
         processor = JobProcessor(worker_id="test-throttle")
         processor._maybe_enqueue_process_dumped_tickets()
         self.assertIsNotNone(processor._last_support_ticket_dump_enqueue_at)
@@ -355,3 +358,56 @@ class SimpleBackgroundJobsTest(TestCase):
         mock_enqueue.reset_mock()
         processor._maybe_enqueue_process_dumped_tickets()
         mock_enqueue.assert_not_called()
+
+    @patch("background_jobs.worker_bootstrap.settings")
+    @patch("background_jobs.worker_bootstrap.threading.Thread")
+    @patch("background_jobs.worker_bootstrap.JobProcessor")
+    def test_start_background_job_worker_threads_spawns_configured_count(
+        self, mock_processor_cls, mock_thread_cls, mock_settings
+    ):
+        from background_jobs.worker_bootstrap import start_background_job_worker_threads
+
+        mock_settings.BACKGROUND_JOB_WORKER_THREADS = 4
+        mock_settings.BACKGROUND_JOB_POLL_INTERVAL = 0.25
+        mock_settings.BACKGROUND_JOB_BATCH_SIZE = 25
+        mock_settings.BACKGROUND_JOB_EXCLUDE_JOB_TYPES = ""
+
+        threads = start_background_job_worker_threads(process_label="test-proc")
+
+        self.assertEqual(len(threads), 4)
+        self.assertEqual(mock_processor_cls.call_count, 4)
+        self.assertTrue(mock_thread_cls.call_args_list[0].kwargs["kwargs"]["run_schedulers"])
+        self.assertFalse(mock_thread_cls.call_args_list[3].kwargs["kwargs"]["run_schedulers"])
+
+    @patch("background_jobs.worker_bootstrap.settings")
+    @patch("background_jobs.worker_bootstrap.threading.Thread")
+    @patch("background_jobs.worker_bootstrap.JobProcessor")
+    def test_start_mixpanel_workers_only_process_mixpanel_job_types(
+        self, mock_processor_cls, mock_thread_cls, mock_settings
+    ):
+        from background_jobs.worker_bootstrap import start_background_job_worker_threads
+        from background_jobs.worker_types import MIXPANEL_JOB_TYPES
+
+        mock_settings.MIXPANEL_JOB_WORKER_THREADS = 2
+        mock_settings.MIXPANEL_JOB_POLL_INTERVAL = 0.1
+        mock_settings.MIXPANEL_JOB_BATCH_SIZE = 40
+
+        threads = start_background_job_worker_threads(
+            process_label="mixpanel",
+            run_schedulers=False,
+            job_types=MIXPANEL_JOB_TYPES,
+            settings_prefix="MIXPANEL_JOB",
+        )
+
+        self.assertEqual(len(threads), 2)
+        mock_processor_cls.assert_any_call(
+            worker_id="mixpanel-t0",
+            job_types=MIXPANEL_JOB_TYPES,
+            exclude_job_types=None,
+        )
+        mock_processor_cls.assert_any_call(
+            worker_id="mixpanel-t1",
+            job_types=MIXPANEL_JOB_TYPES,
+            exclude_job_types=None,
+        )
+        self.assertFalse(mock_thread_cls.call_args_list[0].kwargs["kwargs"]["run_schedulers"])
