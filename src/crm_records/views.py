@@ -6,7 +6,7 @@ from rest_framework.exceptions import ValidationError, NotFound
 from rest_framework.permissions import AllowAny
 from authz.permissions import IsTenantAuthenticated
 from core.pagination import MetaPageNumberPagination, RecordListPagination
-from core.models import Tenant
+from core.models import Tenant, TenantEntityType
 from django.utils import timezone
 from datetime import datetime, time, timedelta, timezone as std_utc
 try:
@@ -31,6 +31,7 @@ from .serializers import (
     RuleSetSerializer,
     RuleExecutionLogSerializer,
     EntityTypeSchemaSerializer,
+    TenantEntityTypeSerializer,
     LeadScoringRequestSerializer,
     CallAttemptMatrixSerializer,
     ScoringRuleModelSerializer,
@@ -4140,6 +4141,21 @@ class EntityTypeSchemaListCreateView(TenantScopedMixin, generics.ListCreateAPIVi
     def perform_create(self, serializer):
         """Set tenant automatically on create."""
         serializer.save(tenant=self.request.tenant)
+
+
+class TenantEntityTypeListView(TenantScopedMixin, generics.ListAPIView):
+    """
+    List discovered entity types and field schemas for the current tenant.
+
+    GET /crm-records/entity-types/
+    """
+    queryset = TenantEntityType.objects.all()
+    permission_classes = [IsTenantAuthenticated]
+    serializer_class = TenantEntityTypeSerializer
+    pagination_class = MetaPageNumberPagination
+
+    def get_queryset(self):
+        return super().get_queryset().order_by("entity_type")
 
 
 class EntityTypeSchemaDetailView(TenantScopedMixin, generics.RetrieveUpdateDestroyAPIView):

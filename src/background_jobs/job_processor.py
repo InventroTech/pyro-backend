@@ -18,6 +18,7 @@ from django.utils import timezone
 from django.db import transaction, close_old_connections, connections
 from django.db.models import Q, F
 from django.db.utils import InterfaceError, OperationalError
+from core.models import EntityTypeDiscoverySyncState
 
 from .models import BackgroundJob, JobStatus, JobType
 from .queue_service import get_queue_service
@@ -39,6 +40,11 @@ LEAD_CRON_ENQUEUE_INTERVAL = 900  # 15 minutes
 
 # Support ticket dump processing (replaces Supabase process-dumped-tickets cron)
 SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL = 300  # 5 minutes
+
+# Entity type discovery from records.
+ENTITY_TYPE_DISCOVERY_ENQUEUE_INTERVAL = 300  # 5 minutes
+ENTITY_TYPE_DISCOVERY_LOCAL_CHECK_INTERVAL = 30  # avoid checking DB on every loop tick
+ENTITY_TYPE_DISCOVERY_SCHEDULER_JOB_NAME = "entity_type_discovery_scheduler"
 
 # How often the worker enqueues log retention (object_history, event_logs, rule_exec_logs)
 LOG_RETENTION_ENQUEUE_INTERVAL = 86400  # 24 hours
@@ -89,6 +95,8 @@ class JobProcessor:
         self._last_dispatch_sync_enqueue_bucket = None
         # Last time we enqueued process_dumped_tickets for pending dump rows
         self._last_support_ticket_dump_enqueue_at = None
+        # Last time we checked whether entity type discovery should be enqueued
+        self._last_entity_type_discovery_enqueue_at = None
         self._run_schedulers = True
         # Circuit breaker state for connection errors
         self._connection_error_count = 0
@@ -463,6 +471,71 @@ class JobProcessor:
                 exc_info=True,
             )
 
+    def _maybe_enqueue_entity_type_discovery(self):
+        """
+        Periodically enqueue one global entity type discovery job.
+        """
+        now = timezone.now()
+        if self._last_entity_type_discovery_enqueue_at is not None:
+            elapsed = (now - self._last_entity_type_discovery_enqueue_at).total_seconds()
+            if elapsed < ENTITY_TYPE_DISCOVERY_LOCAL_CHECK_INTERVAL:
+                return
+        self._last_entity_type_discovery_enqueue_at = now
+
+        try:
+            with transaction.atomic():
+                scheduler_state, _created = (
+                    EntityTypeDiscoverySyncState.objects.select_for_update().get_or_create(
+                        job_name=ENTITY_TYPE_DISCOVERY_SCHEDULER_JOB_NAME,
+                        defaults={
+                            "last_processed_updated_at": None,
+                            "last_processed_record_id": 0,
+                        },
+                    )
+                )
+
+                if scheduler_state.last_success_at is not None:
+                    elapsed = (now - scheduler_state.last_success_at).total_seconds()
+                    if elapsed < ENTITY_TYPE_DISCOVERY_ENQUEUE_INTERVAL:
+                        logger.info(
+                            "[Worker %s] Entity type discovery scheduler throttled "
+                            "(elapsed=%.1fs)",
+                            self.worker_id,
+                            elapsed,
+                        )
+                        return
+
+                active_exists = BackgroundJob.objects.filter(
+                    job_type=JobType.DISCOVER_ENTITY_TYPES,
+                    status__in=[JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.RETRYING],
+                ).exists()
+                if active_exists:
+                    logger.debug(
+                        f"[Worker {self.worker_id}] Entity type discovery job already active"
+                    )
+                    return
+
+                queue = get_queue_service()
+                queue.enqueue_job(
+                    job_type=JobType.DISCOVER_ENTITY_TYPES,
+                    payload={"batch_size": 1000},
+                    priority=-1,
+                    max_attempts=3,
+                )
+                scheduler_state.last_success_at = now
+                scheduler_state.last_error = None
+                scheduler_state.save(update_fields=["last_success_at", "last_error", "updated_at"])
+            logger.info(f"[Worker {self.worker_id}] Enqueued entity type discovery")
+        except Exception as e:
+            EntityTypeDiscoverySyncState.objects.update_or_create(
+                job_name=ENTITY_TYPE_DISCOVERY_SCHEDULER_JOB_NAME,
+                defaults={"last_error": str(e)[:1000]},
+            )
+            logger.warning(
+                f"[Worker {self.worker_id}] Failed to enqueue entity type discovery: {e}",
+                exc_info=True,
+            )
+
     def _maybe_enqueue_lead_cron_jobs(self):
         """
         Every LEAD_CRON_ENQUEUE_INTERVAL seconds, enqueue unassign_snoozed_leads,
@@ -723,12 +796,18 @@ class JobProcessor:
                     self.cleanup_stale_locks()
                     iteration_count = 0
 
-                if self._run_schedulers:
-                    self._maybe_enqueue_process_dumped_tickets()
-                    self._maybe_enqueue_lead_cron_jobs()
-                    self._maybe_enqueue_snoozed_to_not_connected_midnight()
-                    self._maybe_enqueue_dispatch_sync()
-                    self._maybe_enqueue_log_retention()
+                # Every 5 min: process support_ticket_dump → support_ticket + records
+                self._maybe_enqueue_process_dumped_tickets()
+                # Every 5 min: discover tenant entity types and fields from changed records
+                self._maybe_enqueue_entity_type_discovery()
+                # Periodically enqueue lead cron jobs (unassign snoozed, release after 12h) so no external cron is needed
+                self._maybe_enqueue_lead_cron_jobs()
+                # Daily at 23:55 exact minute (TIME_ZONE): SNOOZED → NOT_CONNECTED
+                self._maybe_enqueue_snoozed_to_not_connected_midnight()
+                # Every 8 hours at :05 UTC (5 min after Airbyte sync): dispatch sheet → records
+                self._maybe_enqueue_dispatch_sync()
+                # Periodic purge of object_history, event_logs, rule_exec_logs, finished background_jobs
+                self._maybe_enqueue_log_retention()
 
                 if jobs_processed > 0:
                     logger.debug(
