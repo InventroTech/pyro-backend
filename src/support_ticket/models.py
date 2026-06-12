@@ -15,26 +15,15 @@ logger = logging.getLogger(__name__)
 class SupportTicketDump(SoftDeleteMixin):
     """
     Temporary staging table for support tickets before they're processed.
-    This matches the structure expected by the DumpTicketWebhookView.
+
+    Ticket payload fields live in ``data`` (JSON); ``tenant_id`` and ``is_processed``
+    remain columns for worker queries and indexing.
     """
     id = models.BigAutoField(primary_key=True)
     created_at = models.DateTimeField(auto_now_add=True)
-    ticket_date = models.DateTimeField(null=True, blank=True)
-    user_id = models.CharField(max_length=255, null=True, blank=True)
-    name = models.CharField(max_length=255, null=True, blank=True)
-    phone = models.CharField(max_length=50, null=True, blank=True)
-    source = models.CharField(max_length=255, null=True, blank=True)
-    subscription_status = models.TextField(null=True, blank=True)
-    atleast_paid_once = models.BooleanField(null=True, blank=True)
-    reason = models.TextField(null=True, blank=True)
-    badge = models.CharField(max_length=255, null=True, blank=True)
-    poster = models.CharField(max_length=255, null=True, blank=True)
-    tenant_id = models.UUIDField()  # Required field
-    layout_status = models.CharField(max_length=255, null=True, blank=True)
-    state = models.CharField(max_length=255, null=True, blank=True)
-    praja_dashboard_user_link = models.TextField(null=True, blank=True)
-    display_pic_url = models.TextField(null=True, blank=True)
-    is_processed = models.BooleanField(default=False)  # For cron job tracking
+    tenant_id = models.UUIDField()
+    data = models.JSONField(default=dict, blank=True)
+    is_processed = models.BooleanField(default=False)
 
     class Meta:
         db_table = "support_ticket_dump"
@@ -45,7 +34,8 @@ class SupportTicketDump(SoftDeleteMixin):
         ]
 
     def __str__(self):
-        return f"SupportTicketDump {self.id} - {self.name or 'Unknown'} ({self.tenant_id})"
+        name = (self.data or {}).get("name")
+        return f"SupportTicketDump {self.id} - {name or 'Unknown'} ({self.tenant_id})"
 
 
 

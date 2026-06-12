@@ -30,7 +30,7 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
             'Content-Type': 'application/json'
         }
         
-        # Valid payload matching the ALLOWED_FIELDS
+        # Valid webhook payload
         self.valid_payload = {
             'tenant_id': str(self.tenant_id),
             'ticket_date': '2023-12-01T10:00:00Z',
@@ -65,18 +65,22 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
         # Verify the ticket was created in the database
         ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
         self.assertEqual(ticket_dump.tenant_id, uuid.UUID(self.tenant_id))
-        self.assertEqual(ticket_dump.user_id, 'test_user_123')
-        self.assertEqual(ticket_dump.name, 'John Doe')
-        self.assertEqual(ticket_dump.phone, '1234567890')
-        self.assertEqual(ticket_dump.reason, 'Account issue')
-        self.assertEqual(ticket_dump.layout_status, 'pending')
-        self.assertEqual(ticket_dump.badge, 'premium')
-        self.assertEqual(ticket_dump.poster, 'support_agent')
-        self.assertEqual(ticket_dump.subscription_status, 'active')
-        self.assertTrue(ticket_dump.atleast_paid_once)
-        self.assertEqual(ticket_dump.source, 'mobile_app')
-        self.assertEqual(ticket_dump.praja_dashboard_user_link, 'https://www.thecircleapp.in/admin/users/abc123')
-        self.assertEqual(ticket_dump.display_pic_url, 'https://example.com/pic.jpg')
+        data = ticket_dump.data
+        self.assertEqual(data.get('user_id'), 'test_user_123')
+        self.assertEqual(data.get('name'), 'John Doe')
+        self.assertEqual(data.get('phone'), '1234567890')
+        self.assertEqual(data.get('reason'), 'Account issue')
+        self.assertEqual(data.get('layout_status'), 'pending')
+        self.assertEqual(data.get('badge'), 'premium')
+        self.assertEqual(data.get('poster'), 'support_agent')
+        self.assertEqual(data.get('subscription_status'), 'active')
+        self.assertTrue(data.get('atleast_paid_once'))
+        self.assertEqual(data.get('source'), 'mobile_app')
+        self.assertEqual(
+            data.get('praja_dashboard_user_link'),
+            'https://www.thecircleapp.in/admin/users/abc123',
+        )
+        self.assertEqual(data.get('display_pic_url'), 'https://example.com/pic.jpg')
         self.assertFalse(ticket_dump.is_processed)  # Should default to False
         self.assertIsNotNone(ticket_dump.created_at)
     
@@ -99,9 +103,10 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
         # Verify the ticket was created with minimal data
         ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
         self.assertEqual(ticket_dump.tenant_id, uuid.UUID(self.tenant_id))
-        self.assertIsNone(ticket_dump.user_id)
-        self.assertIsNone(ticket_dump.name)
-        self.assertIsNotNone(ticket_dump.ticket_date)  # Should be set to current time
+        data = ticket_dump.data
+        self.assertIsNone(data.get('user_id'))
+        self.assertIsNone(data.get('name'))
+        self.assertIsNotNone(data.get('ticket_date'))
         self.assertFalse(ticket_dump.is_processed)
     
     def test_dump_ticket_webhook_missing_secret(self):
@@ -208,37 +213,35 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
         # Verify the ticket was created with null values handled correctly
         ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
         self.assertEqual(ticket_dump.tenant_id, uuid.UUID(self.tenant_id))
-        self.assertIsNone(ticket_dump.user_id)
-        self.assertIsNone(ticket_dump.name)
-        self.assertIsNone(ticket_dump.phone)
-        self.assertEqual(ticket_dump.reason, 'Test reason')
-        self.assertIsNone(ticket_dump.atleast_paid_once)
+        data = ticket_dump.data
+        self.assertIsNone(data.get('user_id'))
+        self.assertIsNone(data.get('name'))
+        self.assertIsNone(data.get('phone'))
+        self.assertEqual(data.get('reason'), 'Test reason')
+        self.assertIsNone(data.get('atleast_paid_once'))
     
     @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
-    def test_dump_ticket_webhook_extra_fields_ignored(self):
-        """Test that extra fields not in ALLOWED_FIELDS are ignored"""
+    def test_dump_ticket_webhook_extra_fields_stored_in_data(self):
+        """Extra payload keys are persisted in dump ``data`` JSON."""
         payload_with_extra = self.valid_payload.copy()
         payload_with_extra.update({
-            'extra_field_1': 'should be ignored',
+            'extra_field_1': 'custom value',
             'extra_field_2': 123,
-            'malicious_field': '<script>alert("xss")</script>'
         })
-        
+
         response = self.client.post(
             self.url,
             data=json.dumps(payload_with_extra),
             content_type='application/json',
             **{'HTTP_X_WEBHOOK_SECRET': self.webhook_secret}
         )
-        
+
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        
-        # Verify only allowed fields were saved
+
         ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
-        self.assertEqual(ticket_dump.name, 'John Doe')
-        # Extra fields should not exist in the model
-        with self.assertRaises(AttributeError):
-            ticket_dump.extra_field_1
+        self.assertEqual(ticket_dump.data.get('name'), 'John Doe')
+        self.assertEqual(ticket_dump.data['extra_field_1'], 'custom value')
+        self.assertEqual(ticket_dump.data['extra_field_2'], 123)
     
     @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
     def test_dump_ticket_webhook_invalid_uuid_tenant_id(self):
@@ -281,7 +284,7 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
                 self.assertEqual(response.status_code, status.HTTP_200_OK)
                 
                 ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
-                self.assertEqual(ticket_dump.atleast_paid_once, expected_value)
+                self.assertEqual(ticket_dump.data.get('atleast_paid_once'), expected_value)
                 
                 # Clean up for next iteration
                 ticket_dump.delete()
@@ -311,8 +314,8 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
                 self.assertEqual(response.status_code, status.HTTP_200_OK)
                 
                 ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
-                self.assertEqual(ticket_dump.praja_dashboard_user_link, url)
-                self.assertEqual(ticket_dump.display_pic_url, url)
+                self.assertEqual(ticket_dump.data.get('praja_dashboard_user_link'), url)
+                self.assertEqual(ticket_dump.data.get('display_pic_url'), url)
                 
                 # Clean up for next iteration
                 ticket_dump.delete()
@@ -336,29 +339,32 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
                 response = getattr(self.client, method.lower())(self.url)
                 self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
     
-    @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
-    def test_dump_ticket_webhook_default_ticket_date(self):
-        """Test that ticket_date defaults to current time when not provided"""
-        payload_no_date = self.valid_payload.copy()
-        del payload_no_date['ticket_date']
-        
-        # Get the real time BEFORE mocking so we don't save a MagicMock to the DB!
+    def _post_dump_and_get_ticket_date(self, payload):
         real_time = timezone.now()
-        
-        # Note: Depending on how timezone is imported in views.py, you might need to patch 'support_ticket.views.timezone.now'
-        with patch('django.utils.timezone.now') as mock_now:
+        with patch("django.utils.timezone.now") as mock_now:
             mock_now.return_value = real_time
-            
             response = self.client.post(
                 self.url,
-                data=json.dumps(payload_no_date),
-                content_type='application/json',
-                **{'HTTP_X_WEBHOOK_SECRET': self.webhook_secret}
+                data=json.dumps(payload),
+                content_type="application/json",
+                **{"HTTP_X_WEBHOOK_SECRET": self.webhook_secret},
             )
-        
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
-        self.assertIsNotNone(ticket_dump.ticket_date)  # Within 5 seconds
+        ticket_dump = SupportTicketDump.objects.get(id=response.data["ticket_id"])
+        return ticket_dump.data.get("ticket_date"), real_time
+
+    @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
+    def test_dump_ticket_webhook_default_ticket_date(self):
+        """ticket_date defaults to now when missing or falsy (matches legacy webhook)."""
+        payload_no_date = self.valid_payload.copy()
+        del payload_no_date["ticket_date"]
+        ticket_date, expected = self._post_dump_and_get_ticket_date(payload_no_date)
+        self.assertEqual(ticket_date, expected.isoformat())
+
+        payload_empty_date = self.valid_payload.copy()
+        payload_empty_date["ticket_date"] = ""
+        ticket_date, expected = self._post_dump_and_get_ticket_date(payload_empty_date)
+        self.assertEqual(ticket_date, expected.isoformat())
     
     @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
     def test_dump_ticket_webhook_concurrent_requests(self):
@@ -425,7 +431,7 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         
         ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
-        self.assertEqual(len(ticket_dump.reason), 10000)
+        self.assertEqual(len(ticket_dump.data.get('reason', '')), 10000)
     
     @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
     @patch('support_ticket.views.logger')
