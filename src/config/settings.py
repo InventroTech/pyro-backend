@@ -331,6 +331,20 @@ SPECTACULAR_SETTINGS = {
 # (see core.log_retention and purge_old_log_tables job).
 LOG_RETENTION_DAYS = env.int("LOG_RETENTION_DAYS", default=30)
 
+# General background jobs (Gunicorn web service). Set EXCLUDE_JOB_TYPES when Mixpanel worker is deployed.
+BACKGROUND_JOB_WORKER_THREADS = env.int("BACKGROUND_JOB_WORKER_THREADS", default=1)
+BACKGROUND_JOB_POLL_INTERVAL = float(env("BACKGROUND_JOB_POLL_INTERVAL", default="1"))
+BACKGROUND_JOB_BATCH_SIZE = env.int("BACKGROUND_JOB_BATCH_SIZE", default=10)
+BACKGROUND_JOB_EXCLUDE_JOB_TYPES = env(
+    "BACKGROUND_JOB_EXCLUDE_JOB_TYPES",
+    default="send_mixpanel_event,send_rm_assigned_event",
+)
+
+# Render Background Worker: ``python manage.py run_mixpanel_workers``
+MIXPANEL_JOB_WORKER_THREADS = env.int("MIXPANEL_JOB_WORKER_THREADS", default=1)
+MIXPANEL_JOB_POLL_INTERVAL = float(env("MIXPANEL_JOB_POLL_INTERVAL", default="1"))
+MIXPANEL_JOB_BATCH_SIZE = env.int("MIXPANEL_JOB_BATCH_SIZE", default=10)
+
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 
 # Staging environment flag - used to control certain behaviors like assigned_to field updates
