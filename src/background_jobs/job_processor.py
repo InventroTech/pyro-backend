@@ -95,6 +95,8 @@ class JobProcessor:
         self._last_dispatch_sync_enqueue_bucket = None
         # Last time we enqueued process_dumped_tickets for pending dump rows
         self._last_support_ticket_dump_enqueue_at = None
+        # Last time we checked whether entity type discovery should be enqueued
+        self._last_entity_type_discovery_enqueue_at = None
         self._run_schedulers = True
         # Circuit breaker state for connection errors
         self._connection_error_count = 0
