@@ -18,6 +18,7 @@ from django.utils import timezone
 from django.db import transaction, close_old_connections, connections
 from django.db.models import Q, F
 from django.db.utils import InterfaceError, OperationalError
+from core.models import EntityTypeDiscoverySyncState
 
 from .models import BackgroundJob, JobStatus, JobType
 from .queue_service import get_queue_service
@@ -35,7 +36,7 @@ SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL = 300  # 5 minutes
 # Entity type discovery from records.
 ENTITY_TYPE_DISCOVERY_ENQUEUE_INTERVAL = 300  # 5 minutes
 ENTITY_TYPE_DISCOVERY_LOCAL_CHECK_INTERVAL = 30  # avoid checking DB on every loop tick
-ENTITY_TYPE_DISCOVERY_ADVISORY_LOCK_ID = 2026061101
+ENTITY_TYPE_DISCOVERY_SCHEDULER_JOB_NAME = "entity_type_discovery_scheduler"
 
 # How often the worker enqueues log retention (object_history, event_logs, rule_exec_logs)
 LOG_RETENTION_ENQUEUE_INTERVAL = 86400  # 24 hours
@@ -456,17 +457,24 @@ class JobProcessor:
 
         try:
             with transaction.atomic():
-                db_conn = connections["default"]
-                if db_conn.vendor == "postgresql":
-                    with db_conn.cursor() as cursor:
-                        cursor.execute(
-                            "SELECT pg_try_advisory_xact_lock(%s)",
-                            [ENTITY_TYPE_DISCOVERY_ADVISORY_LOCK_ID],
-                        )
-                        lock_acquired = cursor.fetchone()[0]
-                    if not lock_acquired:
-                        logger.debug(
-                            f"[Worker {self.worker_id}] Entity type discovery enqueue lock busy"
+                scheduler_state, _created = (
+                    EntityTypeDiscoverySyncState.objects.select_for_update().get_or_create(
+                        job_name=ENTITY_TYPE_DISCOVERY_SCHEDULER_JOB_NAME,
+                        defaults={
+                            "last_processed_updated_at": None,
+                            "last_processed_record_id": 0,
+                        },
+                    )
+                )
+
+                if scheduler_state.last_success_at is not None:
+                    elapsed = (now - scheduler_state.last_success_at).total_seconds()
+                    if elapsed < ENTITY_TYPE_DISCOVERY_ENQUEUE_INTERVAL:
+                        logger.info(
+                            "[Worker %s] Entity type discovery scheduler throttled "
+                            "(elapsed=%.1fs)",
+                            self.worker_id,
+                            elapsed,
                         )
                         return
 
@@ -480,17 +488,6 @@ class JobProcessor:
                     )
                     return
 
-                recent_cutoff = now - timedelta(seconds=ENTITY_TYPE_DISCOVERY_ENQUEUE_INTERVAL)
-                recent_exists = BackgroundJob.objects.filter(
-                    job_type=JobType.DISCOVER_ENTITY_TYPES,
-                    created_at__gte=recent_cutoff,
-                ).exists()
-                if recent_exists:
-                    logger.debug(
-                        f"[Worker {self.worker_id}] Entity type discovery recently enqueued"
-                    )
-                    return
-
                 queue = get_queue_service()
                 queue.enqueue_job(
                     job_type=JobType.DISCOVER_ENTITY_TYPES,
@@ -498,8 +495,15 @@ class JobProcessor:
                     priority=-1,
                     max_attempts=3,
                 )
-            logger.debug(f"[Worker {self.worker_id}] Enqueued entity type discovery")
+                scheduler_state.last_success_at = now
+                scheduler_state.last_error = None
+                scheduler_state.save(update_fields=["last_success_at", "last_error", "updated_at"])
+            logger.info(f"[Worker {self.worker_id}] Enqueued entity type discovery")
         except Exception as e:
+            EntityTypeDiscoverySyncState.objects.update_or_create(
+                job_name=ENTITY_TYPE_DISCOVERY_SCHEDULER_JOB_NAME,
+                defaults={"last_error": str(e)[:1000]},
+            )
             logger.warning(
                 f"[Worker {self.worker_id}] Failed to enqueue entity type discovery: {e}",
                 exc_info=True,
