@@ -34,6 +34,7 @@ SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL = 300  # 5 minutes
 
 # Entity type discovery from records.
 ENTITY_TYPE_DISCOVERY_ENQUEUE_INTERVAL = 300  # 5 minutes
+ENTITY_TYPE_DISCOVERY_LOCAL_CHECK_INTERVAL = 30  # avoid checking DB on every loop tick
 ENTITY_TYPE_DISCOVERY_ADVISORY_LOCK_ID = 2026061101
 
 # How often the worker enqueues log retention (object_history, event_logs, rule_exec_logs)
@@ -449,7 +450,7 @@ class JobProcessor:
         now = timezone.now()
         if self._last_entity_type_discovery_enqueue_at is not None:
             elapsed = (now - self._last_entity_type_discovery_enqueue_at).total_seconds()
-            if elapsed < ENTITY_TYPE_DISCOVERY_ENQUEUE_INTERVAL:
+            if elapsed < ENTITY_TYPE_DISCOVERY_LOCAL_CHECK_INTERVAL:
                 return
         self._last_entity_type_discovery_enqueue_at = now
 
