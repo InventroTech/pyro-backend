@@ -34,6 +34,7 @@ SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL = 300  # 5 minutes
 
 # Entity type discovery from records.
 ENTITY_TYPE_DISCOVERY_ENQUEUE_INTERVAL = 300  # 5 minutes
+ENTITY_TYPE_DISCOVERY_ADVISORY_LOCK_ID = 2026061101
 
 # How often the worker enqueues log retention (object_history, event_logs, rule_exec_logs)
 LOG_RETENTION_ENQUEUE_INTERVAL = 86400  # 24 hours
@@ -453,23 +454,49 @@ class JobProcessor:
         self._last_entity_type_discovery_enqueue_at = now
 
         try:
-            active_exists = BackgroundJob.objects.filter(
-                job_type=JobType.DISCOVER_ENTITY_TYPES,
-                status__in=[JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.RETRYING],
-            ).exists()
-            if active_exists:
-                logger.debug(
-                    f"[Worker {self.worker_id}] Entity type discovery job already active"
-                )
-                return
+            with transaction.atomic():
+                db_conn = connections["default"]
+                if db_conn.vendor == "postgresql":
+                    with db_conn.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT pg_try_advisory_xact_lock(%s)",
+                            [ENTITY_TYPE_DISCOVERY_ADVISORY_LOCK_ID],
+                        )
+                        lock_acquired = cursor.fetchone()[0]
+                    if not lock_acquired:
+                        logger.debug(
+                            f"[Worker {self.worker_id}] Entity type discovery enqueue lock busy"
+                        )
+                        return
 
-            queue = get_queue_service()
-            queue.enqueue_job(
-                job_type=JobType.DISCOVER_ENTITY_TYPES,
-                payload={"batch_size": 1000},
-                priority=-1,
-                max_attempts=3,
-            )
+                active_exists = BackgroundJob.objects.filter(
+                    job_type=JobType.DISCOVER_ENTITY_TYPES,
+                    status__in=[JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.RETRYING],
+                ).exists()
+                if active_exists:
+                    logger.debug(
+                        f"[Worker {self.worker_id}] Entity type discovery job already active"
+                    )
+                    return
+
+                recent_cutoff = now - timedelta(seconds=ENTITY_TYPE_DISCOVERY_ENQUEUE_INTERVAL)
+                recent_exists = BackgroundJob.objects.filter(
+                    job_type=JobType.DISCOVER_ENTITY_TYPES,
+                    created_at__gte=recent_cutoff,
+                ).exists()
+                if recent_exists:
+                    logger.debug(
+                        f"[Worker {self.worker_id}] Entity type discovery recently enqueued"
+                    )
+                    return
+
+                queue = get_queue_service()
+                queue.enqueue_job(
+                    job_type=JobType.DISCOVER_ENTITY_TYPES,
+                    payload={"batch_size": 1000},
+                    priority=-1,
+                    max_attempts=3,
+                )
             logger.debug(f"[Worker {self.worker_id}] Enqueued entity type discovery")
         except Exception as e:
             logger.warning(
