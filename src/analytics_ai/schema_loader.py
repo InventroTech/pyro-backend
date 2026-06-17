@@ -105,18 +105,17 @@ def _table_block(model: Model, max_fields: int, include_relationships: bool, inc
             break
 
     # Table-specific extra notes (kept + extended)
-    if tbl == "support_ticket":
-        fields_out.append("- cse_name (CharField): Name of the agent (customer support executive) who handled the ticket.")
-        fields_out.append("- assigned_to (UUIDField): User ID of the assigned agent; links to auth.users.id")
-        # Conditional resolution_time hint
-        has_resolution_time = any(re.match(r"^- *resolution_time\b", f) for f in fields_out) or any(
-            getattr(f, "name", "") == "resolution_time" for f in model._meta.get_fields()
+    if tbl == "records" and model.__name__ == "Record":
+        fields_out.append(
+            "- entity_type (CharField): filter support tickets with entity_type = 'support_ticket'"
         )
-        if has_resolution_time:
-            fields_out.append(
-                "- resolution_time (CharField): 'MM:SS' text; convert to seconds for aggregates using "
-                "SPLIT_PART(resolution_time, ':', 1)::int * 60 + SPLIT_PART(resolution_time, ':', 2)::int"
-            )
+        fields_out.append(
+            "- data (JSONField): ticket payload — keys include cse_name, assigned_to, poster, "
+            "resolution_status, resolution_time ('MM:SS'), completed_at, dumped_at (ISO timestamps)"
+        )
+        fields_out.append(
+            "- Query JSON with data->>'field'; cast timestamps via (data->>'completed_at')::timestamptz"
+        )
 
     block = (
         f"### Table: `{tbl}` (Django model: {model.__name__})\n"
