@@ -22,7 +22,7 @@ class PrajaService:
     """
     Service for sending data to Praja server when:
     - Record entity_type is 'lead' and tenant matches PRAJA_TENANT
-    - SupportTicket tenant matches PRAJA_TENANT
+    - Record entity_type ``support_ticket`` on PRAJA tenant
     """
     
     def __init__(self):
@@ -49,8 +49,11 @@ class PrajaService:
             print(f"⚠️  [PRAJA] Skipping - PRAJA_SERVER_URL or PRAJA_TENANT not configured")
             return False
         
-        if record.entity_type != 'lead':
-            print(f"⚠️  [PRAJA] Skipping record {record.id} - entity_type is '{record.entity_type}', not 'lead'")
+        if record.entity_type not in ("lead", "support_ticket"):
+            print(
+                f"⚠️  [PRAJA] Skipping record {record.id} - entity_type is "
+                f"'{record.entity_type}', not lead/support_ticket"
+            )
             return False
         
         is_praja = self._is_praja_tenant(record.tenant)

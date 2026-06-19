@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError, NotFound
 from rest_framework.permissions import AllowAny
 from authz.permissions import IsTenantAuthenticated
+from config.supabase_auth import SupabaseJWTAuthentication
 from core.pagination import MetaPageNumberPagination, RecordListPagination
 from core.models import Tenant, TenantEntityType
 from django.utils import timezone
@@ -1115,6 +1116,7 @@ class RecordEventView(TenantScopedMixin, APIView):
     Handle event creation and logging for records.
     POST /records/<id>/events/ - Log an event for a specific record.
     """
+    authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
 
     @extend_schema(

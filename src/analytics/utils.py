@@ -1,6 +1,7 @@
 from datetime import timedelta, datetime, time, date
-from support_ticket.models import SupportTicket
 from uuid import UUID
+
+from support_ticket.records import support_ticket_records_qs
 
 from typing import Optional, Tuple
 from django.db import models
@@ -93,14 +94,13 @@ def preview_result(results: dict, limit: int = 50):
     }
 
 def tenant_scoped_qs(user):
-    qs = SupportTicket.objects.all()
     tenant_id = getattr(user, "tenant_id", None)
-    if tenant_id:
-        try:
-            qs = qs.filter(tenant_id=UUID(str(tenant_id)))
-        except Exception:
-            return SupportTicket.objects.none()
-    return qs
+    if not tenant_id:
+        return support_ticket_records_qs().none()
+    try:
+        return support_ticket_records_qs(tenant_id=UUID(str(tenant_id)))
+    except Exception:
+        return support_ticket_records_qs().none()
 
 
 def _distinct_list(qs, field: str):

@@ -9,7 +9,7 @@ import logging
 import json
 from typing import Dict, Any, List, Optional
 from django.utils import timezone
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 import re
 import copy
 from django.core.cache import cache
@@ -102,7 +102,25 @@ def _resolve_templates_in(value: Any, ctx: Dict[str, Any]) -> Any:
     return value
 
 
-    
+def _coerce_json_field_value(value: Any) -> Any:
+    """Normalize values before writing to ``Record.data`` or rule execution logs."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time()).isoformat()
+    if isinstance(value, dict):
+        return {k: _coerce_json_field_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_coerce_json_field_value(v) for v in value]
+    return value
+
+
+def _json_safe_for_log(value: Any) -> Any:
+    """Ensure rule execution log payloads are JSON-serializable."""
+    try:
+        return json.loads(json.dumps(value, default=str))
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _evaluate_condition(condition: Dict[str, Any], ctx: Dict[str, Any]) -> bool:
@@ -134,15 +152,17 @@ def action_update_fields(
     """
     record = ctx["record"]
     payload = ctx.get("payload", {})
-    
+    if record.data is None:
+        record.data = {}
+
     # Store original payload for later checks (before we modify it)
     original_payload = payload.copy() if isinstance(payload, dict) else payload
 
     # Check if this is a call back later event BEFORE template resolution
     event_name = ctx.get("event", "")
-    button_type = payload.get("button_type", "")
-    call_status = payload.get("call_status", "")
-    last_call_outcome = payload.get("last_call_outcome", "")
+    button_type = payload.get("button_type") or ""
+    call_status = payload.get("call_status") or ""
+    last_call_outcome = payload.get("last_call_outcome") or ""
     
     is_call_back_later_event = (
         event_name == "call_back_later" or 
@@ -262,9 +282,10 @@ def action_update_fields(
     # NOT_CONNECTED 12h unassign is driven by first_assigned_today_at (set on any unassigned→assigned
     # transition via merge_first_assignment_today_anchor), not by not_connected_unassign_at.
 
-    # Apply all updates
+    # Apply all updates (coerce datetimes etc. so JSONField + execution logs stay safe)
     for key, value in resolved_updates.items():
-        record.data[key] = value
+        record.data[key] = _coerce_json_field_value(value)
+    resolved_updates = {k: _coerce_json_field_value(v) for k, v in resolved_updates.items()}
     
     logger.info(
         f"After applying updates for record {record.id}: "
@@ -809,6 +830,14 @@ def _evaluate_simple_condition(condition: Dict[str, Any], ctx: Dict[str, Any]) -
             right = _resolve_operand(args[1])
             return left == right
 
+    # Inequality
+    if "!=" in condition:
+        args = condition["!="]
+        if isinstance(args, list) and len(args) == 2:
+            left = _resolve_operand(args[0])
+            right = _resolve_operand(args[1])
+            return left != right
+
     # Less than
     if "<" in condition:
         args = condition["<"]
@@ -862,7 +891,7 @@ def _is_simple_condition(condition: Any) -> bool:
     if not isinstance(condition, dict) or len(condition) != 1:
         return False
     (op, value), = condition.items()
-    simple_ops = {"==", "<", ">", "<=", ">=", "and", "or", "!"}
+    simple_ops = {"==", "!=", "<", ">", "<=", ">=", "and", "or", "!"}
     if op not in simple_ops:
         return False
     if op in {"and", "or"}:
@@ -1018,19 +1047,28 @@ def execute_rules(event_name: str, record: Record, payload: Dict[str, Any], tena
         # Calculate execution duration
         duration_ms = (time.time() - rule_start) * 1000
         
-        # Log the rule execution
-        RuleExecutionLog.objects.create(
-            tenant_id=tenant_id,
-            record=record,
-            rule_id=rule.id,
-            event_name=event_name,
-            matched=log_data["matched"],
-            actions=log_data["actions"],
-            errors=log_data["errors"],
-            duration_ms=duration_ms
-        )
-        
-        logger.debug(f"Rule {rule.id} execution logged in {duration_ms:.2f}ms")
+        # Log the rule execution (must not break the caller if logging fails)
+        try:
+            RuleExecutionLog.objects.create(
+                tenant_id=tenant_id,
+                record=record,
+                rule_id=rule.id,
+                event_name=event_name,
+                matched=log_data["matched"],
+                actions=_json_safe_for_log(log_data["actions"]),
+                errors=_json_safe_for_log(log_data["errors"]),
+                duration_ms=duration_ms,
+            )
+            logger.debug(f"Rule {rule.id} execution logged in {duration_ms:.2f}ms")
+        except Exception as log_exc:
+            logger.error(
+                "Failed to write RuleExecutionLog for rule %s event %s record %s: %s",
+                rule.id,
+                event_name,
+                record.id,
+                log_exc,
+                exc_info=True,
+            )
     
     total_duration = (time.time() - start_time) * 1000
     logger.info(f"Rule execution completed for event '{event_name}' in {total_duration:.2f}ms")
