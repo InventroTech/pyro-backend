@@ -33,6 +33,7 @@ from crm_records.services import PrajaService
 from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
 from support_ticket.models import SupportTicket
 from support_ticket.records import q_record_open_or_snoozed_resolution
+from support_ticket.ticket_types import q_record_self_trial
 from support_ticket.services import MixpanelService, RMAssignedMixpanelService
 
 from .models import BackgroundJob, JobType
@@ -1069,25 +1070,6 @@ class JsonbSetSupportTicketClosed(Func):
     output_field = JSONField()
 
 
-_SELF_TRIAL_SUPPORT_TICKET_FIELD_VALUES = (
-    "SELF TRIAL",
-    "self trial",
-    "Self Trial",
-    "self_trial",
-    "self_trail",
-    "self trail",
-    "selftrail",
-    "Self Trail",
-)
-
-
-def _q_support_ticket_record_self_trial() -> Q:
-    q = Q()
-    for value in _SELF_TRIAL_SUPPORT_TICKET_FIELD_VALUES:
-        q |= Q(data__support_ticket_type=value) | Q(data__poster=value)
-    return q
-
-
 def _legacy_support_ticket_id_from_record_data(data: Any) -> Optional[int]:
     if not isinstance(data, dict):
         return None
@@ -1116,7 +1098,7 @@ def _close_stale_self_trial_support_tickets_queryset(
             )
         )
         .filter(entity_type=SUPPORT_TICKET_ENTITY_TYPE)
-        .filter(_q_support_ticket_record_self_trial())
+        .filter(q_record_self_trial())
         .filter(
             q_record_open_or_snoozed_resolution() | Q(data__resolution_status="WIP")
         )
@@ -1137,16 +1119,17 @@ def _close_stale_self_trial_support_tickets_apply(
         ticket_id = _legacy_support_ticket_id_from_record_data(row.get("data"))
         if ticket_id is not None:
             ticket_ids.add(ticket_id)
-    records_updated = qs.update(
-        data=JsonbSetSupportTicketClosed(F("data")),
-        updated_at=now,
-    )
-    tickets_updated = 0
-    if ticket_ids:
-        tickets_updated = SupportTicket.objects.filter(id__in=ticket_ids).update(
-            resolution_status="Closed",
-            completed_at=now,
+    with transaction.atomic():
+        records_updated = qs.update(
+            data=JsonbSetSupportTicketClosed(F("data")),
+            updated_at=now,
         )
+        tickets_updated = 0
+        if ticket_ids:
+            tickets_updated = SupportTicket.objects.filter(id__in=ticket_ids).update(
+                resolution_status="Closed",
+                completed_at=now,
+            )
     return records_updated, tickets_updated
 
 

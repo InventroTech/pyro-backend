@@ -51,6 +51,10 @@ from .constants import (
     SUPPORT_EVENT_TAKE_BREAK,
     SUPPORT_TICKET_ENTITY_TYPE,
 )
+from .ticket_types import (
+    SELF_TRIAL_TICKET_TYPE_KEY as _SELF_TRIAL_TICKET_TYPE_KEY,
+    canonical_support_ticket_type_key as _canonical_support_ticket_type_key,
+)
 from .events import log_and_dispatch_support_ticket_event, resolve_support_ticket_record
 
 logger = logging.getLogger(__name__)
@@ -672,39 +676,7 @@ _TICKET_TYPE_KEY_TO_ROUTING_RULE: Dict[str, _SupportTicketRoutingRule] = {
     rule.ticket_type_key: rule for rule in _SUPPORT_TICKET_ROUTING_RULES
 }
 
-_TICKET_TYPE_ROUTING_ALIASES: Dict[str, str] = {
-    "self trail": "self_trail",
-    "self trial": "self_trail",
-    "self_trial": "self_trail",
-    "selftrail": "self_trail",
-    "in trial": "in_trial",
-    "intrial": "in_trial",
-    "trial extension": "trial_extension",
-    "in trial extension": "trial_extension",
-    "in_trial_extension": "trial_extension",
-    "premium extension": "premium_extension",
-    "in premium extension": "premium_extension",
-    "in_premium_extension": "premium_extension",
-}
-
 _ROUTING_PICK_BATCH_SIZE = 500
-
-
-def _normalize_support_ticket_type_key(value: Any) -> str:
-    if value is None:
-        return ""
-    normalized = str(value).strip().lower().replace("-", " ").replace("_", " ")
-    return " ".join(normalized.split())
-
-
-def _canonical_support_ticket_type_key(ticket_type: Any) -> str:
-    normalized = _normalize_support_ticket_type_key(ticket_type)
-    if not normalized:
-        return "rest"
-    slug = normalized.replace(" ", "_")
-    if slug in _TICKET_TYPE_KEY_TO_ROUTING_RULE:
-        return slug
-    return _TICKET_TYPE_ROUTING_ALIASES.get(normalized, "rest")
 
 
 def _record_support_ticket_type_raw(record: Record) -> Any:
@@ -719,7 +691,6 @@ def _record_ticket_type_key(record: Record) -> str:
     return _canonical_support_ticket_type_key(_record_support_ticket_type_raw(record))
 
 
-_SELF_TRIAL_TICKET_TYPE_KEY = "self_trail"
 _OPEN_SUPPORT_TICKET_RESOLUTION_Q = (
     Q(resolution_status__isnull=True)
     | Q(resolution_status="Snoozed")
