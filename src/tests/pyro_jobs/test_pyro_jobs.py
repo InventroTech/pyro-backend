@@ -10,8 +10,6 @@ What we test:
 """
 import threading
 from datetime import timedelta
-from unittest.mock import MagicMock, call
-
 import pytest
 from django.utils import timezone
 
