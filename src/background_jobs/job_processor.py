@@ -796,13 +796,18 @@ class JobProcessor:
                     self.cleanup_stale_locks()
                     iteration_count = 0
 
-                if self._run_schedulers:
-                    self._maybe_enqueue_process_dumped_tickets()
-                    self._maybe_enqueue_entity_type_discovery()
-                    self._maybe_enqueue_lead_cron_jobs()
-                    self._maybe_enqueue_snoozed_to_not_connected_midnight()
-                    self._maybe_enqueue_dispatch_sync()
-                    self._maybe_enqueue_log_retention()
+                # Every 5 min: process support_ticket_dump → support_ticket + records
+                self._maybe_enqueue_process_dumped_tickets()
+                # Every 5 min: discover tenant entity types and fields from changed records
+                self._maybe_enqueue_entity_type_discovery()
+                # Periodically enqueue lead cron jobs (unassign snoozed, release after 12h) so no external cron is needed
+                self._maybe_enqueue_lead_cron_jobs()
+                # Daily at 23:55 exact minute (TIME_ZONE): SNOOZED → NOT_CONNECTED
+                self._maybe_enqueue_snoozed_to_not_connected_midnight()
+                # Every 8 hours at :05 UTC (5 min after Airbyte sync): dispatch sheet → records
+                self._maybe_enqueue_dispatch_sync()
+                # Periodic purge of object_history, event_logs, rule_exec_logs, finished background_jobs
+                self._maybe_enqueue_log_retention()
 
                 if jobs_processed > 0:
                     logger.debug(

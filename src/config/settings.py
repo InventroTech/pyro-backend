@@ -73,6 +73,7 @@ INSTALLED_APPS = [
     'object_history',
     'whatsapp',
     'pages',
+    'pyro_jobs',
 ]
 
 MIDDLEWARE = [
