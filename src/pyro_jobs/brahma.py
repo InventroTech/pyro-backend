@@ -3,7 +3,7 @@ import logging
 import threading
 from datetime import timedelta
 from django.utils import timezone
-from django.db import transaction
+from django.db import transaction, ProgrammingError, OperationalError
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +35,13 @@ def run_brahma_loop():
                       - So only 1 job row is ever created per schedule slot
                     """
 
-                    # check if a future pending/running job already exists
+                    # check if any pending/running job already exists (regardless of run_at)
+                    # run_at is intentionally excluded: a RUNNING job has a past run_at but
+                    # must still block Brahma from scheduling a duplicate
                     already_scheduled = PyroJob.objects.filter(
                         job_name=job_name,
                         is_deleted=False,
                         status__in=[PyroJob.STATUS_PENDING, PyroJob.STATUS_RUNNING],
-                        run_at__gt=timezone.now()
                     ).exists()
 
                     if already_scheduled:
@@ -76,6 +77,12 @@ def run_brahma_loop():
                     if created:
                         logger.info("[Brahma] Scheduled: %s → %s", job_name, next_run)
 
+        except (ProgrammingError, OperationalError) as e:
+            if "pyro_job" in str(e):
+                logger.warning("[Brahma] pyro_job table not ready yet, waiting for migrations...")
+                time.sleep(30)
+                continue
+            logger.error("[Brahma] Loop error: %s", e)
         except Exception as e:
             logger.error("[Brahma] Loop error: %s", e)
 

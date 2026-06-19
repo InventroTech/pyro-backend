@@ -3,7 +3,7 @@ import logging
 import threading
 from datetime import timedelta
 from django.utils import timezone
-from django.db import transaction
+from django.db import transaction, ProgrammingError, OperationalError
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +111,12 @@ def run_vishnu_loop():
                             job.job_name, job.attempts
                         )
 
+        except (ProgrammingError, OperationalError) as e:
+            if "pyro_job" in str(e):
+                logger.warning("[Vishnu] pyro_job table not ready yet, waiting for migrations...")
+                time.sleep(30)
+                continue
+            logger.error("[Vishnu] Loop error: %s", e)
         except Exception as e:
             logger.error("[Vishnu] Loop error: %s", e)
 
