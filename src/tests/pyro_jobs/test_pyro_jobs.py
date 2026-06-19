@@ -113,7 +113,6 @@ class TestBrahmaScheduling:
                     job_name=job_name,
                     is_deleted=False,
                     status__in=[PyroJob.STATUS_PENDING, PyroJob.STATUS_RUNNING],
-                    run_at__gt=timezone.now()
                 ).exists()
 
                 if already_scheduled:
@@ -160,6 +159,21 @@ class TestBrahmaScheduling:
             job_name="test_job",
             status="RUNNING",
             run_at=timezone.now() + timedelta(hours=1)
+        )
+        self._run_brahma_tick({"test_job": {"every_minutes": 60}})
+        assert PyroJob.objects.filter(job_name="test_job").count() == 1
+
+    def test_no_duplicate_when_running_with_past_run_at(self):
+        """
+        Vishnu sets run_at in the past when it picks up a job.
+        A second Brahma worker must still not create a duplicate.
+        This was the production bug: run_at__gt=now() excluded RUNNING jobs.
+        """
+        from pyro_jobs.models import PyroJob
+        make_job(
+            job_name="test_job",
+            status="RUNNING",
+            run_at=timezone.now() - timedelta(seconds=5),
         )
         self._run_brahma_tick({"test_job": {"every_minutes": 60}})
         assert PyroJob.objects.filter(job_name="test_job").count() == 1
@@ -622,7 +636,6 @@ class TestConcurrency:
                     job_name=job_name,
                     is_deleted=False,
                     status__in=[PyroJob.STATUS_PENDING, PyroJob.STATUS_RUNNING],
-                    run_at__gt=timezone.now()
                 ).exists()
                 if already_scheduled:
                     continue
