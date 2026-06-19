@@ -8,7 +8,8 @@ from django.db import transaction
 logger = logging.getLogger(__name__)
 
 SCHEDULE = {
-    "dispatch_data_sync": {"every_minutes": 480},
+    "dispatch_data_sync":   {"every_minutes": 480},
+    "purge_old_log_tables": {"every_minutes": 1440},
 }
 
 

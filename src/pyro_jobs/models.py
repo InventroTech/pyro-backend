@@ -22,6 +22,7 @@ class PyroJob(models.Model):
     is_deleted   = models.BooleanField(default=False)
     attempts     = models.IntegerField(default=0)
     max_attempts = models.IntegerField(default=3)
+    result       = models.JSONField(null=True, blank=True)
     error        = models.TextField(null=True, blank=True)
     started_at   = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)

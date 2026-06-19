@@ -10,7 +10,7 @@ What we test:
 """
 import threading
 from datetime import timedelta
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, call
 
 import pytest
 from django.utils import timezone
@@ -466,8 +466,6 @@ class TestBrahmaVishnuIntegration:
         from pyro_jobs.vishnu import fetch_and_lock_job
         from datetime import timedelta
 
-        RETRY_DELAYS = [60, 300]
-
         def run_one():
             j = fetch_and_lock_job(PyroJob)
             if not j:
@@ -481,7 +479,6 @@ class TestBrahmaVishnuIntegration:
             except Exception as e:
                 j.error = str(e)
                 if j.attempts < j.max_attempts:
-                    delay      = RETRY_DELAYS[min(j.attempts - 1, len(RETRY_DELAYS) - 1)]
                     j.status   = PyroJob.STATUS_PENDING
                     j.run_at   = timezone.now() - timedelta(seconds=1)  # make it due immediately
                     j.save(update_fields=["status", "error", "run_at", "attempts"])
@@ -540,7 +537,7 @@ class TestEdgeCases:
         """Handler should not crash if payload is None or empty."""
         from pyro_jobs.models import PyroJob
         received = []
-        job = make_job(payload={})
+        make_job(payload={})
         from pyro_jobs.vishnu import fetch_and_lock_job
         j = fetch_and_lock_job(PyroJob)
         received.append(j.payload)
@@ -569,9 +566,6 @@ class TestEdgeCases:
         """max_attempts=0 means never retry — fail on first error."""
         from pyro_jobs.models import PyroJob
         job = make_job(max_attempts=0, attempts=0)
-
-        def crash(p):
-            raise ValueError("instant fail")
 
         from pyro_jobs.vishnu import fetch_and_lock_job
         from datetime import timedelta

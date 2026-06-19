@@ -70,12 +70,13 @@ def run_vishnu_loop():
                             "[Vishnu] Running: %s (attempt %s/%s)",
                             job.job_name, job.attempts, job.max_attempts
                         )
-                        handler(job.payload)
+                        result = handler(job.payload)
 
                         job.status       = PyroJob.STATUS_COMPLETED
                         job.completed_at = timezone.now()
                         job.is_deleted   = True
-                        job.save(update_fields=["status", "completed_at", "is_deleted"])
+                        job.result       = result if isinstance(result, dict) else None
+                        job.save(update_fields=["status", "completed_at", "is_deleted", "result"])
                         logger.info("[Vishnu] Completed: %s", job.job_name)
 
                     else:
