@@ -63,6 +63,144 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].data.get("name"), "String id")
 
+    def test_dedupe_prefers_self_trial_over_later_non_self_trial(self):
+        in_trial = SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            data=dump_data(
+                user_id="user_self_trial_priority",
+                name="Later in trial",
+                poster="in_trial",
+            ),
+        )
+        self_trial = SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            data=dump_data(
+                user_id="user_self_trial_priority",
+                name="Earlier self trial",
+                support_ticket_type="SELF TRIAL",
+            ),
+        )
+        result = _dedupe_dumps_latest_wins([self_trial, in_trial])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].data.get("name"), "Earlier self trial")
+
+    def test_process_uses_open_self_trial_record_not_support_ticket_table(self):
+        """Open-state dedupe must read from records, not support_ticket."""
+        open_self_trial_record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data=dump_data(
+                user_id="cust_records_only",
+                name="Open self trial record",
+                support_ticket_type="SELF TRIAL",
+            ),
+        )
+        other_open_record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data=dump_data(
+                user_id="cust_records_only",
+                name="Other open type",
+                support_ticket_type="in_trial",
+            ),
+        )
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            data=dump_data(
+                user_id="cust_records_only",
+                name="Incoming in trial",
+                poster="in_trial",
+            ),
+        )
+
+        process_dumped_tickets(tenant_id=self.tenant_id)
+
+        open_self_trial_record.refresh_from_db()
+        self.assertIsNone(open_self_trial_record.data.get("resolution_status"))
+        self.assertFalse(
+            Record.objects.filter(id=other_open_record.id).exists()
+        )
+        self.assertFalse(
+            SupportTicket.objects.filter(user_id="cust_records_only").exists()
+        )
+        self.assertEqual(
+            Record.objects.filter(
+                tenant=self.tenant,
+                entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                data__user_id="cust_records_only",
+            ).count(),
+            1,
+        )
+
+    def test_process_skips_self_trial_dump_when_open_self_trial_record_exists(self):
+        Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data=dump_data(
+                user_id="cust_skip_self_trial",
+                name="Keep this record",
+                support_ticket_type="SELF TRIAL",
+            ),
+        )
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            data=dump_data(
+                user_id="cust_skip_self_trial",
+                name="Should not insert",
+                support_ticket_type="SELF TRIAL",
+            ),
+        )
+
+        result = process_dumped_tickets(tenant_id=self.tenant_id)
+
+        self.assertEqual(result.inserted_tickets, 0)
+        self.assertEqual(
+            Record.objects.filter(
+                tenant=self.tenant,
+                entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                data__user_id="cust_skip_self_trial",
+            ).count(),
+            1,
+        )
+        self.assertEqual(
+            Record.objects.get(
+                tenant=self.tenant,
+                entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                data__user_id="cust_skip_self_trial",
+            ).data.get("name"),
+            "Keep this record",
+        )
+
+    def test_process_inserts_self_trial_when_no_open_self_trial_record(self):
+        other_open_record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data=dump_data(
+                user_id="cust_new_self_trial",
+                name="Paid record",
+                support_ticket_type="paid",
+            ),
+        )
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            data=dump_data(
+                user_id="cust_new_self_trial",
+                name="New self trial",
+                support_ticket_type="SELF TRIAL",
+            ),
+        )
+
+        process_dumped_tickets(tenant_id=self.tenant_id)
+
+        self.assertFalse(Record.objects.filter(id=other_open_record.id).exists())
+
+        new_record = Record.objects.get(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data__name="New self trial",
+        )
+        self.assertIsNone(new_record.data.get("resolution_status"))
+
     @patch.object(SupportTicket.objects, "bulk_create", wraps=SupportTicket.objects.bulk_create)
     def test_bulk_create_ignores_conflicts(self, mock_bulk_create):
         SupportTicketDumpFactory.create(

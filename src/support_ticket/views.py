@@ -11,7 +11,7 @@ from uuid import UUID
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
 from django.db import connection, models, transaction
-from django.db.models import Max, Q
+from django.db.models import Max, Q, QuerySet
 from django.db import IntegrityError
 from django.utils.dateparse import parse_datetime
 from config.supabase_auth import SupabaseJWTAuthentication
@@ -191,13 +191,24 @@ def _normalize_dump_user_id(user_id: Any) -> Optional[str]:
 def _dedupe_dumps_latest_wins(
     dumped_tickets: Sequence[SupportTicketDump],
 ) -> List[SupportTicketDump]:
-    """One row per user_id; later rows in the batch win."""
-    unique: Dict[str, SupportTicketDump] = {}
+    """One row per user_id; SELF TRIAL wins over other types, else latest row wins."""
+    by_user: Dict[str, List[SupportTicketDump]] = {}
+    user_order: List[str] = []
     for dump in dumped_tickets:
         user_id = _normalize_dump_user_id((dump.data or {}).get("user_id"))
-        if user_id:
-            unique[user_id] = dump
-    return list(unique.values())
+        if not user_id:
+            continue
+        if user_id not in by_user:
+            by_user[user_id] = []
+            user_order.append(user_id)
+        by_user[user_id].append(dump)
+
+    unique: List[SupportTicketDump] = []
+    for user_id in user_order:
+        dumps = by_user[user_id]
+        self_trial_dumps = [candidate for candidate in dumps if _dump_is_self_trial(candidate)]
+        unique.append(self_trial_dumps[-1] if self_trial_dumps else dumps[-1])
+    return unique
 
 
 def _serialize_record_extra_value(value: Any) -> Any:
@@ -555,15 +566,45 @@ def process_dumped_tickets(
         dump_data_by_user_id: Dict[str, Dict[str, Any]] = {}
         for dump_ticket in candidates:
             user_id = _normalize_dump_user_id((dump_ticket.data or {}).get("user_id"))
-            _delete_open_support_tickets_for_user(
+            tenant_id = dump_ticket.tenant_id
+            dump_is_self_trial = _dump_is_self_trial(dump_ticket)
+            has_open_self_trial = _has_open_self_trial_record_for_user(
                 user_id,
-                tenant_id=dump_ticket.tenant_id,
+                tenant_id=tenant_id,
             )
-            _delete_open_support_records_for_user(
-                user_id=user_id,
-                tenant_id=dump_ticket.tenant_id,
-            )
-            tickets_to_insert.append(_support_ticket_from_dump(dump_ticket))
+
+            if has_open_self_trial:
+                _delete_open_non_self_trial_records_for_user(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                )
+                _delete_open_non_self_trial_support_tickets_for_user(
+                    user_id,
+                    tenant_id=tenant_id,
+                )
+                continue
+
+            if dump_is_self_trial:
+                _delete_open_non_self_trial_records_for_user(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                )
+                _delete_open_non_self_trial_support_tickets_for_user(
+                    user_id,
+                    tenant_id=tenant_id,
+                )
+                tickets_to_insert.append(_support_ticket_from_dump(dump_ticket))
+            else:
+                _delete_open_support_tickets_for_user(
+                    user_id,
+                    tenant_id=tenant_id,
+                )
+                _delete_open_support_records_for_user(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                )
+                tickets_to_insert.append(_support_ticket_from_dump(dump_ticket))
+
             if user_id:
                 dump_data_by_user_id[user_id] = dict(dump_ticket.data or {})
 
@@ -676,6 +717,100 @@ def _record_support_ticket_type_raw(record: Record) -> Any:
 
 def _record_ticket_type_key(record: Record) -> str:
     return _canonical_support_ticket_type_key(_record_support_ticket_type_raw(record))
+
+
+_SELF_TRIAL_TICKET_TYPE_KEY = "self_trail"
+_OPEN_SUPPORT_TICKET_RESOLUTION_Q = (
+    Q(resolution_status__isnull=True)
+    | Q(resolution_status="Snoozed")
+    | Q(resolution_status="WIP")
+)
+
+
+def _raw_ticket_type_from_mapping(data: Mapping[str, Any]) -> Any:
+    ticket_type = data.get("support_ticket_type")
+    if ticket_type is not None and str(ticket_type).strip():
+        return ticket_type
+    return data.get("poster")
+
+
+def _dump_is_self_trial(dump: SupportTicketDump) -> bool:
+    return (
+        _canonical_support_ticket_type_key(
+            _raw_ticket_type_from_mapping(dump.data or {})
+        )
+        == _SELF_TRIAL_TICKET_TYPE_KEY
+    )
+
+
+def _record_is_self_trial(record: Record) -> bool:
+    return _record_ticket_type_key(record) == _SELF_TRIAL_TICKET_TYPE_KEY
+
+
+def _open_support_records_for_user(
+    user_id: Any,
+    *,
+    tenant_id: Optional[Any] = None,
+) -> QuerySet[Record]:
+    normalized = _normalize_dump_user_id(user_id)
+    if not normalized:
+        return support_ticket_records_qs(tenant_id=tenant_id).none()
+    return (
+        support_ticket_records_qs(tenant_id=tenant_id)
+        .filter(data__user_id=normalized)
+        .filter(q_record_open_or_snoozed_resolution())
+    )
+
+
+def _has_open_self_trial_record_for_user(
+    user_id: Any,
+    *,
+    tenant_id: Optional[Any] = None,
+) -> bool:
+    return any(
+        _record_is_self_trial(record)
+        for record in _open_support_records_for_user(user_id, tenant_id=tenant_id)
+    )
+
+
+def _delete_open_non_self_trial_records_for_user(
+    *,
+    user_id: Any,
+    tenant_id: Optional[Any] = None,
+) -> int:
+    record_ids = [
+        record.id
+        for record in _open_support_records_for_user(user_id, tenant_id=tenant_id)
+        if not _record_is_self_trial(record)
+    ]
+    if not record_ids:
+        return 0
+    count, _ = Record.objects.filter(id__in=record_ids).delete()
+    return count
+
+
+def _delete_open_non_self_trial_support_tickets_for_user(
+    user_id: Any,
+    tenant_id: Optional[Union[str, UUID]] = None,
+) -> int:
+    normalized = _normalize_dump_user_id(user_id)
+    if not normalized:
+        return 0
+    qs = SupportTicket.objects.filter(
+        user_id=normalized,
+    ).filter(_OPEN_SUPPORT_TICKET_RESOLUTION_Q)
+    if tenant_id is not None:
+        qs = qs.filter(tenant_id=tenant_id)
+    ticket_ids = [
+        ticket.id
+        for ticket in qs
+        if _canonical_support_ticket_type_key(ticket.poster)
+        != _SELF_TRIAL_TICKET_TYPE_KEY
+    ]
+    if not ticket_ids:
+        return 0
+    count, _ = SupportTicket.objects.filter(id__in=ticket_ids).delete()
+    return count
 
 
 def _record_call_attempts(record: Record) -> int:

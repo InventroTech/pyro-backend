@@ -24,7 +24,10 @@ class JobType(models.TextChoices):
     PARTNER_LEAD_ASSIGN = "partner_lead_assign", "Partner Lead Assign"
     UNASSIGN_SNOOZED_LEADS = "unassign_snoozed_leads", "Unassign Snoozed Leads"
     RELEASE_LEADS_AFTER_12H = "release_leads_after_12h", "Release Leads After 12h"
-    CLOSE_STALE_SUBSCRIPTION_LEADS = "close_stale_subscription_leads", "Close Stale Subscription Leads"
+    CLOSE_STALE_SELF_TRIAL_SUPPORT_TICKETS = (
+        "close_stale_self_trial_support_tickets",
+        "Close Stale Self Trial Support Tickets",
+    )
     SNOOZED_TO_NOT_CONNECTED_MIDNIGHT = (
         "snoozed_to_not_connected_midnight",
         "Snoozed To Not Connected (midnight)",
