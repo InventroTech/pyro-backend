@@ -475,7 +475,7 @@ class ProcessDumpedTicketsEnqueueRaceTest(TransactionTestCase):
     def test_concurrent_scheduler_tick_creates_only_one_job(self):
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
-            user_id="race_user",
+            data=dump_data(user_id="race_user"),
         )
         worker_count = 4
         results: list = []
