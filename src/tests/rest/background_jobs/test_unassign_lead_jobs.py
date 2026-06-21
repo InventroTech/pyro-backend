@@ -2,7 +2,7 @@
 Tests for lead unassignment background jobs:
 
 - UnassignSnoozedLeadsJobHandler: unassigns SNOOZED leads when snooze_unassign_at has passed
-- CloseStaleSubscriptionLeadsJobHandler: sets lead_stage CLOSED for stale SELF TRIAL leads
+- CloseStaleSelfTrialSupportTicketsJobHandler: sets resolution_status Closed for stale SELF TRIAL support tickets
 - SnoozedToNotConnectedMidnightJobHandler: SNOOZED SALES LEAD with next_call_at today (UTC) → NOT_CONNECTED
 - ReleaseLeadsAfter12hJobHandler: clears assigned_to on NOT_CONNECTED leads when
   first_assigned_today_at + 12h has passed (or legacy not_connected_unassign_at)
@@ -43,11 +43,13 @@ def _assert_next_call_at_about_one_hour_later(test_case, next_call_at_str, toler
 from crm_records.models import Record
 from background_jobs.models import BackgroundJob, JobType
 from background_jobs.job_handlers import (
-    CloseStaleSubscriptionLeadsJobHandler,
+    CloseStaleSelfTrialSupportTicketsJobHandler,
     ReleaseLeadsAfter12hJobHandler,
     SnoozedToNotConnectedMidnightJobHandler,
     UnassignSnoozedLeadsJobHandler,
 )
+from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
+from support_ticket.models import SupportTicket
 
 from tests.factories import TenantFactory, RecordFactory, BackgroundJobFactory
 
@@ -337,115 +339,117 @@ class SnoozedToNotConnectedMidnightJobHandlerTests(TestCase):
         self.assertEqual(self.handler.get_retry_delay(3), 900)
 
 
-class CloseStaleSubscriptionLeadsJobHandlerTests(TestCase):
-    """CloseStaleSubscriptionLeadsJobHandler: CLOSED for SELF TRIAL leads past subscription_time_stamp cutoff."""
+class CloseStaleSelfTrialSupportTicketsJobHandlerTests(TestCase):
+    """Close stale open SELF TRIAL support ticket records past subscription_time_stamp cutoff."""
 
     def setUp(self):
         super().setUp()
-        self.handler = CloseStaleSubscriptionLeadsJobHandler()
+        self.handler = CloseStaleSelfTrialSupportTicketsJobHandler()
         self.tenant = TenantFactory()
 
     def _make_job(self, payload=None):
         return BackgroundJobFactory(
             tenant=self.tenant,
-            job_type=JobType.CLOSE_STALE_SUBSCRIPTION_LEADS,
+            job_type=JobType.CLOSE_STALE_SELF_TRIAL_SUPPORT_TICKETS,
             payload=payload if payload is not None else {},
         )
 
-    def test_sets_closed_when_self_trial_subscription_stale(self):
-        """SELF TRIAL lead with subscription_time_stamp older than default days becomes CLOSED."""
+    def test_closes_when_self_trial_subscription_stale(self):
         sub_ts = (timezone.now() - timedelta(days=20)).isoformat()
-        lead = RecordFactory(
+        ticket = SupportTicket.objects.create(
             tenant=self.tenant,
-            entity_type="lead",
+            user_id="stale_user",
+            poster="SELF TRIAL",
+            resolution_status=None,
+        )
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data={
-                "lead_status": "SELF TRIAL",
-                "lead_stage": "FRESH",
+                "user_id": "stale_user",
+                "support_ticket_type": "SELF TRIAL",
+                "support_ticket_id": ticket.id,
                 "subscription_time_stamp": sub_ts,
             },
         )
         job = self._make_job()
         self.assertTrue(self.handler.process(job))
-        lead.refresh_from_db()
-        self.assertEqual(lead.data.get("lead_stage"), "CLOSED")
+        record.refresh_from_db()
+        ticket.refresh_from_db()
+        self.assertEqual(record.data.get("resolution_status"), "Closed")
+        self.assertIsNotNone(record.data.get("completed_at"))
+        self.assertEqual(ticket.resolution_status, "Closed")
+        self.assertIsNotNone(ticket.completed_at)
         self.assertEqual(job.result["updated"], 1)
+        self.assertEqual(job.result["records_updated"], 1)
+        self.assertEqual(job.result["support_tickets_updated"], 1)
         self.assertEqual(job.result["tenant_scope"], "single")
-        self.assertEqual(job.result["tenant_id"], str(self.tenant.id))
-        self.assertIn("cutoff", job.result)
 
     def test_skips_when_subscription_not_old_enough(self):
-        """Lead with subscription_time_stamp within the window is unchanged."""
         sub_ts = (timezone.now() - timedelta(days=10)).isoformat()
-        lead = RecordFactory(
+        record = RecordFactory(
             tenant=self.tenant,
-            entity_type="lead",
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data={
-                "lead_status": "SELF TRIAL",
-                "lead_stage": "FRESH",
+                "support_ticket_type": "SELF TRIAL",
                 "subscription_time_stamp": sub_ts,
             },
         )
         job = self._make_job({"days": 15})
         self.assertTrue(self.handler.process(job))
-        lead.refresh_from_db()
-        self.assertEqual(lead.data.get("lead_stage"), "FRESH")
+        record.refresh_from_db()
+        self.assertIsNone(record.data.get("resolution_status"))
         self.assertEqual(job.result["updated"], 0)
 
-    def test_skips_when_lead_status_not_self_trial(self):
-        """SALES LEAD rows are not closed by this job."""
+    def test_skips_when_ticket_type_not_self_trial(self):
         sub_ts = (timezone.now() - timedelta(days=20)).isoformat()
-        lead = RecordFactory(
+        record = RecordFactory(
             tenant=self.tenant,
-            entity_type="lead",
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data={
-                "lead_status": "SALES LEAD",
-                "lead_stage": "FRESH",
+                "support_ticket_type": "in_trial",
                 "subscription_time_stamp": sub_ts,
             },
         )
         job = self._make_job()
         self.assertTrue(self.handler.process(job))
-        lead.refresh_from_db()
-        self.assertEqual(lead.data.get("lead_stage"), "FRESH")
+        record.refresh_from_db()
+        self.assertIsNone(record.data.get("resolution_status"))
         self.assertEqual(job.result["updated"], 0)
 
     def test_skips_when_already_closed(self):
-        """Already CLOSED SELF TRIAL leads are excluded."""
         sub_ts = (timezone.now() - timedelta(days=20)).isoformat()
-        lead = RecordFactory(
+        record = RecordFactory(
             tenant=self.tenant,
-            entity_type="lead",
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data={
-                "lead_status": "SELF TRIAL",
-                "lead_stage": "CLOSED",
+                "support_ticket_type": "SELF TRIAL",
+                "resolution_status": "Closed",
                 "subscription_time_stamp": sub_ts,
             },
         )
         job = self._make_job()
         self.assertTrue(self.handler.process(job))
-        lead.refresh_from_db()
-        self.assertEqual(lead.data.get("lead_stage"), "CLOSED")
+        record.refresh_from_db()
+        self.assertEqual(record.data.get("resolution_status"), "Closed")
         self.assertEqual(job.result["updated"], 0)
 
     def test_single_tenant_payload_only_updates_that_tenant(self):
-        """With tenant_id in payload, only matching tenant's leads are updated."""
         other = TenantFactory()
         old_sub = (timezone.now() - timedelta(days=20)).isoformat()
         ours = RecordFactory(
             tenant=self.tenant,
-            entity_type="lead",
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data={
-                "lead_status": "SELF TRIAL",
-                "lead_stage": "FRESH",
+                "support_ticket_type": "SELF TRIAL",
                 "subscription_time_stamp": old_sub,
             },
         )
         theirs = RecordFactory(
             tenant=other,
-            entity_type="lead",
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data={
-                "lead_status": "SELF TRIAL",
-                "lead_stage": "FRESH",
+                "support_ticket_type": "SELF TRIAL",
                 "subscription_time_stamp": old_sub,
             },
         )
@@ -453,11 +457,9 @@ class CloseStaleSubscriptionLeadsJobHandlerTests(TestCase):
         self.assertTrue(self.handler.process(job))
         ours.refresh_from_db()
         theirs.refresh_from_db()
-        self.assertEqual(ours.data.get("lead_stage"), "CLOSED")
-        self.assertEqual(theirs.data.get("lead_stage"), "FRESH")
+        self.assertEqual(ours.data.get("resolution_status"), "Closed")
+        self.assertIsNone(theirs.data.get("resolution_status"))
         self.assertEqual(job.result["updated"], 1)
-        self.assertEqual(job.result["tenant_scope"], "single")
-        self.assertEqual(job.result["tenant_id"], str(self.tenant.id))
 
     def test_validate_payload_rejects_non_positive_days(self):
         self.assertFalse(self.handler.validate_payload({"days": 0}))
