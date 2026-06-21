@@ -19,7 +19,7 @@ from uuid import UUID
 import requests
 from django.conf import settings
 from django.db import transaction
-from django.db.models import DateTimeField, F, Func, JSONField
+from django.db.models import DateTimeField, F, Func, JSONField, Q
 from django.db.models.expressions import RawSQL
 from django.db.utils import OperationalError
 from django.utils import timezone
@@ -30,6 +30,10 @@ from crm_records.lead_assignment_tracking import merge_first_assignment_today_an
 from crm_records.models import Record, PartnerEvent
 from crm_records.scoring import get_scoring_rules, score_chunk_sql
 from crm_records.services import PrajaService
+from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
+from support_ticket.models import SupportTicket
+from support_ticket.records import q_record_open_or_snoozed_resolution
+from support_ticket.ticket_types import q_record_self_trial
 from support_ticket.services import MixpanelService, RMAssignedMixpanelService
 
 from .models import BackgroundJob, JobType
@@ -1053,23 +1057,37 @@ END
 """
 
 
-class JsonbSetLeadStageClosed(Func):
-    """PostgreSQL jsonb_set: set ``data.lead_stage`` to CLOSED."""
+class JsonbSetSupportTicketClosed(Func):
+    """PostgreSQL jsonb_set: set ``data.resolution_status`` to Closed and ``completed_at``."""
 
     function = "jsonb_set"
     template = (
-        "jsonb_set(COALESCE(%(expressions)s, '{}'::jsonb), '{lead_stage}', "
-        "to_jsonb('CLOSED'::text), true)"
+        "jsonb_set("
+        "jsonb_set(COALESCE(%(expressions)s, '{}'::jsonb), '{resolution_status}', "
+        "to_jsonb('Closed'::text), true), "
+        "'{completed_at}', to_jsonb((NOW() AT TIME ZONE 'UTC')::text), true)"
     )
     output_field = JSONField()
 
 
-def _close_stale_subscription_leads_queryset(
+def _legacy_support_ticket_id_from_record_data(data: Any) -> Optional[int]:
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("support_ticket_id") or data.get("ticket_id")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _close_stale_self_trial_support_tickets_queryset(
     tenant_id: Optional[Union[str, UUID]] = None,
 ):
     """
-    Base queryset: SELF TRIAL leads, not CLOSED, with ``subscription_ts`` from
-    ``subscription_time_stamp`` (same rules as the CASE SQL).
+    Base queryset: open SELF TRIAL support ticket records with ``subscription_ts`` from
+    ``subscription_time_stamp`` (same rules as the lead CASE SQL).
     """
     qs = (
         Record.objects.annotate(
@@ -1079,8 +1097,11 @@ def _close_stale_subscription_leads_queryset(
                 output_field=DateTimeField(),
             )
         )
-        .filter(entity_type="lead", data__contains={"lead_status": "SELF TRIAL"})
-        .exclude(data__lead_stage__iexact="CLOSED")
+        .filter(entity_type=SUPPORT_TICKET_ENTITY_TYPE)
+        .filter(q_record_self_trial())
+        .filter(
+            q_record_open_or_snoozed_resolution() | Q(data__resolution_status="WIP")
+        )
     )
     if tenant_id is not None:
         tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
@@ -1088,34 +1109,65 @@ def _close_stale_subscription_leads_queryset(
     return qs
 
 
-def _close_stale_subscription_leads_for_tenant(
+def _close_stale_self_trial_support_tickets_apply(
+    qs,
+    *,
+    now,
+) -> Tuple[int, int]:
+    ticket_ids = set()
+    for row in qs.values("data"):
+        ticket_id = _legacy_support_ticket_id_from_record_data(row.get("data"))
+        if ticket_id is not None:
+            ticket_ids.add(ticket_id)
+    with transaction.atomic():
+        records_updated = qs.update(
+            data=JsonbSetSupportTicketClosed(F("data")),
+            updated_at=now,
+        )
+        tickets_updated = 0
+        if ticket_ids:
+            tickets_updated = SupportTicket.objects.filter(id__in=ticket_ids).update(
+                resolution_status="Closed",
+                completed_at=now,
+            )
+    return records_updated, tickets_updated
+
+
+def _close_stale_self_trial_support_tickets_for_tenant(
     tenant_id: Union[str, UUID], days: int
-) -> Tuple[int, str]:
+) -> Tuple[int, int, str]:
     if days < 1:
         raise ValueError("days must be >= 1")
     cutoff = (timezone.now() - timedelta(days=days)).date()
     now = timezone.now()
     tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
-    updated = (
-        _close_stale_subscription_leads_queryset(tid)
+    stale_qs = (
+        _close_stale_self_trial_support_tickets_queryset(tid)
         .filter(subscription_ts__date__lte=cutoff)
-        .update(data=JsonbSetLeadStageClosed(F("data")), updated_at=now)
     )
-    return updated, cutoff.isoformat()
+    records_updated, tickets_updated = _close_stale_self_trial_support_tickets_apply(
+        stale_qs,
+        now=now,
+    )
+    return records_updated, tickets_updated, cutoff.isoformat()
 
 
-def _close_stale_subscription_leads_all_tenants(days: int) -> Tuple[int, int, str]:
+def _close_stale_self_trial_support_tickets_all_tenants(
+    days: int,
+) -> Tuple[int, int, int, str]:
     if days < 1:
         raise ValueError("days must be >= 1")
     cutoff = (timezone.now() - timedelta(days=days)).date()
     now = timezone.now()
     n_tenants = Tenant.objects.count()
-    total = (
-        _close_stale_subscription_leads_queryset(None)
-        .filter(subscription_ts__date__lte=cutoff)
-        .update(data=JsonbSetLeadStageClosed(F("data")), updated_at=now)
+    stale_qs = _close_stale_self_trial_support_tickets_queryset(None).filter(
+        subscription_ts__date__lte=cutoff
     )
-    return total, n_tenants, cutoff.isoformat()
+    records_updated, tickets_updated = _close_stale_self_trial_support_tickets_apply(
+        stale_qs,
+        now=now,
+    )
+    return records_updated, tickets_updated, n_tenants, cutoff.isoformat()
 
 
 class PurgeOldLogTablesJobHandler(JobHandler):
@@ -1235,10 +1287,12 @@ class ProcessDumpedTicketsJobHandler(JobHandler):
         return True
 
 
-class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
+class CloseStaleSelfTrialSupportTicketsJobHandler(JobHandler):
     """
-    Set ``data.lead_stage`` to CLOSED for **SELF TRIAL** leads (``lead_status``) whose
-    ``subscription_time_stamp`` is at least ``days`` (default 15) in the past.
+    Set ``data.resolution_status`` to **Closed** for open **SELF TRIAL** support ticket
+    records whose ``subscription_time_stamp`` is at least ``days`` (default 15) in the past.
+
+    Also syncs linked legacy ``support_ticket`` rows when ``support_ticket_id`` is present.
 
     Payload:
     - ``days`` (int, optional, default 15): minimum age of subscription timestamp in days.
@@ -1251,40 +1305,50 @@ class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
         if "days" in payload:
             days = int(payload["days"])
         else:
-            days = 14
+            days = 15
         if days < 1:
             raise ValueError("days must be >= 1")
 
         tid = job.tenant_id or payload.get("tenant_id")
         if tid:
-            updated, cutoff = _close_stale_subscription_leads_for_tenant(tid, days)
+            records_updated, tickets_updated, cutoff = (
+                _close_stale_self_trial_support_tickets_for_tenant(tid, days)
+            )
             job.result = {
                 "success": True,
-                "updated": updated,
+                "updated": records_updated,
+                "records_updated": records_updated,
+                "support_tickets_updated": tickets_updated,
                 "days": days,
                 "cutoff": cutoff,
                 "tenant_id": str(tid),
                 "tenant_scope": "single",
             }
             logger.info(
-                "[CloseStaleSubscriptionLeads] tenant=%s updated=%s days=%s",
+                "[CloseStaleSelfTrialSupportTickets] tenant=%s records=%s tickets=%s days=%s",
                 tid,
-                updated,
+                records_updated,
+                tickets_updated,
                 days,
             )
         else:
-            total, n_tenants, cutoff = _close_stale_subscription_leads_all_tenants(days)
+            records_updated, tickets_updated, n_tenants, cutoff = (
+                _close_stale_self_trial_support_tickets_all_tenants(days)
+            )
             job.result = {
                 "success": True,
-                "updated": total,
+                "updated": records_updated,
+                "records_updated": records_updated,
+                "support_tickets_updated": tickets_updated,
                 "days": days,
                 "cutoff": cutoff,
                 "tenants_processed": n_tenants,
                 "tenant_scope": "all",
             }
             logger.info(
-                "[CloseStaleSubscriptionLeads] all tenants updated=%s tenants=%s days=%s",
-                total,
+                "[CloseStaleSelfTrialSupportTickets] all tenants records=%s tickets=%s tenants=%s days=%s",
+                records_updated,
+                tickets_updated,
                 n_tenants,
                 days,
             )
@@ -1300,7 +1364,7 @@ class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
             if "days" in p:
                 days = int(p["days"])
             else:
-                days = 14
+                days = 15
         except (TypeError, ValueError):
             return False
         return days >= 1
@@ -1521,7 +1585,8 @@ class JobHandlerRegistry:
         self.register_handler(JobType.UNASSIGN_SNOOZED_LEADS, UnassignSnoozedLeadsJobHandler())
         self.register_handler(JobType.RELEASE_LEADS_AFTER_12H, ReleaseLeadsAfter12hJobHandler())
         self.register_handler(
-            JobType.CLOSE_STALE_SUBSCRIPTION_LEADS, CloseStaleSubscriptionLeadsJobHandler()
+            JobType.CLOSE_STALE_SELF_TRIAL_SUPPORT_TICKETS,
+            CloseStaleSelfTrialSupportTicketsJobHandler(),
         )
         self.register_handler(
             JobType.SNOOZED_TO_NOT_CONNECTED_MIDNIGHT,

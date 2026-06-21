@@ -539,7 +539,7 @@ class JobProcessor:
     def _maybe_enqueue_lead_cron_jobs(self):
         """
         Every LEAD_CRON_ENQUEUE_INTERVAL seconds, enqueue unassign_snoozed_leads,
-        release_leads_after_12h, and close_stale_subscription_leads so the worker runs them
+        release_leads_after_12h, and close_stale_self_trial_support_tickets so the worker runs them
         without needing external cron.
         """
         now = timezone.now()
@@ -561,13 +561,13 @@ class JobProcessor:
                 )
                 enqueue_for_all_tenants(
                     queue,
-                    job_type=JobType.CLOSE_STALE_SUBSCRIPTION_LEADS,
+                    job_type=JobType.CLOSE_STALE_SELF_TRIAL_SUPPORT_TICKETS,
                     payload={"days": 15},
                     priority=0,
                 )
             logger.debug(
                 f"[Worker {self.worker_id}] Enqueued lead maintenance jobs per tenant "
-                f"(unassign_snoozed_leads, release_leads_after_12h, close_stale_subscription_leads)"
+                f"(unassign_snoozed_leads, release_leads_after_12h, close_stale_self_trial_support_tickets)"
             )
         except Exception as e:
             logger.warning(
