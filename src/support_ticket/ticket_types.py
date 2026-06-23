@@ -76,8 +76,19 @@ def raw_field_values_for_type_key(type_key: str) -> frozenset[str]:
     return frozenset(validated)
 
 
+def q_record_support_ticket_type_key(type_key: str) -> Q:
+    """Q filter for records whose ``support_ticket_type``/``poster`` match ``type_key``."""
+    clauses = [
+        Q(data__support_ticket_type=value) | Q(data__poster=value)
+        for value in raw_field_values_for_type_key(type_key)
+    ]
+    if not clauses:
+        return Q(pk__in=[])
+    combined = clauses[0]
+    for clause in clauses[1:]:
+        combined |= clause
+    return combined
+
+
 def q_record_self_trial() -> Q:
-    q = Q()
-    for value in raw_field_values_for_type_key(SELF_TRIAL_TICKET_TYPE_KEY):
-        q |= Q(data__support_ticket_type=value) | Q(data__poster=value)
-    return q
+    return q_record_support_ticket_type_key(SELF_TRIAL_TICKET_TYPE_KEY)
