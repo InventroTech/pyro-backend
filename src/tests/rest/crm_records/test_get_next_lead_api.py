@@ -15,9 +15,9 @@ Lead filters come from ``Group`` + ``TenantMemberSetting`` KV (see ``get_lead_fi
 not ``UserSettings``. Helpers: ``_seed_sales_pipeline`` (buckets + SALES group), ``_seed_self_trial_legacy``.
 
 Legacy SELF TRIAL path (``lead_statuses`` includes ``"SELF TRIAL"``): main queue is
-fresh-only; Step 5a assigns due not-connected retries when under daily limit (same
-rules as the daily-limit not-connected fallback). ``NOT_CONNECTED`` with
-``call_attempts=0`` still returns empty (retry path requires attempts 1–6).
+fresh-only; Step 5a / daily-limit fallback return due NOT_CONNECTED retries only when
+already assigned to the requesting user (unassigned NOT_CONNECTED is never re-pulled).
+``NOT_CONNECTED`` with ``call_attempts=0`` still returns empty (retry path requires attempts 1–6).
 """
 
 import uuid
@@ -103,8 +103,7 @@ def _seed_tenant_buckets_for_pipeline(tenant):
             "call_attempts": {"lt": 6, "gte": 1},
             "next_call_due": True,
             "assigned_scope": "me",
-            "apply_routing_rule": True,
-            "fallback_assigned_scope": "unassigned",
+            "apply_routing_rule": False,
         },
     )
 
@@ -376,8 +375,8 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
         self.assertNotEqual(data, {})
         self.assertEqual(data["data"].get("lead_source"), "SALES LEAD")
 
-    def test_daily_limit_fallback_assigns_unassigned_not_connected_when_no_assigned_retry(self):
-        """When daily limit is reached and no assigned-to-user retry lead exists, fallback assigns and returns an unassigned NOT_CONNECTED due lead matching filters (e.g. SELF TRIAL)."""
+    def test_daily_limit_fallback_does_not_assign_unassigned_not_connected(self):
+        """When daily limit is reached, unassigned NOT_CONNECTED due leads are not returned."""
         from django.utils import timezone
 
         _seed_self_trial_legacy(
@@ -386,11 +385,10 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
             lead_sources=["SELF TRIAL"],
             daily_limit=1,
         )
-        
+
         now = timezone.now()
-        past_time = now - timezone.timedelta(hours=12) # Push it 12 hours back to guarantee it is "due"
-        
-        # 1. Lead that counts as "assigned today" so we hit daily limit
+        past_time = now - timezone.timedelta(hours=12)
+
         RecordFactory(
             tenant=self.tenant,
             entity_type="lead",
@@ -404,7 +402,6 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
             },
         )
 
-        # 2. Unassigned NOT_CONNECTED SELF TRIAL: fallback assigns it to user and returns it
         RecordFactory(
             tenant=self.tenant,
             entity_type="lead",
@@ -420,21 +417,13 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
                 "phone_number": "+1234567890",
             },
         )
-        
+
         response = self.client.get(self.url, **self.auth_headers)
         self.assertEqual(response.status_code, 200)
-        
-        data = response.json()
-        self.assertNotEqual(data, {}, msg="Fallback assigns unassigned NOT_CONNECTED due lead and returns it")
-        
-        # 👇 FIX 3: Look inside the nested "data" JSON blob for the assertions!
-        lead_data = data.get("data", {})
-        self.assertEqual(lead_data.get("name"), "Self Trial Not Connected")
-        self.assertEqual(lead_data.get("lead_source"), "SELF TRIAL")
-        self.assertEqual(lead_data.get("assigned_to"), self.supabase_uid)
+        self.assertEqual(response.json(), {})
 
-    def test_daily_limit_fallback_assigns_unassigned_in_queue_due_when_no_assigned_retry(self):
-        """When daily limit is reached and no assigned retry lead exists, fallback assigns and returns an unassigned IN_QUEUE due lead (NOT_CONNECTED/IN_QUEUE path)."""
+    def test_daily_limit_fallback_does_not_assign_unassigned_in_queue_due(self):
+        """Unassigned due IN_QUEUE retries are also not pulled when only assigned-to-me retries are allowed."""
         from django.utils import timezone
 
         _seed_self_trial_legacy(
@@ -471,11 +460,7 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
         )
         response = self.client.get(self.url, **self.auth_headers)
         self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertNotEqual(data, {}, msg="Fallback assigns unassigned IN_QUEUE due lead and returns it")
-        self.assertEqual(data.get("name"), "Self Trial IN_QUEUE Due")
-        self.assertEqual(data.get("data", {}).get("lead_stage"), "ASSIGNED")
-        self.assertEqual(data.get("data", {}).get("assigned_to"), self.supabase_uid)
+        self.assertEqual(response.json(), {})
 
     def test_only_not_connected_leads_without_daily_limit_returns_empty(self):
         """NOT_CONNECTED with call_attempts=0 is not in the main queue and does not match Step 5a retry (needs attempts 1–6)."""
@@ -500,8 +485,8 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
             msg="NOT_CONNECTED with 0 attempts: not main queue, not Step 5a retry",
         )
 
-    def test_self_trial_legacy_step_5a_assigns_unassigned_not_connected_due_when_no_fresh_under_daily_limit(self):
-        """Legacy SELF TRIAL: under daily limit, no fresh queueable leads — Step 5a returns due unassigned NOT_CONNECTED retry."""
+    def test_self_trial_legacy_step_5a_skips_unassigned_not_connected_due(self):
+        """Legacy SELF TRIAL: unassigned due NOT_CONNECTED leads are not returned by Step 5a."""
         now = django_timezone.now()
         past = (now - timedelta(hours=3)).isoformat()
         _seed_self_trial_legacy(self.tenant, self.membership, daily_limit=50)
@@ -521,13 +506,7 @@ class GetNextLeadAPIWithSettingsTests(BaseAPITestCase):
         )
         response = self.client.get(self.url, **self.auth_headers)
         self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertNotEqual(data, {}, msg="Step 5a should assign unassigned NOT_CONNECTED due lead")
-        lead_blob = data.get("data", {})
-        self.assertEqual(lead_blob.get("name"), "Step 5a NC Retry")
-        self.assertEqual(lead_blob.get("lead_status"), "SELF TRIAL")
-        self.assertEqual(data.get("lead_status"), "ASSIGNED")
-        self.assertEqual(lead_blob.get("assigned_to"), self.supabase_uid)
+        self.assertEqual(response.json(), {})
 
     def test_self_trial_legacy_step_5a_prefers_assigned_to_me_not_connected_before_unassigned(self):
         """Legacy SELF TRIAL: assigned-to-me due NOT_CONNECTED (lower call_attempts) wins over unassigned retry."""
@@ -995,8 +974,8 @@ class LegacyGetNextLeadRaceConditionTests(BaseAPITestCase):
         lead.refresh_from_db()
         self.assertIsNone((lead.data or {}).get("assigned_to"))
 
-    def test_legacy_step5a_unassigned_nc_retry_lost_race_returns_empty(self):
-        """Step 5a unassigned NOT_CONNECTED retry: lost race after lock returns empty; DB unchanged."""
+    def test_legacy_step5a_unassigned_nc_retry_not_attempted(self):
+        """Step 5a no longer assigns unassigned NOT_CONNECTED retries."""
         now = django_timezone.now()
         past = (now - timedelta(hours=3)).isoformat()
         _seed_self_trial_legacy(self.tenant, self.membership, daily_limit=50)
@@ -1014,12 +993,8 @@ class LegacyGetNextLeadRaceConditionTests(BaseAPITestCase):
                 "phone_number": "+19990000002",
             },
         )
-        other_uid = str(uuid.uuid4())
-        fake_sf = self._make_fake_select_for_update(lead, other_uid)
-        with patch("crm_records.views.Record.objects.select_for_update", fake_sf):
-            response = self.client.get(self.url, **self.auth_headers)
-        self.assertGreaterEqual(fake_sf.calls, 1, "Step 5a lock path should run")
+        response = self.client.get(self.url, **self.auth_headers)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {}, msg="Step 5a lost race: must not steal assignment")
+        self.assertEqual(response.json(), {})
         lead.refresh_from_db()
         self.assertEqual((lead.data or {}).get("assigned_to") or "", "")

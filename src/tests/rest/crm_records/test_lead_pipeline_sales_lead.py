@@ -5,7 +5,7 @@ Covers:
 - Eligible party (affiliated_party) and lead_source filters from UserSettings
 - Daily limit: fresh bucket skipped when limit reached; snoozed follow-up still assignable
 - Snoozed due prioritized over fresh (pull_strategy ordering)
-- 12h NOT_CONNECTED release clears assignee; once next_call_at is due, pipeline can assign
+- 12h NOT_CONNECTED release clears assignee; unassigned NOT_CONNECTED leads are never re-pulled
 - Rule engine compute_next_call_from_attempts (fixed minutes) sets next_call_at
 - NOT_CONNECTED / retry leads returned only after next_call_at <= now
 
@@ -135,8 +135,7 @@ def _seed_default_buckets(tenant) -> None:
             "call_attempts": {"lt": 6, "gte": 1},
             "next_call_due": True,
             "assigned_scope": "me",
-            "apply_routing_rule": True,
-            "fallback_assigned_scope": "unassigned",
+            "apply_routing_rule": False,
         },
     )
 
@@ -467,14 +466,27 @@ def test_not_connected_assigned_to_me_returned_when_due(sales_lead_env):
     assert record.pk == nc.pk
 
 
-def test_release_after_12h_unassigns_then_pipeline_assigns_when_next_call_due(sales_lead_env):
+def test_release_after_12h_unassigns_and_unassigned_nc_not_re_pulled(sales_lead_env):
     """
-    ReleaseLeadsAfter12hJobHandler clears assigned_to (NOT_CONNECTED) and sets next_call_at ~ +1h.
-    After moving next_call_at to the past, the unassigned retry lead is eligible and assigned.
+    ReleaseLeadsAfter12hJobHandler clears assigned_to (NOT_CONNECTED).
+    Unassigned due NC leads are not returned by the pipeline (bucket or daily-limit fallback).
     """
     env = sales_lead_env
-    _make_sales_lead_user_settings(env, eligible_parties=[], lead_sources=[])
     now = timezone.now()
+    _make_sales_lead_user_settings(env, eligible_parties=[], lead_sources=[], daily_limit=1)
+
+    Record.objects.create(
+        tenant=env.tenant,
+        entity_type="lead",
+        data={
+            "lead_status": "SALES LEAD",
+            "lead_source": "PREMIUM_REFERRAL",
+            "first_assigned_to": env.user_identifier,
+            "first_assigned_at": now.isoformat(),
+            "lead_stage": "ASSIGNED",
+            "call_attempts": 0,
+        },
+    )
     anchor = (now - timedelta(hours=13)).isoformat()
 
     lead = RecordFactory(
@@ -512,18 +524,18 @@ def test_release_after_12h_unassigns_then_pipeline_assigns_when_next_call_due(sa
 
     pipeline = LeadPipeline()
     record = pipeline.get_next(tenant=env.tenant, request_user=env.user, debug=False)
-    assert record is not None
-    assert record.pk == lead.pk
-    assert record.data.get("assigned_to") == env.user_identifier
+    assert record is None
+    lead.refresh_from_db()
+    assert lead.data.get("assigned_to") in (None, "", "null")
 
 
-def test_nc_retry_fallback_unassigned_after_12h_release(sales_lead_env):
-    """NC bucket falls back to unassigned scope -- picks up 12h-released leads."""
+def test_unassigned_nc_retry_not_picked_in_normal_flow(sales_lead_env):
+    """NC bucket is assigned-to-me only; unassigned due NC leads are skipped until daily-limit fallback."""
     env = sales_lead_env
     _make_sales_lead_user_settings(env, eligible_parties=[], lead_sources=[])
     past = (timezone.now() - timedelta(minutes=5)).isoformat()
 
-    released = RecordFactory(
+    RecordFactory(
         tenant=env.tenant,
         entity_type="lead",
         data=_sales_lead_data(
@@ -535,17 +547,24 @@ def test_nc_retry_fallback_unassigned_after_12h_release(sales_lead_env):
             last_call_outcome="not_connected",
         ),
     )
+    fresh = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="Fresh instead",
+            lead_stage="IN_QUEUE",
+            call_attempts=0,
+        ),
+    )
 
     pipeline = LeadPipeline()
     record = pipeline.get_next(tenant=env.tenant, request_user=env.user, debug=False)
     assert record is not None
-    assert record.pk == released.pk
-    record.refresh_from_db()
-    assert record.data.get("assigned_to") == env.user_identifier
+    assert record.pk == fresh.pk
 
 
-def test_daily_limit_fallback_picks_unassigned_nc_retry(sales_lead_env):
-    """When daily limit reached and no assigned-to-me retries, unassigned NC retries are tried."""
+def test_daily_limit_fallback_skips_unassigned_nc_retry(sales_lead_env):
+    """When daily limit reached, unassigned NOT_CONNECTED due leads are not assigned."""
     env = sales_lead_env
     now = timezone.now()
     _make_sales_lead_user_settings(env, eligible_parties=[], lead_sources=[], daily_limit=1)
@@ -563,7 +582,7 @@ def test_daily_limit_fallback_picks_unassigned_nc_retry(sales_lead_env):
         },
     )
 
-    nc = RecordFactory(
+    RecordFactory(
         tenant=env.tenant,
         entity_type="lead",
         data=_sales_lead_data(
@@ -578,8 +597,7 @@ def test_daily_limit_fallback_picks_unassigned_nc_retry(sales_lead_env):
 
     pipeline = LeadPipeline()
     record = pipeline.get_next(tenant=env.tenant, request_user=env.user, debug=False)
-    assert record is not None
-    assert record.pk == nc.pk
+    assert record is None
 
 
 def test_daily_limit_fallback_includes_attempts_six(sales_lead_env):
