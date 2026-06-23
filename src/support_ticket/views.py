@@ -310,7 +310,10 @@ def _delete_open_support_tickets_for_user(
     return count
 
 
-def enqueue_ticket_created_mixpanel(ticket: SupportTicket) -> None:
+def enqueue_ticket_created_mixpanel(
+    ticket: SupportTicket,
+    dump_data: Optional[Mapping[str, Any]] = None,
+) -> None:
     user_id = ticket.user_id or str(ticket.id)
     properties = {
         "ticket_id": ticket.id,
@@ -327,6 +330,7 @@ def enqueue_ticket_created_mixpanel(ticket: SupportTicket) -> None:
         "other_reasons": ticket.other_reasons or [],
         "badge": ticket.badge,
         "poster": ticket.poster,
+        "support_ticket_type": (dump_data or {}).get("support_ticket_type"),
         "assigned_to": str(ticket.assigned_to.id) if ticket.assigned_to else None,
         "layout_status": ticket.layout_status,
         "state": ticket.state,
@@ -518,7 +522,9 @@ class ProcessDumpedTicketsResult:
 def process_dumped_tickets(
     *,
     tenant_id: Optional[Union[str, UUID]] = None,
-    on_ticket_created: Optional[Callable[[SupportTicket], None]] = None,
+    on_ticket_created: Optional[
+        Callable[[SupportTicket, Optional[Mapping[str, Any]]], None]
+    ] = None,
     batch_limit: int = DUMP_BATCH_LIMIT,
 ) -> ProcessDumpedTicketsResult:
     dumped_qs = SupportTicketDump.objects.filter(
@@ -565,9 +571,9 @@ def process_dumped_tickets(
         )
 
     inserted_tickets: List[SupportTicket] = []
+    dump_data_by_user_id: Dict[str, Dict[str, Any]] = {}
     with transaction.atomic():
         tickets_to_insert: List[SupportTicket] = []
-        dump_data_by_user_id: Dict[str, Dict[str, Any]] = {}
         for dump_ticket in candidates:
             user_id = _normalize_dump_user_id((dump_ticket.data or {}).get("user_id"))
             tenant_id = dump_ticket.tenant_id
@@ -626,7 +632,10 @@ def process_dumped_tickets(
     if on_ticket_created:
         for ticket in inserted_tickets:
             try:
-                on_ticket_created(ticket)
+                dump_data = (
+                    dump_data_by_user_id.get(ticket.user_id) if ticket.user_id else None
+                )
+                on_ticket_created(ticket, dump_data)
             except Exception as exc:
                 logger.error(
                     "process_dumped_tickets: on_ticket_created failed for ticket %s: %s",

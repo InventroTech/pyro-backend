@@ -15,6 +15,7 @@ from support_ticket.views import (
     _dedupe_dumps_latest_wins,
     enqueue_process_dumped_tickets_for_pending_dumps,
     enqueue_process_dumped_tickets_job,
+    enqueue_ticket_created_mixpanel,
     process_dumped_tickets,
 )
 from support_ticket.models import SupportTicket, SupportTicketDump
@@ -200,6 +201,65 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
             data__name="New self trial",
         )
         self.assertIsNone(new_record.data.get("resolution_status"))
+
+    @patch("support_ticket.views.get_queue_service")
+    def test_ticket_created_mixpanel_includes_support_ticket_type(self, mock_get_queue):
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            data=dump_data(
+                user_id="mixpanel_user",
+                name="Mixpanel ticket",
+                support_ticket_type="SELF TRIAL",
+                poster="legacy_poster",
+            ),
+        )
+
+        process_dumped_tickets(
+            tenant_id=self.tenant_id,
+            on_ticket_created=enqueue_ticket_created_mixpanel,
+        )
+
+        mock_queue = mock_get_queue.return_value
+        mixpanel_calls = [
+            call
+            for call in mock_queue.enqueue_job.call_args_list
+            if call.kwargs.get("job_type") == JobType.SEND_MIXPANEL_EVENT
+            and call.kwargs.get("payload", {}).get("event_name") == "pyro_st_ticket_created"
+        ]
+        self.assertEqual(len(mixpanel_calls), 1)
+        properties = mixpanel_calls[0].kwargs["payload"]["properties"]
+        self.assertEqual(properties["support_ticket_type"], "SELF TRIAL")
+        self.assertEqual(properties["poster"], "legacy_poster")
+
+    @patch("support_ticket.views.get_queue_service")
+    def test_ticket_created_mixpanel_support_ticket_type_not_poster_fallback(
+        self, mock_get_queue
+    ):
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            data=dump_data(
+                user_id="mixpanel_poster_only",
+                name="Poster only ticket",
+                poster="in_trial",
+            ),
+        )
+
+        process_dumped_tickets(
+            tenant_id=self.tenant_id,
+            on_ticket_created=enqueue_ticket_created_mixpanel,
+        )
+
+        mock_queue = mock_get_queue.return_value
+        mixpanel_calls = [
+            call
+            for call in mock_queue.enqueue_job.call_args_list
+            if call.kwargs.get("job_type") == JobType.SEND_MIXPANEL_EVENT
+            and call.kwargs.get("payload", {}).get("event_name") == "pyro_st_ticket_created"
+        ]
+        self.assertEqual(len(mixpanel_calls), 1)
+        properties = mixpanel_calls[0].kwargs["payload"]["properties"]
+        self.assertIsNone(properties["support_ticket_type"])
+        self.assertEqual(properties["poster"], "in_trial")
 
     @patch.object(SupportTicket.objects, "bulk_create", wraps=SupportTicket.objects.bulk_create)
     def test_bulk_create_ignores_conflicts(self, mock_bulk_create):
