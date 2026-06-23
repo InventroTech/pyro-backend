@@ -3,10 +3,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from django.db import transaction
 from django.utils import timezone
 
-from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
 from crm_records.lead_pipeline.bucket_resolver import BucketResolver
 from crm_records.lead_pipeline.candidate_selector import CandidateSelector
 from crm_records.lead_pipeline.daily_limit import DailyLimitChecker
@@ -331,7 +329,7 @@ class LeadPipeline:
                 )
                 return retry_candidate
             logger.info(
-                "[LeadPipeline] daily_limit_retry_fallback empty user=%s (no assigned-to-me or unassigned due retry)",
+                "[LeadPipeline] daily_limit_retry_fallback empty user=%s (no assigned-to-me due retry)",
                 user_identifier,
             )
 
@@ -365,13 +363,9 @@ class LeadPipeline:
         now,
     ) -> Optional[Record]:
         """
-        Ported from GetNextLeadView Step 2.5 fallback (assigned-to-me first, then unassigned).
+        When daily limit is reached: return due NOT_CONNECTED/IN_QUEUE retries already assigned to this user.
+        Unassigned NOT_CONNECTED leads are never pulled here.
         """
-        eligible_lead_types = resolved_user.eligible_lead_types
-        eligible_lead_sources = resolved_user.eligible_lead_sources
-        eligible_lead_statuses = resolved_user.eligible_lead_statuses
-        eligible_states = resolved_user.eligible_states
-
         retry_strategy = {
             "order": ["-day(created_at)", "-lead_score", "-created_at"],
             "day_timezone": "Asia/Kolkata",
@@ -407,80 +401,5 @@ class LeadPipeline:
             user_identifier,
         )
 
-        if retry_candidate:
-            return retry_candidate
-
-        # 2) Unassigned retry candidate (apply eligible filters only; no routing rule).
-        _unassigned_not_connected_where = """
-            (
-                (data->>'assigned_to') IS NULL
-                OR TRIM(COALESCE(data->>'assigned_to', '')) = ''
-                OR LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) IN ('null', 'none')
-            )
-            AND COALESCE((data->>'call_attempts')::int, 0) >= 1
-            AND COALESCE((data->>'call_attempts')::int, 0) <= 6
-            AND UPPER(COALESCE(data->>'lead_stage','')) IN ('NOT_CONNECTED', 'IN_QUEUE')
-            AND (data->>'next_call_at') IS NOT NULL
-            AND TRIM(COALESCE(data->>'next_call_at', '')) != ''
-            AND LOWER(TRIM(COALESCE(data->>'next_call_at', ''))) NOT IN ('null', 'none')
-            AND (data->>'next_call_at')::timestamptz <= NOW()
-        """
-
-        unassigned_retry_qs = Record.objects.filter(tenant=tenant, entity_type="lead").extra(
-            select={"call_attempts_int": "COALESCE((data->>'call_attempts')::int, 0)"},
-            where=[_unassigned_not_connected_where],
-        )
-
-        if eligible_lead_types:
-            unassigned_retry_qs = unassigned_retry_qs.filter(BucketQuerysetBuilder._build_contains_in_q("affiliated_party", eligible_lead_types))
-        if eligible_lead_sources:
-            unassigned_retry_qs = unassigned_retry_qs.filter(BucketQuerysetBuilder._build_contains_in_q("lead_source", eligible_lead_sources))
-        if eligible_lead_statuses:
-            unassigned_retry_qs = unassigned_retry_qs.filter(BucketQuerysetBuilder._build_contains_in_q("lead_status", eligible_lead_statuses))
-        if eligible_states:
-            unassigned_retry_qs = unassigned_retry_qs.filter(BucketQuerysetBuilder._build_contains_in_q("state", eligible_states))
-
-        unassigned_retry_qs = self.strategy_applier.apply(qs=unassigned_retry_qs, strategy=retry_strategy, now_iso=now.isoformat())
-        unassigned_retry_candidate = unassigned_retry_qs.first()
-        logger.info(
-            "[LeadPipeline] fallback step=unassigned filters=affiliated_party=%s lead_source=%s lead_status=%s lead_state=%s "
-            "routing_applied=%s first_record_id=%s user=%s",
-            eligible_lead_types,
-            eligible_lead_sources or "(none)",
-            eligible_lead_statuses or "(none)",
-            eligible_states or "(none)",
-            False,
-            unassigned_retry_candidate.pk if unassigned_retry_candidate else None,
-            user_identifier,
-        )
-
-        if not unassigned_retry_candidate:
-            return None
-
-        # Assign the unassigned retry lead to the user (legacy code assigns it).
-        with transaction.atomic():
-            candidate_locked = (
-                Record.objects.select_for_update(skip_locked=True).filter(pk=unassigned_retry_candidate.pk).first()
-            )
-            if not candidate_locked:
-                return None
-
-            data = candidate_locked.data or {}
-            data = data.copy() if isinstance(data, dict) else {}
-            data["assigned_to"] = user_identifier
-            data["lead_stage"] = LeadAssigner.ASSIGNED_STATUS
-            if "call_attempts" not in data or data.get("call_attempts") in (None, "", "null"):
-                data["call_attempts"] = 0
-
-            merge_first_assignment_today_anchor(data, timezone.now())
-
-            candidate_locked.data = data
-            candidate_locked.updated_at = timezone.now()
-            candidate_locked.save(update_fields=["data", "updated_at"])
-            logger.info(
-                "[LeadPipeline] fallback assigned unassigned retry record_id=%s user=%s",
-                candidate_locked.pk,
-                user_identifier,
-            )
-            return candidate_locked
+        return retry_candidate
 
