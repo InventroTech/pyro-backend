@@ -1,14 +1,22 @@
 import threading
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.db import IntegrityError, close_old_connections
 from django.db.models import Max
 from django.test import TransactionTestCase
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 
 from background_jobs.job_handlers import ProcessDumpedTicketsJobHandler
+from background_jobs.job_processor import (
+    PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME,
+    SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL,
+    JobProcessor,
+)
 from background_jobs.models import BackgroundJob, JobStatus, JobType
+from core.models import EntityTypeDiscoverySyncState
 from crm_records.models import Record
 from support_ticket.views import (
     SUPPORT_TICKET_ENTITY_TYPE,
@@ -484,6 +492,60 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         job.save(update_fields=["status"])
 
         self.assertIsNone(enqueue_process_dumped_tickets_job(self.tenant_id))
+
+
+class ProcessDumpedTicketsSchedulerTest(BaseAPITestCase):
+    """DB-backed scheduler throttle for process_dumped_tickets enqueue ticks."""
+
+    def setUp(self):
+        super().setUp()
+        EntityTypeDiscoverySyncState.objects.filter(
+            job_name=PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME,
+        ).delete()
+
+    @patch("support_ticket.views.enqueue_process_dumped_tickets_for_pending_dumps")
+    def test_scheduler_skips_tick_within_five_minutes(self, mock_enqueue):
+        mock_enqueue.return_value = {"enqueued": [], "skipped_active_job": []}
+        EntityTypeDiscoverySyncState.objects.create(
+            job_name=PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME,
+            last_success_at=timezone.now() - timedelta(seconds=60),
+        )
+        processor = JobProcessor(worker_id="test-scheduler")
+        processor._last_support_ticket_dump_enqueue_at = None
+        processor._maybe_enqueue_process_dumped_tickets()
+        mock_enqueue.assert_not_called()
+
+    @patch("support_ticket.views.enqueue_process_dumped_tickets_for_pending_dumps")
+    def test_scheduler_runs_tick_after_five_minutes(self, mock_enqueue):
+        mock_enqueue.return_value = {"enqueued": [], "skipped_active_job": []}
+        EntityTypeDiscoverySyncState.objects.create(
+            job_name=PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME,
+            last_success_at=timezone.now()
+            - timedelta(seconds=SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL + 1),
+        )
+        processor = JobProcessor(worker_id="test-scheduler")
+        processor._last_support_ticket_dump_enqueue_at = None
+        processor._maybe_enqueue_process_dumped_tickets()
+        mock_enqueue.assert_called_once()
+        state = EntityTypeDiscoverySyncState.objects.get(
+            job_name=PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME,
+        )
+        self.assertIsNotNone(state.last_success_at)
+        self.assertIsNone(state.last_error)
+
+    @patch(
+        "support_ticket.views.enqueue_process_dumped_tickets_for_pending_dumps",
+        side_effect=RuntimeError("enqueue failed"),
+    )
+    def test_scheduler_records_error_without_advancing_success(self, mock_enqueue):
+        processor = JobProcessor(worker_id="test-scheduler")
+        processor._maybe_enqueue_process_dumped_tickets()
+        mock_enqueue.assert_called_once()
+        state = EntityTypeDiscoverySyncState.objects.get(
+            job_name=PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME,
+        )
+        self.assertIsNone(state.last_success_at)
+        self.assertIn("enqueue failed", state.last_error or "")
 
 
 class ProcessDumpedTicketsEnqueueRaceTest(TransactionTestCase):

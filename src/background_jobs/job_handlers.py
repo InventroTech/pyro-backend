@@ -1178,10 +1178,20 @@ class PurgeOldLogTablesJobHandler(JobHandler):
 
     Payload:
     - ``days`` (int, optional): retention window; defaults to :setting:`LOG_RETENTION_DAYS`.
+    - ``chunk_size`` (int, optional): rows deleted per chunk; defaults to
+      :setting:`LOG_RETENTION_CHUNK_SIZE`.
+    - ``max_chunks_per_table`` (int, optional): chunk limit per table per run; defaults to
+      :setting:`LOG_RETENTION_MAX_CHUNKS_PER_TABLE`. When more rows remain, a follow-up job
+      is enqueued for the same tenant.
     """
 
     def process(self, job: BackgroundJob) -> bool:
-        from core.log_retention import get_log_retention_days, purge_old_log_rows
+        from core.log_retention import (
+            get_log_retention_chunk_size,
+            get_log_retention_days,
+            get_log_retention_max_chunks_per_table,
+            purge_old_log_rows,
+        )
 
         payload = job.payload or {}
         if "days" in payload:
@@ -1190,9 +1200,56 @@ class PurgeOldLogTablesJobHandler(JobHandler):
             days = get_log_retention_days()
         if days < 1:
             raise ValueError("days must be >= 1")
+
+        chunk_size = (
+            int(payload["chunk_size"])
+            if "chunk_size" in payload
+            else get_log_retention_chunk_size()
+        )
+        max_chunks_per_table = (
+            int(payload["max_chunks_per_table"])
+            if "max_chunks_per_table" in payload
+            else get_log_retention_max_chunks_per_table()
+        )
+        if chunk_size < 1 or max_chunks_per_table < 1:
+            raise ValueError("chunk_size and max_chunks_per_table must be >= 1")
+
         tenant_id = str(job.tenant_id) if job.tenant_id else None
-        stats = purge_old_log_rows(days=days, tenant_id=tenant_id)
+        stats = purge_old_log_rows(
+            days=days,
+            tenant_id=tenant_id,
+            chunk_size=chunk_size,
+            max_chunks_per_table=max_chunks_per_table,
+        )
         job.result = {"success": True, "tenant_id": tenant_id, **stats}
+
+        if stats.get("has_more") and tenant_id:
+            from .purge_scheduler import tenant_has_active_purge_job
+            from .models import JobType
+            from .queue_service import get_queue_service
+
+            if tenant_has_active_purge_job(tenant_id, exclude_job_id=job.id):
+                logger.info(
+                    "Skipped follow-up purge_old_log_tables for tenant=%s "
+                    "(active job already exists)",
+                    tenant_id,
+                )
+            else:
+                get_queue_service().enqueue_job(
+                    job_type=JobType.PURGE_OLD_LOG_TABLES,
+                    payload={
+                        "days": days,
+                        "chunk_size": chunk_size,
+                        "max_chunks_per_table": max_chunks_per_table,
+                    },
+                    tenant_id=tenant_id,
+                    priority=0,
+                )
+                logger.info(
+                    "Enqueued follow-up purge_old_log_tables for tenant=%s (has_more=True)",
+                    tenant_id,
+                )
+
         return True
 
     def get_retry_delay(self, attempt: int) -> int:
