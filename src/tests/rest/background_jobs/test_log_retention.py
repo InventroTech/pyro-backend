@@ -311,6 +311,19 @@ class TestPurgeOldLogTablesJobHandler:
         assert handler.validate_payload({"days": 0}) is False
         assert handler.validate_payload({"days": "nope"}) is False
 
+    def test_validate_payload_rejects_bad_chunk_settings(self):
+        handler = PurgeOldLogTablesJobHandler()
+        assert handler.validate_payload({"chunk_size": 0}) is False
+        assert handler.validate_payload({"chunk_size": "nope"}) is False
+        assert handler.validate_payload({"max_chunks_per_table": 0}) is False
+        assert handler.validate_payload({"max_chunks_per_table": "nope"}) is False
+
+    def test_validate_payload_accepts_explicit_chunk_settings(self):
+        handler = PurgeOldLogTablesJobHandler()
+        assert handler.validate_payload(
+            {"days": 30, "chunk_size": 500, "max_chunks_per_table": 20}
+        ) is True
+
 
 def test_get_log_retention_days_uses_settings(settings):
     settings.LOG_RETENTION_DAYS = 45

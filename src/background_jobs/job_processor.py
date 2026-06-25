@@ -517,6 +517,7 @@ class JobProcessor:
                 result = enqueue_process_dumped_tickets_for_pending_dumps()
                 scheduler_state.last_success_at = now
                 scheduler_state.last_error = None
+                scheduler_state.updated_at = now
                 scheduler_state.save(
                     update_fields=["last_success_at", "last_error", "updated_at"]
                 )
@@ -595,6 +596,7 @@ class JobProcessor:
                 )
                 scheduler_state.last_success_at = now
                 scheduler_state.last_error = None
+                scheduler_state.updated_at = now
                 scheduler_state.save(update_fields=["last_success_at", "last_error", "updated_at"])
             logger.info(f"[Worker {self.worker_id}] Enqueued entity type discovery")
         except Exception as e:
@@ -809,6 +811,7 @@ class JobProcessor:
 
                 scheduler_state.last_success_at = now
                 scheduler_state.last_error = None
+                scheduler_state.updated_at = now
                 scheduler_state.save(
                     update_fields=["last_success_at", "last_error", "updated_at"]
                 )
