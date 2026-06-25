@@ -47,6 +47,8 @@ def run_purge_old_log_tables(payload: dict) -> None:
         if "max_chunks_per_table" in payload
         else get_log_retention_max_chunks_per_table()
     )
+    if chunk_size < 1 or max_chunks_per_table < 1:
+        raise ValueError("chunk_size and max_chunks_per_table must be >= 1")
 
     logger.info("[PurgeOldLogTables] Starting — retention=%s days", days)
     stats = purge_old_log_rows(
