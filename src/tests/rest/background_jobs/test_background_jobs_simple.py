@@ -326,35 +326,55 @@ class SimpleBackgroundJobsTest(TestCase):
         # Setup timezone mock
         from datetime import timedelta
         mock_timezone.now.return_value = datetime(2024, 1, 1, 12, 0, 0)
-        
-        # Mock stale jobs query
+
+        mock_failed_qs = Mock()
+        mock_failed_qs.update.return_value = 1
+        mock_reset_qs = Mock()
+        mock_reset_qs.update.return_value = 1
         mock_stale_jobs = Mock()
-        mock_stale_jobs.update.return_value = 2  # 2 stale jobs found
+        mock_stale_jobs.filter.side_effect = [mock_failed_qs, mock_reset_qs]
         mock_objects.filter.return_value = mock_stale_jobs
-        
+
         # Cleanup stale locks
         count = self.processor.cleanup_stale_locks(stale_threshold_minutes=5)
-        
-        # Verify cleanup was called
+
+        # Verify exhausted jobs are failed and retriable jobs are reset
         self.assertEqual(count, 2)
         mock_objects.filter.assert_called_once()
+        self.assertEqual(mock_stale_jobs.filter.call_count, 2)
+        mock_failed_qs.update.assert_called_once()
+        mock_reset_qs.update.assert_called_once()
 
+    @patch("background_jobs.job_processor.EntityTypeDiscoverySyncState.objects")
+    @patch("background_jobs.job_processor.transaction.atomic")
     @patch(
         "support_ticket.views.enqueue_process_dumped_tickets_for_pending_dumps",
         side_effect=RuntimeError("enqueue failed"),
     )
     def test_maybe_enqueue_process_dumped_tickets_throttles_after_error(
-        self, mock_enqueue,
+        self, mock_enqueue, mock_atomic, mock_state_objects,
     ):
         """Failed enqueue ticks still respect the 30-second local check interval."""
+        mock_atomic.return_value.__enter__ = Mock(return_value=None)
+        mock_atomic.return_value.__exit__ = Mock(return_value=False)
+        scheduler_state = Mock()
+        scheduler_state.last_success_at = None
+        mock_state_objects.select_for_update.return_value.get_or_create.return_value = (
+            scheduler_state,
+            True,
+        )
+
         processor = JobProcessor(worker_id="test-throttle")
         processor._maybe_enqueue_process_dumped_tickets()
         self.assertIsNotNone(processor._last_support_ticket_dump_enqueue_at)
         mock_enqueue.assert_called_once()
+        mock_state_objects.update_or_create.assert_called_once()
 
         mock_enqueue.reset_mock()
+        mock_state_objects.reset_mock()
         processor._maybe_enqueue_process_dumped_tickets()
         mock_enqueue.assert_not_called()
+        mock_state_objects.select_for_update.assert_not_called()
 
     @patch("background_jobs.worker_bootstrap.settings")
     @patch("background_jobs.worker_bootstrap.threading.Thread")
