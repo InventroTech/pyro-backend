@@ -1,8 +1,9 @@
+from django.contrib.postgres.operations import AddIndexConcurrently
 from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-    # CREATE INDEX CONCURRENTLY cannot run inside a transaction block.
+    # Required for CREATE INDEX CONCURRENTLY (see AddIndexConcurrently).
     atomic = False
 
     dependencies = [
@@ -10,36 +11,16 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.SeparateDatabaseAndState(
-            state_operations=[
-                migrations.AddIndex(
-                    model_name="objecthistory",
-                    index=models.Index(
-                        fields=["tenant", "created_at"],
-                        name="object_hist_retention_idx",
-                        condition=models.Q(
-                            persistent_history=False,
-                            is_deleted=False,
-                            deleted_at__isnull=True,
-                        ),
-                    ),
+        AddIndexConcurrently(
+            model_name="objecthistory",
+            index=models.Index(
+                fields=["tenant", "created_at"],
+                name="object_hist_retention_idx",
+                condition=models.Q(
+                    persistent_history=False,
+                    is_deleted=False,
+                    deleted_at__isnull=True,
                 ),
-            ],
-            database_operations=[
-                migrations.RunSQL(
-                    sql="""
-                    SET statement_timeout TO 0;
-                    CREATE INDEX CONCURRENTLY IF NOT EXISTS object_hist_retention_idx
-                    ON public.object_history (tenant_id, created_at)
-                    WHERE persistent_history = false
-                      AND is_deleted = false
-                      AND deleted_at IS NULL;
-                    RESET statement_timeout;
-                    """,
-                    reverse_sql="""
-                    DROP INDEX CONCURRENTLY IF EXISTS public.object_hist_retention_idx;
-                    """,
-                ),
-            ],
+            ),
         ),
     ]
