@@ -39,8 +39,6 @@ class Migration(migrations.Migration):
                     reverse_sql="""
                     DROP INDEX CONCURRENTLY IF EXISTS public.object_hist_retention_idx;
                     """,
-                    # RunSQL defaults to atomic=True, which breaks CONCURRENTLY.
-                    atomic=False,
                 ),
             ],
         ),
