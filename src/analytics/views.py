@@ -818,7 +818,10 @@ class SupportTicketFilterOptionsView(APIView):
     def get(self, request):
         tenant = request.tenant
         qs = SupportTicket.objects.filter(tenant_id=tenant.id)
-        resolution_statuses = _distinct_list(qs, "resolution_status")
+        resolution_statuses = [
+    status.upper() if status else status
+    for status in _distinct_list(qs, "resolution_status")
+]
         poster_statuses = _distinct_list(qs, "poster")
         return Response({
             "resolution_statuses": resolution_statuses,
