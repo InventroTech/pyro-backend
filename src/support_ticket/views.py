@@ -402,7 +402,7 @@ def enqueue_process_dumped_tickets_job(
 def enqueue_process_dumped_tickets_for_pending_dumps() -> Dict[str, Any]:
     """
     Enqueue one ``process_dumped_tickets`` job per tenant with unprocessed dump rows.
-    Called by the background worker every 5 minutes (same cadence as the old cron).
+    Called by the background worker on a DB-backed 5-minute scheduler tick.
     """
     tenant_ids = (
         SupportTicketDump.objects.filter(
