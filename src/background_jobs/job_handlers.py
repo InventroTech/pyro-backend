@@ -1265,9 +1265,27 @@ class PurgeOldLogTablesJobHandler(JobHandler):
                 from core.log_retention import get_log_retention_days
 
                 days = get_log_retention_days()
+            if days < 1:
+                return False
+
+            from core.log_retention import (
+                get_log_retention_chunk_size,
+                get_log_retention_max_chunks_per_table,
+            )
+
+            chunk_size = (
+                int(p["chunk_size"])
+                if "chunk_size" in p
+                else get_log_retention_chunk_size()
+            )
+            max_chunks_per_table = (
+                int(p["max_chunks_per_table"])
+                if "max_chunks_per_table" in p
+                else get_log_retention_max_chunks_per_table()
+            )
         except (TypeError, ValueError):
             return False
-        return days >= 1
+        return chunk_size >= 1 and max_chunks_per_table >= 1
 
 
 class SyncDispatchToRecordsJobHandler(JobHandler):
