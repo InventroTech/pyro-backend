@@ -1,14 +1,17 @@
+from django.contrib.postgres.operations import AddIndexConcurrently
 from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
+    # Required for CREATE INDEX CONCURRENTLY (see AddIndexConcurrently).
+    atomic = False
 
     dependencies = [
         ("object_history", "0005_alter_objecthistory_managers_and_more"),
     ]
 
     operations = [
-        migrations.AddIndex(
+        AddIndexConcurrently(
             model_name="objecthistory",
             index=models.Index(
                 fields=["tenant", "created_at"],
