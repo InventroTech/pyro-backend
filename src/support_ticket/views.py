@@ -185,6 +185,47 @@ def _enqueue_mixpanel_event(
         logger.error("Failed to enqueue Mixpanel event=%s user_id=%s error=%s", event_name, user_id, e, exc_info=True)
 
 
+def _enqueue_cse_assigned_event(
+    *,
+    user_id: Any,
+    cse_email: str,
+    tenant_id: Any = None,
+) -> None:
+    if not user_id or not cse_email:
+        logger.warning(
+            "Skipping cse_assigned enqueue due to missing user_id or cse_email "
+            "(user_id=%s, cse_email=%s)",
+            user_id,
+            bool(cse_email),
+        )
+        return
+    try:
+        user_id_int = int(user_id)
+    except (ValueError, TypeError):
+        logger.error(
+            "[GetNextTicket] Could not enqueue cse_assigned event - user_id=%s is not numeric",
+            user_id,
+        )
+        return
+    try:
+        queue_service = get_queue_service()
+        queue_service.enqueue_job(
+            job_type=JobType.SEND_CSE_ASSIGNED_EVENT,
+            payload={"user_id": user_id_int, "cse_email": cse_email},
+            tenant_id=str(tenant_id) if tenant_id else None,
+            priority=0,
+            max_attempts=3,
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to enqueue cse_assigned event user_id=%s cse_email=%s error=%s",
+            user_id,
+            cse_email,
+            e,
+            exc_info=True,
+        )
+
+
 def _normalize_dump_user_id(user_id: Any) -> Optional[str]:
     if user_id is None:
         return None
@@ -947,6 +988,12 @@ def _enqueue_support_assignment_mixpanel(
         user_id=customer_user_id,
         event_name="pyro_st_assigned",
         properties=mixpanel_properties,
+        tenant_id=record.tenant_id,
+    )
+
+    _enqueue_cse_assigned_event(
+        user_id=customer_user_id,
+        cse_email=user_email,
         tenant_id=record.tenant_id,
     )
 
