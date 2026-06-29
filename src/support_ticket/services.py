@@ -6,6 +6,7 @@ import base64
 from typing import Dict, Any, Literal, Optional
 
 RmAssignedSendResult = Literal["success", "skipped_not_found", "failed"]
+CseAssignedSendResult = RmAssignedSendResult
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +259,130 @@ class RMAssignedMixpanelService:
 
         except Exception as error:
             logger.error(f'❌ [Mixpanel] Error: rm_assigned - {error}')
+            logger.error(f"   Error Type: {type(error).__name__}")
+            return "failed"
+
+
+class CSEAssignedMixpanelService:
+    """
+    Service for sending CSE assigned events to Mixpanel via custom API
+    """
+
+    def __init__(self):
+        self.mixpanel_token = os.environ.get("MIXPANEL_TOKEN")
+        self.mixpanel_api_url = "https://api.thecircleapp.in/pyro/cse_assigned"
+
+    def send_to_mixpanel_sync(self, user_id: int, cse_email: str) -> CseAssignedSendResult:
+        """
+        Send CSE assigned event to Mixpanel via custom API.
+
+        Args:
+            user_id: Customer user ID as integer (sent as user_id in payload)
+            cse_email: CSE email address
+
+        Returns:
+            ``success`` on 2xx, ``skipped_not_found`` on 404 (user missing in Circle),
+            ``failed`` for other errors.
+        """
+        try:
+            if not self.mixpanel_token:
+                logger.warning("MIXPANEL_TOKEN not configured, skipping Mixpanel event")
+                return "failed"
+
+            user_id_int = int(user_id) if user_id else None
+
+            if not user_id_int or not cse_email:
+                logger.warning("user_id and cse_email are required for CSE assigned Mixpanel event")
+                return "failed"
+
+            payload = {
+                "user_id": user_id_int,
+                "cse_email": cse_email,
+            }
+
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.mixpanel_token}",
+            }
+
+            logger.info("=" * 80)
+            logger.info(f"🎯 [Mixpanel] Sending cse_assigned for user_id={user_id_int}")
+            logger.info(f"   URL: {self.mixpanel_api_url}")
+            logger.info(f"   User ID: {user_id_int}")
+            logger.info(f"   CSE Email: {cse_email}")
+            logger.info(
+                f"   Token: {self.mixpanel_token[:15]}..."
+                f"{self.mixpanel_token[-5:] if len(self.mixpanel_token) > 20 else ''}"
+            )
+            logger.info("=" * 80)
+            logger.info("📤 [Mixpanel] Request Payload:")
+            logger.info(f"   {json.dumps(payload, indent=2, default=str)}")
+            logger.info("=" * 80)
+
+            response = requests.post(
+                self.mixpanel_api_url,
+                json=payload,
+                headers=headers,
+                timeout=30,
+            )
+
+            logger.info("=" * 80)
+            logger.info("📥 [Mixpanel] Response for cse_assigned")
+            logger.info(f"   Status Code: {response.status_code}")
+            logger.info(f"   Response Headers: {dict(response.headers)}")
+
+            try:
+                response_json = response.json()
+                logger.info(f"   Response Body: {json.dumps(response_json, indent=2, default=str)}")
+            except Exception:
+                logger.info(
+                    f"   Response Text: {response.text[:500]}"
+                    f"{'...' if len(response.text) > 500 else ''}"
+                )
+
+            logger.info("=" * 80)
+
+            if not response.ok:
+                if response.status_code == 404:
+                    try:
+                        error_data = response.json()
+                        error_msg = error_data.get("message", "Unknown error")
+                    except Exception:
+                        error_msg = response.text[:200] if response.text else "Not found"
+                    logger.warning(
+                        "[Mixpanel] cse_assigned skipped (404 user not found): "
+                        "user_id=%s cse_email=%s message=%s",
+                        user_id_int,
+                        cse_email,
+                        error_msg,
+                    )
+                    return "skipped_not_found"
+
+                logger.error("=" * 80)
+                logger.error(f"❌ [Mixpanel] Failed: cse_assigned status={response.status_code}")
+
+                if response.status_code == 401:
+                    logger.error("   Error: Unauthorized - Check MIXPANEL_TOKEN in .env file")
+                    logger.error(f"   Token Preview: {self.mixpanel_token[:20]}...")
+                elif response.status_code >= 500:
+                    logger.error(f"   Error: Server Error ({response.status_code})")
+                    logger.error("   This is a server-side issue with the Mixpanel API")
+                else:
+                    logger.error(f"   Error: HTTP {response.status_code}")
+                    try:
+                        error_data = response.json()
+                        logger.error(f"   Details: {json.dumps(error_data, indent=2, default=str)}")
+                    except Exception:
+                        logger.error(f"   Response: {response.text[:200]}")
+
+                logger.error("=" * 80)
+                return "failed"
+
+            logger.info(f"✅ [Mixpanel] Success: cse_assigned for user_id={user_id_int}")
+            return "success"
+
+        except Exception as error:
+            logger.error(f"❌ [Mixpanel] Error: cse_assigned - {error}")
             logger.error(f"   Error Type: {type(error).__name__}")
             return "failed"
 
