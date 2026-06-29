@@ -1,4 +1,5 @@
 from datetime import timedelta
+from unittest.mock import MagicMock, patch
 
 import jwt
 from django.conf import settings
@@ -7,6 +8,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 
+from background_jobs.models import JobType
 from crm_records.models import Record
 from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
 from support_ticket.views import _record_ticket_type_key
@@ -71,6 +73,27 @@ class GetNextTicketAPITest(BaseAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch("support_ticket.views.get_queue_service")
+    def test_get_next_ticket_enqueues_cse_assigned_event(self, mock_get_queue):
+        mock_queue = MagicMock()
+        mock_get_queue.return_value = mock_queue
+        customer_user_id = "123456"
+        _open_record(tenant=self.tenant, user_id=customer_user_id, name="Customer")
+
+        response = self.client.get(self.url, **self.auth_headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        cse_calls = [
+            call
+            for call in mock_queue.enqueue_job.call_args_list
+            if call.kwargs.get("job_type") == JobType.SEND_CSE_ASSIGNED_EVENT
+        ]
+        self.assertEqual(len(cse_calls), 1)
+        self.assertEqual(
+            cse_calls[0].kwargs["payload"],
+            {"user_id": 123456, "cse_email": self.email},
+        )
 
     def test_get_next_ticket_assigns_newest_unassigned_record(self):
         older = _open_record(tenant=self.tenant, user_id="old_user", name="Older")

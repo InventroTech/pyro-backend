@@ -340,7 +340,7 @@ BACKGROUND_JOB_POLL_INTERVAL = float(env("BACKGROUND_JOB_POLL_INTERVAL", default
 BACKGROUND_JOB_BATCH_SIZE = env.int("BACKGROUND_JOB_BATCH_SIZE", default=10)
 BACKGROUND_JOB_EXCLUDE_JOB_TYPES = env(
     "BACKGROUND_JOB_EXCLUDE_JOB_TYPES",
-    default="send_mixpanel_event,send_rm_assigned_event",
+    default="send_mixpanel_event,send_rm_assigned_event,send_cse_assigned_event",
 )
 
 # Render Background Worker: ``python manage.py run_mixpanel_workers``

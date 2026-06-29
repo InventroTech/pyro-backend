@@ -34,7 +34,11 @@ from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
 from support_ticket.models import SupportTicket
 from support_ticket.records import q_record_open_or_snoozed_resolution
 from support_ticket.ticket_types import q_record_self_trial
-from support_ticket.services import MixpanelService, RMAssignedMixpanelService
+from support_ticket.services import (
+    CSEAssignedMixpanelService,
+    MixpanelService,
+    RMAssignedMixpanelService,
+)
 
 from .models import BackgroundJob, JobType
 
@@ -295,6 +299,106 @@ class RMAssignedMixpanelJobHandler(JobHandler):
         for field in required:
             if field not in payload:
                 logger.error(f"Missing required field '{field}' in RM assigned job payload")
+                return False
+        return True
+
+
+class CSEAssignedMixpanelJobHandler(JobHandler):
+    """
+    Handler for sending CSE assigned events to Mixpanel via cse_assigned endpoint.
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        """
+        Process a CSE assigned Mixpanel job.
+
+        Expected payload:
+        {
+            "user_id": int,
+            "cse_email": str
+        }
+        """
+        payload = job.payload
+        user_id = payload.get("user_id")
+        cse_email = payload.get("cse_email")
+
+        if user_id is None or not cse_email:
+            error_msg = (
+                f"Invalid CSE assigned job payload: missing user_id or cse_email "
+                f"(user_id={user_id}, cse_email={bool(cse_email)})"
+            )
+            logger.error(f"Invalid CSE assigned job payload for job {job.id}: {error_msg}")
+            raise ValueError(error_msg)
+
+        try:
+            start_time = time.time()
+            user_id_int = int(user_id)
+            service = CSEAssignedMixpanelService()
+            outcome = service.send_to_mixpanel_sync(user_id_int, cse_email)
+            execution_time = time.time() - start_time
+            ts = timezone.now().isoformat()
+
+            if outcome == "success":
+                job.result = {
+                    "success": True,
+                    "user_id": user_id_int,
+                    "cse_email": cse_email,
+                    "execution_time_seconds": round(execution_time, 3),
+                    "timestamp": ts,
+                }
+                logger.info(
+                    f"CSE assigned event sent successfully for job {job.id}: "
+                    f"user_id={user_id_int} cse_email={cse_email}"
+                )
+                return True
+
+            if outcome == "skipped_not_found":
+                job.result = {
+                    "success": True,
+                    "skipped": True,
+                    "reason": "user_not_found_404",
+                    "user_id": user_id_int,
+                    "cse_email": cse_email,
+                    "execution_time_seconds": round(execution_time, 3),
+                    "timestamp": ts,
+                }
+                logger.warning(
+                    "CSE assigned event skipped for job %s (user not found): user_id=%s cse_email=%s",
+                    job.id,
+                    user_id_int,
+                    cse_email,
+                )
+                return True
+
+            job.result = {
+                "success": False,
+                "user_id": user_id_int,
+                "error": "CSEAssignedMixpanelService failed",
+                "timestamp": ts,
+            }
+            logger.error(
+                "CSE assigned event failed for job %s: user_id=%s cse_email=%s",
+                job.id,
+                user_id_int,
+                cse_email,
+            )
+            raise Exception("CSEAssignedMixpanelService failed")
+        except Exception as e:
+            logger.error(
+                f"CSE assigned event failed for job {job.id}: user_id={user_id} error={e}",
+                exc_info=True,
+            )
+            raise
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [1, 10, 60]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+    def validate_payload(self, payload: Dict[str, Any]) -> bool:
+        required = ["user_id", "cse_email"]
+        for field in required:
+            if field not in payload:
+                logger.error(f"Missing required field '{field}' in CSE assigned job payload")
                 return False
         return True
 
@@ -1652,6 +1756,7 @@ class JobHandlerRegistry:
         """Register default handlers"""
         self.register_handler(JobType.SEND_MIXPANEL_EVENT, MixpanelJobHandler())
         self.register_handler(JobType.SEND_RM_ASSIGNED_EVENT, RMAssignedMixpanelJobHandler())
+        self.register_handler(JobType.SEND_CSE_ASSIGNED_EVENT, CSEAssignedMixpanelJobHandler())
         self.register_handler(JobType.SEND_WEBHOOK, WebhookJobHandler())
         self.register_handler(JobType.EXECUTE_FUNCTION, FunctionJobHandler())
         self.register_handler(JobType.SCORE_LEADS, LeadScoringJobHandler())
