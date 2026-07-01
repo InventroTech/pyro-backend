@@ -14,9 +14,8 @@ SCHEDULE = {
 }
 
 
-def _next_occurrence_utc(time_str: str, now) -> "datetime":
+def _next_occurrence_utc(time_str: str, now):
     """Return the next UTC datetime for a HH:MM clock time (today if not yet passed, else tomorrow)."""
-    from datetime import datetime as dt
     h, m = (int(x) for x in time_str.split(":"))
     candidate = now.replace(hour=h, minute=m, second=0, microsecond=0)
     if candidate <= now:
