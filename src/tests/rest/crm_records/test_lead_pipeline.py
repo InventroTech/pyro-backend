@@ -150,8 +150,7 @@ def _seed_tenant_buckets(tenant) -> dict:
             "call_attempts": {"lt": 6, "gte": 1},
             "next_call_due": True,
             "assigned_scope": "me",
-            "apply_routing_rule": True,
-            "fallback_assigned_scope": "unassigned",
+            "apply_routing_rule": False,
         },
     )
 

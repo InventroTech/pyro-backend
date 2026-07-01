@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RecordListCreateView, RecordDistinctFieldValuesView, RecordDetailView, RecordHistoryView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, LeadScoringView, GetMyCurrentLeadView, PartnerEventsView, PartnerLeadView, CallAttemptMatrixListCreateView, CallAttemptMatrixDetailView, CallAttemptMatrixByLeadTypeView, LeadAssignmentWebhookProxyView, RMAssignedMixpanelView, ScoringRuleListCreateView, ScoringRuleDetailView, ApiSecretKeySetView, ApiSecretKeyUpdateView
+from .views import RecordListCreateView, RecordDistinctFieldValuesView, RecordDetailView, RecordHistoryView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, TenantEntityTypeListView, LeadScoringView, GetMyCurrentLeadView, PartnerEventsView, PartnerLeadView, CallAttemptMatrixListCreateView, CallAttemptMatrixDetailView, CallAttemptMatrixByLeadTypeView, LeadAssignmentWebhookProxyView, RMAssignedMixpanelView, ScoringRuleListCreateView, ScoringRuleDetailView, ApiSecretKeySetView, ApiSecretKeyUpdateView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 from .public_views import PublicJobsView, PublicJobApplicationView
 
@@ -46,6 +46,7 @@ urlpatterns = [
     path("public/applications/", PublicJobApplicationView.as_view(), name="public-applications"),
     
     # Entity Type Schema endpoints
+    path("entity-types/", TenantEntityTypeListView.as_view(), name="tenant-entity-type-list"),
     path("entity-schemas/", EntityTypeSchemaListCreateView.as_view(), name="entity-schema-list-create"),
     path("entity-schemas/<int:pk>/", EntityTypeSchemaDetailView.as_view(), name="entity-schema-detail"),
     path("entity-schemas/by-type/", EntityTypeSchemaByTypeView.as_view(), name="entity-schema-by-type"),

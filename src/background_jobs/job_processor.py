@@ -18,19 +18,19 @@ from django.utils import timezone
 from django.db import transaction, close_old_connections, connections
 from django.db.models import Q, F
 from django.db.utils import InterfaceError, OperationalError
+from core.models import EntityTypeDiscoverySyncState
 
 from .models import BackgroundJob, JobStatus, JobType
 from .queue_service import get_queue_service
 from .job_handlers import get_handler_registry
 from .scheduler_locks import (
     SCHEDULER_LOCK_DISPATCH_SYNC,
-    SCHEDULER_LOCK_DUMP_TICKETS,
     SCHEDULER_LOCK_LEAD_CRON,
-    SCHEDULER_LOCK_LOG_RETENTION,
     SCHEDULER_LOCK_SNOOZED_MIDNIGHT,
     scheduler_lock,
 )
-from .tenant_jobs import enqueue_for_all_tenants
+from .purge_scheduler import tenant_should_enqueue_purge
+from .tenant_jobs import enqueue_for_all_tenants, iter_active_tenant_ids
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +39,18 @@ LEAD_CRON_ENQUEUE_INTERVAL = 900  # 15 minutes
 
 # Support ticket dump processing (replaces Supabase process-dumped-tickets cron)
 SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL = 300  # 5 minutes
+PROCESS_DUMPED_TICKETS_LOCAL_CHECK_INTERVAL = 30  # avoid checking DB on every loop tick
+PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME = "process_dumped_tickets_scheduler"
+
+# Entity type discovery from records.
+ENTITY_TYPE_DISCOVERY_ENQUEUE_INTERVAL = 300  # 5 minutes
+ENTITY_TYPE_DISCOVERY_LOCAL_CHECK_INTERVAL = 30  # avoid checking DB on every loop tick
+ENTITY_TYPE_DISCOVERY_SCHEDULER_JOB_NAME = "entity_type_discovery_scheduler"
 
 # How often the worker enqueues log retention (object_history, event_logs, rule_exec_logs)
 LOG_RETENTION_ENQUEUE_INTERVAL = 86400  # 24 hours
+LOG_RETENTION_LOCAL_CHECK_INTERVAL = 30  # avoid checking DB on every loop tick
+LOG_RETENTION_SCHEDULER_JOB_NAME = "purge_old_log_tables_scheduler"
 
 # Enqueue ``snoozed_to_not_connected_midnight`` at exactly this clock minute in ``TIME_ZONE`` (UTC).
 # 23:55 keeps ``NOW()`` on the same calendar date as same-day ``next_call_at`` (e.g. 31 Mar snoozes
@@ -89,6 +98,8 @@ class JobProcessor:
         self._last_dispatch_sync_enqueue_bucket = None
         # Last time we enqueued process_dumped_tickets for pending dump rows
         self._last_support_ticket_dump_enqueue_at = None
+        # Last time we checked whether entity type discovery should be enqueued
+        self._last_entity_type_discovery_enqueue_at = None
         self._run_schedulers = True
         # Circuit breaker state for connection errors
         self._connection_error_count = 0
@@ -398,54 +409,119 @@ class JobProcessor:
     def cleanup_stale_locks(self, stale_threshold_minutes: int = 5):
         """
         Reset jobs that have been PROCESSING for too long (likely from crashed workers).
+
+        Jobs that already exhausted ``max_attempts`` are marked ``FAILED`` instead of
+        being reset to ``PENDING``, which would otherwise create unrunnable zombies.
         
         Args:
             stale_threshold_minutes: Minutes after which a lock is considered stale
             
         Returns:
-            Number of stale jobs reset
+            Number of stale jobs updated
         """
         threshold = timezone.now() - timedelta(minutes=stale_threshold_minutes)
-        
+
         stale_jobs = BackgroundJob.objects.filter(
             status=JobStatus.PROCESSING,
-            locked_at__lt=threshold
+            locked_at__lt=threshold,
         )
-        
-        count = stale_jobs.update(
+
+        failed_count = stale_jobs.filter(attempts__gte=F("max_attempts")).update(
+            status=JobStatus.FAILED,
+            locked_by=None,
+            locked_at=None,
+        )
+        reset_count = stale_jobs.filter(attempts__lt=F("max_attempts")).update(
             status=JobStatus.PENDING,
             locked_by=None,
-            locked_at=None
+            locked_at=None,
         )
-        
-        if count > 0:
+
+        count = failed_count + reset_count
+        if failed_count > 0:
             logger.warning(
-                f"[Worker {self.worker_id}] Reset {count} stale jobs "
+                f"[Worker {self.worker_id}] Marked {failed_count} exhausted stale jobs "
+                f"as FAILED"
+            )
+        if reset_count > 0:
+            logger.warning(
+                f"[Worker {self.worker_id}] Reset {reset_count} stale jobs "
                 f"that were stuck in PROCESSING"
             )
-        
+
+        return count
+
+    def cleanup_exhausted_pending_jobs(self) -> int:
+        """
+        Mark ``PENDING`` jobs with ``attempts >= max_attempts`` as ``FAILED``.
+
+        These are zombie rows: the worker will never pick them up
+        (``attempts__lt=max_attempts``), but they still look active to schedulers.
+        """
+        count = BackgroundJob.objects.filter(
+            status=JobStatus.PENDING,
+            attempts__gte=F("max_attempts"),
+        ).update(
+            status=JobStatus.FAILED,
+            locked_by=None,
+            locked_at=None,
+        )
+        if count > 0:
+            logger.warning(
+                f"[Worker {self.worker_id}] Marked {count} exhausted PENDING jobs "
+                f"as FAILED"
+            )
         return count
 
     def _maybe_enqueue_process_dumped_tickets(self):
         """
         Every SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL seconds, enqueue
         process_dumped_tickets for each tenant with unprocessed dump rows.
+
+        Uses :class:`core.models.EntityTypeDiscoverySyncState` (keyed by
+        ``PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME``) so the 5-minute cadence
+        is consistent across Gunicorn workers and survives process restarts.
         """
         now = timezone.now()
         if self._last_support_ticket_dump_enqueue_at is not None:
             elapsed = (now - self._last_support_ticket_dump_enqueue_at).total_seconds()
-            if elapsed < SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL:
+            if elapsed < PROCESS_DUMPED_TICKETS_LOCAL_CHECK_INTERVAL:
                 return
-        # Advance throttle before the attempt so persistent enqueue errors cannot
-        # retry on every worker loop iteration.
         self._last_support_ticket_dump_enqueue_at = now
+
         try:
-            with scheduler_lock(SCHEDULER_LOCK_DUMP_TICKETS) as acquired:
-                if not acquired:
-                    return
+            with transaction.atomic():
+                scheduler_state, _created = (
+                    EntityTypeDiscoverySyncState.objects.select_for_update().get_or_create(
+                        job_name=PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME,
+                        defaults={
+                            "last_processed_updated_at": None,
+                            "last_processed_record_id": 0,
+                        },
+                    )
+                )
+
+                if scheduler_state.last_success_at is not None:
+                    elapsed = (now - scheduler_state.last_success_at).total_seconds()
+                    if elapsed < SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL:
+                        logger.debug(
+                            "[Worker %s] process_dumped_tickets scheduler throttled "
+                            "(elapsed=%.1fs)",
+                            self.worker_id,
+                            elapsed,
+                        )
+                        return
+
                 from support_ticket.views import enqueue_process_dumped_tickets_for_pending_dumps
 
                 result = enqueue_process_dumped_tickets_for_pending_dumps()
+                scheduler_state.last_success_at = now
+                scheduler_state.last_error = None
+                scheduler_state.updated_at = now
+                scheduler_state.save(
+                    update_fields=["last_success_at", "last_error", "updated_at"]
+                )
+
             enqueued = result.get("enqueued") or []
             if enqueued:
                 logger.info(
@@ -458,15 +534,85 @@ class JobProcessor:
                     "no tenants with pending dumps (or jobs already active)"
                 )
         except Exception as e:
+            EntityTypeDiscoverySyncState.objects.update_or_create(
+                job_name=PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME,
+                defaults={"last_error": str(e)[:1000]},
+            )
             logger.warning(
                 f"[Worker {self.worker_id}] Failed to enqueue process_dumped_tickets: {e}",
+                exc_info=True,
+            )
+
+    def _maybe_enqueue_entity_type_discovery(self):
+        """
+        Periodically enqueue one global entity type discovery job.
+        """
+        now = timezone.now()
+        if self._last_entity_type_discovery_enqueue_at is not None:
+            elapsed = (now - self._last_entity_type_discovery_enqueue_at).total_seconds()
+            if elapsed < ENTITY_TYPE_DISCOVERY_LOCAL_CHECK_INTERVAL:
+                return
+        self._last_entity_type_discovery_enqueue_at = now
+
+        try:
+            with transaction.atomic():
+                scheduler_state, _created = (
+                    EntityTypeDiscoverySyncState.objects.select_for_update().get_or_create(
+                        job_name=ENTITY_TYPE_DISCOVERY_SCHEDULER_JOB_NAME,
+                        defaults={
+                            "last_processed_updated_at": None,
+                            "last_processed_record_id": 0,
+                        },
+                    )
+                )
+
+                if scheduler_state.last_success_at is not None:
+                    elapsed = (now - scheduler_state.last_success_at).total_seconds()
+                    if elapsed < ENTITY_TYPE_DISCOVERY_ENQUEUE_INTERVAL:
+                        logger.info(
+                            "[Worker %s] Entity type discovery scheduler throttled "
+                            "(elapsed=%.1fs)",
+                            self.worker_id,
+                            elapsed,
+                        )
+                        return
+
+                active_exists = BackgroundJob.objects.filter(
+                    job_type=JobType.DISCOVER_ENTITY_TYPES,
+                    status__in=[JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.RETRYING],
+                ).exists()
+                if active_exists:
+                    logger.debug(
+                        f"[Worker {self.worker_id}] Entity type discovery job already active"
+                    )
+                    return
+
+                queue = get_queue_service()
+                queue.enqueue_job(
+                    job_type=JobType.DISCOVER_ENTITY_TYPES,
+                    payload={"batch_size": 1000},
+                    priority=-1,
+                    max_attempts=3,
+                )
+                scheduler_state.last_success_at = now
+                scheduler_state.last_error = None
+                scheduler_state.updated_at = now
+                scheduler_state.save(update_fields=["last_success_at", "last_error", "updated_at"])
+            logger.info(f"[Worker {self.worker_id}] Enqueued entity type discovery")
+        except Exception as e:
+            EntityTypeDiscoverySyncState.objects.update_or_create(
+                job_name=ENTITY_TYPE_DISCOVERY_SCHEDULER_JOB_NAME,
+                defaults={"last_error": str(e)[:1000]},
+            )
+            logger.warning(
+                f"[Worker {self.worker_id}] Failed to enqueue entity type discovery: {e}",
                 exc_info=True,
             )
 
     def _maybe_enqueue_lead_cron_jobs(self):
         """
         Every LEAD_CRON_ENQUEUE_INTERVAL seconds, enqueue unassign_snoozed_leads,
-        release_leads_after_12h, and close_stale_subscription_leads so the worker runs them
+        release_leads_after_12h, and close_stale_self_trial_support_tickets so the worker runs them
         without needing external cron.
         """
         now = timezone.now()
@@ -488,13 +634,13 @@ class JobProcessor:
                 )
                 enqueue_for_all_tenants(
                     queue,
-                    job_type=JobType.CLOSE_STALE_SUBSCRIPTION_LEADS,
+                    job_type=JobType.CLOSE_STALE_SELF_TRIAL_SUPPORT_TICKETS,
                     payload={"days": 15},
                     priority=0,
                 )
             logger.debug(
                 f"[Worker {self.worker_id}] Enqueued lead maintenance jobs per tenant "
-                f"(unassign_snoozed_leads, release_leads_after_12h, close_stale_subscription_leads)"
+                f"(unassign_snoozed_leads, release_leads_after_12h, close_stale_self_trial_support_tickets)"
             )
         except Exception as e:
             logger.warning(
@@ -598,29 +744,87 @@ class JobProcessor:
         once per :data:`LOG_RETENTION_ENQUEUE_INTERVAL` so old audit/log rows are removed
         without external cron. Finished job rows (COMPLETED/FAILED) in ``background_jobs``
         are pruned; active queue states are not removed.
+
+        Uses :class:`core.models.EntityTypeDiscoverySyncState` for cross-process throttle
+        and skips tenants with an active purge job or a successful purge in the last
+        :data:`LOG_RETENTION_ENQUEUE_INTERVAL` (unless ``has_more`` continuation is pending).
         """
         now = timezone.now()
         if self._last_log_retention_enqueue_at is not None:
             elapsed = (now - self._last_log_retention_enqueue_at).total_seconds()
-            if elapsed < LOG_RETENTION_ENQUEUE_INTERVAL:
+            if elapsed < LOG_RETENTION_LOCAL_CHECK_INTERVAL:
                 return
         self._last_log_retention_enqueue_at = now
+
         try:
-            with scheduler_lock(SCHEDULER_LOCK_LOG_RETENTION) as acquired:
-                if not acquired:
-                    return
-                days = int(getattr(settings, "LOG_RETENTION_DAYS", 30))
-                queue = get_queue_service()
-                enqueue_for_all_tenants(
-                    queue,
-                    job_type=JobType.PURGE_OLD_LOG_TABLES,
-                    payload={"days": days},
-                    priority=0,
+            with transaction.atomic():
+                scheduler_state, _created = (
+                    EntityTypeDiscoverySyncState.objects.select_for_update().get_or_create(
+                        job_name=LOG_RETENTION_SCHEDULER_JOB_NAME,
+                        defaults={
+                            "last_processed_updated_at": None,
+                            "last_processed_record_id": 0,
+                        },
+                    )
                 )
-            logger.debug(
-                f"[Worker {self.worker_id}] Enqueued purge_old_log_tables (days={days})"
+
+                if scheduler_state.last_success_at is not None:
+                    elapsed = (now - scheduler_state.last_success_at).total_seconds()
+                    if elapsed < LOG_RETENTION_ENQUEUE_INTERVAL:
+                        logger.debug(
+                            "[Worker %s] purge_old_log_tables scheduler throttled "
+                            "(elapsed=%.1fs)",
+                            self.worker_id,
+                            elapsed,
+                        )
+                        return
+
+                days = int(getattr(settings, "LOG_RETENTION_DAYS", 30))
+                chunk_size = int(getattr(settings, "LOG_RETENTION_CHUNK_SIZE", 500))
+                max_chunks_per_table = int(
+                    getattr(settings, "LOG_RETENTION_MAX_CHUNKS_PER_TABLE", 20)
+                )
+                payload = {
+                    "days": days,
+                    "chunk_size": chunk_size,
+                    "max_chunks_per_table": max_chunks_per_table,
+                }
+                queue = get_queue_service()
+                enqueued = 0
+                skipped = 0
+                for tid in iter_active_tenant_ids():
+                    tid_str = str(tid)
+                    if not tenant_should_enqueue_purge(
+                        tid_str,
+                        now=now,
+                        interval_seconds=LOG_RETENTION_ENQUEUE_INTERVAL,
+                    ):
+                        skipped += 1
+                        continue
+                    queue.enqueue_job(
+                        job_type=JobType.PURGE_OLD_LOG_TABLES,
+                        payload=payload,
+                        priority=0,
+                        tenant_id=tid_str,
+                    )
+                    enqueued += 1
+
+                scheduler_state.last_success_at = now
+                scheduler_state.last_error = None
+                scheduler_state.updated_at = now
+                scheduler_state.save(
+                    update_fields=["last_success_at", "last_error", "updated_at"]
+                )
+
+            logger.info(
+                f"[Worker {self.worker_id}] purge_old_log_tables scheduler: "
+                f"enqueued={enqueued} skipped={skipped} (days={days})"
             )
         except Exception as e:
+            EntityTypeDiscoverySyncState.objects.update_or_create(
+                job_name=LOG_RETENTION_SCHEDULER_JOB_NAME,
+                defaults={"last_error": str(e)[:1000]},
+            )
             logger.warning(
                 f"[Worker {self.worker_id}] Failed to enqueue purge_old_log_tables: {e}",
                 exc_info=True,
@@ -721,13 +925,21 @@ class JobProcessor:
                 iteration_count += 1
                 if iteration_count >= stale_cleanup_interval:
                     self.cleanup_stale_locks()
+                    self.cleanup_exhausted_pending_jobs()
                     iteration_count = 0
 
                 if self._run_schedulers:
+                    # Every 5 min: process support_ticket_dump → support_ticket + records
                     self._maybe_enqueue_process_dumped_tickets()
+                    # Every 5 min: discover tenant entity types and fields from changed records
+                    self._maybe_enqueue_entity_type_discovery()
+                    # Periodically enqueue lead cron jobs (unassign snoozed, release after 12h) so no external cron is needed
                     self._maybe_enqueue_lead_cron_jobs()
+                    # Daily at 23:55 exact minute (TIME_ZONE): SNOOZED → NOT_CONNECTED
                     self._maybe_enqueue_snoozed_to_not_connected_midnight()
+                    # Every 8 hours at :05 UTC (5 min after Airbyte sync): dispatch sheet → records
                     self._maybe_enqueue_dispatch_sync()
+                    # Periodic purge of object_history, event_logs, rule_exec_logs, finished background_jobs
                     self._maybe_enqueue_log_retention()
 
                 if jobs_processed > 0:

@@ -73,6 +73,7 @@ INSTALLED_APPS = [
     'object_history',
     'whatsapp',
     'pages',
+    'pyro_jobs',
 ]
 
 MIDDLEWARE = [
@@ -330,6 +331,8 @@ SPECTACULAR_SETTINGS = {
 # (COMPLETED/FAILED only): rows older than this many days are permanently removed
 # (see core.log_retention and purge_old_log_tables job).
 LOG_RETENTION_DAYS = env.int("LOG_RETENTION_DAYS", default=30)
+LOG_RETENTION_CHUNK_SIZE = env.int("LOG_RETENTION_CHUNK_SIZE", default=500)
+LOG_RETENTION_MAX_CHUNKS_PER_TABLE = env.int("LOG_RETENTION_MAX_CHUNKS_PER_TABLE", default=20)
 
 # General background jobs (Gunicorn web service). Set EXCLUDE_JOB_TYPES when Mixpanel worker is deployed.
 BACKGROUND_JOB_WORKER_THREADS = env.int("BACKGROUND_JOB_WORKER_THREADS", default=1)
@@ -337,7 +340,7 @@ BACKGROUND_JOB_POLL_INTERVAL = float(env("BACKGROUND_JOB_POLL_INTERVAL", default
 BACKGROUND_JOB_BATCH_SIZE = env.int("BACKGROUND_JOB_BATCH_SIZE", default=10)
 BACKGROUND_JOB_EXCLUDE_JOB_TYPES = env(
     "BACKGROUND_JOB_EXCLUDE_JOB_TYPES",
-    default="send_mixpanel_event,send_rm_assigned_event",
+    default="send_mixpanel_event,send_rm_assigned_event,send_cse_assigned_event",
 )
 
 # Render Background Worker: ``python manage.py run_mixpanel_workers``

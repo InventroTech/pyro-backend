@@ -16,6 +16,7 @@ class JobType(models.TextChoices):
     """Job type choices for background jobs"""
     SEND_MIXPANEL_EVENT = "send_mixpanel_event", "Send Mixpanel Event"
     SEND_RM_ASSIGNED_EVENT = "send_rm_assigned_event", "Send RM Assigned Event"
+    SEND_CSE_ASSIGNED_EVENT = "send_cse_assigned_event", "Send CSE Assigned Event"
     SEND_WEBHOOK = "send_webhook", "Send Webhook"
     EXECUTE_FUNCTION = "execute_function", "Execute Function"
     SCORE_LEADS = "score_leads", "Score Leads"
@@ -24,7 +25,10 @@ class JobType(models.TextChoices):
     PARTNER_LEAD_ASSIGN = "partner_lead_assign", "Partner Lead Assign"
     UNASSIGN_SNOOZED_LEADS = "unassign_snoozed_leads", "Unassign Snoozed Leads"
     RELEASE_LEADS_AFTER_12H = "release_leads_after_12h", "Release Leads After 12h"
-    CLOSE_STALE_SUBSCRIPTION_LEADS = "close_stale_subscription_leads", "Close Stale Subscription Leads"
+    CLOSE_STALE_SELF_TRIAL_SUPPORT_TICKETS = (
+        "close_stale_self_trial_support_tickets",
+        "Close Stale Self Trial Support Tickets",
+    )
     SNOOZED_TO_NOT_CONNECTED_MIDNIGHT = (
         "snoozed_to_not_connected_midnight",
         "Snoozed To Not Connected (midnight)",
@@ -32,6 +36,7 @@ class JobType(models.TextChoices):
     PURGE_OLD_LOG_TABLES = "purge_old_log_tables", "Purge Old Log Tables"
     SYNC_DISPATCH_TO_RECORDS = "sync_dispatch_to_records", "Sync Dispatch To Records"
     PROCESS_DUMPED_TICKETS = "process_dumped_tickets", "Process Dumped Support Tickets"
+    DISCOVER_ENTITY_TYPES = "discover_entity_types", "Discover Entity Types"
     # Future job types can be added here:
     # SEND_EMAIL = "send_email", "Send Email"
     # GENERATE_REPORT = "generate_report", "Generate Report"

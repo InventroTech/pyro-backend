@@ -7,4 +7,5 @@ from .models import JobType
 MIXPANEL_JOB_TYPES: tuple[str, ...] = (
     JobType.SEND_MIXPANEL_EVENT,
     JobType.SEND_RM_ASSIGNED_EVENT,
+    JobType.SEND_CSE_ASSIGNED_EVENT,
 )

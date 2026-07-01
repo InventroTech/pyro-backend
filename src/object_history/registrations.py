@@ -14,7 +14,6 @@ from crm_records.models import (
     UserBucketAssignment,
 )
 from scheduler.models import ScheduledTask, TaskPolicy
-from support_ticket.models import SupportTicket
 from whatsapp.models import WhatsAppTemplate
 
 from .registry import register
@@ -34,22 +33,6 @@ register(
         "created_at",
     ],
     redact_fields=set(),
-    snapshot_strategy="minimal",
-)
-
-register(
-    SupportTicket,
-    track_fields=[
-        "resolution_status",
-        "call_status",
-        "assigned_to_id",
-        "cse_name",
-        "cse_remarks",
-        "call_attempts",
-        "snooze_until",
-        "review_requested",
-    ],
-    redact_fields={"cse_remarks"},
     snapshot_strategy="minimal",
 )
 

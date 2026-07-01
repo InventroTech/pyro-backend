@@ -166,3 +166,74 @@ class RoleBaseModel(SoftDeleteMixin, TimeStampedModel, RoleModel):
         indexes = [
             models.Index(fields=['tenant', '-created_at']),
         ]
+
+
+def default_entity_type_schema():
+    return {"fields": {}}
+
+
+class TenantEntityType(BaseModel):
+    """
+    Discovered entity metadata for a tenant/entity_type pair.
+
+    ``schema_json`` stores only field/type metadata, never sample record data.
+    Example: {"fields": {"name": {"type": "string"}}}
+    """
+    entity_type = models.CharField(
+        max_length=100,
+        db_index=True,
+        help_text="The discovered record entity type, e.g. 'lead' or 'ticket'.",
+    )
+    schema_json = models.JSONField(
+        default=default_entity_type_schema,
+        blank=True,
+        help_text="Discovered unique data fields and their inferred JSON types.",
+    )
+    fields_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of unique fields currently stored in schema_json.fields.",
+    )
+    first_seen_at = models.DateTimeField(null=True, blank=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_seen_record_id = models.PositiveBigIntegerField(default=0)
+
+    class Meta(BaseModel.Meta):
+        db_table = "tenant_entity_types"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "entity_type"],
+                condition=models.Q(is_deleted=False, deleted_at__isnull=True),
+                name="tenant_entity_types_tenant_entity_type_uniq_alive",
+            ),
+        ]
+        indexes = [
+            *BaseModel.Meta.indexes,
+            models.Index(fields=["tenant", "entity_type"]),
+            models.Index(fields=["tenant", "-last_seen_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.tenant_id}: {self.entity_type} ({self.fields_count} fields)"
+
+
+class EntityTypeDiscoverySyncState(TimeStampedModel):
+    """
+    Global bookmark for incremental entity type discovery from records.
+
+    The pair (last_processed_updated_at, last_processed_record_id) lets the sync
+    resume safely when multiple records share the same updated_at timestamp.
+    """
+    job_name = models.CharField(max_length=100, unique=True, default="entity_type_discovery")
+    last_processed_updated_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_processed_record_id = models.PositiveBigIntegerField(default=0)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = "entity_type_discovery_sync_state"
+
+    def __str__(self):
+        return (
+            f"{self.job_name}: updated_at={self.last_processed_updated_at}, "
+            f"record_id={self.last_processed_record_id}"
+        )

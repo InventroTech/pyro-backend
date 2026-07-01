@@ -19,7 +19,7 @@ from uuid import UUID
 import requests
 from django.conf import settings
 from django.db import transaction
-from django.db.models import DateTimeField, F, Func, JSONField
+from django.db.models import DateTimeField, F, Func, JSONField, Q
 from django.db.models.expressions import RawSQL
 from django.db.utils import OperationalError
 from django.utils import timezone
@@ -30,8 +30,15 @@ from crm_records.lead_assignment_tracking import merge_first_assignment_today_an
 from crm_records.models import Record, PartnerEvent
 from crm_records.scoring import get_scoring_rules, score_chunk_sql
 from crm_records.services import PrajaService
+from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
 from support_ticket.models import SupportTicket
-from support_ticket.services import MixpanelService, RMAssignedMixpanelService
+from support_ticket.records import q_record_open_or_snoozed_resolution
+from support_ticket.ticket_types import q_record_self_trial
+from support_ticket.services import (
+    CSEAssignedMixpanelService,
+    MixpanelService,
+    RMAssignedMixpanelService,
+)
 
 from .models import BackgroundJob, JobType
 
@@ -292,6 +299,106 @@ class RMAssignedMixpanelJobHandler(JobHandler):
         for field in required:
             if field not in payload:
                 logger.error(f"Missing required field '{field}' in RM assigned job payload")
+                return False
+        return True
+
+
+class CSEAssignedMixpanelJobHandler(JobHandler):
+    """
+    Handler for sending CSE assigned events to Mixpanel via cse_assigned endpoint.
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        """
+        Process a CSE assigned Mixpanel job.
+
+        Expected payload:
+        {
+            "user_id": int,
+            "cse_email": str
+        }
+        """
+        payload = job.payload
+        user_id = payload.get("user_id")
+        cse_email = payload.get("cse_email")
+
+        if user_id is None or not cse_email:
+            error_msg = (
+                f"Invalid CSE assigned job payload: missing user_id or cse_email "
+                f"(user_id={user_id}, cse_email={bool(cse_email)})"
+            )
+            logger.error(f"Invalid CSE assigned job payload for job {job.id}: {error_msg}")
+            raise ValueError(error_msg)
+
+        try:
+            start_time = time.time()
+            user_id_int = int(user_id)
+            service = CSEAssignedMixpanelService()
+            outcome = service.send_to_mixpanel_sync(user_id_int, cse_email)
+            execution_time = time.time() - start_time
+            ts = timezone.now().isoformat()
+
+            if outcome == "success":
+                job.result = {
+                    "success": True,
+                    "user_id": user_id_int,
+                    "cse_email": cse_email,
+                    "execution_time_seconds": round(execution_time, 3),
+                    "timestamp": ts,
+                }
+                logger.info(
+                    f"CSE assigned event sent successfully for job {job.id}: "
+                    f"user_id={user_id_int} cse_email={cse_email}"
+                )
+                return True
+
+            if outcome == "skipped_not_found":
+                job.result = {
+                    "success": True,
+                    "skipped": True,
+                    "reason": "user_not_found_404",
+                    "user_id": user_id_int,
+                    "cse_email": cse_email,
+                    "execution_time_seconds": round(execution_time, 3),
+                    "timestamp": ts,
+                }
+                logger.warning(
+                    "CSE assigned event skipped for job %s (user not found): user_id=%s cse_email=%s",
+                    job.id,
+                    user_id_int,
+                    cse_email,
+                )
+                return True
+
+            job.result = {
+                "success": False,
+                "user_id": user_id_int,
+                "error": "CSEAssignedMixpanelService failed",
+                "timestamp": ts,
+            }
+            logger.error(
+                "CSE assigned event failed for job %s: user_id=%s cse_email=%s",
+                job.id,
+                user_id_int,
+                cse_email,
+            )
+            raise Exception("CSEAssignedMixpanelService failed")
+        except Exception as e:
+            logger.error(
+                f"CSE assigned event failed for job {job.id}: user_id={user_id} error={e}",
+                exc_info=True,
+            )
+            raise
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [1, 10, 60]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+    def validate_payload(self, payload: Dict[str, Any]) -> bool:
+        required = ["user_id", "cse_email"]
+        for field in required:
+            if field not in payload:
+                logger.error(f"Missing required field '{field}' in CSE assigned job payload")
                 return False
         return True
 
@@ -763,16 +870,32 @@ class PrajaJobHandler(JobHandler):
                     logger.error(f"Praja job {job.id} failed: {error_msg}")
                     raise Exception(error_msg)
             elif object_type == "ticket":
-                # For tickets, we need to reconstruct the ticket object
-                try:
-                    ticket = SupportTicket.objects.get(id=object_id)
-                    print(f"📋 [PRAJA JOB] Found ticket {object_id}, sending to Praja server...")
-                    success = praja_service.send_ticket_to_praja(ticket)
-                except SupportTicket.DoesNotExist:
-                    error_msg = f"SupportTicket {object_id} not found"
+                from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
+                from support_ticket.events import resolve_support_ticket_record
+
+                record = Record.objects.filter(
+                    id=object_id,
+                    entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                ).first()
+                if record is None and job.tenant_id:
+                    from core.models import Tenant
+
+                    tenant = Tenant.objects.filter(id=job.tenant_id).first()
+                    if tenant is not None:
+                        record = resolve_support_ticket_record(
+                            tenant=tenant,
+                            ticket_id=object_id,
+                        )
+                if record is None:
+                    error_msg = f"Support ticket record {object_id} not found"
                     print(f"❌ [PRAJA JOB] {error_msg}")
                     logger.error(f"Praja job {job.id} failed: {error_msg}")
                     raise Exception(error_msg)
+                print(
+                    f"📋 [PRAJA JOB] Found support ticket record {record.id}, "
+                    "sending to Praja server..."
+                )
+                success = praja_service.send_record_to_praja(record)
             else:
                 error_msg = f"Invalid object_type: {object_type}. Must be 'record' or 'ticket'"
                 print(f"❌ [PRAJA JOB] {error_msg}")
@@ -1038,23 +1161,37 @@ END
 """
 
 
-class JsonbSetLeadStageClosed(Func):
-    """PostgreSQL jsonb_set: set ``data.lead_stage`` to CLOSED."""
+class JsonbSetSupportTicketClosed(Func):
+    """PostgreSQL jsonb_set: set ``data.resolution_status`` to Closed and ``completed_at``."""
 
     function = "jsonb_set"
     template = (
-        "jsonb_set(COALESCE(%(expressions)s, '{}'::jsonb), '{lead_stage}', "
-        "to_jsonb('CLOSED'::text), true)"
+        "jsonb_set("
+        "jsonb_set(COALESCE(%(expressions)s, '{}'::jsonb), '{resolution_status}', "
+        "to_jsonb('Closed'::text), true), "
+        "'{completed_at}', to_jsonb((NOW() AT TIME ZONE 'UTC')::text), true)"
     )
     output_field = JSONField()
 
 
-def _close_stale_subscription_leads_queryset(
+def _legacy_support_ticket_id_from_record_data(data: Any) -> Optional[int]:
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("support_ticket_id") or data.get("ticket_id")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _close_stale_self_trial_support_tickets_queryset(
     tenant_id: Optional[Union[str, UUID]] = None,
 ):
     """
-    Base queryset: SELF TRIAL leads, not CLOSED, with ``subscription_ts`` from
-    ``subscription_time_stamp`` (same rules as the CASE SQL).
+    Base queryset: open SELF TRIAL support ticket records with ``subscription_ts`` from
+    ``subscription_time_stamp`` (same rules as the lead CASE SQL).
     """
     qs = (
         Record.objects.annotate(
@@ -1064,8 +1201,11 @@ def _close_stale_subscription_leads_queryset(
                 output_field=DateTimeField(),
             )
         )
-        .filter(entity_type="lead", data__contains={"lead_status": "SELF TRIAL"})
-        .exclude(data__lead_stage__iexact="CLOSED")
+        .filter(entity_type=SUPPORT_TICKET_ENTITY_TYPE)
+        .filter(q_record_self_trial())
+        .filter(
+            q_record_open_or_snoozed_resolution() | Q(data__resolution_status="WIP")
+        )
     )
     if tenant_id is not None:
         tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
@@ -1073,34 +1213,65 @@ def _close_stale_subscription_leads_queryset(
     return qs
 
 
-def _close_stale_subscription_leads_for_tenant(
+def _close_stale_self_trial_support_tickets_apply(
+    qs,
+    *,
+    now,
+) -> Tuple[int, int]:
+    ticket_ids = set()
+    for row in qs.values("data"):
+        ticket_id = _legacy_support_ticket_id_from_record_data(row.get("data"))
+        if ticket_id is not None:
+            ticket_ids.add(ticket_id)
+    with transaction.atomic():
+        records_updated = qs.update(
+            data=JsonbSetSupportTicketClosed(F("data")),
+            updated_at=now,
+        )
+        tickets_updated = 0
+        if ticket_ids:
+            tickets_updated = SupportTicket.objects.filter(id__in=ticket_ids).update(
+                resolution_status="Closed",
+                completed_at=now,
+            )
+    return records_updated, tickets_updated
+
+
+def _close_stale_self_trial_support_tickets_for_tenant(
     tenant_id: Union[str, UUID], days: int
-) -> Tuple[int, str]:
+) -> Tuple[int, int, str]:
     if days < 1:
         raise ValueError("days must be >= 1")
     cutoff = (timezone.now() - timedelta(days=days)).date()
     now = timezone.now()
     tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
-    updated = (
-        _close_stale_subscription_leads_queryset(tid)
+    stale_qs = (
+        _close_stale_self_trial_support_tickets_queryset(tid)
         .filter(subscription_ts__date__lte=cutoff)
-        .update(data=JsonbSetLeadStageClosed(F("data")), updated_at=now)
     )
-    return updated, cutoff.isoformat()
+    records_updated, tickets_updated = _close_stale_self_trial_support_tickets_apply(
+        stale_qs,
+        now=now,
+    )
+    return records_updated, tickets_updated, cutoff.isoformat()
 
 
-def _close_stale_subscription_leads_all_tenants(days: int) -> Tuple[int, int, str]:
+def _close_stale_self_trial_support_tickets_all_tenants(
+    days: int,
+) -> Tuple[int, int, int, str]:
     if days < 1:
         raise ValueError("days must be >= 1")
     cutoff = (timezone.now() - timedelta(days=days)).date()
     now = timezone.now()
     n_tenants = Tenant.objects.count()
-    total = (
-        _close_stale_subscription_leads_queryset(None)
-        .filter(subscription_ts__date__lte=cutoff)
-        .update(data=JsonbSetLeadStageClosed(F("data")), updated_at=now)
+    stale_qs = _close_stale_self_trial_support_tickets_queryset(None).filter(
+        subscription_ts__date__lte=cutoff
     )
-    return total, n_tenants, cutoff.isoformat()
+    records_updated, tickets_updated = _close_stale_self_trial_support_tickets_apply(
+        stale_qs,
+        now=now,
+    )
+    return records_updated, tickets_updated, n_tenants, cutoff.isoformat()
 
 
 class PurgeOldLogTablesJobHandler(JobHandler):
@@ -1111,10 +1282,20 @@ class PurgeOldLogTablesJobHandler(JobHandler):
 
     Payload:
     - ``days`` (int, optional): retention window; defaults to :setting:`LOG_RETENTION_DAYS`.
+    - ``chunk_size`` (int, optional): rows deleted per chunk; defaults to
+      :setting:`LOG_RETENTION_CHUNK_SIZE`.
+    - ``max_chunks_per_table`` (int, optional): chunk limit per table per run; defaults to
+      :setting:`LOG_RETENTION_MAX_CHUNKS_PER_TABLE`. When more rows remain, a follow-up job
+      is enqueued for the same tenant.
     """
 
     def process(self, job: BackgroundJob) -> bool:
-        from core.log_retention import get_log_retention_days, purge_old_log_rows
+        from core.log_retention import (
+            get_log_retention_chunk_size,
+            get_log_retention_days,
+            get_log_retention_max_chunks_per_table,
+            purge_old_log_rows,
+        )
 
         payload = job.payload or {}
         if "days" in payload:
@@ -1123,9 +1304,56 @@ class PurgeOldLogTablesJobHandler(JobHandler):
             days = get_log_retention_days()
         if days < 1:
             raise ValueError("days must be >= 1")
+
+        chunk_size = (
+            int(payload["chunk_size"])
+            if "chunk_size" in payload
+            else get_log_retention_chunk_size()
+        )
+        max_chunks_per_table = (
+            int(payload["max_chunks_per_table"])
+            if "max_chunks_per_table" in payload
+            else get_log_retention_max_chunks_per_table()
+        )
+        if chunk_size < 1 or max_chunks_per_table < 1:
+            raise ValueError("chunk_size and max_chunks_per_table must be >= 1")
+
         tenant_id = str(job.tenant_id) if job.tenant_id else None
-        stats = purge_old_log_rows(days=days, tenant_id=tenant_id)
+        stats = purge_old_log_rows(
+            days=days,
+            tenant_id=tenant_id,
+            chunk_size=chunk_size,
+            max_chunks_per_table=max_chunks_per_table,
+        )
         job.result = {"success": True, "tenant_id": tenant_id, **stats}
+
+        if stats.get("has_more") and tenant_id:
+            from .purge_scheduler import tenant_has_active_purge_job
+            from .models import JobType
+            from .queue_service import get_queue_service
+
+            if tenant_has_active_purge_job(tenant_id, exclude_job_id=job.id):
+                logger.info(
+                    "Skipped follow-up purge_old_log_tables for tenant=%s "
+                    "(active job already exists)",
+                    tenant_id,
+                )
+            else:
+                get_queue_service().enqueue_job(
+                    job_type=JobType.PURGE_OLD_LOG_TABLES,
+                    payload={
+                        "days": days,
+                        "chunk_size": chunk_size,
+                        "max_chunks_per_table": max_chunks_per_table,
+                    },
+                    tenant_id=tenant_id,
+                    priority=0,
+                )
+                logger.info(
+                    "Enqueued follow-up purge_old_log_tables for tenant=%s (has_more=True)",
+                    tenant_id,
+                )
+
         return True
 
     def get_retry_delay(self, attempt: int) -> int:
@@ -1141,9 +1369,27 @@ class PurgeOldLogTablesJobHandler(JobHandler):
                 from core.log_retention import get_log_retention_days
 
                 days = get_log_retention_days()
+            if days < 1:
+                return False
+
+            from core.log_retention import (
+                get_log_retention_chunk_size,
+                get_log_retention_max_chunks_per_table,
+            )
+
+            chunk_size = (
+                int(p["chunk_size"])
+                if "chunk_size" in p
+                else get_log_retention_chunk_size()
+            )
+            max_chunks_per_table = (
+                int(p["max_chunks_per_table"])
+                if "max_chunks_per_table" in p
+                else get_log_retention_max_chunks_per_table()
+            )
         except (TypeError, ValueError):
             return False
-        return days >= 1
+        return chunk_size >= 1 and max_chunks_per_table >= 1
 
 
 class SyncDispatchToRecordsJobHandler(JobHandler):
@@ -1220,10 +1466,12 @@ class ProcessDumpedTicketsJobHandler(JobHandler):
         return True
 
 
-class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
+class CloseStaleSelfTrialSupportTicketsJobHandler(JobHandler):
     """
-    Set ``data.lead_stage`` to CLOSED for **SELF TRIAL** leads (``lead_status``) whose
-    ``subscription_time_stamp`` is at least ``days`` (default 15) in the past.
+    Set ``data.resolution_status`` to **Closed** for open **SELF TRIAL** support ticket
+    records whose ``subscription_time_stamp`` is at least ``days`` (default 15) in the past.
+
+    Also syncs linked legacy ``support_ticket`` rows when ``support_ticket_id`` is present.
 
     Payload:
     - ``days`` (int, optional, default 15): minimum age of subscription timestamp in days.
@@ -1236,40 +1484,50 @@ class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
         if "days" in payload:
             days = int(payload["days"])
         else:
-            days = 14
+            days = 15
         if days < 1:
             raise ValueError("days must be >= 1")
 
         tid = job.tenant_id or payload.get("tenant_id")
         if tid:
-            updated, cutoff = _close_stale_subscription_leads_for_tenant(tid, days)
+            records_updated, tickets_updated, cutoff = (
+                _close_stale_self_trial_support_tickets_for_tenant(tid, days)
+            )
             job.result = {
                 "success": True,
-                "updated": updated,
+                "updated": records_updated,
+                "records_updated": records_updated,
+                "support_tickets_updated": tickets_updated,
                 "days": days,
                 "cutoff": cutoff,
                 "tenant_id": str(tid),
                 "tenant_scope": "single",
             }
             logger.info(
-                "[CloseStaleSubscriptionLeads] tenant=%s updated=%s days=%s",
+                "[CloseStaleSelfTrialSupportTickets] tenant=%s records=%s tickets=%s days=%s",
                 tid,
-                updated,
+                records_updated,
+                tickets_updated,
                 days,
             )
         else:
-            total, n_tenants, cutoff = _close_stale_subscription_leads_all_tenants(days)
+            records_updated, tickets_updated, n_tenants, cutoff = (
+                _close_stale_self_trial_support_tickets_all_tenants(days)
+            )
             job.result = {
                 "success": True,
-                "updated": total,
+                "updated": records_updated,
+                "records_updated": records_updated,
+                "support_tickets_updated": tickets_updated,
                 "days": days,
                 "cutoff": cutoff,
                 "tenants_processed": n_tenants,
                 "tenant_scope": "all",
             }
             logger.info(
-                "[CloseStaleSubscriptionLeads] all tenants updated=%s tenants=%s days=%s",
-                total,
+                "[CloseStaleSelfTrialSupportTickets] all tenants records=%s tickets=%s tenants=%s days=%s",
+                records_updated,
+                tickets_updated,
                 n_tenants,
                 days,
             )
@@ -1285,7 +1543,7 @@ class CloseStaleSubscriptionLeadsJobHandler(JobHandler):
             if "days" in p:
                 days = int(p["days"])
             else:
-                days = 14
+                days = 15
         except (TypeError, ValueError):
             return False
         return days >= 1
@@ -1432,6 +1690,58 @@ class ReleaseLeadsAfter12hJobHandler(JobHandler):
         delays = [60, 300, 900]
         return delays[min(attempt - 1, len(delays) - 1)]
 
+
+class DiscoverEntityTypesJobHandler(JobHandler):
+    """
+    Incrementally discover tenant entity types and data fields from records.
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        from crm_records.entity_type_discovery import discover_entity_types_from_records
+
+        payload = job.payload or {}
+        batch_size = int(payload.get("batch_size") or 1000)
+        max_runtime_seconds = payload.get("max_runtime_seconds")
+        if max_runtime_seconds is not None:
+            max_runtime_seconds = int(max_runtime_seconds)
+
+        result = discover_entity_types_from_records(
+            batch_size=batch_size,
+            max_runtime_seconds=max_runtime_seconds,
+        )
+        job.result = {
+            "success": True,
+            "processed": result.processed,
+            "entity_types_touched": result.entity_types_touched,
+            "schemas_updated": result.schemas_updated,
+            "last_processed_record_id": result.last_processed_record_id,
+            "last_processed_updated_at": result.last_processed_updated_at,
+            "has_more": result.has_more,
+            "timestamp": timezone.now().isoformat(),
+        }
+        logger.info(
+            "[DiscoverEntityTypes] processed=%s touched=%s updated=%s has_more=%s",
+            result.processed,
+            result.entity_types_touched,
+            result.schemas_updated,
+            result.has_more,
+        )
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+    def validate_payload(self, payload: Dict[str, Any]) -> bool:
+        for key in ("batch_size", "max_runtime_seconds"):
+            if key in payload:
+                try:
+                    if int(payload[key]) <= 0:
+                        return False
+                except (TypeError, ValueError):
+                    return False
+        return True
+
 class JobHandlerRegistry:
     """
     Registry for job handlers.
@@ -1446,6 +1756,7 @@ class JobHandlerRegistry:
         """Register default handlers"""
         self.register_handler(JobType.SEND_MIXPANEL_EVENT, MixpanelJobHandler())
         self.register_handler(JobType.SEND_RM_ASSIGNED_EVENT, RMAssignedMixpanelJobHandler())
+        self.register_handler(JobType.SEND_CSE_ASSIGNED_EVENT, CSEAssignedMixpanelJobHandler())
         self.register_handler(JobType.SEND_WEBHOOK, WebhookJobHandler())
         self.register_handler(JobType.EXECUTE_FUNCTION, FunctionJobHandler())
         self.register_handler(JobType.SCORE_LEADS, LeadScoringJobHandler())
@@ -1454,7 +1765,8 @@ class JobHandlerRegistry:
         self.register_handler(JobType.UNASSIGN_SNOOZED_LEADS, UnassignSnoozedLeadsJobHandler())
         self.register_handler(JobType.RELEASE_LEADS_AFTER_12H, ReleaseLeadsAfter12hJobHandler())
         self.register_handler(
-            JobType.CLOSE_STALE_SUBSCRIPTION_LEADS, CloseStaleSubscriptionLeadsJobHandler()
+            JobType.CLOSE_STALE_SELF_TRIAL_SUPPORT_TICKETS,
+            CloseStaleSelfTrialSupportTicketsJobHandler(),
         )
         self.register_handler(
             JobType.SNOOZED_TO_NOT_CONNECTED_MIDNIGHT,
@@ -1471,6 +1783,10 @@ class JobHandlerRegistry:
         self.register_handler(
             JobType.PROCESS_DUMPED_TICKETS,
             ProcessDumpedTicketsJobHandler(),
+        )
+        self.register_handler(
+            JobType.DISCOVER_ENTITY_TYPES,
+            DiscoverEntityTypesJobHandler(),
         )
         # Praja handler removed - now using MixpanelService instead
         # self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())

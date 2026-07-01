@@ -5,8 +5,9 @@ from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError, NotFound
 from rest_framework.permissions import AllowAny
 from authz.permissions import IsTenantAuthenticated
+from config.supabase_auth import SupabaseJWTAuthentication
 from core.pagination import MetaPageNumberPagination, RecordListPagination
-from core.models import Tenant
+from core.models import Tenant, TenantEntityType
 from django.utils import timezone
 from datetime import datetime, time, timedelta, timezone as std_utc
 try:
@@ -31,6 +32,7 @@ from .serializers import (
     RuleSetSerializer,
     RuleExecutionLogSerializer,
     EntityTypeSchemaSerializer,
+    TenantEntityTypeSerializer,
     LeadScoringRequestSerializer,
     CallAttemptMatrixSerializer,
     ScoringRuleModelSerializer,
@@ -1114,6 +1116,7 @@ class RecordEventView(TenantScopedMixin, APIView):
     Handle event creation and logging for records.
     POST /records/<id>/events/ - Log an event for a specific record.
     """
+    authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
 
     @extend_schema(
@@ -1811,8 +1814,8 @@ class GetNextLeadView(APIView):
         log_label: str,
     ):
         """
-        When the main queue has no suitable lead: due NOT_CONNECTED/IN_QUEUE retries — assigned-to-me first,
-        else unassigned (filters + routing), lock-assign, then same JSON shape as a normal assign.
+        Due NOT_CONNECTED/IN_QUEUE retries already assigned to this user (next_call_at <= now).
+        Unassigned NOT_CONNECTED leads are never returned here.
         Returns Response 200 or None.
         """
         due_nc = """
@@ -1829,51 +1832,7 @@ class GetNextLeadView(APIView):
             .first()
         )
         if not retry_candidate:
-            unassigned_where = f"""
-                (
-                    (data->>'assigned_to') IS NULL
-                    OR TRIM(COALESCE(data->>'assigned_to', '')) = ''
-                    OR LOWER(TRIM(COALESCE(data->>'assigned_to', ''))) IN ('null', 'none')
-                )
-                AND {due_nc}
-            """
-            qs = Record.objects.filter(tenant=tenant, entity_type="lead").extra(
-                select={"call_attempts_int": "COALESCE((data->>'call_attempts')::int, 0)"},
-                where=[unassigned_where],
-            )
-            if eligible_lead_types:
-                qs = qs.filter(data__affiliated_party__in=eligible_lead_types)
-            if eligible_lead_sources:
-                qs = qs.filter(data__lead_source__in=eligible_lead_sources)
-            if eligible_lead_statuses:
-                qs = qs.filter(data__lead_status__in=eligible_lead_statuses)
-            if eligible_states:
-                qs = qs.filter(data__state__in=eligible_states)
-            picked = qs.order_by("call_attempts_int", "updated_at", "id").first()
-            if not picked:
-                return None
-            with transaction.atomic():
-                locked = Record.objects.select_for_update(skip_locked=True).filter(pk=picked.pk).first()
-                if not locked:
-                    return None
-                data = (locked.data or {}).copy()
-                if not _legacy_get_next_lead_assignee_is_unassigned(data.get("assigned_to")):
-                    logger.info(
-                        "%s Unassigned NC retry lost race record_id=%s assigned_to=%s user=%s",
-                        log_label,
-                        locked.pk,
-                        data.get("assigned_to"),
-                        user_identifier,
-                    )
-                    return None
-                data["assigned_to"] = user_identifier
-                data["lead_stage"] = self.ASSIGNED_STATUS
-                if "call_attempts" not in data or data.get("call_attempts") in (None, "", "null"):
-                    data["call_attempts"] = 0
-                locked.data = data
-                locked.updated_at = timezone.now()
-                locked.save(update_fields=["data", "updated_at"])
-                retry_candidate = locked
+            return None
 
         serialized_data = RecordSerializer(retry_candidate).data
         lead_data = retry_candidate.data or {}
@@ -4140,6 +4099,21 @@ class EntityTypeSchemaListCreateView(TenantScopedMixin, generics.ListCreateAPIVi
     def perform_create(self, serializer):
         """Set tenant automatically on create."""
         serializer.save(tenant=self.request.tenant)
+
+
+class TenantEntityTypeListView(TenantScopedMixin, generics.ListAPIView):
+    """
+    List discovered entity types and field schemas for the current tenant.
+
+    GET /crm-records/entity-types/
+    """
+    queryset = TenantEntityType.objects.all()
+    permission_classes = [IsTenantAuthenticated]
+    serializer_class = TenantEntityTypeSerializer
+    pagination_class = MetaPageNumberPagination
+
+    def get_queryset(self):
+        return super().get_queryset().order_by("entity_type")
 
 
 class EntityTypeSchemaDetailView(TenantScopedMixin, generics.RetrieveUpdateDestroyAPIView):

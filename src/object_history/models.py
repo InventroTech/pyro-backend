@@ -82,6 +82,15 @@ class ObjectHistory(BaseModel):
                 fields=["persistent_history", "created_at"],
                 name="object_hist_persist_cr_idx",
             ),
+            models.Index(
+                fields=["tenant", "created_at"],
+                name="object_hist_retention_idx",
+                condition=models.Q(
+                    persistent_history=False,
+                    is_deleted=False,
+                    deleted_at__isnull=True,
+                ),
+            ),
         ]
         constraints = [
             models.UniqueConstraint(
