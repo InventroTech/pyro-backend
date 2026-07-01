@@ -95,6 +95,36 @@ class GetNextTicketAPITest(BaseAPITestCase):
             {"user_id": 123456, "cse_email": self.email},
         )
 
+    @patch("support_ticket.views.get_queue_service")
+    def test_get_next_ticket_assigned_mixpanel_includes_release_build_number(
+        self, mock_get_queue
+    ):
+        mock_queue = MagicMock()
+        mock_get_queue.return_value = mock_queue
+        record = _open_record(
+            tenant=self.tenant,
+            user_id="123456",
+            name="Customer",
+        )
+        record.data = {**record.data, "release_build_number": "9.8.7"}
+        record.save(update_fields=["data"])
+
+        response = self.client.get(self.url, **self.auth_headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("ticket", response.data)
+        mixpanel_calls = [
+            call
+            for call in mock_queue.enqueue_job.call_args_list
+            if call.kwargs.get("job_type") == JobType.SEND_MIXPANEL_EVENT
+            and call.kwargs.get("payload", {}).get("event_name") == "pyro_st_assigned"
+        ]
+        self.assertEqual(len(mixpanel_calls), 1)
+        self.assertEqual(
+            mixpanel_calls[0].kwargs["payload"]["properties"]["release_build_number"],
+            "9.8.7",
+        )
+
     def test_get_next_ticket_assigns_newest_unassigned_record(self):
         older = _open_record(tenant=self.tenant, user_id="old_user", name="Older")
         newer = _open_record(tenant=self.tenant, user_id="new_user", name="Newer")

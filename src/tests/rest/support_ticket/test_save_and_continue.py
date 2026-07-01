@@ -148,6 +148,7 @@ class SaveAndContinueViewTest(BaseAPITestCase):
                 support_ticket_id=self.support_ticket.id,
                 resolution_time="0:00",
                 call_attempts=0,
+                release_build_number="4.5.6",
             ),
         )
 
@@ -196,6 +197,8 @@ class SaveAndContinueViewTest(BaseAPITestCase):
         self.assertEqual(mock_enqueue_mixpanel.call_count, 2)
         names = [c.kwargs["event_name"] for c in mock_enqueue_mixpanel.call_args_list]
         self.assertEqual(names, ["pyro_st_connected", "pyro_st_resolve"])
+        resolve_call = mock_enqueue_mixpanel.call_args_list[1]
+        self.assertEqual(resolve_call.kwargs["properties"]["release_build_number"], "4.5.6")
     
     def test_save_and_continue_time_accumulation(self):
         """Test time accumulation functionality"""
