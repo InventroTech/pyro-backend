@@ -7,6 +7,7 @@ from typing import Any, Dict, Set
 from django.db.models import Q
 
 SELF_TRIAL_TICKET_TYPE_KEY = "self_trail"
+SELF_TRIAL_MAX_CALL_ATTEMPTS = 6
 
 _TICKET_TYPE_ROUTING_KEYS = frozenset(
     {
