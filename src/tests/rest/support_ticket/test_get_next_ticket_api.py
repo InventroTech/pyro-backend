@@ -101,19 +101,18 @@ class GetNextTicketAPITest(BaseAPITestCase):
     ):
         mock_queue = MagicMock()
         mock_get_queue.return_value = mock_queue
-        Record.objects.create(
+        record = _open_record(
             tenant=self.tenant,
-            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
-            data=dump_data(
-                user_id="123456",
-                name="Customer",
-                release_build_number="9.8.7",
-            ),
+            user_id="123456",
+            name="Customer",
         )
+        record.data = {**record.data, "release_build_number": "9.8.7"}
+        record.save(update_fields=["data"])
 
         response = self.client.get(self.url, **self.auth_headers)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("ticket", response.data)
         mixpanel_calls = [
             call
             for call in mock_queue.enqueue_job.call_args_list
