@@ -104,7 +104,10 @@ def run_brahma_loop():
                         if created:
                             logger.info("[Brahma] Scheduled: %s → %s", job_name, next_run)
                     except MultipleObjectsReturned:
-                        pass
+                        logger.debug(
+                            "[Brahma] Multiple pending rows detected for %s due to race; treating as already scheduled.",
+                            job_name,
+                        )
 
         except (ProgrammingError, OperationalError) as e:
             if "pyro_job" in str(e):

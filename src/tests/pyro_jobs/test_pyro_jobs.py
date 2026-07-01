@@ -661,7 +661,9 @@ class TestConcurrency:
                         defaults={"run_at": next_run, "payload": {}}
                     )
                 except MultipleObjectsReturned:
-                    pass
+                    # Expected in concurrent Brahma races when duplicate pending rows
+                    # are created without a DB-level unique constraint.
+                    continue
 
     def test_concurrent_brahma_workers_dont_duplicate(self):
         """
