@@ -881,6 +881,16 @@ def _evaluate_simple_condition(condition: Dict[str, Any], ctx: Dict[str, Any]) -
                 return left >= right
             except Exception:
                 return False
+
+    # Membership (left operand in right-hand collection)
+    if "in" in condition:
+        args = condition["in"]
+        if isinstance(args, list) and len(args) == 2:
+            needle = _resolve_operand(args[0])
+            haystack = args[1]
+            if isinstance(haystack, list):
+                return needle in haystack
+            return False
     
     # Default to False for unknown/unsupported conditions to avoid false positives
     return False
@@ -891,7 +901,7 @@ def _is_simple_condition(condition: Any) -> bool:
     if not isinstance(condition, dict) or len(condition) != 1:
         return False
     (op, value), = condition.items()
-    simple_ops = {"==", "!=", "<", ">", "<=", ">=", "and", "or", "!"}
+    simple_ops = {"==", "!=", "<", ">", "<=", ">=", "and", "or", "!", "in"}
     if op not in simple_ops:
         return False
     if op in {"and", "or"}:
@@ -900,6 +910,16 @@ def _is_simple_condition(condition: Any) -> bool:
         return all(_is_simple_condition(v) if isinstance(v, dict) else True for v in value)
     if op == "!":
         return _is_simple_condition(value) if isinstance(value, dict) else True
+    if op == "in":
+        if not (isinstance(value, list) and len(value) == 2):
+            return False
+        needle, haystack = value
+        if isinstance(needle, dict) and "var" in needle:
+            if not isinstance(needle.get("var"), str):
+                return False
+        elif isinstance(needle, dict):
+            return False
+        return isinstance(haystack, list)
     # Comparators & equality expect 2 args which can be literals or {"var": path}
     if not (isinstance(value, list) and len(value) == 2):
         return False

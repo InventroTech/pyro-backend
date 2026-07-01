@@ -11,6 +11,87 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from crm_records.models import RuleSet
+from support_ticket.ticket_types import (
+    SELF_TRIAL_MAX_CALL_ATTEMPTS,
+    SELF_TRIAL_TICKET_TYPE_KEY,
+    raw_field_values_for_type_key,
+)
+
+_SELF_TRIAL_RAW_VALUES = list(raw_field_values_for_type_key(SELF_TRIAL_TICKET_TYPE_KEY))
+_SELF_TRIAL_CLOSE_AT = SELF_TRIAL_MAX_CALL_ATTEMPTS - 1
+_DEFAULT_CLOSE_AT = 2
+
+
+def _record_is_self_trial_condition() -> Dict[str, Any]:
+    return {
+        "or": [
+            {"in": [{"var": "record_data.support_ticket_type"}, _SELF_TRIAL_RAW_VALUES]},
+            {"in": [{"var": "record_data.poster"}, _SELF_TRIAL_RAW_VALUES]},
+        ]
+    }
+
+
+def _record_not_self_trial_condition() -> Dict[str, Any]:
+    return {"!": _record_is_self_trial_condition()}
+
+
+def _not_connected_snooze_actions() -> List[Dict[str, Any]]:
+    return [
+        {
+            "action": "update_fields",
+            "args": {
+                "updates": {
+                    "cse_name": None,
+                    "assigned_to": None,
+                    "call_status": "Not Connected",
+                    "cse_remarks": "{{payload.cse_remarks}}",
+                    "completed_at": "{{now}}",
+                    "other_reasons": "{{payload.other_reasons}}",
+                    "resolution_status": "Snoozed",
+                },
+                "increments": {"call_attempts": 1},
+            },
+        },
+        {
+            "action": "compute_next_call_from_attempts",
+            "args": {
+                "target_field": "next_call_at",
+                "fixed_minutes": 60,
+                "attempts_field": "call_attempts",
+            },
+        },
+        {
+            "action": "compute_next_call_from_attempts",
+            "args": {
+                "target_field": "snooze_until",
+                "fixed_minutes": 60,
+                "attempts_field": "call_attempts",
+            },
+        },
+    ]
+
+
+def _not_connected_close_actions() -> List[Dict[str, Any]]:
+    return [
+        {
+            "action": "update_fields",
+            "args": {
+                "updates": {
+                    "cse_name": None,
+                    "assigned_to": None,
+                    "call_status": "Not Connected",
+                    "cse_remarks": "{{payload.cse_remarks}}",
+                    "completed_at": "{{now}}",
+                    "next_call_at": None,
+                    "snooze_until": "{{payload.snooze_until}}",
+                    "other_reasons": "{{payload.other_reasons}}",
+                    "resolution_time": "{{payload.resolution_time}}",
+                    "resolution_status": "Closed",
+                },
+                "increments": {"call_attempts": 1},
+            },
+        }
+    ]
 
 SUPPORT_TICKET_TEST_RULES: List[Dict[str, Any]] = [
     {
@@ -79,66 +160,47 @@ SUPPORT_TICKET_TEST_RULES: List[Dict[str, Any]] = [
     },
     {
         "event_name": "support.not_connected",
-        "condition": {"<": [{"var": "record_data.call_attempts"}, 2]},
+        "condition": {
+            "and": [
+                _record_not_self_trial_condition(),
+                {"<": [{"var": "record_data.call_attempts"}, _DEFAULT_CLOSE_AT]},
+            ]
+        },
         "description": "Support not connected — attempts 1–2: snooze 1h (UpdateCallStatusView)",
-        "actions": [
-            {
-                "action": "update_fields",
-                "args": {
-                    "updates": {
-                        "cse_name": None,
-                        "assigned_to": None,
-                        "call_status": "Not Connected",
-                        "cse_remarks": "{{payload.cse_remarks}}",
-                        "completed_at": "{{now}}",
-                        "other_reasons": "{{payload.other_reasons}}",
-                        "resolution_status": "Snoozed",
-                    },
-                    "increments": {"call_attempts": 1},
-                },
-            },
-            {
-                "action": "compute_next_call_from_attempts",
-                "args": {
-                    "target_field": "next_call_at",
-                    "fixed_minutes": 60,
-                    "attempts_field": "call_attempts",
-                },
-            },
-            {
-                "action": "compute_next_call_from_attempts",
-                "args": {
-                    "target_field": "snooze_until",
-                    "fixed_minutes": 60,
-                    "attempts_field": "call_attempts",
-                },
-            },
-        ],
+        "actions": _not_connected_snooze_actions(),
     },
     {
         "event_name": "support.not_connected",
-        "condition": {">=": [{"var": "record_data.call_attempts"}, 2]},
+        "condition": {
+            "and": [
+                _record_not_self_trial_condition(),
+                {">=": [{"var": "record_data.call_attempts"}, _DEFAULT_CLOSE_AT]},
+            ]
+        },
         "description": "Support not connected — 3rd attempt: close (UpdateCallStatusView)",
-        "actions": [
-            {
-                "action": "update_fields",
-                "args": {
-                    "updates": {
-                        "cse_name": None,
-                        "assigned_to": None,
-                        "call_status": "Not Connected",
-                        "cse_remarks": "{{payload.cse_remarks}}",
-                        "completed_at": "{{now}}",
-                        "next_call_at": None,
-                        "snooze_until": "{{payload.snooze_until}}",
-                        "other_reasons": "{{payload.other_reasons}}",
-                        "resolution_time": "{{payload.resolution_time}}",
-                        "resolution_status": "Closed",
-                    },
-                    "increments": {"call_attempts": 1},
-                },
-            }
-        ],
+        "actions": _not_connected_close_actions(),
+    },
+    {
+        "event_name": "support.not_connected",
+        "condition": {
+            "and": [
+                _record_is_self_trial_condition(),
+                {"<": [{"var": "record_data.call_attempts"}, _SELF_TRIAL_CLOSE_AT]},
+            ]
+        },
+        "description": "Self trial not connected — attempts 1–5: snooze 1h (UpdateCallStatusView)",
+        "actions": _not_connected_snooze_actions(),
+    },
+    {
+        "event_name": "support.not_connected",
+        "condition": {
+            "and": [
+                _record_is_self_trial_condition(),
+                {">=": [{"var": "record_data.call_attempts"}, _SELF_TRIAL_CLOSE_AT]},
+            ]
+        },
+        "description": "Self trial not connected — 6th attempt: close (UpdateCallStatusView)",
+        "actions": _not_connected_close_actions(),
     },
     {
         "event_name": "support.resolved",
