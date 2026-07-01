@@ -2,6 +2,7 @@ import time
 import logging
 import threading
 from datetime import timedelta
+from django.core.exceptions import MultipleObjectsReturned
 from django.utils import timezone
 from django.db import transaction, ProgrammingError, OperationalError
 
@@ -90,15 +91,20 @@ def run_brahma_loop():
                     # run_at is in defaults (not the lookup key) so that two
                     # workers racing through the same check always hit the
                     # same row — one creates, the other gets the existing one.
-                    _, created = PyroJob.objects.get_or_create(
-                        job_name=job_name,
-                        status=PyroJob.STATUS_PENDING,
-                        is_deleted=False,
-                        defaults={"run_at": next_run, "payload": {}}
-                    )
-
-                    if created:
-                        logger.info("[Brahma] Scheduled: %s → %s", job_name, next_run)
+                    # MultipleObjectsReturned can occur in a tight race where
+                    # N workers all pass the already_scheduled check before any
+                    # of them commits — treat it as "already scheduled".
+                    try:
+                        _, created = PyroJob.objects.get_or_create(
+                            job_name=job_name,
+                            status=PyroJob.STATUS_PENDING,
+                            is_deleted=False,
+                            defaults={"run_at": next_run, "payload": {}}
+                        )
+                        if created:
+                            logger.info("[Brahma] Scheduled: %s → %s", job_name, next_run)
+                    except MultipleObjectsReturned:
+                        pass
 
         except (ProgrammingError, OperationalError) as e:
             if "pyro_job" in str(e):
