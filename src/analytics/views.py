@@ -858,9 +858,12 @@ class SupportTicketFilterOptionsView(APIView):
     permission_classes = [IsTenantAuthenticated]
     def get(self, request):
         tenant = request.tenant
-        qs = support_ticket_records_qs(tenant=tenant)
-        resolution_statuses = distinct_data_values(qs, "resolution_status")
-        poster_statuses = distinct_data_values(qs, "poster")
+        qs = SupportTicket.objects.filter(tenant_id=tenant.id)
+        resolution_statuses = [
+    status.upper() if status else status
+    for status in _distinct_list(qs, "resolution_status")
+]
+        poster_statuses = _distinct_list(qs, "poster")
         return Response({
             "resolution_statuses": resolution_statuses,
             "poster_statuses": poster_statuses,

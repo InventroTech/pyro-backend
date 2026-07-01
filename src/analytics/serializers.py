@@ -1,16 +1,26 @@
 from rest_framework import serializers
+from support_ticket.models import SupportTicket
 
-from support_ticket.records import record_to_ticket_dict
+class SupportTicketSerializer(serializers.ModelSerializer):
+    # 1. Instruct Django to look for a custom method to handle this field's output
+    resolution_status = serializers.SerializerMethodField()
 
+    class Meta:
+        model = SupportTicket
+        fields = [
+            "id", "created_at", "ticket_date", "user_id", "name", "phone", "source",
+            "subscription_status", "atleast_paid_once", "reason", "other_reasons",
+            "badge", "poster", "tenant_id", "assigned_to", "layout_status", "state",
+            "resolution_status", "resolution_time", "cse_name", "cse_remarks",
+            "call_status", "call_attempts", "rm_name", "completed_at", "snooze_until",
+            "praja_dashboard_user_link", "display_pic_url", "dumped_at", "review_requested"
+        ]
 
-class SupportTicketSerializer(serializers.Serializer):
-    """Serialize support ticket ``Record`` rows (or pre-built dicts)."""
-
-    def to_representation(self, instance):
-        if isinstance(instance, dict):
-            return instance
-        return record_to_ticket_dict(instance)
-
+    # 2. This method dynamically capitalizes the status value sent to the frontend
+    def get_resolution_status(self, obj):
+        if obj.resolution_status:
+            return obj.resolution_status.upper()  # Changes 'open' to 'OPEN'
+        return obj.resolution_status
 
 # Analytics serializers
 class TeamOverviewSerializer(serializers.Serializer):
