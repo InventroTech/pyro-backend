@@ -11,6 +11,7 @@ from rest_framework import status
 from background_jobs.models import JobType
 from crm_records.models import Record
 from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
+from support_ticket.ticket_types import SELF_TRIAL_MAX_CALL_ATTEMPTS
 from support_ticket.views import _record_ticket_type_key
 from tests.base.test_setup import BaseAPITestCase
 from tests.factories.support_ticket_dump_factory import dump_data
@@ -261,6 +262,30 @@ class GetNextTicketAPITest(BaseAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["ticket"]["id"], record.id)
         self.assertEqual(response.data["ticket"]["assigned_to"], self.supabase_uid)
+
+    def test_get_next_ticket_skips_self_trail_at_max_attempts(self):
+        exhausted = _open_record(
+            tenant=self.tenant,
+            user_id="exhausted_self",
+            name="Exhausted Self",
+            support_ticket_type="Self_Trial",
+        )
+        exhausted.data = {
+            **exhausted.data,
+            "call_attempts": SELF_TRIAL_MAX_CALL_ATTEMPTS,
+        }
+        exhausted.save(update_fields=["data"])
+        available = _open_record(
+            tenant=self.tenant,
+            user_id="available_self",
+            name="Available Self",
+            support_ticket_type="Self_Trial",
+        )
+
+        response = self.client.get(self.url, **self.auth_headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["ticket"]["id"], available.id)
 
     def test_get_next_ticket_skips_record_at_max_attempts(self):
         exhausted = _open_record(
