@@ -8,9 +8,20 @@ from django.db import transaction, ProgrammingError, OperationalError
 logger = logging.getLogger(__name__)
 
 SCHEDULE = {
-    "dispatch_data_sync":   {"every_minutes": 480},
-    "purge_old_log_tables": {"every_minutes": 1440},
+    "dispatch_data_sync":                {"every_minutes": 480},
+    "purge_old_log_tables":              {"every_minutes": 1440},
+    "snoozed_to_not_connected_midnight": {"daily_at_utc": "17:30"},
 }
+
+
+def _next_occurrence_utc(time_str: str, now) -> "datetime":
+    """Return the next UTC datetime for a HH:MM clock time (today if not yet passed, else tomorrow)."""
+    from datetime import datetime as dt
+    h, m = (int(x) for x in time_str.split(":"))
+    candidate = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    if candidate <= now:
+        candidate += timedelta(days=1)
+    return candidate
 
 
 def run_brahma_loop():
@@ -53,16 +64,29 @@ def run_brahma_loop():
                         status=PyroJob.STATUS_COMPLETED,
                     ).order_by("-completed_at").first()
 
-                    if last_completed:
-                        # next_run = last run time + interval (no drift)
-                        next_run = last_completed.run_at + timedelta(minutes=config["every_minutes"])
+                    now = timezone.now()
 
-                        # if we missed the window (e.g. server was down) → run immediately
-                        if next_run < timezone.now():
-                            next_run = timezone.now()
+                    if "daily_at_utc" in config:
+                        # Pin to a specific UTC clock time each day.
+                        # Subsequent runs anchor from last run_at + 1 day (no drift).
+                        # First run (or missed window) schedules the next occurrence.
+                        if last_completed:
+                            next_run = last_completed.run_at + timedelta(days=1)
+                            if next_run < now:
+                                next_run = _next_occurrence_utc(config["daily_at_utc"], now)
+                        else:
+                            next_run = _next_occurrence_utc(config["daily_at_utc"], now)
                     else:
-                        # first time ever → run immediately
-                        next_run = timezone.now()
+                        if last_completed:
+                            # next_run = last run time + interval (no drift)
+                            next_run = last_completed.run_at + timedelta(minutes=config["every_minutes"])
+
+                            # if we missed the window (e.g. server was down) → run immediately
+                            if next_run < now:
+                                next_run = now
+                        else:
+                            # first time ever → run immediately
+                            next_run = now
 
                     # run_at is in defaults (not the lookup key) so that two
                     # workers racing through the same check always hit the
