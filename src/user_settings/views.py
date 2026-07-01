@@ -15,6 +15,7 @@ from .serializers import (
     GroupSerializer,
 )
 from .services import (
+    fresh_leads_counts_for_groups,
     upsert_user_kv_settings,
     upsert_user_lead_assignment_kv,
     USER_KV_GROUP_ID_KEY,
@@ -539,8 +540,13 @@ class GroupListCreateView(APIView):
 
     def get(self, request):
         tenant = request.tenant
-        groups = Group.objects.filter(tenant=tenant).order_by("-created_at")
-        serializer = GroupSerializer(groups, many=True)
+        groups = list(Group.objects.filter(tenant=tenant).order_by("-created_at"))
+        fresh_counts = fresh_leads_counts_for_groups(tenant, groups)
+        serializer = GroupSerializer(
+            groups,
+            many=True,
+            context={"fresh_leads_counts": fresh_counts},
+        )
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
@@ -549,7 +555,11 @@ class GroupListCreateView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         group = serializer.save(tenant=tenant)
-        return Response(GroupSerializer(group).data, status=status.HTTP_201_CREATED)
+        fresh_counts = fresh_leads_counts_for_groups(tenant, [group])
+        return Response(
+            GroupSerializer(group, context={"fresh_leads_counts": fresh_counts}).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class GroupDetailView(APIView):
@@ -563,15 +573,23 @@ class GroupDetailView(APIView):
     def get(self, request, pk: int):
         tenant = request.tenant
         group = self.get_object(tenant, pk)
-        return Response(GroupSerializer(group).data, status=status.HTTP_200_OK)
+        fresh_counts = fresh_leads_counts_for_groups(tenant, [group])
+        return Response(
+            GroupSerializer(group, context={"fresh_leads_counts": fresh_counts}).data,
+            status=status.HTTP_200_OK,
+        )
 
     def put(self, request, pk: int):
         tenant = request.tenant
         group = self.get_object(tenant, pk)
         serializer = GroupSerializer(group, data=request.data, partial=True)
         if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_200_OK)
+            group = serializer.save()
+            fresh_counts = fresh_leads_counts_for_groups(tenant, [group])
+            return Response(
+                GroupSerializer(group, context={"fresh_leads_counts": fresh_counts}).data,
+                status=status.HTTP_200_OK,
+            )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, pk: int):
