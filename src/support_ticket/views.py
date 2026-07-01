@@ -351,44 +351,73 @@ def _delete_open_support_tickets_for_user(
     return count
 
 
+def _support_ticket_record_for_ticket(ticket: SupportTicket) -> Optional[Record]:
+    if not ticket.id or not ticket.tenant_id:
+        return None
+    return (
+        Record.objects.filter(
+            tenant_id=ticket.tenant_id,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data__support_ticket_id=ticket.id,
+        )
+        .order_by("-id")
+        .first()
+    )
+
+
+def _ticket_created_mixpanel_properties(record: Record) -> Dict[str, Any]:
+    data = record.data or {}
+    ticket_id = data.get("support_ticket_id") or data.get("ticket_id")
+    return {
+        "ticket_id": ticket_id,
+        "tenant_id": str(record.tenant_id) if record.tenant_id else data.get("tenant_id"),
+        "created_at": _iso_or_none(record.created_at),
+        "ticket_date": _iso_or_none(data.get("ticket_date")),
+        "user_id": data.get("user_id"),
+        "name": data.get("name"),
+        "phone": data.get("phone"),
+        "source": data.get("source"),
+        "subscription_status": data.get("subscription_status"),
+        "atleast_paid_once": data.get("atleast_paid_once"),
+        "reason": data.get("reason"),
+        "other_reasons": data.get("other_reasons") or [],
+        "badge": data.get("badge"),
+        "poster": data.get("poster"),
+        "support_ticket_type": data.get("support_ticket_type"),
+        "release_build_number": data.get("release_build_number"),
+        "assigned_to": data.get("assigned_to"),
+        "layout_status": data.get("layout_status"),
+        "state": data.get("state"),
+        "resolution_status": data.get("resolution_status"),
+        "resolution_time": data.get("resolution_time"),
+        "cse_name": data.get("cse_name"),
+        "cse_remarks": data.get("cse_remarks"),
+        "call_status": data.get("call_status"),
+        "call_attempts": data.get("call_attempts"),
+        "rm_name": data.get("rm_name"),
+        "completed_at": _iso_or_none(data.get("completed_at")),
+        "snooze_until": _iso_or_none(data.get("snooze_until")),
+        "praja_dashboard_user_link": data.get("praja_dashboard_user_link"),
+        "display_pic_url": data.get("display_pic_url"),
+        "dumped_at": _iso_or_none(data.get("dumped_at")),
+        "review_requested": data.get("review_requested"),
+    }
+
+
 def enqueue_ticket_created_mixpanel(
     ticket: SupportTicket,
     dump_data: Optional[Mapping[str, Any]] = None,
 ) -> None:
-    user_id = ticket.user_id or str(ticket.id)
-    properties = {
-        "ticket_id": ticket.id,
-        "tenant_id": str(ticket.tenant.id) if ticket.tenant else None,
-        "created_at": ticket.created_at.isoformat() if ticket.created_at else None,
-        "ticket_date": ticket.ticket_date.isoformat() if ticket.ticket_date else None,
-        "user_id": ticket.user_id,
-        "name": ticket.name,
-        "phone": ticket.phone,
-        "source": ticket.source,
-        "subscription_status": ticket.subscription_status,
-        "atleast_paid_once": ticket.atleast_paid_once,
-        "reason": ticket.reason,
-        "other_reasons": ticket.other_reasons or [],
-        "badge": ticket.badge,
-        "poster": ticket.poster,
-        "support_ticket_type": (dump_data or {}).get("support_ticket_type"),
-        "assigned_to": str(ticket.assigned_to.id) if ticket.assigned_to else None,
-        "layout_status": ticket.layout_status,
-        "state": ticket.state,
-        "resolution_status": ticket.resolution_status,
-        "resolution_time": ticket.resolution_time,
-        "cse_name": ticket.cse_name,
-        "cse_remarks": ticket.cse_remarks,
-        "call_status": ticket.call_status,
-        "call_attempts": ticket.call_attempts,
-        "rm_name": ticket.rm_name,
-        "completed_at": ticket.completed_at.isoformat() if ticket.completed_at else None,
-        "snooze_until": ticket.snooze_until.isoformat() if ticket.snooze_until else None,
-        "praja_dashboard_user_link": ticket.praja_dashboard_user_link,
-        "display_pic_url": ticket.display_pic_url,
-        "dumped_at": ticket.dumped_at.isoformat() if ticket.dumped_at else None,
-        "review_requested": ticket.review_requested,
-    }
+    record = _support_ticket_record_for_ticket(ticket)
+    if not record:
+        logger.warning(
+            "enqueue_ticket_created_mixpanel: no record for ticket_id=%s; skipping",
+            ticket.id,
+        )
+        return
+    record_data = record.data or {}
+    user_id = record_data.get("user_id") or str(ticket.id)
+    properties = _ticket_created_mixpanel_properties(record)
     get_queue_service().enqueue_job(
         job_type=JobType.SEND_MIXPANEL_EVENT,
         payload={
@@ -396,7 +425,7 @@ def enqueue_ticket_created_mixpanel(
             "event_name": "pyro_st_ticket_created",
             "properties": properties,
         },
-        tenant_id=str(ticket.tenant_id) if ticket.tenant_id else None,
+        tenant_id=str(record.tenant_id) if record.tenant_id else None,
         priority=0,
     )
 
@@ -978,6 +1007,7 @@ def _enqueue_support_assignment_mixpanel(
         "cse_name": user_email,
         "cse_email": user_email,
         "support_ticket_type": _record_support_ticket_type_raw(record),
+        "release_build_number": data.get("release_build_number"),
         "poster": data.get("poster"),
         "source": data.get("source"),
         "resolution_status": data.get("resolution_status"),
