@@ -165,6 +165,7 @@ def _mixpanel_properties(record: Record, payload: Dict[str, Any]) -> Dict[str, A
         "reasons": payload.get("other_reasons") or [],
         "review_requested": payload.get("review_requested"),
         "poster": data.get("poster"),
+        "release_build_number": data.get("release_build_number"),
         "source": data.get("source"),
         "resolution_status": data.get("resolution_status"),
         "call_status": data.get("call_status"),

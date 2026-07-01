@@ -219,6 +219,7 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
                 name="Mixpanel ticket",
                 support_ticket_type="SELF TRIAL",
                 poster="legacy_poster",
+                release_build_number="1.2.3",
             ),
         )
 
@@ -236,8 +237,15 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         ]
         self.assertEqual(len(mixpanel_calls), 1)
         properties = mixpanel_calls[0].kwargs["payload"]["properties"]
+        record = Record.objects.get(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data__user_id="mixpanel_user",
+        )
+        self.assertEqual(record.data.get("release_build_number"), "1.2.3")
         self.assertEqual(properties["support_ticket_type"], "SELF TRIAL")
         self.assertEqual(properties["poster"], "legacy_poster")
+        self.assertEqual(properties["release_build_number"], "1.2.3")
 
     @patch("support_ticket.views.get_queue_service")
     def test_ticket_created_mixpanel_support_ticket_type_not_poster_fallback(
