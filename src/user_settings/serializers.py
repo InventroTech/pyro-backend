@@ -94,10 +94,18 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
 class GroupSerializer(serializers.ModelSerializer):
     """Serializer for tenant groups."""
 
+    fresh_leads_count = serializers.SerializerMethodField()
+
     class Meta:
         model = Group
-        fields = ["id", "tenant", "name", "group_data", "created_at", "updated_at"]
-        read_only_fields = ["id", "tenant", "created_at", "updated_at"]
+        fields = ["id", "tenant", "name", "group_data", "fresh_leads_count", "created_at", "updated_at"]
+        read_only_fields = ["id", "tenant", "created_at", "updated_at", "fresh_leads_count"]
+
+    def get_fresh_leads_count(self, obj: Group):
+        counts = self.context.get("fresh_leads_counts") or {}
+        if obj.id in counts:
+            return counts[obj.id]
+        return None
 
     def validate_name(self, value: str) -> str:
         cleaned = (value or "").strip()
