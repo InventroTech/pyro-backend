@@ -31,7 +31,7 @@ class SupportTicketEventHandlerTest(BaseAPITestCase):
         )
 
     def test_not_connected_snoozes_then_closes_per_rules(self):
-        for expected_attempts in (1, 2):
+        for expected_attempts in range(1, 6):
             dispatch_support_ticket_event(
                 SUPPORT_EVENT_NOT_CONNECTED,
                 self.record,
@@ -49,7 +49,7 @@ class SupportTicketEventHandlerTest(BaseAPITestCase):
             {},
         )
         self.record.refresh_from_db()
-        self.assertEqual(self.record.data["call_attempts"], 3)
+        self.assertEqual(self.record.data["call_attempts"], 6)
         self.assertEqual(self.record.data["resolution_status"], "Closed")
 
     def test_take_break_unassigns_per_rules(self):

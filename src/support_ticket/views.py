@@ -52,6 +52,7 @@ from .constants import (
     SUPPORT_TICKET_ENTITY_TYPE,
 )
 from .ticket_types import (
+    SELF_TRIAL_MAX_CALL_ATTEMPTS,
     SELF_TRIAL_TICKET_TYPE_KEY as _SELF_TRIAL_TICKET_TYPE_KEY,
     canonical_support_ticket_type_key as _canonical_support_ticket_type_key,
 )
@@ -743,7 +744,7 @@ class _SupportTicketRoutingRule:
 
 
 _SUPPORT_TICKET_ROUTING_RULES: Tuple[_SupportTicketRoutingRule, ...] = (
-    _SupportTicketRoutingRule("self_trail", 1, 3),
+    _SupportTicketRoutingRule("self_trail", 1, SELF_TRIAL_MAX_CALL_ATTEMPTS),
     _SupportTicketRoutingRule("in_trial", 1, 3),
     _SupportTicketRoutingRule("paid", 1, 3),
     _SupportTicketRoutingRule("trial_extension", 1, 3),
