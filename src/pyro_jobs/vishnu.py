@@ -8,6 +8,7 @@ from django.db import transaction, ProgrammingError, OperationalError
 logger = logging.getLogger(__name__)
 
 RETRY_DELAYS = [60, 300]
+STALE_RUNNING_MINUTES = 30
 
 
 def fetch_and_lock_job(PyroJob):
@@ -46,6 +47,39 @@ def fetch_and_lock_job(PyroJob):
     return job
 
 
+def recover_stale_jobs(PyroJob):
+    """
+    Reset jobs stuck in RUNNING for longer than STALE_RUNNING_MINUTES.
+    Happens when a worker process dies mid-job — status stays RUNNING forever
+    because Vishnu only updates it on completion or caught exception.
+    """
+    cutoff = timezone.now() - timedelta(minutes=STALE_RUNNING_MINUTES)
+    stale = PyroJob.objects.filter(
+        status=PyroJob.STATUS_RUNNING,
+        is_deleted=False,
+        started_at__lt=cutoff,
+    )
+    for job in stale:
+        if job.attempts < job.max_attempts:
+            delay = RETRY_DELAYS[min(job.attempts - 1, len(RETRY_DELAYS) - 1)]
+            job.status = PyroJob.STATUS_PENDING
+            job.run_at = timezone.now() + timedelta(seconds=delay)
+            job.save(update_fields=["status", "run_at"])
+            logger.warning(
+                "[Vishnu] Stale RUNNING job recovered → PENDING: %s (id=%s, stuck since %s)",
+                job.job_name, job.id, job.started_at,
+            )
+        else:
+            job.status = PyroJob.STATUS_FAILED
+            job.is_deleted = True
+            job.error = (job.error or "") + "\n[auto-failed: stale RUNNING job recovered by Vishnu]"
+            job.save(update_fields=["status", "is_deleted", "error"])
+            logger.error(
+                "[Vishnu] Stale RUNNING job auto-failed: %s (id=%s, attempts=%s/%s)",
+                job.job_name, job.id, job.attempts, job.max_attempts,
+            )
+
+
 def run_vishnu_loop():
     time.sleep(10)
 
@@ -53,6 +87,8 @@ def run_vishnu_loop():
         try:
             from pyro_jobs.models import PyroJob
             from pyro_jobs.handlers import JOB_HANDLERS
+
+            recover_stale_jobs(PyroJob)
 
             # keep picking up jobs until there are none left
             while True:

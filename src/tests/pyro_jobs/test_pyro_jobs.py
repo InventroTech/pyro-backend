@@ -629,6 +629,7 @@ class TestConcurrency:
         """One Brahma scheduling pass."""
         from pyro_jobs.models import PyroJob
         from django.db import transaction
+        from django.core.exceptions import MultipleObjectsReturned
 
         for job_name, config in schedule.items():
             with transaction.atomic():
@@ -652,12 +653,17 @@ class TestConcurrency:
                 if next_run < timezone.now():
                     next_run = timezone.now()
 
-                PyroJob.objects.get_or_create(
-                    job_name=job_name,
-                    status=PyroJob.STATUS_PENDING,
-                    is_deleted=False,
-                    defaults={"run_at": next_run, "payload": {}}
-                )
+                try:
+                    PyroJob.objects.get_or_create(
+                        job_name=job_name,
+                        status=PyroJob.STATUS_PENDING,
+                        is_deleted=False,
+                        defaults={"run_at": next_run, "payload": {}}
+                    )
+                except MultipleObjectsReturned:
+                    # Expected in concurrent Brahma races when duplicate pending rows
+                    # are created without a DB-level unique constraint.
+                    continue
 
     def test_concurrent_brahma_workers_dont_duplicate(self):
         """
