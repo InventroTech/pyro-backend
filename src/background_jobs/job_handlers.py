@@ -1583,21 +1583,27 @@ class SnoozedToNotConnectedMidnightJobHandler(JobHandler):
             ),
             job,
         )
+        # Fetch all matching IDs upfront with a plain query (no server-side cursor)
+        # to avoid "cursor does not exist" errors on connection resets during iteration.
+        record_ids = list(qs.values_list("id", flat=True))
         updated = 0
-        for record in qs.iterator(chunk_size=500):
-            data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
-            if data.get("lead_stage") != "SNOOZED" or data.get("lead_status") != "SALES LEAD":
-                continue
-            data["lead_stage"] = "NOT_CONNECTED"
-            data["assigned_to"] = None
-            data.pop("snooze_unassign_at", None)
-            record.data = data
-            record.save(update_fields=["data", "updated_at"])
-            updated += 1
-            logger.debug(
-                "[SnoozedToNotConnectedMidnight] record_id=%s: NOT_CONNECTED + unassigned (SALES LEAD)",
-                record.id,
-            )
+        chunk_size = 500
+        for offset in range(0, len(record_ids), chunk_size):
+            chunk = Record.objects.filter(id__in=record_ids[offset:offset + chunk_size])
+            for record in chunk:
+                data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
+                if data.get("lead_stage") != "SNOOZED" or data.get("lead_status") != "SALES LEAD":
+                    continue
+                data["lead_stage"] = "NOT_CONNECTED"
+                data["assigned_to"] = None
+                data.pop("snooze_unassign_at", None)
+                record.data = data
+                record.save(update_fields=["data", "updated_at"])
+                updated += 1
+                logger.debug(
+                    "[SnoozedToNotConnectedMidnight] record_id=%s: NOT_CONNECTED + unassigned (SALES LEAD)",
+                    record.id,
+                )
         job.result = {
             "success": True,
             "updated": updated,
