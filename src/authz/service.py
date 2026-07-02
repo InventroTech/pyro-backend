@@ -139,15 +139,13 @@ def link_user_uid_and_activate(email: str, uid: str) -> dict:
             ).exclude(user_id=uid).exists()
             
             if existing_with_different_uid:
-                # User is linked with different UID - return success but with warning (idempotent)
-                # This allows the frontend to handle gracefully without 400 errors
                 return {
-                    'success': True,
-                    'message': f'User with email {email} is already linked to a different Supabase account',
+                    'success': False,
+                    'code': 'UID_CONFLICT',
+                    'error': 'This account is already linked to a different Supabase identity. Contact your administrator to re-configure this user before logging in.',
                     'uid': uid,
                     'activated_memberships': 0,
                     'membership_ids': [],
-                    'already_linked_different_uid': True
                 }
             
             # Find TenantMembership records that need linking (no user_id set)
