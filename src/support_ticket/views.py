@@ -57,6 +57,7 @@ from .ticket_types import (
     canonical_support_ticket_type_key as _canonical_support_ticket_type_key,
 )
 from .events import log_and_dispatch_support_ticket_event, resolve_support_ticket_record
+from .mixpanel_properties import support_ticket_mixpanel_properties
 
 logger = logging.getLogger(__name__)
 DUMP_BATCH_LIMIT = 5000
@@ -366,45 +367,6 @@ def _support_ticket_record_for_ticket(ticket: SupportTicket) -> Optional[Record]
     )
 
 
-def _ticket_created_mixpanel_properties(record: Record) -> Dict[str, Any]:
-    data = record.data or {}
-    ticket_id = data.get("support_ticket_id") or data.get("ticket_id")
-    return {
-        "ticket_id": ticket_id,
-        "tenant_id": str(record.tenant_id) if record.tenant_id else data.get("tenant_id"),
-        "created_at": _iso_or_none(record.created_at),
-        "ticket_date": _iso_or_none(data.get("ticket_date")),
-        "user_id": data.get("user_id"),
-        "name": data.get("name"),
-        "phone": data.get("phone"),
-        "source": data.get("source"),
-        "subscription_status": data.get("subscription_status"),
-        "atleast_paid_once": data.get("atleast_paid_once"),
-        "reason": data.get("reason"),
-        "other_reasons": data.get("other_reasons") or [],
-        "badge": data.get("badge"),
-        "poster": data.get("poster"),
-        "support_ticket_type": data.get("support_ticket_type"),
-        "release_build_number": data.get("release_build_number"),
-        "assigned_to": data.get("assigned_to"),
-        "layout_status": data.get("layout_status"),
-        "state": data.get("state"),
-        "resolution_status": data.get("resolution_status"),
-        "resolution_time": data.get("resolution_time"),
-        "cse_name": data.get("cse_name"),
-        "cse_remarks": data.get("cse_remarks"),
-        "call_status": data.get("call_status"),
-        "call_attempts": data.get("call_attempts"),
-        "rm_name": data.get("rm_name"),
-        "completed_at": _iso_or_none(data.get("completed_at")),
-        "snooze_until": _iso_or_none(data.get("snooze_until")),
-        "praja_dashboard_user_link": data.get("praja_dashboard_user_link"),
-        "display_pic_url": data.get("display_pic_url"),
-        "dumped_at": _iso_or_none(data.get("dumped_at")),
-        "review_requested": data.get("review_requested"),
-    }
-
-
 def enqueue_ticket_created_mixpanel(
     ticket: SupportTicket,
     dump_data: Optional[Mapping[str, Any]] = None,
@@ -418,7 +380,7 @@ def enqueue_ticket_created_mixpanel(
         return
     record_data = record.data or {}
     user_id = record_data.get("user_id") or str(ticket.id)
-    properties = _ticket_created_mixpanel_properties(record)
+    properties = support_ticket_mixpanel_properties(record)
     get_queue_service().enqueue_job(
         job_type=JobType.SEND_MIXPANEL_EVENT,
         payload={
@@ -999,22 +961,12 @@ def _enqueue_support_assignment_mixpanel(
     customer_user_id = data.get("user_id")
     if not customer_user_id:
         return
-    legacy_ticket_id = data.get("support_ticket_id") or data.get("ticket_id") or record.id
-    mixpanel_properties = {
-        "ticket_id": legacy_ticket_id,
-        "record_id": record.id,
-        "tenant_id": str(record.tenant_id) if record.tenant_id else data.get("tenant_id"),
-        "assigned_to": str(user_uuid),
-        "cse_name": user_email,
-        "cse_email": user_email,
-        "support_ticket_type": _record_support_ticket_type_raw(record),
-        "release_build_number": data.get("release_build_number"),
-        "poster": data.get("poster"),
-        "source": data.get("source"),
-        "resolution_status": data.get("resolution_status"),
-        "created_at": _iso_or_none(record.created_at),
-        "snooze_until": _iso_or_none(data.get("snooze_until")),
-    }
+    mixpanel_properties = support_ticket_mixpanel_properties(
+        record,
+        assigned_to=str(user_uuid),
+        cse_name=user_email,
+        cse_email=user_email,
+    )
     _enqueue_mixpanel_event(
         user_id=customer_user_id,
         event_name="pyro_st_assigned",

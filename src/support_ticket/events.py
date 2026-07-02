@@ -27,6 +27,7 @@ from support_ticket.constants import (
     SUPPORT_TICKET_BUTTON_EVENTS,
     SUPPORT_TICKET_ENTITY_TYPE,
 )
+from support_ticket.mixpanel_properties import support_ticket_button_event_mixpanel_properties
 from support_ticket.services import TicketTimeService
 
 logger = logging.getLogger(__name__)
@@ -153,26 +154,6 @@ def _enqueue_mixpanel_event(
         )
 
 
-def _mixpanel_properties(record: Record, payload: Dict[str, Any]) -> Dict[str, Any]:
-    data = record.data or {}
-    legacy_id = data.get("support_ticket_id") or data.get("ticket_id") or record.id
-    return {
-        "support_ticket_id": legacy_id,
-        "record_id": record.id,
-        "ticket_id": legacy_id,
-        "remarks": payload.get("cse_remarks") or "",
-        "cse_email_id": payload.get("cse_name"),
-        "reasons": payload.get("other_reasons") or [],
-        "review_requested": payload.get("review_requested"),
-        "poster": data.get("poster"),
-        "release_build_number": data.get("release_build_number"),
-        "source": data.get("source"),
-        "resolution_status": data.get("resolution_status"),
-        "call_status": data.get("call_status"),
-        "call_attempts": data.get("call_attempts"),
-    }
-
-
 def enqueue_support_ticket_mixpanel(
     record: Record,
     event_name: str,
@@ -184,7 +165,7 @@ def enqueue_support_ticket_mixpanel(
     if not customer_user_id:
         return
 
-    props = _mixpanel_properties(record, payload)
+    props = support_ticket_button_event_mixpanel_properties(record, payload)
     tenant_id = record.tenant_id
 
     if event_name == SUPPORT_EVENT_NOT_CONNECTED:
