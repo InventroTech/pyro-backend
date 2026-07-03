@@ -1423,7 +1423,7 @@ class SyncDispatchToRecordsJobHandler(JobHandler):
 class ProcessDumpedTicketsJobHandler(JobHandler):
     """
     Process ``support_ticket_dump`` rows for the job's tenant: dedupe, replace open
-    tickets, insert ``support_ticket``, mirror to ``records``.
+    records, insert ``records``.
 
     ``tenant_id`` is set on the :class:`~background_jobs.models.BackgroundJob` row
     (not in payload). Enqueued by the worker every 5 minutes when dumps are pending.
