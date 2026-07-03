@@ -1,9 +1,8 @@
 import threading
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.db import IntegrityError, close_old_connections
-from django.db.models import Max
 from django.test import TransactionTestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -16,7 +15,6 @@ from background_jobs.job_processor import (
     JobProcessor,
 )
 from background_jobs.models import BackgroundJob, JobStatus, JobType
-from core.models import EntityTypeDiscoverySyncState
 from crm_records.models import Record
 from support_ticket.views import (
     SUPPORT_TICKET_ENTITY_TYPE,
@@ -26,16 +24,12 @@ from support_ticket.views import (
     enqueue_ticket_created_mixpanel,
     process_dumped_tickets,
 )
-from support_ticket.models import SupportTicket, SupportTicketDump
+from support_ticket.models import SupportTicketDump
 from tests.base.test_setup import BaseAPITestCase
 from tests.factories import TenantFactory
 from tests.factories.support_ticket_dump_factory import (
     SupportTicketDumpFactory,
     dump_data,
-)
-from tests.factories.support_ticket_factory import (
-    SnoozedSupportTicketFactory,
-    UnassignedSupportTicketFactory,
 )
 
 
@@ -43,7 +37,6 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
     def setUp(self):
         super().setUp()
         SupportTicketDump.objects.all().delete()
-        SupportTicket.objects.all().delete()
         Record.objects.filter(entity_type=SUPPORT_TICKET_ENTITY_TYPE).delete()
 
     def test_dedupe_latest_wins(self):
@@ -94,7 +87,7 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         self.assertEqual(result[0].data.get("name"), "Earlier self trial")
 
     def test_process_uses_open_self_trial_record_not_support_ticket_table(self):
-        """Open-state dedupe must read from records, not support_ticket."""
+        """Open-state dedupe must read from records only."""
         open_self_trial_record = Record.objects.create(
             tenant=self.tenant,
             entity_type=SUPPORT_TICKET_ENTITY_TYPE,
@@ -128,9 +121,6 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         self.assertIsNone(open_self_trial_record.data.get("resolution_status"))
         self.assertFalse(
             Record.objects.filter(id=other_open_record.id).exists()
-        )
-        self.assertFalse(
-            SupportTicket.objects.filter(user_id="cust_records_only").exists()
         )
         self.assertEqual(
             Record.objects.filter(
@@ -277,34 +267,7 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         self.assertIsNone(properties["support_ticket_type"])
         self.assertEqual(properties["poster"], "in_trial")
 
-    @patch.object(SupportTicket.objects, "bulk_create", wraps=SupportTicket.objects.bulk_create)
-    def test_bulk_create_ignores_conflicts(self, mock_bulk_create):
-        SupportTicketDumpFactory.create(
-            tenant_id=self.tenant_id,
-            data=dump_data(user_id="cust_conflict", name="Conflict Test"),
-        )
-
-        process_dumped_tickets(tenant_id=self.tenant_id)
-
-        mock_bulk_create.assert_called_once()
-        self.assertTrue(mock_bulk_create.call_args.kwargs.get("ignore_conflicts"))
-        inserted = mock_bulk_create.call_args.args[0]
-        self.assertEqual(len(inserted), 1)
-        self.assertIsNotNone(inserted[0].id)
-
-    def test_process_assigns_monotonic_support_ticket_ids(self):
-        max_before = SupportTicket.all_objects.aggregate(m=Max("id"))["m"] or 0
-        SupportTicketDumpFactory.create(
-            tenant_id=self.tenant_id,
-            data=dump_data(user_id="cust_id_alloc", name="Id Alloc"),
-        )
-
-        process_dumped_tickets(tenant_id=self.tenant_id)
-
-        ticket = SupportTicket.objects.get(user_id="cust_id_alloc")
-        self.assertEqual(ticket.id, max_before + 1)
-
-    def test_process_maps_dump_fields_to_ticket_and_record(self):
+    def test_process_maps_dump_fields_to_record(self):
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
             data=dump_data(
@@ -317,14 +280,15 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
 
         process_dumped_tickets(tenant_id=self.tenant_id)
 
-        ticket = SupportTicket.objects.get(user_id="cust_extra")
-        self.assertEqual(ticket.rm_name, "RM One")
-
-        record = Record.objects.get(entity_type=SUPPORT_TICKET_ENTITY_TYPE, tenant=self.tenant)
+        record = Record.objects.get(
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            tenant=self.tenant,
+            data__user_id="cust_extra",
+        )
         self.assertEqual(record.data["rm_name"], "RM One")
         self.assertEqual(record.data["custom_segment"], "vip_trial")
 
-    def test_process_inserts_support_ticket_and_mirrors_records(self):
+    def test_process_inserts_records_from_dump(self):
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
             data=dump_data(user_id="cust_1", name="Mirror Me", poster="in_trial"),
@@ -335,16 +299,36 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         self.assertEqual(result.inserted_tickets, 1)
         self.assertEqual(result.mirrored_records, 1)
 
-        ticket = SupportTicket.objects.get(user_id="cust_1")
-        self.assertEqual(ticket.name, "Mirror Me")
-        self.assertEqual(ticket.poster, "in_trial")
-        self.assertIsNotNone(ticket.dumped_at)
-
-        record = Record.objects.get(entity_type=SUPPORT_TICKET_ENTITY_TYPE, tenant=self.tenant)
-        self.assertEqual(record.data["user_id"], "cust_1")
-        self.assertEqual(record.data["support_ticket_id"], ticket.id)
+        record = Record.objects.get(
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            tenant=self.tenant,
+            data__user_id="cust_1",
+        )
         self.assertEqual(record.data["name"], "Mirror Me")
+        self.assertEqual(record.data["poster"], "in_trial")
+        self.assertIsNotNone(record.data.get("dumped_at"))
         self.assertEqual(record.data["call_status"], "Call Waiting")
+
+    def test_process_does_not_write_support_ticket_table(self):
+        from support_ticket.models import SupportTicket
+
+        SupportTicket.objects.all().delete()
+        count_before = SupportTicket.objects.count()
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            data=dump_data(user_id="cust_no_legacy", name="Records Only"),
+        )
+
+        process_dumped_tickets(tenant_id=self.tenant_id)
+
+        self.assertEqual(SupportTicket.objects.count(), count_before)
+        self.assertTrue(
+            Record.objects.filter(
+                tenant=self.tenant,
+                entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                data__user_id="cust_no_legacy",
+            ).exists()
+        )
 
     def test_process_counts_dumps_without_user_id_as_skipped(self):
         SupportTicketDumpFactory.create(
@@ -360,7 +344,13 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
 
         self.assertEqual(result.skipped_tickets, 1)
         self.assertEqual(result.inserted_tickets, 1)
-        self.assertTrue(SupportTicket.objects.filter(user_id="valid_user").exists())
+        self.assertTrue(
+            Record.objects.filter(
+                tenant=self.tenant,
+                entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                data__user_id="valid_user",
+            ).exists()
+        )
 
     def test_process_scoped_to_tenant(self):
         other_tenant = TenantFactory()
@@ -376,19 +366,34 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         result = process_dumped_tickets(tenant_id=self.tenant_id)
 
         self.assertEqual(result.inserted_tickets, 1)
-        self.assertTrue(SupportTicket.objects.filter(user_id="tenant_a").exists())
-        self.assertFalse(SupportTicket.objects.filter(user_id="tenant_b").exists())
+        self.assertTrue(
+            Record.objects.filter(
+                tenant=self.tenant,
+                entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                data__user_id="tenant_a",
+            ).exists()
+        )
+        self.assertFalse(
+            Record.objects.filter(
+                entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                data__user_id="tenant_b",
+            ).exists()
+        )
         self.assertTrue(
             SupportTicketDump.objects.filter(
                 tenant_id=other_tenant.id, is_processed=False
             ).exists()
         )
 
-    def test_bulk_create_failure_rollbacks_open_ticket_deletions(self):
-        open_ticket = UnassignedSupportTicketFactory.create(
+    def test_record_create_failure_rollbacks_open_record_deletions(self):
+        open_record = Record.objects.create(
             tenant=self.tenant,
-            user_id="cust_rollback",
-            resolution_status=None,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data=dump_data(
+                user_id="cust_rollback",
+                name="Open record",
+                resolution_status=None,
+            ),
         )
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
@@ -396,20 +401,28 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         )
 
         with patch.object(
-            SupportTicket.objects,
-            "bulk_create",
-            side_effect=IntegrityError("simulated bulk_create failure"),
+            Record.objects,
+            "create",
+            side_effect=IntegrityError("simulated create failure"),
         ):
             with self.assertRaises(IntegrityError):
                 process_dumped_tickets(tenant_id=self.tenant_id)
 
-        open_ticket.refresh_from_db()
+        open_record.refresh_from_db()
         self.assertEqual(
-            SupportTicket.objects.filter(user_id="cust_rollback").count(),
+            Record.objects.filter(
+                tenant=self.tenant,
+                entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                data__user_id="cust_rollback",
+            ).count(),
             1,
         )
-        self.assertEqual(open_ticket.id, SupportTicket.objects.get(user_id="cust_rollback").id)
-        self.assertNotEqual(open_ticket.name, "Replacement")
+        self.assertEqual(open_record.id, Record.objects.get(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data__user_id="cust_rollback",
+        ).id)
+        self.assertEqual(open_record.data.get("name"), "Open record")
         self.assertTrue(
             SupportTicketDump.objects.filter(
                 tenant_id=self.tenant_id,
@@ -418,16 +431,24 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
             ).exists()
         )
 
-    def test_process_replaces_open_support_ticket_not_snoozed(self):
-        open_ticket = UnassignedSupportTicketFactory.create(
+    def test_process_replaces_open_record_not_snoozed(self):
+        open_record = Record.objects.create(
             tenant=self.tenant,
-            user_id="cust_2",
-            resolution_status=None,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data=dump_data(
+                user_id="cust_2",
+                name="Open record",
+                resolution_status=None,
+            ),
         )
-        snoozed = SnoozedSupportTicketFactory.create(
+        snoozed = Record.objects.create(
             tenant=self.tenant,
-            user_id="cust_3",
-            resolution_status="Snoozed",
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data=dump_data(
+                user_id="cust_3",
+                name="Snoozed record",
+                resolution_status="Snoozed",
+            ),
         )
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
@@ -440,11 +461,32 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
 
         process_dumped_tickets(tenant_id=self.tenant_id)
 
-        self.assertFalse(SupportTicket.objects.filter(id=open_ticket.id).exists())
-        self.assertTrue(SupportTicket.objects.filter(id=snoozed.id).exists())
-        self.assertEqual(SupportTicket.objects.filter(user_id="cust_2").count(), 1)
-        self.assertEqual(SupportTicket.objects.get(user_id="cust_2").name, "Replacement")
-        self.assertEqual(SupportTicket.objects.filter(user_id="cust_3").count(), 2)
+        self.assertFalse(Record.objects.filter(id=open_record.id).exists())
+        self.assertTrue(Record.objects.filter(id=snoozed.id).exists())
+        self.assertEqual(
+            Record.objects.filter(
+                tenant=self.tenant,
+                entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                data__user_id="cust_2",
+            ).count(),
+            1,
+        )
+        self.assertEqual(
+            Record.objects.get(
+                tenant=self.tenant,
+                entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                data__user_id="cust_2",
+            ).data.get("name"),
+            "Replacement",
+        )
+        self.assertEqual(
+            Record.objects.filter(
+                tenant=self.tenant,
+                entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                data__user_id="cust_3",
+            ).count(),
+            2,
+        )
 
     def test_enqueue_for_pending_dumps_only_when_unprocessed_exist(self):
         SupportTicketDumpFactory.create(
@@ -503,57 +545,93 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
 
 
 class ProcessDumpedTicketsSchedulerTest(BaseAPITestCase):
-    """DB-backed scheduler throttle for process_dumped_tickets enqueue ticks."""
+    """Scheduler throttle for process_dumped_tickets enqueue ticks."""
 
-    def setUp(self):
-        super().setUp()
-        EntityTypeDiscoverySyncState.objects.filter(
-            job_name=PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME,
-        ).delete()
-
-    @patch("support_ticket.views.enqueue_process_dumped_tickets_for_pending_dumps")
-    def test_scheduler_skips_tick_within_five_minutes(self, mock_enqueue):
-        mock_enqueue.return_value = {"enqueued": [], "skipped_active_job": []}
-        EntityTypeDiscoverySyncState.objects.create(
-            job_name=PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME,
-            last_success_at=timezone.now() - timedelta(seconds=60),
-        )
+    def _make_processor(self):
         processor = JobProcessor(worker_id="test-scheduler")
         processor._last_support_ticket_dump_enqueue_at = None
-        processor._maybe_enqueue_process_dumped_tickets()
+        return processor
+
+    @staticmethod
+    def _mock_atomic(mock_atomic):
+        mock_atomic.return_value.__enter__ = Mock(return_value=None)
+        mock_atomic.return_value.__exit__ = Mock(return_value=False)
+
+    @patch("background_jobs.job_processor.transaction.atomic")
+    @patch("background_jobs.job_processor.EntityTypeDiscoverySyncState.objects")
+    @patch("support_ticket.views.enqueue_process_dumped_tickets_for_pending_dumps")
+    def test_scheduler_skips_tick_within_five_minutes(
+        self, mock_enqueue, mock_state_objects, mock_atomic,
+    ):
+        self._mock_atomic(mock_atomic)
+        mock_enqueue.return_value = {"enqueued": [], "skipped_active_job": []}
+
+        scheduler_state = Mock()
+        scheduler_state.last_success_at = timezone.now() - timedelta(seconds=60)
+        mock_state_objects.select_for_update.return_value.get_or_create.return_value = (
+            scheduler_state,
+            False,
+        )
+
+        self._make_processor()._maybe_enqueue_process_dumped_tickets()
         mock_enqueue.assert_not_called()
 
+    @patch("background_jobs.job_processor.transaction.atomic")
+    @patch("background_jobs.job_processor.EntityTypeDiscoverySyncState.objects")
     @patch("support_ticket.views.enqueue_process_dumped_tickets_for_pending_dumps")
-    def test_scheduler_runs_tick_after_five_minutes(self, mock_enqueue):
+    def test_scheduler_runs_tick_after_five_minutes(
+        self, mock_enqueue, mock_state_objects, mock_atomic,
+    ):
+        self._mock_atomic(mock_atomic)
         mock_enqueue.return_value = {"enqueued": [], "skipped_active_job": []}
-        EntityTypeDiscoverySyncState.objects.create(
-            job_name=PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME,
-            last_success_at=timezone.now()
-            - timedelta(seconds=SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL + 1),
-        )
-        processor = JobProcessor(worker_id="test-scheduler")
-        processor._last_support_ticket_dump_enqueue_at = None
-        processor._maybe_enqueue_process_dumped_tickets()
-        mock_enqueue.assert_called_once()
-        state = EntityTypeDiscoverySyncState.objects.get(
-            job_name=PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME,
-        )
-        self.assertIsNotNone(state.last_success_at)
-        self.assertIsNone(state.last_error)
 
+        scheduler_state = Mock()
+        scheduler_state.last_success_at = timezone.now() - timedelta(
+            seconds=SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL + 1
+        )
+        scheduler_state.last_error = "old error"
+        mock_state_objects.select_for_update.return_value.get_or_create.return_value = (
+            scheduler_state,
+            False,
+        )
+
+        self._make_processor()._maybe_enqueue_process_dumped_tickets()
+
+        mock_enqueue.assert_called_once()
+        self.assertIsNotNone(scheduler_state.last_success_at)
+        self.assertIsNone(scheduler_state.last_error)
+        scheduler_state.save.assert_called_once_with(
+            update_fields=["last_success_at", "last_error", "updated_at"]
+        )
+
+    @patch("background_jobs.job_processor.EntityTypeDiscoverySyncState.objects")
+    @patch("background_jobs.job_processor.transaction.atomic")
     @patch(
         "support_ticket.views.enqueue_process_dumped_tickets_for_pending_dumps",
         side_effect=RuntimeError("enqueue failed"),
     )
-    def test_scheduler_records_error_without_advancing_success(self, mock_enqueue):
-        processor = JobProcessor(worker_id="test-scheduler")
-        processor._maybe_enqueue_process_dumped_tickets()
-        mock_enqueue.assert_called_once()
-        state = EntityTypeDiscoverySyncState.objects.get(
-            job_name=PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME,
+    def test_scheduler_records_error_without_advancing_success(
+        self, mock_enqueue, mock_atomic, mock_state_objects,
+    ):
+        self._mock_atomic(mock_atomic)
+
+        scheduler_state = Mock()
+        scheduler_state.last_success_at = None
+        mock_state_objects.select_for_update.return_value.get_or_create.return_value = (
+            scheduler_state,
+            True,
         )
-        self.assertIsNone(state.last_success_at)
-        self.assertIn("enqueue failed", state.last_error or "")
+
+        self._make_processor()._maybe_enqueue_process_dumped_tickets()
+
+        mock_enqueue.assert_called_once()
+        mock_state_objects.update_or_create.assert_called_once()
+        call_kwargs = mock_state_objects.update_or_create.call_args.kwargs
+        self.assertEqual(
+            call_kwargs["job_name"],
+            PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME,
+        )
+        self.assertIn("enqueue failed", call_kwargs["defaults"]["last_error"])
 
 
 class ProcessDumpedTicketsEnqueueRaceTest(TransactionTestCase):
@@ -647,7 +725,7 @@ class ProcessDumpedTicketsJobHandlerTest(BaseAPITestCase):
     def setUp(self):
         super().setUp()
         SupportTicketDump.objects.all().delete()
-        SupportTicket.objects.all().delete()
+        Record.objects.filter(entity_type=SUPPORT_TICKET_ENTITY_TYPE).delete()
 
     @patch("support_ticket.views.enqueue_ticket_created_mixpanel")
     def test_job_handler_processes_tenant_dumps(self, mock_mixpanel):
@@ -666,7 +744,13 @@ class ProcessDumpedTicketsJobHandlerTest(BaseAPITestCase):
 
         self.assertTrue(ok)
         self.assertEqual(job.result["inserted_tickets"], 1)
-        self.assertTrue(SupportTicket.objects.filter(user_id="job_user").exists())
+        self.assertTrue(
+            Record.objects.filter(
+                tenant=self.tenant,
+                entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                data__user_id="job_user",
+            ).exists()
+        )
         mock_mixpanel.assert_called_once()
 
 

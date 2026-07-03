@@ -929,7 +929,7 @@ class JobProcessor:
                     iteration_count = 0
 
                 if self._run_schedulers:
-                    # Every 5 min: process support_ticket_dump → support_ticket + records
+                    # Every 5 min: process support_ticket_dump → records
                     self._maybe_enqueue_process_dumped_tickets()
                     # Every 5 min: discover tenant entity types and fields from changed records
                     self._maybe_enqueue_entity_type_discovery()
