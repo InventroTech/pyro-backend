@@ -410,7 +410,7 @@ class LinkUserUidView(APIView):
 
             result = link_user_uid_and_activate(email, uid)
 
-            if result.get("success"):
+            if result.get("success") or result.get("code") == "UID_CONFLICT":
                 return Response(result, status=status.HTTP_200_OK)
             return Response(result, status=status.HTTP_400_BAD_REQUEST)
 
@@ -463,6 +463,8 @@ class DeleteUserEverywhereView(APIView):
                     "tenant_id": report.get("tenant_id"),
                     "resolved_uid": report.get("resolved_uid"),
                     "deleted": report.get("deleted"),
+                    "memberships_deactivated": report.get("memberships_deactivated", 0),
+                    "sessions_revoked": report.get("sessions_revoked", []),
                     "notes": report.get("notes", []),
                 },
                 status=status.HTTP_200_OK,
