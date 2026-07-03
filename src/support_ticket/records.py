@@ -1,8 +1,8 @@
 """
 Support ticket data on ``crm_records.Record`` (``entity_type=support_ticket``).
 
-Operational reads/writes for queue, analytics, WIP, and admin updates use records;
-``support_ticket`` table remains ingest-only dual-write from ``process_dumped_tickets``.
+Operational reads/writes for queue, analytics, WIP, and admin updates use records.
+``process_dumped_tickets`` ingests ``support_ticket_dump`` rows directly into records.
 """
 
 from __future__ import annotations

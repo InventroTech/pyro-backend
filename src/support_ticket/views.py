@@ -11,7 +11,7 @@ from uuid import UUID
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
 from django.db import connection, models, transaction
-from django.db.models import Max, Q, QuerySet
+from django.db.models import Q, QuerySet
 from django.db import IntegrityError
 from django.utils.dateparse import parse_datetime
 from config.supabase_auth import SupabaseJWTAuthentication
@@ -61,8 +61,6 @@ from .mixpanel_properties import support_ticket_mixpanel_properties
 
 logger = logging.getLogger(__name__)
 DUMP_BATCH_LIMIT = 5000
-# Legacy support_ticket.id has no DB sequence; ids must be allocated before bulk_create.
-_SUPPORT_TICKET_ID_ALLOC_LOCK = 874215903
 # Per-tenant advisory lock so only one process_dumped_tickets job is enqueued at a time.
 _PROCESS_DUMPED_TICKETS_LOCK_BASE = 874216000
 _INCOMPLETE_DUMP_JOB_STATUSES = (
@@ -85,13 +83,23 @@ _DUMP_RESERVED_KEYS = frozenset({
     "created_at",
     "data",
 })
-_SUPPORT_TICKET_SKIP_FROM_DUMP = frozenset({
+_RECORD_DATA_SKIP_FROM_DUMP = frozenset({
     "id",
     "tenant",
+    "tenant_id",
     "assigned_to",
     "is_deleted",
     "deleted_at",
     "created_at",
+    "is_processed",
+    "data",
+})
+_RECORD_DATETIME_FIELDS = frozenset({
+    "created_at",
+    "ticket_date",
+    "completed_at",
+    "snooze_until",
+    "dumped_at",
 })
 
 
@@ -131,33 +139,6 @@ def _extract_dump_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
         if key not in _DUMP_RESERVED_KEYS and value is not None
     }
     return _serialize_dump_payload(cleaned)
-
-
-def _support_ticket_kwargs_from_dump(dump_ticket: SupportTicketDump) -> Dict[str, Any]:
-    datetime_fields = frozenset(
-        field.name
-        for field in SupportTicket._meta.fields
-        if isinstance(field, models.DateTimeField)
-    )
-    kwargs: Dict[str, Any] = {
-        "tenant_id": dump_ticket.tenant_id,
-        "dumped_at": timezone.now(),
-    }
-    data = dump_ticket.data or {}
-    for field in SupportTicket._meta.fields:
-        if field.name in _SUPPORT_TICKET_SKIP_FROM_DUMP or field.name in kwargs:
-            continue
-        if not field.concrete or field.many_to_many:
-            continue
-        if field.name not in data:
-            continue
-        value = data[field.name]
-        if field.name in datetime_fields:
-            value = _parse_dump_datetime(value)
-        elif field.name == "user_id":
-            value = _normalize_dump_user_id(value)
-        kwargs[field.name] = value
-    return kwargs
 
 
 def _enqueue_mixpanel_event(
@@ -266,55 +247,47 @@ def _serialize_record_extra_value(value: Any) -> Any:
     return value
 
 
-def _build_support_record_data(
-    ticket: SupportTicket,
-    *,
-    extra_data: Optional[Mapping[str, Any]] = None,
+def _build_support_record_data_from_dump(
+    dump_ticket: SupportTicketDump,
 ) -> Dict[str, Any]:
-    snooze_until = ticket.snooze_until
-    tenant_id = str(ticket.tenant_id) if ticket.tenant_id else None
-    assigned_to = str(ticket.assigned_to_id) if ticket.assigned_to_id else None
-
+    now = timezone.now()
     data: Dict[str, Any] = {
-        "support_ticket_id": ticket.id,
-        "ticket_id": ticket.id,
-        "created_at": ticket.created_at.isoformat() if ticket.created_at else None,
-        "ticket_date": ticket.ticket_date.isoformat() if ticket.ticket_date else None,
-        "user_id": ticket.user_id,
-        "name": ticket.name,
-        "phone": ticket.phone,
-        "source": ticket.source,
-        "subscription_status": ticket.subscription_status,
-        "atleast_paid_once": ticket.atleast_paid_once,
-        "reason": ticket.reason,
-        "other_reasons": ticket.other_reasons or [],
-        "badge": ticket.badge,
-        "poster": ticket.poster,
-        "tenant_id": tenant_id,
-        "assigned_to": assigned_to,
-        "layout_status": ticket.layout_status,
-        "state": ticket.state,
-        "resolution_status": ticket.resolution_status,
-        "resolution_time": ticket.resolution_time,
-        "cse_name": ticket.cse_name,
-        "cse_remarks": ticket.cse_remarks,
-        "call_status": ticket.call_status or "Call Waiting",
-        "call_attempts": ticket.call_attempts if ticket.call_attempts is not None else 0,
-        "rm_name": ticket.rm_name,
-        "completed_at": ticket.completed_at.isoformat() if ticket.completed_at else None,
-        "snooze_until": snooze_until.isoformat() if snooze_until else None,
-        "praja_dashboard_user_link": ticket.praja_dashboard_user_link,
-        "display_pic_url": ticket.display_pic_url,
-        "dumped_at": ticket.dumped_at.isoformat() if ticket.dumped_at else None,
-        "review_requested": bool(ticket.review_requested),
+        "tenant_id": str(dump_ticket.tenant_id) if dump_ticket.tenant_id else None,
+        "dumped_at": now.isoformat(),
+        "call_status": "Call Waiting",
+        "call_attempts": 0,
+        "other_reasons": [],
+        "review_requested": False,
     }
-    if snooze_until:
-        data["next_call_at"] = snooze_until.isoformat()
-    if extra_data:
-        for key, value in extra_data.items():
-            if key in data:
-                continue
+    raw = dump_ticket.data or {}
+    for key, value in raw.items():
+        if key in _RECORD_DATA_SKIP_FROM_DUMP or value is None:
+            continue
+        if key in _RECORD_DATETIME_FIELDS:
+            parsed = _parse_dump_datetime(value)
+            data[key] = parsed.isoformat() if parsed else None
+        elif key == "user_id":
+            data[key] = _normalize_dump_user_id(value)
+        elif key == "other_reasons":
+            data[key] = list(value) if value is not None else []
+        elif key == "review_requested":
+            data[key] = bool(value)
+        elif key == "call_attempts":
+            try:
+                data[key] = int(value) if value is not None else 0
+            except (TypeError, ValueError):
+                data[key] = 0
+        else:
             data[key] = _serialize_record_extra_value(value)
+
+    data.setdefault("call_status", "Call Waiting")
+    data.setdefault("call_attempts", 0)
+    data.setdefault("other_reasons", [])
+    data.setdefault("review_requested", False)
+
+    snooze_until = data.get("snooze_until")
+    if snooze_until:
+        data["next_call_at"] = snooze_until
     return data
 
 
@@ -336,50 +309,12 @@ def _delete_open_support_records_for_user(
     return count
 
 
-def _delete_open_support_tickets_for_user(
-    user_id: Any,
-    tenant_id: Optional[Union[str, UUID]] = None,
-) -> int:
-    normalized = _normalize_dump_user_id(user_id)
-    if not normalized:
-        return 0
-    qs = SupportTicket.objects.filter(
-        user_id=normalized,
-        resolution_status__isnull=True,
-    )
-    if tenant_id is not None:
-        qs = qs.filter(tenant_id=tenant_id)
-    count, _ = qs.delete()
-    return count
-
-
-def _support_ticket_record_for_ticket(ticket: SupportTicket) -> Optional[Record]:
-    if not ticket.id or not ticket.tenant_id:
-        return None
-    return (
-        Record.objects.filter(
-            tenant_id=ticket.tenant_id,
-            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
-            data__support_ticket_id=ticket.id,
-        )
-        .order_by("-id")
-        .first()
-    )
-
-
 def enqueue_ticket_created_mixpanel(
-    ticket: SupportTicket,
+    record: Record,
     dump_data: Optional[Mapping[str, Any]] = None,
 ) -> None:
-    record = _support_ticket_record_for_ticket(ticket)
-    if not record:
-        logger.warning(
-            "enqueue_ticket_created_mixpanel: no record for ticket_id=%s; skipping",
-            ticket.id,
-        )
-        return
     record_data = record.data or {}
-    user_id = record_data.get("user_id") or str(ticket.id)
+    user_id = record_data.get("user_id") or str(record.id)
     properties = support_ticket_mixpanel_properties(record)
     get_queue_service().enqueue_job(
         job_type=JobType.SEND_MIXPANEL_EVENT,
@@ -455,93 +390,6 @@ def enqueue_process_dumped_tickets_for_pending_dumps() -> Dict[str, Any]:
     return {"enqueued": enqueued, "skipped_active_job": skipped}
 
 
-def _mirror_tickets_to_records(
-    tickets: Iterable[SupportTicket],
-    *,
-    dump_data_by_user_id: Optional[Mapping[str, Mapping[str, Any]]] = None,
-) -> int:
-    mirrored = 0
-    dump_data_by_user_id = dump_data_by_user_id or {}
-    for ticket in tickets:
-        if not ticket.id or not ticket.tenant_id:
-            logger.warning(
-                "Skipping records mirror for ticket %s: missing id or tenant_id",
-                ticket.id,
-            )
-            continue
-        extra_data = dump_data_by_user_id.get(ticket.user_id) if ticket.user_id else None
-        Record.objects.create(
-            tenant_id=ticket.tenant_id,
-            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
-            data=_build_support_record_data(ticket, extra_data=extra_data),
-        )
-        mirrored += 1
-    return mirrored
-
-
-def _support_ticket_from_dump(dump_ticket: SupportTicketDump) -> SupportTicket:
-    return SupportTicket(**_support_ticket_kwargs_from_dump(dump_ticket))
-
-
-def _allocate_support_ticket_ids(count: int) -> List[int]:
-    """
-    Allocate monotonic primary keys for support_ticket.
-
-    The table predates Django migrations and has no serial/identity on ``id``,
-    so bulk_create cannot rely on the database to generate keys.
-    """
-    if count <= 0:
-        return []
-    with transaction.atomic():
-        if connection.vendor == "postgresql":
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT pg_advisory_xact_lock(%s)",
-                    [_SUPPORT_TICKET_ID_ALLOC_LOCK],
-                )
-        start = (SupportTicket.all_objects.aggregate(m=Max("id"))["m"] or 0) + 1
-        return list(range(start, start + count))
-
-
-def _assign_support_ticket_ids(tickets_to_insert: List[SupportTicket]) -> None:
-    ids = _allocate_support_ticket_ids(len(tickets_to_insert))
-    for ticket, pk in zip(tickets_to_insert, ids):
-        ticket.id = pk
-
-
-def _load_inserted_support_tickets(
-    tickets_to_insert: List[SupportTicket],
-) -> List[SupportTicket]:
-    """
-    Return support_ticket rows persisted by bulk_create.
-
-    IDs are pre-assigned before insert (legacy table has no id sequence). Rows
-    skipped via ignore_conflicts are omitted.
-    """
-    if not tickets_to_insert:
-        return []
-    allocated_ids = [t.id for t in tickets_to_insert if t.id]
-    if allocated_ids:
-        found = {
-            t.id: t
-            for t in SupportTicket.objects.filter(id__in=allocated_ids)
-        }
-        return [found[pk] for pk in allocated_ids if pk in found]
-
-    user_ids = [t.user_id for t in tickets_to_insert if t.user_id]
-    tenant_id = tickets_to_insert[0].tenant_id
-    if not user_ids or not tenant_id:
-        return []
-    by_user: Dict[str, SupportTicket] = {}
-    for ticket in SupportTicket.objects.filter(
-        tenant_id=tenant_id,
-        user_id__in=user_ids,
-    ).order_by("-id"):
-        if ticket.user_id not in by_user:
-            by_user[ticket.user_id] = ticket
-    return [by_user[uid] for uid in user_ids if uid in by_user]
-
-
 @dataclass
 class ProcessDumpedTicketsResult:
     total_dumped_tickets: int
@@ -556,7 +404,7 @@ def process_dumped_tickets(
     *,
     tenant_id: Optional[Union[str, UUID]] = None,
     on_ticket_created: Optional[
-        Callable[[SupportTicket, Optional[Mapping[str, Any]]], None]
+        Callable[[Record, Optional[Mapping[str, Any]]], None]
     ] = None,
     batch_limit: int = DUMP_BATCH_LIMIT,
 ) -> ProcessDumpedTicketsResult:
@@ -603,10 +451,10 @@ def process_dumped_tickets(
             marked_processed=marked,
         )
 
-    inserted_tickets: List[SupportTicket] = []
+    inserted_records: List[Record] = []
     dump_data_by_user_id: Dict[str, Dict[str, Any]] = {}
     with transaction.atomic():
-        tickets_to_insert: List[SupportTicket] = []
+        dumps_to_insert: List[SupportTicketDump] = []
         for dump_ticket in candidates:
             user_id = _normalize_dump_user_id((dump_ticket.data or {}).get("user_id"))
             tenant_id = dump_ticket.tenant_id
@@ -621,10 +469,6 @@ def process_dumped_tickets(
                     user_id=user_id,
                     tenant_id=tenant_id,
                 )
-                _delete_open_non_self_trial_support_tickets_for_user(
-                    user_id,
-                    tenant_id=tenant_id,
-                )
                 continue
 
             if dump_is_self_trial:
@@ -632,55 +476,46 @@ def process_dumped_tickets(
                     user_id=user_id,
                     tenant_id=tenant_id,
                 )
-                _delete_open_non_self_trial_support_tickets_for_user(
-                    user_id,
-                    tenant_id=tenant_id,
-                )
-                tickets_to_insert.append(_support_ticket_from_dump(dump_ticket))
             else:
-                _delete_open_support_tickets_for_user(
-                    user_id,
-                    tenant_id=tenant_id,
-                )
                 _delete_open_support_records_for_user(
                     user_id=user_id,
                     tenant_id=tenant_id,
                 )
-                tickets_to_insert.append(_support_ticket_from_dump(dump_ticket))
-
+            dumps_to_insert.append(dump_ticket)
             if user_id:
                 dump_data_by_user_id[user_id] = dict(dump_ticket.data or {})
 
-        _assign_support_ticket_ids(tickets_to_insert)
-        SupportTicket.objects.bulk_create(tickets_to_insert, ignore_conflicts=True)
-        inserted_tickets = _load_inserted_support_tickets(tickets_to_insert)
-        mirrored = _mirror_tickets_to_records(
-            inserted_tickets,
-            dump_data_by_user_id=dump_data_by_user_id,
-        )
+        for dump_ticket in dumps_to_insert:
+            inserted_records.append(
+                Record.objects.create(
+                    tenant_id=dump_ticket.tenant_id,
+                    entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                    data=_build_support_record_data_from_dump(dump_ticket),
+                )
+            )
         marked = SupportTicketDump.objects.filter(id__in=dump_ids).update(
             is_processed=True
         )
 
     if on_ticket_created:
-        for ticket in inserted_tickets:
+        for record in inserted_records:
             try:
-                dump_data = (
-                    dump_data_by_user_id.get(ticket.user_id) if ticket.user_id else None
-                )
-                on_ticket_created(ticket, dump_data)
+                user_id = _normalize_dump_user_id((record.data or {}).get("user_id"))
+                dump_data = dump_data_by_user_id.get(user_id) if user_id else None
+                on_ticket_created(record, dump_data)
             except Exception as exc:
                 logger.error(
-                    "process_dumped_tickets: on_ticket_created failed for ticket %s: %s",
-                    ticket.id,
+                    "process_dumped_tickets: on_ticket_created failed for record %s: %s",
+                    record.id,
                     exc,
                     exc_info=True,
                 )
+    inserted_count = len(inserted_records)
     return ProcessDumpedTicketsResult(
         total_dumped_tickets=len(dumped_tickets_list),
         unique_tickets=len(unique_tickets),
-        inserted_tickets=len(inserted_tickets),
-        mirrored_records=mirrored,
+        inserted_tickets=inserted_count,
+        mirrored_records=inserted_count,
         skipped_tickets=skipped,
         marked_processed=marked,
     )
@@ -731,13 +566,6 @@ def _record_support_ticket_type_raw(record: Record) -> Any:
 
 def _record_ticket_type_key(record: Record) -> str:
     return _canonical_support_ticket_type_key(_record_support_ticket_type_raw(record))
-
-
-_OPEN_SUPPORT_TICKET_RESOLUTION_Q = (
-    Q(resolution_status__isnull=True)
-    | Q(resolution_status="Snoozed")
-    | Q(resolution_status="WIP")
-)
 
 
 def _raw_ticket_type_from_mapping(data: Mapping[str, Any]) -> Any:
@@ -799,30 +627,6 @@ def _delete_open_non_self_trial_records_for_user(
     if not record_ids:
         return 0
     count, _ = Record.objects.filter(id__in=record_ids).delete()
-    return count
-
-
-def _delete_open_non_self_trial_support_tickets_for_user(
-    user_id: Any,
-    tenant_id: Optional[Union[str, UUID]] = None,
-) -> int:
-    normalized = _normalize_dump_user_id(user_id)
-    if not normalized:
-        return 0
-    qs = SupportTicket.objects.filter(
-        user_id=normalized,
-    ).filter(_OPEN_SUPPORT_TICKET_RESOLUTION_Q)
-    if tenant_id is not None:
-        qs = qs.filter(tenant_id=tenant_id)
-    ticket_ids = [
-        ticket.id
-        for ticket in qs
-        if _canonical_support_ticket_type_key(ticket.poster)
-        != _SELF_TRIAL_TICKET_TYPE_KEY
-    ]
-    if not ticket_ids:
-        return 0
-    count, _ = SupportTicket.objects.filter(id__in=ticket_ids).delete()
     return count
 
 
