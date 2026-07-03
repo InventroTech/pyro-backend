@@ -21,7 +21,6 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .models import SupportTicketDump
-from .models import SupportTicket
 from .serializers import SaveAndContinueSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer,UpdateCallStatusRequestSerializer
 from .services import MixpanelService, TicketTimeService
 from background_jobs.queue_service import get_queue_service
@@ -44,7 +43,6 @@ from .records import (
     records_to_ticket_dicts,
     support_ticket_records_qs,
 )
-from .utils import send_to_mixpanel, ticket_to_mixpanel_data
 from .constants import (
     SAVE_AND_CONTINUE_RESOLUTION_EVENTS,
     SUPPORT_EVENT_NOT_CONNECTED,

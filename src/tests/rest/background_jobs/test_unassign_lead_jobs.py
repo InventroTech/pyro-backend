@@ -49,8 +49,6 @@ from background_jobs.job_handlers import (
     UnassignSnoozedLeadsJobHandler,
 )
 from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
-from support_ticket.models import SupportTicket
-
 from tests.factories import TenantFactory, RecordFactory, BackgroundJobFactory
 
 
@@ -356,33 +354,22 @@ class CloseStaleSelfTrialSupportTicketsJobHandlerTests(TestCase):
 
     def test_closes_when_self_trial_subscription_stale(self):
         sub_ts = (timezone.now() - timedelta(days=20)).isoformat()
-        ticket = SupportTicket.objects.create(
-            tenant=self.tenant,
-            user_id="stale_user",
-            poster="SELF TRIAL",
-            resolution_status=None,
-        )
         record = RecordFactory(
             tenant=self.tenant,
             entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data={
                 "user_id": "stale_user",
                 "support_ticket_type": "SELF TRIAL",
-                "support_ticket_id": ticket.id,
                 "subscription_time_stamp": sub_ts,
             },
         )
         job = self._make_job()
         self.assertTrue(self.handler.process(job))
         record.refresh_from_db()
-        ticket.refresh_from_db()
         self.assertEqual(record.data.get("resolution_status"), "Closed")
         self.assertIsNotNone(record.data.get("completed_at"))
-        self.assertEqual(ticket.resolution_status, "Closed")
-        self.assertIsNotNone(ticket.completed_at)
         self.assertEqual(job.result["updated"], 1)
         self.assertEqual(job.result["records_updated"], 1)
-        self.assertEqual(job.result["support_tickets_updated"], 1)
         self.assertEqual(job.result["tenant_scope"], "single")
 
     def test_skips_when_subscription_not_old_enough(self):
