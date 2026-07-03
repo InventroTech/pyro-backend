@@ -31,7 +31,6 @@ from crm_records.models import Record, PartnerEvent
 from crm_records.scoring import get_scoring_rules, score_chunk_sql
 from crm_records.services import PrajaService
 from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
-from support_ticket.models import SupportTicket
 from support_ticket.records import q_record_open_or_snoozed_resolution
 from support_ticket.ticket_types import q_record_self_trial
 from support_ticket.services import (
@@ -1174,18 +1173,6 @@ class JsonbSetSupportTicketClosed(Func):
     output_field = JSONField()
 
 
-def _legacy_support_ticket_id_from_record_data(data: Any) -> Optional[int]:
-    if not isinstance(data, dict):
-        return None
-    raw = data.get("support_ticket_id") or data.get("ticket_id")
-    if raw is None:
-        return None
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
-
-
 def _close_stale_self_trial_support_tickets_queryset(
     tenant_id: Optional[Union[str, UUID]] = None,
 ):
@@ -1217,29 +1204,17 @@ def _close_stale_self_trial_support_tickets_apply(
     qs,
     *,
     now,
-) -> Tuple[int, int]:
-    ticket_ids = set()
-    for row in qs.values("data"):
-        ticket_id = _legacy_support_ticket_id_from_record_data(row.get("data"))
-        if ticket_id is not None:
-            ticket_ids.add(ticket_id)
+) -> int:
     with transaction.atomic():
-        records_updated = qs.update(
+        return qs.update(
             data=JsonbSetSupportTicketClosed(F("data")),
             updated_at=now,
         )
-        tickets_updated = 0
-        if ticket_ids:
-            tickets_updated = SupportTicket.objects.filter(id__in=ticket_ids).update(
-                resolution_status="Closed",
-                completed_at=now,
-            )
-    return records_updated, tickets_updated
 
 
 def _close_stale_self_trial_support_tickets_for_tenant(
     tenant_id: Union[str, UUID], days: int
-) -> Tuple[int, int, str]:
+) -> Tuple[int, str]:
     if days < 1:
         raise ValueError("days must be >= 1")
     cutoff = (timezone.now() - timedelta(days=days)).date()
@@ -1249,16 +1224,16 @@ def _close_stale_self_trial_support_tickets_for_tenant(
         _close_stale_self_trial_support_tickets_queryset(tid)
         .filter(subscription_ts__date__lte=cutoff)
     )
-    records_updated, tickets_updated = _close_stale_self_trial_support_tickets_apply(
+    records_updated = _close_stale_self_trial_support_tickets_apply(
         stale_qs,
         now=now,
     )
-    return records_updated, tickets_updated, cutoff.isoformat()
+    return records_updated, cutoff.isoformat()
 
 
 def _close_stale_self_trial_support_tickets_all_tenants(
     days: int,
-) -> Tuple[int, int, int, str]:
+) -> Tuple[int, int, str]:
     if days < 1:
         raise ValueError("days must be >= 1")
     cutoff = (timezone.now() - timedelta(days=days)).date()
@@ -1267,11 +1242,11 @@ def _close_stale_self_trial_support_tickets_all_tenants(
     stale_qs = _close_stale_self_trial_support_tickets_queryset(None).filter(
         subscription_ts__date__lte=cutoff
     )
-    records_updated, tickets_updated = _close_stale_self_trial_support_tickets_apply(
+    records_updated = _close_stale_self_trial_support_tickets_apply(
         stale_qs,
         now=now,
     )
-    return records_updated, tickets_updated, n_tenants, cutoff.isoformat()
+    return records_updated, n_tenants, cutoff.isoformat()
 
 
 class PurgeOldLogTablesJobHandler(JobHandler):
@@ -1423,7 +1398,7 @@ class SyncDispatchToRecordsJobHandler(JobHandler):
 class ProcessDumpedTicketsJobHandler(JobHandler):
     """
     Process ``support_ticket_dump`` rows for the job's tenant: dedupe, replace open
-    tickets, insert ``support_ticket``, mirror to ``records``.
+    records, insert ``records``.
 
     ``tenant_id`` is set on the :class:`~background_jobs.models.BackgroundJob` row
     (not in payload). Enqueued by the worker every 5 minutes when dumps are pending.
@@ -1471,8 +1446,6 @@ class CloseStaleSelfTrialSupportTicketsJobHandler(JobHandler):
     Set ``data.resolution_status`` to **Closed** for open **SELF TRIAL** support ticket
     records whose ``subscription_time_stamp`` is at least ``days`` (default 15) in the past.
 
-    Also syncs linked legacy ``support_ticket`` rows when ``support_ticket_id`` is present.
-
     Payload:
     - ``days`` (int, optional, default 15): minimum age of subscription timestamp in days.
     - ``tenant_id`` (str UUID, optional): if set in payload, only that tenant; if omitted,
@@ -1490,44 +1463,40 @@ class CloseStaleSelfTrialSupportTicketsJobHandler(JobHandler):
 
         tid = job.tenant_id or payload.get("tenant_id")
         if tid:
-            records_updated, tickets_updated, cutoff = (
+            records_updated, cutoff = (
                 _close_stale_self_trial_support_tickets_for_tenant(tid, days)
             )
             job.result = {
                 "success": True,
                 "updated": records_updated,
                 "records_updated": records_updated,
-                "support_tickets_updated": tickets_updated,
                 "days": days,
                 "cutoff": cutoff,
                 "tenant_id": str(tid),
                 "tenant_scope": "single",
             }
             logger.info(
-                "[CloseStaleSelfTrialSupportTickets] tenant=%s records=%s tickets=%s days=%s",
+                "[CloseStaleSelfTrialSupportTickets] tenant=%s records=%s days=%s",
                 tid,
                 records_updated,
-                tickets_updated,
                 days,
             )
         else:
-            records_updated, tickets_updated, n_tenants, cutoff = (
+            records_updated, n_tenants, cutoff = (
                 _close_stale_self_trial_support_tickets_all_tenants(days)
             )
             job.result = {
                 "success": True,
                 "updated": records_updated,
                 "records_updated": records_updated,
-                "support_tickets_updated": tickets_updated,
                 "days": days,
                 "cutoff": cutoff,
                 "tenants_processed": n_tenants,
                 "tenant_scope": "all",
             }
             logger.info(
-                "[CloseStaleSelfTrialSupportTickets] all tenants records=%s tickets=%s tenants=%s days=%s",
+                "[CloseStaleSelfTrialSupportTickets] all tenants records=%s tenants=%s days=%s",
                 records_updated,
-                tickets_updated,
                 n_tenants,
                 days,
             )
