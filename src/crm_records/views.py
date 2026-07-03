@@ -40,7 +40,7 @@ from .serializers import (
 )
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
-from .scoring import calculate_and_update_lead_score
+from .tenant_entity_type_attributes import attributes_from_tenant_entity_type
 from .permissions import HasAPISecret
 from support_ticket.services import MixpanelService, RMAssignedMixpanelService
 from background_jobs.queue_service import get_queue_service
@@ -4234,63 +4234,59 @@ class EntityTypeSchemaByTypeView(TenantScopedMixin, APIView):
 
 class EntityTypeAttributesView(TenantScopedMixin, APIView):
     """
-    Get attributes list for an entity type.
-    
+    Get attributes list for an entity type (used by Lead Score / Dynamic Scoring).
+
     GET /crm-records/entity-attributes/?entity_type=lead
-    
-    Returns a simple list of attributes for the specified entity_type.
+
+    Primary source: tenant_entity_types.schema_json.fields (discovered from records).
+    Fallback: entity_type_schemas.attributes (legacy manual schemas).
     """
     permission_classes = [IsTenantAuthenticated]
-    
+
     def get(self, request):
-        """
-        Get attributes list by entity_type.
-        
-        Query Parameters:
-        - entity_type: Required. The entity type to get attributes for (e.g., 'lead', 'ticket')
-        
-        Returns:
-        {
-            "entity_type": "lead",
-            "attributes": [
-                "id",
-                "tenant_id",
-                "entity_type",
-                "data",
-                "data.name",
-                "data.praja_id",
-                "data.lead_score",
-                ...
-            ],
-            "total_count": 29
-        }
-        """
         entity_type = request.query_params.get('entity_type')
-        
+
         if not entity_type:
             return Response({
                 'error': 'entity_type query parameter is required. Example: ?entity_type=lead'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
+
         entity_type = entity_type.strip()
-        
+
+        tenant_entity = TenantEntityType.objects.filter(
+            tenant=request.tenant,
+            entity_type=entity_type,
+        ).first()
+
+        if tenant_entity:
+            attributes = attributes_from_tenant_entity_type(tenant_entity)
+            return Response({
+                'entity_type': entity_type,
+                'attributes': attributes,
+                'total_count': len(attributes),
+                'source': 'tenant_entity_types',
+                'fields_count': tenant_entity.fields_count,
+            }, status=status.HTTP_200_OK)
+
         try:
             schema = EntityTypeSchema.objects.get(
                 tenant=request.tenant,
-                entity_type=entity_type
+                entity_type=entity_type,
             )
-            
             return Response({
                 'entity_type': schema.entity_type,
                 'attributes': schema.attributes,
-                'total_count': len(schema.attributes)
+                'total_count': len(schema.attributes),
+                'source': 'entity_type_schemas',
             }, status=status.HTTP_200_OK)
-            
         except EntityTypeSchema.DoesNotExist:
             return Response({
-                'error': f'Schema not found for entity_type "{entity_type}"',
+                'error': f'No attributes found for entity_type "{entity_type}"',
                 'entity_type': entity_type,
-                'suggestion': 'Create a schema first using POST /crm-records/entity-schemas/'
+                'suggestion': (
+                    'Ensure records exist for this entity type so discovery populates '
+                    'tenant_entity_types, or create a legacy schema via POST /crm-records/entity-schemas/'
+                ),
             }, status=status.HTTP_404_NOT_FOUND)
 
 
