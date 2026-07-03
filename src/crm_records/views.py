@@ -40,6 +40,7 @@ from .serializers import (
 )
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
+from .scoring import calculate_and_update_lead_score
 from .tenant_entity_type_attributes import attributes_from_tenant_entity_type
 from .permissions import HasAPISecret
 from support_ticket.services import MixpanelService, RMAssignedMixpanelService
