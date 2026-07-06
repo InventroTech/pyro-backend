@@ -329,6 +329,24 @@ def enqueue_ticket_created_mixpanel(
     )
 
 
+def enqueue_ticket_created_praja(
+    record: Record,
+    dump_data: Optional[Mapping[str, Any]] = None,
+) -> None:
+    from support_ticket.events import enqueue_praja_for_open_ticket
+
+    enqueue_praja_for_open_ticket(record, dump_data=dump_data)
+
+
+def on_ticket_created_after_dump(
+    record: Record,
+    dump_data: Optional[Mapping[str, Any]] = None,
+) -> None:
+    """Side effects after a dumped ticket is inserted as a ``records`` row."""
+    enqueue_ticket_created_mixpanel(record, dump_data)
+    enqueue_ticket_created_praja(record, dump_data)
+
+
 @transaction.atomic
 def enqueue_process_dumped_tickets_job(
     tenant_id: Union[str, UUID],
