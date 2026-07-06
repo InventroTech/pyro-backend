@@ -1,6 +1,6 @@
 import threading
 from datetime import timedelta
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from django.db import IntegrityError, close_old_connections
 from django.test import TransactionTestCase
@@ -321,33 +321,6 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
             if call.kwargs.get("job_type") == JobType.SEND_TO_PRAJA
         ]
         self.assertEqual(praja_calls, [])
-
-    @patch.object(SupportTicket.objects, "bulk_create", wraps=SupportTicket.objects.bulk_create)
-    def test_bulk_create_ignores_conflicts(self, mock_bulk_create):
-        SupportTicketDumpFactory.create(
-            tenant_id=self.tenant_id,
-            data=dump_data(user_id="cust_conflict", name="Conflict Test"),
-        )
-
-        process_dumped_tickets(tenant_id=self.tenant_id)
-
-        mock_bulk_create.assert_called_once()
-        self.assertTrue(mock_bulk_create.call_args.kwargs.get("ignore_conflicts"))
-        inserted = mock_bulk_create.call_args.args[0]
-        self.assertEqual(len(inserted), 1)
-        self.assertIsNotNone(inserted[0].id)
-
-    def test_process_assigns_monotonic_support_ticket_ids(self):
-        max_before = SupportTicket.all_objects.aggregate(m=Max("id"))["m"] or 0
-        SupportTicketDumpFactory.create(
-            tenant_id=self.tenant_id,
-            data=dump_data(user_id="cust_id_alloc", name="Id Alloc"),
-        )
-
-        process_dumped_tickets(tenant_id=self.tenant_id)
-
-        ticket = SupportTicket.objects.get(user_id="cust_id_alloc")
-        self.assertEqual(ticket.id, max_before + 1)
 
     def test_process_maps_dump_fields_to_ticket_and_record(self):
         SupportTicketDumpFactory.create(
@@ -833,7 +806,7 @@ class ProcessDumpedTicketsJobHandlerTest(BaseAPITestCase):
                 data__user_id="job_user",
             ).exists()
         )
-        mock_mixpanel.assert_called_once()
+        mock_on_ticket_created.assert_called_once()
 
 
 class ProcessDumpedTicketsAPITest(BaseAPITestCase):

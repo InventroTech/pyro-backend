@@ -327,28 +327,21 @@ def enqueue_ticket_created_mixpanel(
 
 
 def enqueue_ticket_created_praja(
-    ticket: SupportTicket,
+    record: Record,
     dump_data: Optional[Mapping[str, Any]] = None,
 ) -> None:
     from support_ticket.events import enqueue_praja_for_open_ticket
 
-    record = _support_ticket_record_for_ticket(ticket)
-    if not record:
-        logger.warning(
-            "enqueue_ticket_created_praja: no record for ticket_id=%s; skipping",
-            ticket.id,
-        )
-        return
     enqueue_praja_for_open_ticket(record)
 
 
 def on_ticket_created_after_dump(
-    ticket: SupportTicket,
+    record: Record,
     dump_data: Optional[Mapping[str, Any]] = None,
 ) -> None:
-    """Side effects after a dumped ticket is inserted and mirrored to ``records``."""
-    enqueue_ticket_created_mixpanel(ticket, dump_data)
-    enqueue_ticket_created_praja(ticket, dump_data)
+    """Side effects after a dumped ticket is inserted as a ``records`` row."""
+    enqueue_ticket_created_mixpanel(record, dump_data)
+    enqueue_ticket_created_praja(record, dump_data)
 
 
 @transaction.atomic

@@ -1236,30 +1236,19 @@ def _close_stale_self_trial_support_tickets_apply(
     qs,
     *,
     now,
-) -> Tuple[int, int]:
-    ticket_ids = set()
+) -> int:
     record_ids = list(qs.values_list("id", flat=True))
-    for row in qs.values("data"):
-        ticket_id = _legacy_support_ticket_id_from_record_data(row.get("data"))
-        if ticket_id is not None:
-            ticket_ids.add(ticket_id)
     with transaction.atomic():
-        return qs.update(
+        records_updated = qs.update(
             data=JsonbSetSupportTicketClosed(F("data")),
             updated_at=now,
         )
-        tickets_updated = 0
-        if ticket_ids:
-            tickets_updated = SupportTicket.objects.filter(id__in=ticket_ids).update(
-                resolution_status="Closed",
-                completed_at=now,
-            )
     if record_ids:
         from support_ticket.events import enqueue_praja_for_terminal_resolution
 
         for record in Record.objects.filter(id__in=record_ids):
             enqueue_praja_for_terminal_resolution(record)
-    return records_updated, tickets_updated
+    return records_updated
 
 
 def _close_stale_self_trial_support_tickets_for_tenant(
