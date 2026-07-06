@@ -14,6 +14,7 @@ from django.db import connection, models, transaction
 from django.db.models import Q, QuerySet
 from django.db import IntegrityError
 from django.utils.dateparse import parse_datetime
+from django.conf import settings
 from config.supabase_auth import SupabaseJWTAuthentication
 from authz.permissions import IsTenantAuthenticated
 import os
@@ -27,6 +28,8 @@ from background_jobs.queue_service import get_queue_service
 from background_jobs.models import BackgroundJob, JobStatus, JobType
 from core.models import Tenant
 from crm_records.models import Record
+from crm_records.permissions import HasAPISecret
+from crm_records.serializers import RecordSerializer
 from user_settings.models import Group, TenantMemberSetting
 from user_settings.services import USER_KV_GROUP_ID_KEY
 from authz.permissions import IsTenantAuthenticated
@@ -1521,3 +1524,194 @@ class ProcessDumpedTicketsView(APIView):
                 'error': str(error),
                 'message': 'Failed to enqueue process dumped tickets jobs',
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def resolve_entity_api_tenant(request) -> Tuple[Optional[Tenant], Optional[Response]]:
+    """Resolve tenant for ``/entity/``-style external APIs."""
+    tenant_id = request.query_params.get("tenant_id") or request.data.get("tenant_id")
+    if tenant_id:
+        try:
+            return Tenant.objects.get(id=tenant_id), None
+        except Tenant.DoesNotExist:
+            return None, Response(
+                {"error": f"Tenant with id {tenant_id} not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except (ValueError, TypeError):
+            return None, Response(
+                {"error": f"Invalid tenant_id format: {tenant_id}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    api_secret_obj = getattr(request, "api_secret_obj", None)
+    if api_secret_obj and api_secret_obj.tenant:
+        return api_secret_obj.tenant, None
+
+    default_slug = getattr(settings, "DEFAULT_TENANT_SLUG", "bibhab-thepyro-ai")
+    try:
+        return Tenant.objects.get(slug=default_slug), None
+    except Tenant.DoesNotExist:
+        tenant = Tenant.objects.first()
+        if tenant:
+            return tenant, None
+        return None, Response(
+            {"error": "No tenant found in database"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+def _entity_request_body(request) -> Dict[str, Any]:
+    body = request.data
+    return body if isinstance(body, dict) else {}
+
+
+def _parse_entity_ticket_id(request) -> Tuple[Optional[int], Optional[Response]]:
+    body = _entity_request_body(request)
+    raw = request.query_params.get("ticket_id") or body.get("ticket_id")
+    if raw is None or raw == "":
+        return None, Response(
+            {"error": "ticket_id is required (in query param or request body)"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    try:
+        return int(raw), None
+    except (TypeError, ValueError):
+        return None, Response(
+            {"error": "ticket_id must be an integer"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+def extract_support_ticket_entity_updates(request_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Read update fields from the ``data`` object only."""
+    nested = request_data.get("data")
+    if not isinstance(nested, dict):
+        return {}
+    updates = dict(nested)
+    updates.pop("ticket_id", None)
+    updates.pop("tenant_id", None)
+    return updates
+
+
+def _entity_task_label(task_item: Dict[str, Any]) -> Optional[str]:
+    label = task_item.get("task") or task_item.get("task_name")
+    if label is None:
+        return None
+    normalized = str(label).strip()
+    return normalized or None
+
+
+def merge_entity_tasks_partial(existing: Any, incoming: Any) -> List[Dict[str, Any]]:
+    """
+    Merge ``incoming`` tasks into ``existing`` by task name.
+
+    Only tasks included in the payload are updated; others are unchanged.
+    """
+    merged: List[Dict[str, Any]] = [
+        dict(task) for task in existing if isinstance(task, dict)
+    ] if isinstance(existing, list) else []
+
+    if not isinstance(incoming, list) or not incoming:
+        return merged
+
+    index_by_name: Dict[str, int] = {}
+    for index, task in enumerate(merged):
+        label = _entity_task_label(task)
+        if label:
+            index_by_name[label] = index
+
+    for item in incoming:
+        if not isinstance(item, dict):
+            continue
+        label = _entity_task_label(item)
+        if not label:
+            continue
+        normalized = {**item, "task": label}
+        normalized.pop("task_name", None)
+
+        if label in index_by_name:
+            idx = index_by_name[label]
+            merged[idx] = {**merged[idx], **normalized, "task": label}
+        else:
+            merged.append(normalized)
+            index_by_name[label] = len(merged) - 1
+
+    return merged
+
+
+class SupportTicketEntityAPIView(APIView):
+    """
+    PATCH support ticket by ``ticket_id`` (``records.id``) at ``/entity/support_ticket/``.
+
+    Send ``ticket_id`` at the request root (or as a query param). Put all update
+    fields inside a ``data`` object. Tasks are merged by name — only tasks included
+    in ``data.tasks`` are updated::
+
+        {
+            "ticket_id": 12345,
+            "data": {
+                "tasks": [{"task": "App Installation", "status": "Yes"}],
+                "resolution_status": "In Progress",
+                "cse_remarks": "Demo done"
+            }
+        }
+
+    Auth: ``X-Secret-Pyro`` header (same as ``/entity/``).
+    """
+
+    authentication_classes = []
+    permission_classes = [HasAPISecret]
+
+    def patch(self, request):
+        tenant, error_response = resolve_entity_api_tenant(request)
+        if error_response:
+            return error_response
+
+        ticket_id, error_response = _parse_entity_ticket_id(request)
+        if error_response:
+            return error_response
+
+        record = resolve_support_ticket_record(tenant=tenant, ticket_id=ticket_id)
+        if not record:
+            return Response(
+                {"error": f"Support ticket with ticket_id {ticket_id} not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        body = _entity_request_body(request)
+        if not isinstance(body.get("data"), dict):
+            return Response(
+                {"error": "data object is required in request body"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        updates = extract_support_ticket_entity_updates(body)
+        incoming_tasks = updates.pop("tasks", None)
+        if not updates and incoming_tasks is None:
+            return Response(
+                {"error": "At least one field must be provided for update"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if "assigned_to" in updates and updates["assigned_to"] is not None:
+            updates["assigned_to"] = str(updates["assigned_to"])
+
+        with transaction.atomic():
+            if incoming_tasks is not None:
+                payload = dict(record.data or {})
+                payload["tasks"] = merge_entity_tasks_partial(payload.get("tasks"), incoming_tasks)
+                record.data = payload
+                record.save(update_fields=["data", "updated_at"])
+            if updates:
+                record = apply_record_data_updates(record, updates)
+
+        logger.info(
+            "[SupportTicketEntityAPI] Updated record id=%s ticket_id=%s tenant=%s fields=%s tasks=%s",
+            record.id,
+            ticket_id,
+            tenant.slug,
+            list(updates.keys()),
+            len(incoming_tasks) if isinstance(incoming_tasks, list) else 0,
+        )
+
+        return Response(RecordSerializer(record).data, status=status.HTTP_200_OK)
