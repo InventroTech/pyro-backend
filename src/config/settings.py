@@ -348,6 +348,11 @@ MIXPANEL_JOB_WORKER_THREADS = env.int("MIXPANEL_JOB_WORKER_THREADS", default=1)
 MIXPANEL_JOB_POLL_INTERVAL = float(env("MIXPANEL_JOB_POLL_INTERVAL", default="1"))
 MIXPANEL_JOB_BATCH_SIZE = env.int("MIXPANEL_JOB_BATCH_SIZE", default=10)
 
+PRAJA_API_URL = os.getenv(
+    "PRAJA_API_URL",
+    "https://api.thecircleapp.in/pyro/save_resolved_ticket",
+)
+
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 
 # Staging environment flag - used to control certain behaviors like assigned_to field updates

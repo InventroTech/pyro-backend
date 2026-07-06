@@ -1,14 +1,20 @@
+from unittest.mock import patch
+
 from django.urls import reverse
 from rest_framework import status
 
+from background_jobs.models import JobType
 from crm_records.models import EventLog, Record
 from support_ticket.constants import (
+    SUPPORT_EVENT_CALL_LATER,
+    SUPPORT_EVENT_CANNOT_RESOLVE,
     SUPPORT_EVENT_NOT_CONNECTED,
     SUPPORT_EVENT_RESOLVED,
     SUPPORT_EVENT_TAKE_BREAK,
     SUPPORT_TICKET_ENTITY_TYPE,
 )
 from support_ticket.events import dispatch_support_ticket_event
+from support_ticket.services import SaveResolvedTicketPrajaService
 from tests.rest.support_ticket.support_rules import seed_support_ticket_rules
 from tests.base.test_setup import BaseAPITestCase
 from tests.factories.support_ticket_dump_factory import dump_data
@@ -106,3 +112,103 @@ class SupportTicketEventHandlerTest(BaseAPITestCase):
         self.assertEqual(self.record.data["resolution_status"], "Resolved")
         self.assertEqual(self.record.data["resolution_time"], "1:00")
         self.assertEqual(EventLog.objects.filter(record=self.record).count(), 1)
+
+    @patch("support_ticket.events.get_queue_service")
+    def test_resolved_enqueues_praja_save_resolved_ticket(self, mock_get_queue):
+        dispatch_support_ticket_event(
+            SUPPORT_EVENT_RESOLVED,
+            self.record,
+            {
+                "reason": "Self Trial completion",
+                "resolutionTime": "1:00",
+                "callStatus": "Connected",
+            },
+        )
+        praja_calls = [
+            c
+            for c in mock_get_queue.return_value.enqueue_job.call_args_list
+            if c.kwargs.get("job_type") == JobType.SEND_TO_PRAJA
+        ]
+        self.assertEqual(len(praja_calls), 1)
+        self.assertEqual(
+            praja_calls[0].kwargs["payload"]["object_type"],
+            "save_resolved_ticket",
+        )
+
+    @patch("support_ticket.events.get_queue_service")
+    def test_not_connected_does_not_enqueue_praja(self, mock_get_queue):
+        dispatch_support_ticket_event(
+            SUPPORT_EVENT_NOT_CONNECTED,
+            self.record,
+            {"cse_remarks": "no answer"},
+        )
+        praja_calls = [
+            c
+            for c in mock_get_queue.return_value.enqueue_job.call_args_list
+            if c.kwargs.get("job_type") == JobType.SEND_TO_PRAJA
+        ]
+        self.assertEqual(praja_calls, [])
+
+    @patch("support_ticket.events.get_queue_service")
+    def test_not_connected_close_enqueues_praja(self, mock_get_queue):
+        for _ in range(5):
+            dispatch_support_ticket_event(
+                SUPPORT_EVENT_NOT_CONNECTED,
+                self.record,
+                {"cse_remarks": "no answer"},
+            )
+            self.record.refresh_from_db()
+
+        dispatch_support_ticket_event(
+            SUPPORT_EVENT_NOT_CONNECTED,
+            self.record,
+            {},
+        )
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.data["resolution_status"], "Closed")
+
+        praja_calls = [
+            c
+            for c in mock_get_queue.return_value.enqueue_job.call_args_list
+            if c.kwargs.get("job_type") == JobType.SEND_TO_PRAJA
+        ]
+        self.assertEqual(len(praja_calls), 1)
+        self.assertEqual(praja_calls[0].kwargs["payload"]["ticket_status"], "CLOSED")
+
+    @patch("support_ticket.events.get_queue_service")
+    def test_call_later_does_not_enqueue_praja(self, mock_get_queue):
+        dispatch_support_ticket_event(
+            SUPPORT_EVENT_CALL_LATER,
+            self.record,
+            {"callStatus": "Connected", "cseRemarks": "call back later"},
+        )
+        praja_calls = [
+            c
+            for c in mock_get_queue.return_value.enqueue_job.call_args_list
+            if c.kwargs.get("job_type") == JobType.SEND_TO_PRAJA
+        ]
+        self.assertEqual(praja_calls, [])
+
+    def test_save_resolved_ticket_payload_from_record(self):
+        self.record.data = {
+            **self.record.data,
+            "user_id": 123,
+            "support_ticket_id": 456,
+            "resolution_status": "Resolved",
+            "tasks": [
+                {"task": "Verify ID", "status": "Yes"},
+                {"task": "Close case", "status": "Yes"},
+            ],
+        }
+        self.record.save(update_fields=["data"])
+        service = SaveResolvedTicketPrajaService()
+        payload = service.build_payload(self.record)
+        self.assertEqual(
+            payload,
+            {
+                "user_id": 123,
+                "ticket_id": self.record.id,
+                "ticket_status": "RESOLVED",
+                "all_tasks_completed": True,
+            },
+        )
