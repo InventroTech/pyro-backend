@@ -26,6 +26,7 @@ from support_ticket.constants import (
     SUPPORT_EVENT_RESOLVED,
     SUPPORT_TICKET_BUTTON_EVENTS,
     SUPPORT_TICKET_ENTITY_TYPE,
+    SUPPORT_TICKET_PRAJA_SYNC_RESOLUTION_STATUSES,
 )
 from support_ticket.mixpanel_properties import support_ticket_button_event_mixpanel_properties
 from support_ticket.services import TicketTimeService
@@ -200,6 +201,68 @@ def enqueue_support_ticket_mixpanel(
     )
 
 
+def _enqueue_praja_save_resolved_ticket(*, record: Record) -> None:
+    from support_ticket.services import SaveResolvedTicketPrajaService
+
+    service = SaveResolvedTicketPrajaService()
+    payload = service.build_payload(record)
+    if not payload:
+        return
+    try:
+        get_queue_service().enqueue_job(
+            job_type=JobType.SEND_TO_PRAJA,
+            payload={
+                "object_type": "save_resolved_ticket",
+                **payload,
+            },
+            tenant_id=str(record.tenant_id) if record.tenant_id else None,
+            priority=0,
+            max_attempts=3,
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to enqueue Praja save_resolved_ticket record_id=%s: %s",
+            record.id,
+            exc,
+            exc_info=True,
+        )
+
+
+def enqueue_praja_for_terminal_resolution(record: Record) -> None:
+    """Enqueue Praja sync when ``resolution_status`` is a terminal sync status."""
+    data = record.data or {}
+    if data.get("resolution_status") not in SUPPORT_TICKET_PRAJA_SYNC_RESOLUTION_STATUSES:
+        return
+    if not data.get("user_id"):
+        logger.warning(
+            "Skipping Praja save_resolved_ticket for record_id=%s — missing user_id",
+            record.id,
+        )
+        return
+    _enqueue_praja_save_resolved_ticket(record=record)
+
+
+def enqueue_praja_for_open_ticket(record: Record) -> None:
+    """Enqueue Praja sync when ``resolution_status`` is Open (read from record data only)."""
+    from support_ticket.constants import SUPPORT_RESOLUTION_STATUS_OPEN
+
+    data = record.data or {}
+    if data.get("resolution_status") != SUPPORT_RESOLUTION_STATUS_OPEN:
+        return
+    if not data.get("user_id"):
+        logger.warning(
+            "Skipping Praja save_resolved_ticket for open record_id=%s — missing user_id",
+            record.id,
+        )
+        return
+    _enqueue_praja_save_resolved_ticket(record=record)
+
+
+def enqueue_support_ticket_praja_sync(record: Record, event_name: str) -> None:
+    """POST ticket snapshot to Praja when rules leave a terminal ``resolution_status``."""
+    enqueue_praja_for_terminal_resolution(record)
+
+
 def dispatch_support_ticket_event(
     event_name: str,
     record: Record,
@@ -218,6 +281,7 @@ def dispatch_support_ticket_event(
     execute_rules(event_name, record, prepared, str(record.tenant_id))
     record.refresh_from_db()
     enqueue_support_ticket_mixpanel(record, event_name, prepared)
+    enqueue_support_ticket_praja_sync(record, event_name)
 
 
 def log_and_dispatch_support_ticket_event(

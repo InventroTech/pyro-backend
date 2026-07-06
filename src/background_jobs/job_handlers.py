@@ -845,16 +845,21 @@ class PrajaJobHandler(JobHandler):
         object_type = payload.get("object_type")
         object_id = payload.get("object_id")
         data = payload.get("data", {})
-        
-        if not object_type or not object_id:
-            error_msg = f"Invalid Praja job payload: missing object_type or object_id"
+
+        if not object_type:
+            error_msg = "Invalid Praja job payload: missing object_type"
             logger.error(f"Invalid Praja job payload for job {job.id}: {error_msg}")
             raise ValueError(error_msg)
-        
+        if object_type != "save_resolved_ticket" and not object_id:
+            error_msg = "Invalid Praja job payload: missing object_id"
+            logger.error(f"Invalid Praja job payload for job {job.id}: {error_msg}")
+            raise ValueError(error_msg)
+
         try:
             start_time = time.time()
-            
-            print(f"\n🚀 [PRAJA JOB] Processing job {job.id} for {object_type} {object_id}...")
+
+            job_label = object_id if object_id is not None else payload.get("ticket_id")
+            print(f"\n🚀 [PRAJA JOB] Processing job {job.id} for {object_type} {job_label}...")
             
             praja_service = PrajaService()
             
@@ -896,14 +901,27 @@ class PrajaJobHandler(JobHandler):
                     "sending to Praja server..."
                 )
                 success = praja_service.send_record_to_praja(record)
+            elif object_type == "save_resolved_ticket":
+                from support_ticket.services import SaveResolvedTicketPrajaService
+
+                save_service = SaveResolvedTicketPrajaService()
+                success = save_service.save_resolved_ticket(
+                    user_id=payload.get("user_id"),
+                    ticket_id=payload.get("ticket_id"),
+                    ticket_status=payload.get("ticket_status"),
+                    all_tasks_completed=payload.get("all_tasks_completed"),
+                )
             else:
-                error_msg = f"Invalid object_type: {object_type}. Must be 'record' or 'ticket'"
+                error_msg = (
+                    f"Invalid object_type: {object_type}. "
+                    "Must be 'record', 'ticket', or 'save_resolved_ticket'"
+                )
                 print(f"❌ [PRAJA JOB] {error_msg}")
                 logger.error(f"Praja job {job.id} failed: {error_msg}")
                 raise ValueError(error_msg)
             
             if not success:
-                error_msg = f"Praja service returned False for {object_type} {object_id}"
+                error_msg = f"Praja service returned False for {object_type} {job_label}"
                 print(f"❌ [PRAJA JOB] {error_msg}")
                 logger.error(f"Praja job {job.id} failed: {error_msg}")
                 raise Exception(error_msg)
@@ -941,14 +959,28 @@ class PrajaJobHandler(JobHandler):
     
     def validate_payload(self, payload: Dict[str, Any]) -> bool:
         """Validate Praja job payload"""
-        if "object_type" not in payload:
+        object_type = payload.get("object_type")
+        if not object_type:
             logger.error("Missing required field 'object_type' in Praja job payload")
             return False
+        if object_type == "save_resolved_ticket":
+            required = ("user_id", "ticket_id", "ticket_status", "all_tasks_completed")
+            for field in required:
+                if field not in payload:
+                    logger.error(
+                        "Missing required field '%s' in save_resolved_ticket payload",
+                        field,
+                    )
+                    return False
+            return True
         if "object_id" not in payload:
             logger.error("Missing required field 'object_id' in Praja job payload")
             return False
-        if payload.get("object_type") not in ["record", "ticket"]:
-            logger.error(f"Invalid object_type: {payload.get('object_type')}. Must be 'record' or 'ticket'")
+        if object_type not in ["record", "ticket"]:
+            logger.error(
+                f"Invalid object_type: {object_type}. "
+                "Must be 'record', 'ticket', or 'save_resolved_ticket'"
+            )
             return False
         return True
 
@@ -1219,6 +1251,7 @@ def _close_stale_self_trial_support_tickets_apply(
     now,
 ) -> Tuple[int, int]:
     ticket_ids = set()
+    record_ids = list(qs.values_list("id", flat=True))
     for row in qs.values("data"):
         ticket_id = _legacy_support_ticket_id_from_record_data(row.get("data"))
         if ticket_id is not None:
@@ -1234,6 +1267,11 @@ def _close_stale_self_trial_support_tickets_apply(
                 resolution_status="Closed",
                 completed_at=now,
             )
+    if record_ids:
+        from support_ticket.events import enqueue_praja_for_terminal_resolution
+
+        for record in Record.objects.filter(id__in=record_ids):
+            enqueue_praja_for_terminal_resolution(record)
     return records_updated, tickets_updated
 
 
@@ -1431,7 +1469,7 @@ class ProcessDumpedTicketsJobHandler(JobHandler):
 
     def process(self, job: BackgroundJob) -> bool:
         from support_ticket.views import (
-            enqueue_ticket_created_mixpanel,
+            on_ticket_created_after_dump,
             process_dumped_tickets,
             process_dumped_tickets_job_result,
         )
@@ -1441,7 +1479,7 @@ class ProcessDumpedTicketsJobHandler(JobHandler):
 
         result = process_dumped_tickets(
             tenant_id=job.tenant_id,
-            on_ticket_created=enqueue_ticket_created_mixpanel,
+            on_ticket_created=on_ticket_created_after_dump,
         )
         job.result = {
             "success": True,
@@ -1795,7 +1833,7 @@ class JobHandlerRegistry:
             DiscoverEntityTypesJobHandler(),
         )
         # Praja handler removed - now using MixpanelService instead
-        # self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
+        self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
     
     def register_handler(self, job_type: str, handler: JobHandler):
         """

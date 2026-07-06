@@ -387,6 +387,105 @@ class CSEAssignedMixpanelService:
             return "failed"
 
 
+class SaveResolvedTicketPrajaService:
+    """POST resolved support ticket snapshot to Praja ``save_resolved_ticket``."""
+
+    def __init__(self):
+        from django.conf import settings
+
+        self.api_url = getattr(settings, "PRAJA_API_URL", None) or os.environ.get(
+            "PRAJA_API_URL",
+            "https://api.thecircleapp.in/pyro/save_resolved_ticket",
+        )
+
+    def _request_headers(self) -> Dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        token = os.environ.get("PRAJA_TOKEN", "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    def build_payload(self, record) -> Optional[Dict[str, Any]]:
+        from support_ticket.records import all_support_ticket_tasks_completed
+
+        data = record.data or {}
+        user_id = data.get("user_id")
+        if user_id is None:
+            logger.warning(
+                "[Praja] Skipping save_resolved_ticket — missing user_id "
+                "record_id=%s",
+                record.id,
+            )
+            return None
+
+        resolution = data.get("resolution_status")
+        ticket_status = str(resolution).strip() if resolution else ""
+        ticket_status = ticket_status.upper().replace(" ", "_").replace("'", "")
+
+        user_id_for_api = int(user_id) if str(user_id).isdigit() else user_id
+
+        return {
+            "user_id": user_id_for_api,
+            "ticket_id": record.id,
+            "ticket_status": ticket_status,
+            "all_tasks_completed": all_support_ticket_tasks_completed(data),
+        }
+
+    def save_resolved_ticket(
+        self,
+        user_id,
+        ticket_id,
+        ticket_status,
+        all_tasks_completed,
+    ) -> bool:
+        payload = {
+            "user_id": int(user_id) if str(user_id).isdigit() else user_id,
+            "ticket_id": int(ticket_id) if str(ticket_id).isdigit() else ticket_id,
+            "ticket_status": str(ticket_status).upper().replace(" ", "_").replace("'", ""),
+            "all_tasks_completed": bool(all_tasks_completed),
+        }
+        headers = self._request_headers()
+
+        try:
+            logger.info(
+                "[Praja] POST save_resolved_ticket url=%s payload=%s",
+                self.api_url,
+                json.dumps(payload, default=str),
+            )
+            response = requests.post(
+                self.api_url,
+                json=payload,
+                headers=headers,
+                timeout=30,
+            )
+            if not response.ok:
+                logger.error(
+                    "[Praja] save_resolved_ticket failed status=%s body=%s",
+                    response.status_code,
+                    response.text[:500],
+                )
+                return False
+            logger.info(
+                "[Praja] save_resolved_ticket success ticket_id=%s",
+                payload.get("ticket_id"),
+            )
+            return True
+        except requests.exceptions.RequestException as exc:
+            logger.error("[Praja] save_resolved_ticket error: %s", exc)
+            return False
+
+    def save_record(self, record) -> bool:
+        payload = self.build_payload(record)
+        if not payload:
+            return False
+        return self.save_resolved_ticket(
+            user_id=payload["user_id"],
+            ticket_id=payload["ticket_id"],
+            ticket_status=payload["ticket_status"],
+            all_tasks_completed=payload["all_tasks_completed"],
+        )
+
+
 class TicketTimeService:
     """
     Service for handling ticket resolution time calculations

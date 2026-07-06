@@ -24,6 +24,7 @@ from support_ticket.views import (
     enqueue_process_dumped_tickets_for_pending_dumps,
     enqueue_process_dumped_tickets_job,
     enqueue_ticket_created_mixpanel,
+    on_ticket_created_after_dump,
     process_dumped_tickets,
 )
 from support_ticket.models import SupportTicket, SupportTicketDump
@@ -276,6 +277,60 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         properties = mixpanel_calls[0].kwargs["payload"]["properties"]
         self.assertIsNone(properties["support_ticket_type"])
         self.assertEqual(properties["poster"], "in_trial")
+
+    @patch("support_ticket.views.get_queue_service")
+    def test_open_ticket_enqueues_praja_on_dump_process(self, mock_get_queue):
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            data=dump_data(
+                user_id="12345",
+                name="Open ticket",
+                resolution_status="Open",
+            ),
+        )
+
+        process_dumped_tickets(
+            tenant_id=self.tenant_id,
+            on_ticket_created=on_ticket_created_after_dump,
+        )
+
+        mock_queue = mock_get_queue.return_value
+        praja_calls = [
+            call
+            for call in mock_queue.enqueue_job.call_args_list
+            if call.kwargs.get("job_type") == JobType.SEND_TO_PRAJA
+        ]
+        self.assertEqual(len(praja_calls), 1)
+        payload = praja_calls[0].kwargs["payload"]
+        self.assertEqual(payload["object_type"], "save_resolved_ticket")
+        self.assertEqual(payload["user_id"], 12345)
+        self.assertEqual(payload["ticket_status"], "OPEN")
+        record = Record.objects.get(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data__user_id="12345",
+        )
+        self.assertEqual(payload["ticket_id"], record.id)
+
+    @patch("support_ticket.views.get_queue_service")
+    def test_non_open_ticket_does_not_enqueue_praja_on_dump_process(self, mock_get_queue):
+        SupportTicketDumpFactory.create(
+            tenant_id=self.tenant_id,
+            data=dump_data(user_id="67890", name="Pending ticket"),
+        )
+
+        process_dumped_tickets(
+            tenant_id=self.tenant_id,
+            on_ticket_created=on_ticket_created_after_dump,
+        )
+
+        mock_queue = mock_get_queue.return_value
+        praja_calls = [
+            call
+            for call in mock_queue.enqueue_job.call_args_list
+            if call.kwargs.get("job_type") == JobType.SEND_TO_PRAJA
+        ]
+        self.assertEqual(praja_calls, [])
 
     @patch.object(SupportTicket.objects, "bulk_create", wraps=SupportTicket.objects.bulk_create)
     def test_bulk_create_ignores_conflicts(self, mock_bulk_create):
@@ -649,8 +704,8 @@ class ProcessDumpedTicketsJobHandlerTest(BaseAPITestCase):
         SupportTicketDump.objects.all().delete()
         SupportTicket.objects.all().delete()
 
-    @patch("support_ticket.views.enqueue_ticket_created_mixpanel")
-    def test_job_handler_processes_tenant_dumps(self, mock_mixpanel):
+    @patch("support_ticket.views.on_ticket_created_after_dump")
+    def test_job_handler_processes_tenant_dumps(self, mock_on_ticket_created):
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
             data=dump_data(user_id="job_user", name="From job"),
@@ -667,7 +722,7 @@ class ProcessDumpedTicketsJobHandlerTest(BaseAPITestCase):
         self.assertTrue(ok)
         self.assertEqual(job.result["inserted_tickets"], 1)
         self.assertTrue(SupportTicket.objects.filter(user_id="job_user").exists())
-        mock_mixpanel.assert_called_once()
+        mock_on_ticket_created.assert_called_once()
 
 
 class ProcessDumpedTicketsAPITest(BaseAPITestCase):

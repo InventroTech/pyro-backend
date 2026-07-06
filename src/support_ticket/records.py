@@ -239,6 +239,7 @@ def build_ticket_task_progress(raw_tasks: Any) -> List[Dict[str, str]]:
 
     return steps
 
+ 
 
 def record_to_ticket_dict(record: Record) -> Dict[str, Any]:
     """Flatten a support ticket record for API/analytics responses."""
