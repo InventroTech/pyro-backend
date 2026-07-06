@@ -268,7 +268,7 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         self.assertIsNone(properties["support_ticket_type"])
         self.assertEqual(properties["poster"], "in_trial")
 
-    @patch("support_ticket.views.get_queue_service")
+    @patch("support_ticket.events.get_queue_service")
     def test_open_ticket_enqueues_praja_on_dump_process(self, mock_get_queue):
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
@@ -302,7 +302,7 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         )
         self.assertEqual(payload["ticket_id"], record.id)
 
-    @patch("support_ticket.views.get_queue_service")
+    @patch("support_ticket.events.get_queue_service")
     def test_non_open_ticket_does_not_enqueue_praja_on_dump_process(self, mock_get_queue):
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,

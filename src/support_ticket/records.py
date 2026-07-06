@@ -239,7 +239,22 @@ def build_ticket_task_progress(raw_tasks: Any) -> List[Dict[str, str]]:
 
     return steps
 
- 
+
+def all_support_ticket_tasks_completed(data: Optional[Dict[str, Any]]) -> bool:
+    """True when every task in ``data["tasks"]`` is marked complete."""
+    tasks = _parse_ticket_tasks_raw((data or {}).get("tasks"))
+    if not tasks:
+        return False
+    for item in tasks:
+        status_text = str(item.get("status") or "").lower().strip()
+        if not (
+            "yes" in status_text
+            or "done" in status_text
+            or "complete" in status_text
+        ):
+            return False
+    return True
+
 
 def record_to_ticket_dict(record: Record) -> Dict[str, Any]:
     """Flatten a support ticket record for API/analytics responses."""
