@@ -33,3 +33,9 @@ SUPPORT_TICKET_PRAJA_SYNC_RESOLUTION_STATUSES = frozenset({
     "Can't Resolve",
     "Closed",
 })
+
+# Button events → resolution written by rules (fallback if object_history has no diff).
+SUPPORT_EVENT_TO_PRAJA_RESOLUTION_STATUS = {
+    SUPPORT_EVENT_RESOLVED: "Resolved",
+    SUPPORT_EVENT_CANNOT_RESOLVE: "Can't Resolve",
+}

@@ -256,6 +256,42 @@ def all_support_ticket_tasks_completed(data: Optional[Dict[str, Any]]) -> bool:
     return True
 
 
+def resolution_status_from_latest_object_history(record: Record) -> Optional[str]:
+    """
+    Read ``resolution_status`` from the latest ``object_history`` row for this record.
+
+    Used for Praja sync at button-click time — the history row is written when rules
+    call ``record.save()`` after the CSE action, without reading ``records.data`` directly.
+    """
+    from django.contrib.contenttypes.models import ContentType
+    from object_history.models import ObjectHistory
+
+    content_type = ContentType.objects.get_for_model(Record)
+    entry = (
+        ObjectHistory.objects.filter(
+            content_type=content_type,
+            object_id=str(record.id),
+        )
+        .order_by("-version")
+        .first()
+    )
+    if not entry:
+        return None
+
+    resolution_change = (entry.changes or {}).get("resolution_status")
+    if isinstance(resolution_change, dict):
+        new_value = resolution_change.get("to")
+        if new_value is not None and str(new_value).strip() != "":
+            return str(new_value)
+
+    after_data = (entry.after_state or {}).get("data")
+    if isinstance(after_data, dict):
+        status = after_data.get("resolution_status")
+        if status is not None and str(status).strip() != "":
+            return str(status)
+    return None
+
+
 def record_to_ticket_dict(record: Record) -> Dict[str, Any]:
     """Flatten a support ticket record for API/analytics responses."""
     data = record.data or {}

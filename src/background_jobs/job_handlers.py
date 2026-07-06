@@ -1247,7 +1247,7 @@ def _close_stale_self_trial_support_tickets_apply(
         from support_ticket.events import enqueue_praja_for_terminal_resolution
 
         for record in Record.objects.filter(id__in=record_ids):
-            enqueue_praja_for_terminal_resolution(record)
+            enqueue_praja_for_terminal_resolution(record, resolution_status="Closed")
     return records_updated
 
 

@@ -405,8 +405,16 @@ class SaveResolvedTicketPrajaService:
             headers["Authorization"] = f"Bearer {token}"
         return headers
 
-    def build_payload(self, record) -> Optional[Dict[str, Any]]:
-        from support_ticket.records import all_support_ticket_tasks_completed
+    def build_payload(
+        self,
+        record,
+        *,
+        resolution_status: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        from support_ticket.records import (
+            all_support_ticket_tasks_completed,
+            resolution_status_from_latest_object_history,
+        )
 
         data = record.data or {}
         user_id = data.get("user_id")
@@ -418,7 +426,10 @@ class SaveResolvedTicketPrajaService:
             )
             return None
 
-        resolution = data.get("resolution_status")
+        resolution = (
+            resolution_status
+            or resolution_status_from_latest_object_history(record)
+        )
         ticket_status = str(resolution).strip() if resolution else ""
         ticket_status = ticket_status.upper().replace(" ", "_").replace("'", "")
 

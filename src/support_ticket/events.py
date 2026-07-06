@@ -8,7 +8,7 @@ This module normalizes API payloads for rule templates and enqueues Mixpanel eve
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 from uuid import UUID
 
 from django.core.cache import cache
@@ -24,6 +24,7 @@ from support_ticket.constants import (
     SUPPORT_EVENT_NOT_CONNECTED,
     SUPPORT_EVENT_TAKE_BREAK,
     SUPPORT_EVENT_RESOLVED,
+    SUPPORT_EVENT_TO_PRAJA_RESOLUTION_STATUS,
     SUPPORT_TICKET_BUTTON_EVENTS,
     SUPPORT_TICKET_ENTITY_TYPE,
     SUPPORT_TICKET_PRAJA_SYNC_RESOLUTION_STATUSES,
@@ -201,11 +202,15 @@ def enqueue_support_ticket_mixpanel(
     )
 
 
-def _enqueue_praja_save_resolved_ticket(*, record: Record) -> None:
+def _enqueue_praja_save_resolved_ticket(
+    *,
+    record: Record,
+    resolution_status: Optional[str] = None,
+) -> None:
     from support_ticket.services import SaveResolvedTicketPrajaService
 
     service = SaveResolvedTicketPrajaService()
-    payload = service.build_payload(record)
+    payload = service.build_payload(record, resolution_status=resolution_status)
     if not payload:
         return
     try:
@@ -228,39 +233,81 @@ def _enqueue_praja_save_resolved_ticket(*, record: Record) -> None:
         )
 
 
-def enqueue_praja_for_terminal_resolution(record: Record) -> None:
-    """Enqueue Praja sync when ``resolution_status`` is a terminal sync status."""
-    data = record.data or {}
-    if data.get("resolution_status") not in SUPPORT_TICKET_PRAJA_SYNC_RESOLUTION_STATUSES:
+def enqueue_praja_for_terminal_resolution(
+    record: Record,
+    *,
+    resolution_status: Optional[str] = None,
+) -> None:
+    """Enqueue Praja when latest object_history (or explicit status) is terminal."""
+    from support_ticket.records import resolution_status_from_latest_object_history
+
+    status = resolution_status or resolution_status_from_latest_object_history(record)
+    if status not in SUPPORT_TICKET_PRAJA_SYNC_RESOLUTION_STATUSES:
         return
+    data = record.data or {}
     if not data.get("user_id"):
         logger.warning(
             "Skipping Praja save_resolved_ticket for record_id=%s — missing user_id",
             record.id,
         )
         return
-    _enqueue_praja_save_resolved_ticket(record=record)
+    _enqueue_praja_save_resolved_ticket(record=record, resolution_status=status)
 
 
-def enqueue_praja_for_open_ticket(record: Record) -> None:
-    """Enqueue Praja sync when ``resolution_status`` is Open (read from record data only)."""
+def enqueue_praja_for_open_ticket(
+    record: Record,
+    dump_data: Optional[Mapping[str, Any]] = None,
+) -> None:
+    """
+    Enqueue Praja when a new open ticket row is created from ``process_dumped_tickets``.
+
+    At dump ingest we read ``resolution_status`` from the dump payload / creation-time
+    record data (not a separate query on ``records`` for terminal statuses).
+    """
     from support_ticket.constants import SUPPORT_RESOLUTION_STATUS_OPEN
 
-    data = record.data or {}
-    if data.get("resolution_status") != SUPPORT_RESOLUTION_STATUS_OPEN:
+    status = _open_resolution_status_at_dump_ingest(record, dump_data)
+    if status != SUPPORT_RESOLUTION_STATUS_OPEN:
         return
+    data = record.data or {}
     if not data.get("user_id"):
         logger.warning(
             "Skipping Praja save_resolved_ticket for open record_id=%s — missing user_id",
             record.id,
         )
         return
-    _enqueue_praja_save_resolved_ticket(record=record)
+    _enqueue_praja_save_resolved_ticket(
+        record=record,
+        resolution_status=SUPPORT_RESOLUTION_STATUS_OPEN,
+    )
+
+
+def _open_resolution_status_at_dump_ingest(
+    record: Record,
+    dump_data: Optional[Mapping[str, Any]] = None,
+) -> Optional[str]:
+    """Resolve Open status at dump→record create time (dump payload first)."""
+    from support_ticket.constants import SUPPORT_RESOLUTION_STATUS_OPEN
+    from support_ticket.records import resolution_status_from_latest_object_history
+
+    for source in (
+        (dump_data or {}).get("resolution_status"),
+        (record.data or {}).get("resolution_status"),
+        resolution_status_from_latest_object_history(record),
+    ):
+        if source == SUPPORT_RESOLUTION_STATUS_OPEN:
+            return SUPPORT_RESOLUTION_STATUS_OPEN
+    return None
 
 
 def enqueue_support_ticket_praja_sync(record: Record, event_name: str) -> None:
-    """POST ticket snapshot to Praja when rules leave a terminal ``resolution_status``."""
-    enqueue_praja_for_terminal_resolution(record)
+    """POST to Praja using object_history from the button-click save (not records.data)."""
+    from support_ticket.records import resolution_status_from_latest_object_history
+
+    status = resolution_status_from_latest_object_history(record)
+    if status is None:
+        status = SUPPORT_EVENT_TO_PRAJA_RESOLUTION_STATUS.get(event_name)
+    enqueue_praja_for_terminal_resolution(record, resolution_status=status)
 
 
 def dispatch_support_ticket_event(

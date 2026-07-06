@@ -332,7 +332,7 @@ def enqueue_ticket_created_praja(
 ) -> None:
     from support_ticket.events import enqueue_praja_for_open_ticket
 
-    enqueue_praja_for_open_ticket(record)
+    enqueue_praja_for_open_ticket(record, dump_data=dump_data)
 
 
 def on_ticket_created_after_dump(
