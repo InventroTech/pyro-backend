@@ -24,7 +24,7 @@ SAVE_AND_CONTINUE_RESOLUTION_EVENTS = {
 # Stored on ticket/record when Praja dumps a new open support ticket.
 SUPPORT_RESOLUTION_STATUS_OPEN = "Open"
 
-PRAJA_SAVE_SUPPORT_TICKET_URL = "http://api.thecircleapp.in/pyro/save_support_ticket"
+PRAJA_SAVE_SUPPORT_TICKET_URL = "https://api.thecircleapp.in/pyro/save_support_ticket"
 
 # ``resolution_status`` values that POST to Praja ``save_support_ticket`` after rules run.
 # ``Open`` is synced separately when a dumped ticket is created.

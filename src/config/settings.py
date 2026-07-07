@@ -350,7 +350,7 @@ MIXPANEL_JOB_BATCH_SIZE = env.int("MIXPANEL_JOB_BATCH_SIZE", default=10)
 
 PRAJA_API_URL = os.getenv(
     "PRAJA_API_URL",
-    "http://api.thecircleapp.in/pyro/save_support_ticket",
+    "https://api.thecircleapp.in/pyro/save_support_ticket",
 )
 
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
