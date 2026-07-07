@@ -395,7 +395,7 @@ class SaveResolvedTicketPrajaService:
 
         self.api_url = getattr(settings, "PRAJA_API_URL", None) or os.environ.get(
             "PRAJA_API_URL",
-            "https://api.thecircleapp.in/pyro/save_resolved_ticket",
+            "http://api.thecircleapp.in/pyro/save_support_ticket",
         )
 
     def _request_headers(self) -> Dict[str, str]:
