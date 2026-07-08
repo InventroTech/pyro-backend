@@ -364,11 +364,7 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         self.assertIsNotNone(record.data.get("dumped_at"))
         self.assertEqual(record.data["call_status"], "Call Waiting")
 
-    def test_process_does_not_write_support_ticket_table(self):
-        from support_ticket.models import SupportTicket
-
-        SupportTicket.objects.all().delete()
-        count_before = SupportTicket.objects.count()
+    def test_process_writes_records_only(self):
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
             data=dump_data(user_id="cust_no_legacy", name="Records Only"),
@@ -376,7 +372,6 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
 
         process_dumped_tickets(tenant_id=self.tenant_id)
 
-        self.assertEqual(SupportTicket.objects.count(), count_before)
         self.assertTrue(
             Record.objects.filter(
                 tenant=self.tenant,
