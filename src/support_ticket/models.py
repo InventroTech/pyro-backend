@@ -1,15 +1,6 @@
 from django.db import models
-from django.contrib.postgres.fields import ArrayField
-from django.contrib.postgres.indexes import GinIndex, BrinIndex
-from django.db.models import Q
-from django.utils import timezone
-from core.models import Tenant
-from core.soft_delete import SoftDeleteMixin
-from accounts.models import SupabaseAuthUser
-from object_history.models import HistoryTrackedModel
-import logging
 
-logger = logging.getLogger(__name__)
+from core.soft_delete import SoftDeleteMixin
 
 
 class SupportTicketDump(SoftDeleteMixin):
@@ -36,68 +27,3 @@ class SupportTicketDump(SoftDeleteMixin):
     def __str__(self):
         name = (self.data or {}).get("name")
         return f"SupportTicketDump {self.id} - {name or 'Unknown'} ({self.tenant_id})"
-
-
-
-class SupportTicket(HistoryTrackedModel, SoftDeleteMixin):
-    id = models.BigAutoField(primary_key=True)
-    created_at = models.DateTimeField(default=timezone.now)
-    ticket_date = models.DateTimeField(null=True, blank=True)
-
-    user_id = models.CharField(max_length=255, null=True, blank=True)
-    name = models.CharField(max_length=255, null=True, blank=True)
-    phone = models.CharField(max_length=50, null=True, blank=True)
-    source = models.CharField(max_length=255, null=True, blank=True)
-
-    subscription_status = models.TextField(null=True, blank=True)
-    atleast_paid_once = models.BooleanField(null=True, blank=True)
-
-    reason = models.TextField(null=True, blank=True)
-    other_reasons = ArrayField(models.TextField(), null=True, blank=True)
-
-    badge = models.CharField(max_length=255, null=True, blank=True)
-    poster = models.CharField(max_length=255, null=True, blank=True)
-
-    tenant = models.ForeignKey(
-        Tenant, db_column="tenant_id",
-        on_delete=models.DO_NOTHING,  # matches DB
-        null=True, blank=True, related_name="support_tickets",
-    )
-    assigned_to = models.ForeignKey(
-        SupabaseAuthUser, db_column="assigned_to",
-        on_delete=models.CASCADE,     # matches DB ON DELETE CASCADE
-        null=True, blank=True, related_name="assigned_tickets",
-    )
-
-    layout_status = models.CharField(max_length=255, null=True, blank=True)
-    state = models.CharField(max_length=255, null=True, blank=True)
-    resolution_status = models.CharField(max_length=255, null=True, blank=True)
-    resolution_time = models.CharField(max_length=255, null=True, blank=True)
-
-    cse_name = models.CharField(max_length=255, null=True, blank=True)
-    cse_remarks = models.TextField(null=True, blank=True)
-    call_status = models.CharField(max_length=255, null=True, blank=True)
-    call_attempts = models.IntegerField(null=True, blank=True, default=0)
-
-    rm_name = models.TextField(null=True, blank=True)
-    completed_at = models.DateTimeField(null=True, blank=True)
-    snooze_until = models.DateTimeField(null=True, blank=True)
-    praja_dashboard_user_link = models.TextField(null=True, blank=True)
-    display_pic_url = models.TextField(null=True, blank=True)
-    dumped_at = models.DateTimeField(null=True, blank=True)
-    review_requested = models.BooleanField(null=True, blank=True, help_text="Whether CSE requested customer to post a review")
-
-    class Meta:
-        db_table = "support_ticket"
-        managed = True
-
-    def save(self, *args, **kwargs):
-        """
-        Standard save method - no Mixpanel integration here.
-        Mixpanel events are sent from API views.
-        """
-        return super().save(*args, **kwargs)
-
-    def __str__(self):
-        base = self.name or self.phone or self.user_id or f"#{self.id}"
-        return f"SupportTicket {base}"

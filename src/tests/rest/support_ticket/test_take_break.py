@@ -5,13 +5,10 @@ from rest_framework.test import APIClient
 from uuid import uuid4
 from unittest.mock import patch
 
-from core.models import Tenant
 from crm_records.models import EventLog, Record
 from support_ticket.constants import SUPPORT_EVENT_TAKE_BREAK, SUPPORT_TICKET_ENTITY_TYPE
-from support_ticket.models import SupportTicket
 from tests.factories.user_factory import UserFactory
 from tests.factories.core_factory import TenantFactory
-from tests.factories.support_ticket_factory import SupportTicketFactory
 from tests.factories.support_ticket_dump_factory import dump_data
 from tests.rest.support_ticket.support_rules import seed_support_ticket_rules
 
@@ -116,23 +113,13 @@ class TestTakeBreakView:
         return client, user.supabase_uid, user.email
 
     @pytest.fixture
-    def test_ticket(self, authenticated_client):
-        return SupportTicketFactory(
-            tenant=self.test_tenant,
-            cse_name="existing_cse_name",
-            assigned_to=None,
-        )
-
-    @pytest.fixture
-    def test_record(self, authenticated_client, test_ticket):
+    def test_record(self, authenticated_client):
         seed_support_ticket_rules(self.test_tenant)
         return Record.objects.create(
             tenant=self.test_tenant,
             entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data=dump_data(
-                support_ticket_id=test_ticket.id,
-                cse_name=test_ticket.cse_name,
-                resolution_status=test_ticket.resolution_status,
+                cse_name="existing_cse_name",
             ),
         )
 
