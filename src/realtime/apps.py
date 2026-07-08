@@ -1,7 +1,10 @@
+import logging
 import os
 import sys
 
 from django.apps import AppConfig
+
+logger = logging.getLogger(__name__)
 
 
 class RealtimeConfig(AppConfig):
@@ -39,9 +42,7 @@ class RealtimeConfig(AppConfig):
 
             start_pg_listener()
         except Exception:
-            import logging
-
-            logging.getLogger(__name__).exception("Failed to start PostgreSQL realtime listener")
+            logger.exception("Failed to start PostgreSQL realtime listener")
 
     @staticmethod
     def _warn_if_pg_notify_trigger_missing() -> None:
@@ -55,9 +56,12 @@ class RealtimeConfig(AppConfig):
                 )
                 if cursor.fetchone():
                     return
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "Realtime: direct SQL/Supabase table edits will NOT auto-update the UI "
                 "until you run: python manage.py migrate crm_records 0037"
             )
         except Exception:
-            pass
+            logger.debug(
+                "Could not verify pg_notify trigger records_pyro_notify_change",
+                exc_info=True,
+            )
