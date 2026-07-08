@@ -9,11 +9,6 @@ from .crm_records_factory import (
     BackgroundJobFactory,
     ApiSecretKeyFactory,
 )
-from .support_ticket_factory import (
-    SupportTicketFactory,
-    UnassignedSupportTicketFactory,
-    SnoozedSupportTicketFactory,
-)
 from .support_ticket_dump_factory import (
     SupportTicketDumpFactory,
     ProcessedSupportTicketDumpFactory,
@@ -32,9 +27,6 @@ __all__ = [
     "PartnerEventFactory",
     "BackgroundJobFactory",
     "ApiSecretKeyFactory",
-    "SupportTicketFactory",
-    "UnassignedSupportTicketFactory",
-    "SnoozedSupportTicketFactory",
     "SupportTicketDumpFactory",
     "ProcessedSupportTicketDumpFactory",
     "MinimalSupportTicketDumpFactory",
