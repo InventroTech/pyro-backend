@@ -6,7 +6,7 @@ from typing import Any
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 
-from .event_loop import schedule_on_main_loop
+from .event_loop import get_main_event_loop, schedule_on_main_loop
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +36,10 @@ def broadcast_to_tenant(tenant_id, data: dict[str, Any]) -> None:
     payload = {"type": "notify", "data": data}
 
     try:
-        if schedule_on_main_loop(_group_send(channel_layer, group, payload)):
-            return
+        loop = get_main_event_loop()
+        if loop is not None and loop.is_running():
+            if schedule_on_main_loop(_group_send(channel_layer, group, payload)):
+                return
         async_to_sync(channel_layer.group_send)(group, payload)
     except Exception:
         logger.exception("Failed to broadcast realtime event to tenant %s", tenant_id)
@@ -56,8 +58,10 @@ def broadcast_to_user(user_id, data: dict[str, Any]) -> None:
     payload = {"type": "notify", "data": data}
 
     try:
-        if schedule_on_main_loop(_group_send(channel_layer, group, payload)):
-            return
+        loop = get_main_event_loop()
+        if loop is not None and loop.is_running():
+            if schedule_on_main_loop(_group_send(channel_layer, group, payload)):
+                return
         async_to_sync(channel_layer.group_send)(group, payload)
     except Exception:
         logger.exception("Failed to broadcast realtime event to user %s", user_id)
