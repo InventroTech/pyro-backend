@@ -45,6 +45,7 @@ ALLOWED_HOSTS = (
 # Application definition
 
 INSTALLED_APPS = [
+    'daphne',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -74,6 +75,8 @@ INSTALLED_APPS = [
     'whatsapp',
     'pages',
     'pyro_jobs',
+    'channels',
+    'realtime',
 ]
 
 MIDDLEWARE = [
@@ -110,9 +113,32 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'config.wsgi.application'
+ASGI_APPLICATION = 'config.asgi.application'
 
+REDIS_URL = env("REDIS_URL", default="")
+REALTIME_USE_REDIS = env.bool(
+    "REALTIME_USE_REDIS",
+    default=bool(REDIS_URL) and not IS_DEV,
+)
 
-# Database
+if REALTIME_USE_REDIS and REDIS_URL:
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {"hosts": [REDIS_URL]},
+        }
+    }
+else:
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels.layers.InMemoryChannelLayer",
+        }
+    }
+
+# Postgres LISTEN for direct SQL / Supabase table edits.
+# Supabase transaction pooler (port 6543) cannot receive cross-connection NOTIFY;
+# session mode (5432 on the same pooler host) is required.
+REALTIME_PG_NOTIFY_PORT = env.int("REALTIME_PG_NOTIFY_PORT", default=None)
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 # Logging might add color later for better debugging

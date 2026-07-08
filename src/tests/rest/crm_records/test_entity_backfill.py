@@ -57,8 +57,10 @@ class EntityBackfillApiTests(TestCase):
         self.assertEqual(r2.status_code, 200)
         self.assertEqual(r2.data["id"], first_id)
         self.assertEqual(r2.data["data"]["name"], "Updated Lead Name")
-        self.assertEqual(r2.data["data"]["lead_stage"], "ASSIGNED")
         self.assertEqual(r2.data["data"]["phone_number"], "+9999999999")
+        # Serializer omits lead_stage from API when stage is ASSIGNED but assigned_to is empty.
+        record = Record.objects.get(id=first_id)
+        self.assertEqual(record.data["lead_stage"], "ASSIGNED")
         self.assertEqual(Record.objects.filter(data__praja_id=pid).count(), 1)
 
     def test_post_entity_upsert_preserves_existing_fields(self):

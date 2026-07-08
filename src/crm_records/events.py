@@ -43,6 +43,11 @@ def dispatch_event(event_name: str, record: Record, payload: Dict[str, Any]) -> 
             dispatch_support_ticket_event(event_name, record, payload)
         else:
             execute_rules(event_name, record, payload, str(record.tenant.id))
+
+        record.refresh_from_db()
+        from realtime.broadcast import broadcast_record_updated
+
+        broadcast_record_updated(record)
         
         logger.info(f"[DISPATCH] Successfully processed event '{event_name}' for Record {record.id}")
         return True
