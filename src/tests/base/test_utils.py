@@ -5,8 +5,6 @@ from datetime import datetime, timedelta
 import jwt
 from django.conf import settings
 
-from support_ticket.models import SupportTicket
-
 
 def generate_supabase_jwt(
     uid="test-uid-123",
@@ -25,34 +23,6 @@ def generate_supabase_jwt(
     if isinstance(token, bytes):
         token = token.decode("utf-8")
     return token
-
-
-def create_support_ticket(
-    dumped_at=None,
-    completed_at=None,
-    resolution_status="Resolved",
-    tenant_id=None,
-    name="Test User",
-    phone="9999999999",
-    user_id=None,
-    source="test_source",
-):
-    import uuid
-    dumped_at = dumped_at or datetime.now() - timedelta(days=2)
-    completed_at = completed_at or datetime.now() - timedelta(days=1)
-    tenant_id = tenant_id or uuid.uuid4()
-    user_id = user_id or "test-user-id"
-
-    return SupportTicket.objects.create(
-        dumped_at=dumped_at,
-        completed_at=completed_at,
-        resolution_status=resolution_status,
-        tenant_id=tenant_id,
-        name=name,
-        phone=phone,
-        user_id=user_id,
-        source=source,
-    )
 
 
 def get_date_range(days=7):

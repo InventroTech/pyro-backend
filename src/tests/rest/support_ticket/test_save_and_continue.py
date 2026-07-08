@@ -8,9 +8,7 @@ from crm_records.models import EventLog, Record
 from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
 from tests.rest.support_ticket.support_rules import seed_support_ticket_rules
 from tests.base.test_setup import BaseAPITestCase
-from tests.factories.support_ticket_factory import SupportTicketFactory
 from tests.factories.support_ticket_dump_factory import dump_data
-from support_ticket.models import SupportTicket
 from support_ticket.services import TicketTimeService, MixpanelService
 
 
@@ -128,15 +126,7 @@ class SaveAndContinueViewTest(BaseAPITestCase):
     def setUp(self):
         """Set up test data"""
         super().setUp()
-        
-        self.support_ticket = SupportTicketFactory.create(
-            user_id="test_user_123",
-            name="Test User",
-            phone="1234567890",
-            tenant_id=self.tenant_id,
-            resolution_time="0:00",
-            call_attempts=0
-        )
+
         seed_support_ticket_rules(self.tenant)
         self.record = Record.objects.create(
             tenant=self.tenant,
@@ -145,7 +135,6 @@ class SaveAndContinueViewTest(BaseAPITestCase):
                 user_id="test_user_123",
                 name="Test User",
                 phone="1234567890",
-                support_ticket_id=self.support_ticket.id,
                 resolution_time="0:00",
                 call_attempts=0,
                 release_build_number="4.5.6",
