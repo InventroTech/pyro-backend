@@ -108,6 +108,25 @@ class RecordSerializer(serializers.ModelSerializer):
             return one.get(key, key)
         return key
 
+    def to_representation(self, instance):
+        rep = super().to_representation(instance)
+        if instance.entity_type != "lead":
+            return rep
+
+        data = rep.get("data")
+        if isinstance(data, dict):
+            data.pop("state", None)
+            data.pop("location", None)
+            if _is_empty_assigned(data.get("assigned_to")):
+                if str(data.get("lead_stage") or "").strip().upper() == "ASSIGNED":
+                    data.pop("lead_stage", None)
+            rep["data"] = data
+
+        if _is_empty_assigned((data or {}).get("assigned_to") if isinstance(data, dict) else None):
+            rep.pop("assigned_to_display", None)
+
+        return rep
+
 
 class TenantEntityTypeSerializer(serializers.ModelSerializer):
     class Meta:
