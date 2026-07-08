@@ -75,16 +75,18 @@ def _handle_payload(payload: str) -> None:
 def _listen_loop() -> None:
     while True:
         conn = None
-        params = _connection_params()
+        db = settings.DATABASES["default"]
+        listen_host = db["HOST"]
+        listen_port = _listen_port()
         try:
-            conn = psycopg2.connect(**params)
+            conn = psycopg2.connect(**_connection_params())
             conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
             with conn.cursor() as cur:
                 cur.execute(f"LISTEN {PG_NOTIFY_CHANNEL};")
             logger.info(
                 "Listening for database changes on %s:%s channel %s",
-                params["host"],
-                params["port"],
+                listen_host,
+                listen_port,
                 PG_NOTIFY_CHANNEL,
             )
 
