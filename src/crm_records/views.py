@@ -921,12 +921,22 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
         Update record. "Not connected" logic is handled by the rule engine when lead_stage is set to "NOT_CONNECTED".
         """
         previous_status = None
+        previous_assigned_to = None
         instance = getattr(serializer, "instance", None)
         if instance is not None and isinstance(getattr(instance, "data", None), dict):
             previous_status = instance.data.get("status")
+            previous_assigned_to = instance.data.get("assigned_to")
 
         updated_record = serializer.save()
         _notify_requester_when_paid(self.request, updated_record, previous_status)
+
+        if updated_record.entity_type == "lead" and isinstance(updated_record.data, dict):
+            PostAssignmentActions().run_for_manual_assignment(
+                record=updated_record,
+                tenant=self.request.tenant,
+                previous_assigned_to=previous_assigned_to,
+                assignee_identifier=updated_record.data.get("assigned_to"),
+            )
 
     def delete(self, request, *args, **kwargs):
         """
