@@ -63,10 +63,6 @@ from .serializers import (
 )
 
 
-
-
-
-
 # "How many support tickets did each executive resolve last week?"
 # "Which executive had the fastest average resolution time last month?"
 # "Show me the number of open vs closed tickets handled by each support executive."
@@ -1165,23 +1161,17 @@ class TeamOverviewView(TenantScopedMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Get manager user_id
-        user = request.user
-        user_id = getattr(user, 'supabase_uid', None) or getattr(user, 'id', None)
-        
+        user_id = getattr(request.user, "supabase_uid", None) or getattr(request.user, "id", None)
         if not user_id:
             return Response(
                 {"error": "User ID not found"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        # Resolve team
+
         team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
-        
-        # Get metrics
         metrics_service = TeamMetricsService(team_user_ids, request.tenant)
         overview = metrics_service.get_overview(target_date, manager_user_id=str(user_id))
-        
+
         serializer = TeamOverviewSerializer(overview)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -1239,11 +1229,8 @@ class TeamMembersView(TenantScopedMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Get manager user_id
-        user = request.user
-        user_id = getattr(user, 'supabase_uid', None) or getattr(user, 'id', None)
-        
-        logger.info(f"Manager user_id: {user_id} (supabase_uid: {getattr(user, 'supabase_uid', None)}, id: {getattr(user, 'id', None)})")
+        user_id = getattr(request.user, "supabase_uid", None) or getattr(request.user, "id", None)
+        logger.info(f"Manager user_id: {user_id}")
         
         if not user_id:
             logger.error("User ID not found for manager")
@@ -1251,21 +1238,17 @@ class TeamMembersView(TenantScopedMixin, APIView):
                 {"error": "User ID not found"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        # Resolve team
+
         logger.info(f"Resolving team for manager user_id: {user_id}, tenant: {request.tenant.id}")
         team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
         logger.info(f"Team resolved - found {len(team_user_ids)} user_ids: {team_user_ids}")
-        
-        # Get metrics
-        logger.info(f"Creating TeamMetricsService with {len(team_user_ids)} team members")
+
         metrics_service = TeamMetricsService(team_user_ids, request.tenant)
-        logger.info(f"Calling get_member_breakdown for date range: {start_date} to {end_date}, excluding manager: {user_id}")
-        member_breakdown = metrics_service.get_member_breakdown(start_date, end_date, manager_user_id=str(user_id))
-        logger.info(f"Member breakdown returned {len(member_breakdown)} members")
-        
+        member_breakdown = metrics_service.get_member_breakdown(
+            start_date, end_date, manager_user_id=str(user_id)
+        )
+
         serializer = MemberBreakdownSerializer(member_breakdown, many=True)
-        logger.info(f"Serialized data: {serializer.data}")
         logger.info("=" * 80)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -1310,26 +1293,18 @@ class TeamEventsView(TenantScopedMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Get manager user_id
-        user = request.user
-        user_id = getattr(user, 'supabase_uid', None) or getattr(user, 'id', None)
-        
+        user_id = getattr(request.user, "supabase_uid", None) or getattr(request.user, "id", None)
         if not user_id:
             return Response(
                 {"error": "User ID not found"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        # Resolve team
+
         team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
-        
-        # Get metrics
         metrics_service = TeamMetricsService(team_user_ids, request.tenant)
         event_breakdown = metrics_service.get_event_breakdown(start_date, end_date)
-        
-        # Format response
+
         result = [{"event_type": k, "count": v} for k, v in event_breakdown.items()]
-        
         serializer = EventBreakdownSerializer(result, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -1366,23 +1341,17 @@ class TeamTimeSeriesView(TenantScopedMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Get manager user_id
-        user = request.user
-        user_id = getattr(user, 'supabase_uid', None) or getattr(user, 'id', None)
-        
+        user_id = getattr(request.user, "supabase_uid", None) or getattr(request.user, "id", None)
         if not user_id:
             return Response(
                 {"error": "User ID not found"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        # Resolve team
+
         team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
-        
-        # Get metrics
         metrics_service = TeamMetricsService(team_user_ids, request.tenant)
         time_series = metrics_service.get_time_series(start_date, end_date)
-        
+
         serializer = TimeSeriesSerializer(time_series, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -1395,8 +1364,7 @@ class UnassignedLeadsBreakdownView(TenantScopedMixin, APIView):
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
-        user = request.user
-        user_id = getattr(user, 'supabase_uid', None) or getattr(user, 'id', None)
+        user_id = getattr(request.user, "supabase_uid", None) or getattr(request.user, "id", None)
 
         if not user_id:
             return Response(
