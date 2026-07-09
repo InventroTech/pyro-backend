@@ -122,50 +122,21 @@ class TeamMetricsService:
     
     def _get_base_queryset(self, start_date: Optional[date] = None, end_date: Optional[date] = None, manager_user_id: Optional[str] = None):
         """Get base queryset filtered by tenant, team, and date range."""
-        logger = logging.getLogger(__name__)
-        logger.info(f"[TeamMetricsService] _get_base_queryset called")
-        logger.info(f"[TeamMetricsService] tenant: {self.tenant.id}, team_user_ids: {self.team_user_ids}")
-        logger.info(f"[TeamMetricsService] date range: {start_date} to {end_date}")
-        
-        # Get team user IDs (excluding manager if provided)
         team_user_ids_to_use = self._get_team_user_ids_excluding_manager(manager_user_id) if manager_user_id else self.team_user_ids
-        
-        # Filter by payload->>'user_id' directly using JSONB field lookup
+
         queryset = EventLog.objects.filter(
             tenant=self.tenant,
             event__in=TRACKED_EVENTS,
-            payload__user_id__in=list(team_user_ids_to_use)
+            payload__user_id__in=list(team_user_ids_to_use),
         )
-        
-        base_count = queryset.count()
-        logger.info(f"[TeamMetricsService] Base queryset (before date filter) count: {base_count}")
-        logger.info(f"[TeamMetricsService] TRACKED_EVENTS: {TRACKED_EVENTS}")
-        
-        # Log actual dates of events to help debug
-        if base_count > 0:
-            event_dates = list(queryset.values_list('timestamp__date', flat=True).distinct().order_by('timestamp__date'))
-            logger.info(f"[TeamMetricsService] Actual event dates in database: {event_dates}")
-            # Log a sample event with full details
-            sample = queryset.first()
-            if sample:
-                logger.info(f"[TeamMetricsService] Sample event - id: {sample.id}, event: {sample.event}, timestamp: {sample.timestamp}, date: {sample.timestamp.date()}, payload_user_id: {sample.payload.get('user_id')}")
-        else:
-            logger.warning(f"[TeamMetricsService] No events found for team members at all (before date filter)")
-        
-        # Convert IST dates to UTC datetime ranges for accurate filtering
+
         if start_date:
             utc_start, _ = get_utc_datetime_range_for_ist_date(start_date)
             queryset = queryset.filter(timestamp__gte=utc_start)
-            logger.info(f"[TeamMetricsService] After start_date filter (IST: {start_date}, UTC: {utc_start}): {queryset.count()}")
         if end_date:
             _, utc_end = get_utc_datetime_range_for_ist_date(end_date)
             queryset = queryset.filter(timestamp__lte=utc_end)
-            logger.info(f"[TeamMetricsService] After end_date filter (IST: {end_date}, UTC: {utc_end}): {queryset.count()}")
-        
-        # Log sample events to see what we're getting
-        sample_events = queryset[:5].values('id', 'event', 'timestamp', 'payload__user_id', 'record_id')
-        logger.info(f"[TeamMetricsService] Sample events (first 5): {list(sample_events)}")
-        
+
         return queryset
     
     def get_attendance(self, target_date: date, manager_user_id: Optional[str] = None) -> int:
@@ -471,10 +442,10 @@ class TeamMetricsService:
                 params=lead_source_filter,
             )
         if lead_stage_filter:
-            qs = qs.extra(where=["COALESCE(NULLIF(TRIM(data->>'lead_stage'), ''), 'Unknown') = %s"],
-                          params=[lead_stage_filter])
-
-        total = qs.count()
+            qs = qs.extra(
+                where=["COALESCE(NULLIF(TRIM(data->>'lead_stage'), ''), 'Unknown') = %s"],
+                params=[lead_stage_filter],
+            )
 
         by_source = list(
             qs.extra(
@@ -488,7 +459,8 @@ class TeamMetricsService:
             ).values("lead_stage").annotate(count=Count("id")).order_by("-count")
         )
 
-        # Distinct values for filter dropdowns (always unfiltered so user sees all options)
+        total = sum(row["count"] for row in by_source)
+
         all_qs = self._get_unassigned_leads_qs()
         available_sources = list(
             all_qs.extra(
@@ -543,58 +515,54 @@ class TeamMetricsService:
             target_date: Date to get metrics for
             manager_user_id: Optional manager user_id to calculate reports count (excludes manager from total_team_size)
         """
-        # Calculate total_team_size: count of reports only (excluding manager)
         if manager_user_id:
-            # Use TeamResolver to get accurate count of reports
             total_team_size = TeamResolver.get_reports_count(manager_user_id, self.tenant)
         else:
-            # Fallback: exclude manager from team_user_ids count
-            # This assumes manager is always in team_user_ids
             total_team_size = max(0, len(self.team_user_ids) - 1)
-        
+
+        queryset = self._get_base_queryset(
+            start_date=target_date,
+            end_date=target_date,
+            manager_user_id=manager_user_id,
+        )
+        connected_events = Q(
+            event__in=[
+                "lead.trial_activated",
+                "lead.call_back_later",
+                "lead.not_interested",
+            ]
+        )
+        agg = queryset.aggregate(
+            attendance=Count("payload__user_id", filter=Q(event="lead.get_next_lead"), distinct=True),
+            calls_made=Count("id", filter=Q(event="lead.get_next_lead")),
+            trials_activated=Count("id", filter=Q(event="lead.trial_activated")),
+            calls_connected=Count("id", filter=connected_events),
+        )
+
+        calls_connected = agg["calls_connected"] or 0
+        trials_activated = agg["trials_activated"] or 0
+        connected_to_trial_ratio = (
+            trials_activated / calls_connected if calls_connected > 0 else None
+        )
+
         return {
-            'attendance': self.get_attendance(target_date, manager_user_id),
-            'total_team_size': total_team_size,
-            'calls_made': self.get_calls_made(target_date, target_date, manager_user_id),
-            'trials_activated': self.get_trials_activated(target_date, target_date, manager_user_id),
-            'connected_to_trial_ratio': self.get_connected_to_trial_ratio(target_date, target_date, manager_user_id),
-            'average_time_spent_seconds': self.get_average_time_spent(target_date, target_date, manager_user_id),
-            'trail_target': self.get_trail_target(manager_user_id),
-            'allotted_leads': self.get_allotted_leads(manager_user_id),
-            'unassigned_leads': self.get_unassigned_leads_count(),
+            "attendance": agg["attendance"] or 0,
+            "total_team_size": total_team_size,
+            "calls_made": agg["calls_made"] or 0,
+            "trials_activated": trials_activated,
+            "connected_to_trial_ratio": connected_to_trial_ratio,
+            "average_time_spent_seconds": self.get_average_time_spent(
+                target_date, target_date, manager_user_id
+            ),
+            "trail_target": self.get_trail_target(manager_user_id),
+            "allotted_leads": self.get_allotted_leads(manager_user_id),
+            "unassigned_leads": self.get_unassigned_leads_count(),
         }
     
     def get_member_breakdown(self, start_date: Optional[date] = None, end_date: Optional[date] = None, manager_user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get per-member metrics breakdown (excluding manager if manager_user_id is provided)."""
-        logger = logging.getLogger(__name__)
-        logger.info(f"[TeamMetricsService] get_member_breakdown called for {start_date} to {end_date} (excluding manager: {manager_user_id})")
-        
         queryset = self._get_base_queryset(start_date, end_date, manager_user_id)
-        total_events = queryset.count()
-        logger.info(f"[TeamMetricsService] Total events in queryset: {total_events}")
-        
-        if total_events == 0:
-            logger.warning(f"[TeamMetricsService] No events found! Checking if events exist at all...")
-            # Check if there are ANY events for this tenant
-            all_events = EventLog.objects.filter(tenant=self.tenant).count()
-            logger.info(f"[TeamMetricsService] Total EventLog entries for tenant: {all_events}")
-            
-            # Check if there are events for team user_ids (without date filter)
-            team_events = EventLog.objects.filter(
-                tenant=self.tenant,
-                payload__user_id__in=list(self.team_user_ids)
-            ).count()
-            logger.info(f"[TeamMetricsService] Total events for team user_ids (any date): {team_events}")
-            
-            # Check if there are events for the date range (any user)
-            date_events = EventLog.objects.filter(
-                tenant=self.tenant,
-                timestamp__date__gte=start_date if start_date else date.today(),
-                timestamp__date__lte=end_date if end_date else date.today()
-            ).count()
-            logger.info(f"[TeamMetricsService] Total events for date range (any user): {date_events}")
-        
-        # Initialize user_metrics with ALL team members (even if they have no events), excluding manager
+
         team_user_ids_to_use = self._get_team_user_ids_excluding_manager(manager_user_id) if manager_user_id else self.team_user_ids
         user_metrics = {}
         for user_id in team_user_ids_to_use:
@@ -609,26 +577,14 @@ class TeamMetricsService:
                 'take_break_count': 0,
                 'not_interested_count': 0,
             }
-        
-        logger.info(f"[TeamMetricsService] Initialized user_metrics for {len(user_metrics)} team members")
-        
-        # Get counts per user per event type
+
         member_metrics = queryset.values('payload__user_id', 'event').annotate(
             count=Count('id')
         ).order_by('payload__user_id', 'event')
         
-        logger.info(f"[TeamMetricsService] Member metrics query returned {member_metrics.count()} rows")
-        
-        # Log the raw metrics
-        for metric in list(member_metrics)[:10]:  # Log first 10
-            logger.info(f"[TeamMetricsService] Metric: user_id={metric['payload__user_id']}, event={metric['event']}, count={metric['count']}")
-        
-        # Aggregate by user - update existing entries with event counts
         for metric in member_metrics:
             user_id = metric['payload__user_id']
-            # Ensure user_id is in user_metrics (should already be, but safety check)
             if user_id not in user_metrics:
-                logger.warning(f"[TeamMetricsService] Found event for user_id {user_id} not in team_user_ids, adding anyway")
                 user_metrics[user_id] = {
                     'user_id': user_id,
                     'total_events': 0,
@@ -675,10 +631,7 @@ class TeamMetricsService:
             user_id_str = str(m['user_id'])
             user_id_to_email[user_id_str] = m['email']
             membership_id_to_user_id[m['id']] = user_id_str
-        
-        logger.info(f"[TeamMetricsService] Fetched {len(user_id_to_email)} user emails from TenantMembership for {len(all_user_ids)} user_ids")
-        
-        # Fetch daily_target from TenantMemberSetting KV for these memberships
+
         membership_ids = [m['id'] for m in memberships]
         target_by_membership = kv_int_by_membership(
             self.tenant, membership_ids, USER_KV_DAILY_TARGET_KEY
@@ -689,14 +642,6 @@ class TeamMetricsService:
             if user_id_str:
                 user_id_to_daily_target[user_id_str] = daily_target
 
-        logger.info(
-            "[TeamMetricsService] Fetched daily_target for %d users from TenantMemberSetting KV",
-            len(user_id_to_daily_target),
-        )
-        
-        # Calculate per-user metrics: attendance, connected_to_trial_ratio, and average_time_spent
-        # Add email, daily_target, and calculated metrics to each member's data
-        # Bulk fetch average time spent for all users (avoids N+1)
         user_ids_for_avg = [
             uid for uid in user_metrics.keys()
             if not manager_user_id or str(uid) != str(manager_user_id)
@@ -709,9 +654,7 @@ class TeamMetricsService:
         manager_user_id_str = str(manager_user_id) if manager_user_id else None
         
         for user_id_str, metrics in user_metrics.items():
-            # Exclude manager from results
             if manager_user_id_str and user_id_str == manager_user_id_str:
-                logger.info(f"[TeamMetricsService] Excluding manager user_id: {user_id_str} from member breakdown")
                 continue
             
             member_data = metrics.copy()
@@ -733,11 +676,7 @@ class TeamMetricsService:
             member_data['average_time_spent_seconds'] = avg_time_by_user.get(user_id_str, 0.0)
             
             result.append(member_data)
-        
-        logger.info(f"[TeamMetricsService] Final member breakdown: {len(result)} members (manager excluded)")
-        for member in result:
-            logger.info(f"[TeamMetricsService] Member: {member}")
-        
+
         return result
     
     def get_event_breakdown(self, start_date: Optional[date] = None, end_date: Optional[date] = None) -> Dict[str, int]:
