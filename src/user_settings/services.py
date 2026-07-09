@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Iterable, Optional
 
-from django.db import connection
 from django.db.models import Count, Q
 from django.utils import timezone
 
@@ -178,44 +178,58 @@ _LEAD_FILTER_OPTIONS_TTL_SECONDS = 30
 _lead_filter_options_cache: dict[str, tuple[float, dict[str, list[str]]]] = {}
 _lead_filter_options_lock = threading.Lock()
 
-_LEAD_FILTER_OPTIONS_SQL = """
-    SELECT kind, value
-    FROM (
-        SELECT 'lead_types' AS kind, TRIM(data->>'affiliated_party') AS value
+# One indexed DISTINCT per column; run in parallel (faster than UNION of 4 full scans).
+_LEAD_FILTER_DISTINCT_SQL = {
+    "lead_types": """
+        SELECT DISTINCT TRIM(data->>'affiliated_party') AS value
         FROM records
         WHERE tenant_id = %s
           AND entity_type = 'lead'
           AND data->>'affiliated_party' IS NOT NULL
           AND TRIM(data->>'affiliated_party') NOT IN ('', 'null')
-        GROUP BY 2
-        UNION ALL
-        SELECT 'lead_sources', TRIM(data->>'lead_source')
+        ORDER BY 1
+    """,
+    "lead_sources": """
+        SELECT DISTINCT TRIM(data->>'lead_source') AS value
         FROM records
         WHERE tenant_id = %s
           AND entity_type = 'lead'
           AND data->>'lead_source' IS NOT NULL
           AND TRIM(data->>'lead_source') NOT IN ('', 'null')
-        GROUP BY 2
-        UNION ALL
-        SELECT 'lead_statuses', TRIM(data->>'lead_status')
+        ORDER BY 1
+    """,
+    "lead_statuses": """
+        SELECT DISTINCT TRIM(data->>'lead_status') AS value
         FROM records
         WHERE tenant_id = %s
           AND entity_type = 'lead'
           AND data->>'lead_status' IS NOT NULL
           AND TRIM(data->>'lead_status') NOT IN ('', 'null')
-        GROUP BY 2
-        UNION ALL
-        SELECT 'lead_states', TRIM(data->>'state')
+        ORDER BY 1
+    """,
+    "lead_states": """
+        SELECT DISTINCT TRIM(data->>'state') AS value
         FROM records
         WHERE tenant_id = %s
           AND entity_type = 'lead'
           AND data->>'state' IS NOT NULL
           AND TRIM(data->>'state') NOT IN ('', 'null')
-        GROUP BY 2
-    ) options
-    WHERE value IS NOT NULL AND value != ''
-    ORDER BY kind, value
-"""
+        ORDER BY 1
+    """,
+}
+
+
+def _fetch_distinct_lead_filter_column(tenant_id, kind: str, sql: str) -> tuple[str, list[str]]:
+    from django.db import connections
+
+    conn = connections["default"]
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(sql, [tenant_id])
+            values = [row[0] for row in cursor.fetchall() if row[0]]
+        return kind, values
+    finally:
+        conn.close()
 
 
 def _fetch_lead_filter_options_from_db(tenant_id) -> dict[str, list[str]]:
@@ -225,12 +239,14 @@ def _fetch_lead_filter_options_from_db(tenant_id) -> dict[str, list[str]]:
         "lead_statuses": [],
         "lead_states": [],
     }
-    params = [tenant_id, tenant_id, tenant_id, tenant_id]
-    with connection.cursor() as cursor:
-        cursor.execute(_LEAD_FILTER_OPTIONS_SQL, params)
-        for kind, value in cursor.fetchall():
-            if kind in options and value:
-                options[kind].append(value)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(_fetch_distinct_lead_filter_column, tenant_id, kind, sql)
+            for kind, sql in _LEAD_FILTER_DISTINCT_SQL.items()
+        ]
+        for future in as_completed(futures):
+            kind, values = future.result()
+            options[kind] = values
     return options
 
 
