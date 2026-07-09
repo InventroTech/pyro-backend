@@ -433,45 +433,58 @@ class TeamMetricsService:
         Breakdown of unassigned leads by lead_source and lead_stage.
         lead_source_filter accepts a list of sources for multi-select.
         """
-        qs = self._get_unassigned_leads_qs()
+        from django.db import connection
 
-        if lead_source_filter:
-            placeholders = ", ".join(["%s"] * len(lead_source_filter))
-            qs = qs.extra(
-                where=[f"COALESCE(NULLIF(TRIM(data->>'lead_source'), ''), 'Unknown') IN ({placeholders})"],
-                params=lead_source_filter,
+        sql = f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(data->>'lead_source'), ''), 'Unknown') AS lead_source,
+                COALESCE(NULLIF(TRIM(data->>'lead_stage'), ''), 'Unknown') AS lead_stage,
+                COUNT(*)::int AS count
+            FROM records
+            WHERE tenant_id = %s
+              AND entity_type = 'lead'
+              AND ({self._UNASSIGNED_WHERE.strip()})
+            GROUP BY 1, 2
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(sql, [self.tenant.id])
+            inventory = [
+                {"lead_source": row[0], "lead_stage": row[1], "count": row[2]}
+                for row in cursor.fetchall()
+            ]
+
+        source_filter = set(lead_source_filter) if lead_source_filter else None
+        available_sources = sorted({row["lead_source"] for row in inventory})
+        available_stages = sorted({row["lead_stage"] for row in inventory})
+
+        by_source_counts: Dict[str, int] = {}
+        by_status_counts: Dict[str, int] = {}
+        total = 0
+
+        for row in inventory:
+            lead_source = row["lead_source"]
+            lead_stage = row["lead_stage"]
+            count = row["count"]
+            if source_filter and lead_source not in source_filter:
+                continue
+            if lead_stage_filter and lead_stage != lead_stage_filter:
+                continue
+            total += count
+            by_source_counts[lead_source] = by_source_counts.get(lead_source, 0) + count
+            by_status_counts[lead_stage] = by_status_counts.get(lead_stage, 0) + count
+
+        by_source = [
+            {"lead_source": source, "count": count}
+            for source, count in sorted(
+                by_source_counts.items(), key=lambda item: (-item[1], item[0])
             )
-        if lead_stage_filter:
-            qs = qs.extra(
-                where=["COALESCE(NULLIF(TRIM(data->>'lead_stage'), ''), 'Unknown') = %s"],
-                params=[lead_stage_filter],
+        ]
+        by_status = [
+            {"lead_stage": stage, "count": count}
+            for stage, count in sorted(
+                by_status_counts.items(), key=lambda item: (-item[1], item[0])
             )
-
-        by_source = list(
-            qs.extra(
-                select={"lead_source": "COALESCE(NULLIF(TRIM(data->>'lead_source'), ''), 'Unknown')"}
-            ).values("lead_source").annotate(count=Count("id")).order_by("-count")
-        )
-
-        by_status = list(
-            qs.extra(
-                select={"lead_stage": "COALESCE(NULLIF(TRIM(data->>'lead_stage'), ''), 'Unknown')"}
-            ).values("lead_stage").annotate(count=Count("id")).order_by("-count")
-        )
-
-        total = sum(row["count"] for row in by_source)
-
-        all_qs = self._get_unassigned_leads_qs()
-        available_sources = list(
-            all_qs.extra(
-                select={"lead_source": "COALESCE(NULLIF(TRIM(data->>'lead_source'), ''), 'Unknown')"}
-            ).values_list("lead_source", flat=True).distinct().order_by("lead_source")
-        )
-        available_stages = list(
-            all_qs.extra(
-                select={"lead_stage": "COALESCE(NULLIF(TRIM(data->>'lead_stage'), ''), 'Unknown')"}
-            ).values_list("lead_stage", flat=True).distinct().order_by("lead_stage")
-        )
+        ]
 
         return {
             "total": total,

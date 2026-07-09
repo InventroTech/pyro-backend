@@ -1376,8 +1376,7 @@ class UnassignedLeadsBreakdownView(TenantScopedMixin, APIView):
         lead_source_list = [s.strip() for s in lead_source_raw.split(',') if s.strip()] or None
         lead_stage = request.query_params.get('lead_stage', '').strip() or None
 
-        team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
-        metrics_service = TeamMetricsService(team_user_ids, request.tenant)
+        metrics_service = TeamMetricsService(set(), request.tenant)
         breakdown = metrics_service.get_unassigned_leads_breakdown(
             lead_source_filter=lead_source_list,
             lead_stage_filter=lead_stage,

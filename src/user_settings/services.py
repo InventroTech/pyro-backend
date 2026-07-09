@@ -271,7 +271,13 @@ def get_lead_filter_options(tenant) -> dict[str, list[str]]:
         cached = _lead_filter_options_cache.get(cache_key)
         if cached and now - cached[0] < _LEAD_FILTER_OPTIONS_TTL_SECONDS:
             return cached[1]
-        options = _fetch_lead_filter_options_from_db(tenant.id)
+
+    options = _fetch_lead_filter_options_from_db(tenant.id)
+
+    with _lead_filter_options_lock:
+        cached = _lead_filter_options_cache.get(cache_key)
+        if cached and time.monotonic() - cached[0] < _LEAD_FILTER_OPTIONS_TTL_SECONDS:
+            return cached[1]
         _lead_filter_options_cache[cache_key] = (time.monotonic(), options)
         return options
 
