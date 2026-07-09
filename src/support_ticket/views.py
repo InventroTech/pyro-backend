@@ -139,6 +139,16 @@ def _extract_dump_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
     return _serialize_dump_payload(cleaned)
 
 
+def _coerce_webhook_api_id(value: Any) -> Any:
+    if value is None:
+        return None
+    return int(value) if str(value).isdigit() else value
+
+
+def _support_ticket_id_from_dump_data(data: Mapping[str, Any]) -> Any:
+    return data.get("support_ticket_id") or data.get("ticket_id")
+
+
 def _enqueue_mixpanel_event(
     *,
     user_id: Any,
@@ -916,15 +926,38 @@ class DumpTicketWebhookView(APIView):
                     {**dump_payload, "ticket_date": timezone.now()}
                 )
 
-            dump_ticket = SupportTicketDump.objects.create(
+            SupportTicketDump.objects.create(
                 tenant_id=payload['tenant_id'],
                 data=dump_payload,
                 is_processed=False,
             )
 
+            process_dumped_tickets(
+                tenant_id=payload['tenant_id'],
+                on_ticket_created=on_ticket_created_after_dump,
+            )
+
+            record_id = None
+            normalized_user_id = _normalize_dump_user_id(dump_payload.get("user_id"))
+            if normalized_user_id:
+                record = (
+                    Record.objects.filter(
+                        tenant_id=payload['tenant_id'],
+                        entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                        data__user_id=normalized_user_id,
+                    )
+                    .order_by("-id")
+                    .first()
+                )
+                if record:
+                    record_id = record.id
+
             return Response({
                 'message': 'Ticket created successfully in dump table',
-                'ticket_id': dump_ticket.id,
+                'ticket_id': _coerce_webhook_api_id(
+                    _support_ticket_id_from_dump_data(dump_payload)
+                ),
+                'record_id': record_id,
             }, status=status.HTTP_200_OK)
             
         except Exception as error:
