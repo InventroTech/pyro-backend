@@ -108,8 +108,62 @@ def count_available_fresh_leads_for_group(tenant, group: Group) -> int:
 
 
 def fresh_leads_counts_for_groups(tenant, groups: Iterable[Group]) -> dict[int, int]:
-    """Map group id -> available queue count (fresh leads or support tickets)."""
-    return {group.id: count_available_fresh_leads_for_group(tenant, group) for group in groups}
+    """
+    Map group id -> available queue count (fresh leads or support tickets).
+
+    Lead groups share one inventory scan instead of one COUNT query per group.
+    """
+    groups = list(groups)
+    if not groups:
+        return {}
+
+    counts: dict[int, int] = {}
+    lead_groups: list[Group] = []
+
+    for group in groups:
+        group_data = group.group_data if isinstance(group.group_data, dict) else {}
+        queue_type = group_data.get("queue_type")
+        if isinstance(queue_type, str) and queue_type.strip().lower() == "ticket":
+            counts[group.id] = count_available_support_tickets_for_group(tenant, group_data)
+        else:
+            lead_groups.append(group)
+
+    if not lead_groups:
+        return counts
+
+    # One query for all queueable leads; count per group in memory.
+    inventory = list(
+        Record.objects.filter(tenant=tenant, entity_type="lead")
+        .extra(where=[_QUEUEABLE_LEADS_WHERE])
+        .values_list(
+            "data__affiliated_party",
+            "data__lead_source",
+            "data__lead_status",
+            "data__state",
+        )
+    )
+
+    for group in lead_groups:
+        group_data = group.group_data if isinstance(group.group_data, dict) else {}
+        party = group_data.get("party") if isinstance(group_data.get("party"), list) else []
+        lead_sources = group_data.get("lead_sources") if isinstance(group_data.get("lead_sources"), list) else []
+        lead_statuses = group_data.get("lead_statuses") if isinstance(group_data.get("lead_statuses"), list) else []
+        states = group_data.get("states") if isinstance(group_data.get("states"), list) else []
+
+        matched = 0
+        for affiliated_party, lead_source, lead_status, state in inventory:
+            if party and affiliated_party not in party:
+                continue
+            if lead_sources and lead_source not in lead_sources:
+                continue
+            if lead_statuses and lead_status not in lead_statuses:
+                continue
+            if states and state not in states:
+                continue
+            matched += 1
+        counts[group.id] = matched
+
+    return counts
 
 
 USER_KV_GROUP_ID_KEY = "GROUP"

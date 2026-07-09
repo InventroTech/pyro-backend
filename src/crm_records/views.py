@@ -24,6 +24,20 @@ import logging
 import os
 
 logger = logging.getLogger(__name__)
+
+# Default JSON fields for lead search (avoids loading the full queryset to discover keys).
+_LEAD_DEFAULT_SEARCH_FIELDS = (
+    "name",
+    "phone_number",
+    "lead_source",
+    "lead_stage",
+    "lead_status",
+    "assigned_to",
+    "affiliated_party",
+    "praja_id",
+    "state",
+)
+
 from .models import Record, EventLog, RuleSet, RuleExecutionLog, EntityTypeSchema, CallAttemptMatrix, ScoringRule, PartnerEvent, ApiSecretKey
 from object_history.models import ObjectHistory
 from .serializers import (
@@ -561,27 +575,15 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                         # JSONB fields in data column (including name)
                         q_search |= Q(**{f"data__{field}__icontains": search_term})
             else:
-                # Fallback: search across all available fields
-                # Search in normal model fields
-                # Note: name is now in data column, so it will be searched via data__name below
-                
-                # Search in JSONB fields - we'll search in common fields and any existing data
-                # Get all unique keys from existing data to search in
-                # Dynamically collect all unique JSON fields from existing records for this queryset
-                from itertools import chain
-                all_data_keys = set(chain.from_iterable(
-                    record.data.keys() for record in queryset if isinstance(record.data, dict)
-                ))
-                common_json_fields = list(all_data_keys)
-                # Always include 'name' in search since it's now in data column
-                if 'name' not in common_json_fields:
-                    common_json_fields.append('name')
-                for field in common_json_fields:
-                    q_search |= Q(**{f"data__{field}__icontains": search_term})
-                
-                # Also search for any field that might contain the search term
-                # This is a more generic approach for unknown JSONB fields
-                q_search |= Q(data__icontains=search_term)
+                # Search common lead JSON fields only (do not scan the full queryset for keys).
+                for field in _LEAD_DEFAULT_SEARCH_FIELDS:
+                    if field == "assigned_to":
+                        q_search |= build_assigned_to_search_q(
+                            getattr(self.request, "tenant", None),
+                            search_term,
+                        )
+                    else:
+                        q_search |= Q(**{f"data__{field}__icontains": search_term})
             
             queryset = queryset.filter(q_search)
         
@@ -641,6 +643,17 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 
                 if exclude_q:
                     queryset = queryset.exclude(exclude_q)
+
+        if entity_type == "lead":
+            queryset = queryset.only(
+                "id",
+                "tenant_id",
+                "entity_type",
+                "data",
+                "pyro_data",
+                "created_at",
+                "updated_at",
+            )
             
         return queryset
     
@@ -1060,6 +1073,16 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
         queryset = super().get_queryset()
         if self.entity_type:
             queryset = queryset.filter(entity_type=self.entity_type)
+        if self.entity_type == "lead":
+            queryset = queryset.only(
+                "id",
+                "tenant_id",
+                "entity_type",
+                "data",
+                "pyro_data",
+                "created_at",
+                "updated_at",
+            )
         return queryset
     
     def perform_create(self, serializer):
