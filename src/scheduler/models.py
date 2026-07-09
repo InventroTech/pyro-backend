@@ -85,7 +85,7 @@ class ScheduledTask(HistoryTrackedModel, BaseModel):
         ]
 
 
-class AttemptLog(SoftDeleteMixin):
+class AttemptLog(HistoryTrackedModel, SoftDeleteMixin):
     task = models.ForeignKey(ScheduledTask, on_delete=models.CASCADE, related_name="attempt_logs")
     attempt_no = models.PositiveSmallIntegerField()
     started_at = models.DateTimeField(auto_now_add=True)

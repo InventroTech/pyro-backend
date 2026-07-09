@@ -4,6 +4,7 @@ from django.utils import timezone
 from django.core.validators import RegexValidator
 
 from core.soft_delete import SoftDeleteMixin
+from object_history.tracking import HistoryTrackedModel
 
 
 class TimeStampedModel(models.Model):
@@ -39,7 +40,7 @@ class Tenant(models.Model):
         return f"{self.name} ({self.slug})"
 
 
-class TenantSettings(models.Model):
+class TenantSettings(HistoryTrackedModel, models.Model):
     """
     Per-tenant product settings stored in the app DB (unlike :class:`Tenant`, which
     mirrors an external ``tenants`` table).
@@ -172,7 +173,7 @@ def default_entity_type_schema():
     return {"fields": {}}
 
 
-class TenantEntityType(BaseModel):
+class TenantEntityType(HistoryTrackedModel, BaseModel):
     """
     Discovered entity metadata for a tenant/entity_type pair.
 
@@ -216,7 +217,7 @@ class TenantEntityType(BaseModel):
         return f"{self.tenant_id}: {self.entity_type} ({self.fields_count} fields)"
 
 
-class EntityTypeDiscoverySyncState(TimeStampedModel):
+class EntityTypeDiscoverySyncState(HistoryTrackedModel, TimeStampedModel):
     """
     Global bookmark for incremental entity type discovery from records.
 
