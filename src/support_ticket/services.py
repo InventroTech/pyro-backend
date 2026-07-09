@@ -405,6 +405,9 @@ class SaveResolvedTicketPrajaService:
             headers["Authorization"] = f"Bearer {token}"
         return headers
 
+    def _coerce_api_id(self, value: Any) -> Any:
+        return int(value) if str(value).isdigit() else value
+
     def build_payload(
         self,
         record,
@@ -426,6 +429,15 @@ class SaveResolvedTicketPrajaService:
             )
             return None
 
+        ticket_id = data.get("support_ticket_id") or data.get("ticket_id")
+        if ticket_id is None:
+            logger.warning(
+                "[Praja] Skipping save_resolved_ticket — missing ticket_id "
+                "record_id=%s",
+                record.id,
+            )
+            return None
+
         resolution = (
             resolution_status
             or resolution_status_from_latest_object_history(record)
@@ -433,11 +445,10 @@ class SaveResolvedTicketPrajaService:
         ticket_status = str(resolution).strip() if resolution else ""
         ticket_status = ticket_status.upper().replace(" ", "_").replace("'", "")
 
-        user_id_for_api = int(user_id) if str(user_id).isdigit() else user_id
-
         return {
-            "user_id": user_id_for_api,
-            "ticket_id": record.id,
+            "user_id": self._coerce_api_id(user_id),
+            "ticket_id": self._coerce_api_id(ticket_id),
+            "record_id": self._coerce_api_id(record.id),
             "ticket_status": ticket_status,
             "all_tasks_completed": all_support_ticket_tasks_completed(data),
         }
@@ -446,12 +457,14 @@ class SaveResolvedTicketPrajaService:
         self,
         user_id,
         ticket_id,
+        record_id,
         ticket_status,
         all_tasks_completed,
     ) -> bool:
         payload = {
-            "user_id": int(user_id) if str(user_id).isdigit() else user_id,
-            "ticket_id": int(ticket_id) if str(ticket_id).isdigit() else ticket_id,
+            "user_id": self._coerce_api_id(user_id),
+            "ticket_id": self._coerce_api_id(ticket_id),
+            "record_id": self._coerce_api_id(record_id),
             "ticket_status": str(ticket_status).upper().replace(" ", "_").replace("'", ""),
             "all_tasks_completed": bool(all_tasks_completed),
         }
@@ -477,8 +490,9 @@ class SaveResolvedTicketPrajaService:
                 )
                 return False
             logger.info(
-                "[Praja] save_resolved_ticket success ticket_id=%s",
+                "[Praja] save_resolved_ticket success ticket_id=%s record_id=%s",
                 payload.get("ticket_id"),
+                payload.get("record_id"),
             )
             return True
         except requests.exceptions.RequestException as exc:
@@ -492,6 +506,7 @@ class SaveResolvedTicketPrajaService:
         return self.save_resolved_ticket(
             user_id=payload["user_id"],
             ticket_id=payload["ticket_id"],
+            record_id=payload["record_id"],
             ticket_status=payload["ticket_status"],
             all_tasks_completed=payload["all_tasks_completed"],
         )

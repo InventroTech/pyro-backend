@@ -907,6 +907,7 @@ class PrajaJobHandler(JobHandler):
                 success = save_service.save_resolved_ticket(
                     user_id=payload.get("user_id"),
                     ticket_id=payload.get("ticket_id"),
+                    record_id=payload.get("record_id"),
                     ticket_status=payload.get("ticket_status"),
                     all_tasks_completed=payload.get("all_tasks_completed"),
                 )
@@ -963,7 +964,7 @@ class PrajaJobHandler(JobHandler):
             logger.error("Missing required field 'object_type' in Praja job payload")
             return False
         if object_type == "save_resolved_ticket":
-            required = ("user_id", "ticket_id", "ticket_status", "all_tasks_completed")
+            required = ("user_id", "ticket_id", "record_id", "ticket_status", "all_tasks_completed")
             for field in required:
                 if field not in payload:
                     logger.error(
