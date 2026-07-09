@@ -378,7 +378,13 @@ def get_distinct_record_field_values(tenant, entity_type: str, field: str) -> li
         cached = _record_distinct_values_cache.get(cache_key)
         if cached and now - cached[0] < _RECORD_DISTINCT_VALUES_TTL_SECONDS:
             return cached[1]
-        values = _fetch_distinct_record_field_values(tenant.id, entity_type, field)
+
+    values = _fetch_distinct_record_field_values(tenant.id, entity_type, field)
+
+    with _record_distinct_values_lock:
+        cached = _record_distinct_values_cache.get(cache_key)
+        if cached and monotonic() - cached[0] < _RECORD_DISTINCT_VALUES_TTL_SECONDS:
+            return cached[1]
         _record_distinct_values_cache[cache_key] = (monotonic(), values)
         return values
 
