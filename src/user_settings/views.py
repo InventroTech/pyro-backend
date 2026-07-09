@@ -16,6 +16,7 @@ from .serializers import (
 )
 from .services import (
     fresh_leads_counts_for_groups,
+    get_lead_filter_options,
     upsert_user_kv_settings,
     upsert_user_lead_assignment_kv,
     USER_KV_GROUP_ID_KEY,
@@ -388,35 +389,8 @@ class LeadTypesListView(APIView):
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
-        """Get all unique lead types from records' affiliated_party field"""
-        tenant = request.tenant
-        
-        if not tenant:
-            return Response({
-                'lead_types': []
-            }, status=status.HTTP_200_OK)
-        
-        # Extract unique affiliated_party values using database-level query for better performance
-        # Using raw SQL for efficient JSONB querying
-        from django.db import connection
-        
-        with connection.cursor() as cursor:
-            cursor.execute("""
-                SELECT DISTINCT data->>'affiliated_party' as affiliated_party
-                FROM records
-                WHERE tenant_id = %s
-                  AND entity_type = 'lead'
-                  AND data->>'affiliated_party' IS NOT NULL
-                  AND data->>'affiliated_party' != ''
-                  AND data->>'affiliated_party' != 'null'
-                ORDER BY affiliated_party
-            """, [tenant.id])
-            
-            lead_types_list = [row[0].strip() for row in cursor.fetchall() if row[0] and row[0].strip()]
-        
-        return Response({
-            'lead_types': lead_types_list
-        }, status=status.HTTP_200_OK)
+        options = get_lead_filter_options(request.tenant)
+        return Response({"lead_types": options["lead_types"]}, status=status.HTTP_200_OK)
 
 
 class LeadSourcesListView(APIView):
@@ -424,33 +398,8 @@ class LeadSourcesListView(APIView):
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
-        """Get all unique lead sources from records' lead_source field"""
-        tenant = request.tenant
-
-        if not tenant:
-            return Response({
-                'lead_sources': []
-            }, status=status.HTTP_200_OK)
-
-        from django.db import connection
-
-        with connection.cursor() as cursor:
-            cursor.execute("""
-                SELECT DISTINCT data->>'lead_source' as lead_source
-                FROM records
-                WHERE tenant_id = %s
-                  AND entity_type = 'lead'
-                  AND data->>'lead_source' IS NOT NULL
-                  AND data->>'lead_source' != ''
-                  AND data->>'lead_source' != 'null'
-                ORDER BY lead_source
-            """, [tenant.id])
-
-            lead_sources_list = [row[0].strip() for row in cursor.fetchall() if row[0] and row[0].strip()]
-
-        return Response({
-            'lead_sources': lead_sources_list
-        }, status=status.HTTP_200_OK)
+        options = get_lead_filter_options(request.tenant)
+        return Response({"lead_sources": options["lead_sources"]}, status=status.HTTP_200_OK)
 
 
 class LeadStatusesListView(APIView):
@@ -458,33 +407,8 @@ class LeadStatusesListView(APIView):
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
-        """Get all unique lead statuses from records' lead_status field"""
-        tenant = request.tenant
-
-        if not tenant:
-            return Response({
-                'lead_statuses': []
-            }, status=status.HTTP_200_OK)
-
-        from django.db import connection
-
-        with connection.cursor() as cursor:
-            cursor.execute("""
-                SELECT DISTINCT data->>'lead_status' as lead_status
-                FROM records
-                WHERE tenant_id = %s
-                  AND entity_type = 'lead'
-                  AND data->>'lead_status' IS NOT NULL
-                  AND data->>'lead_status' != ''
-                  AND data->>'lead_status' != 'null'
-                ORDER BY lead_status
-            """, [tenant.id])
-
-            lead_statuses_list = [row[0].strip() for row in cursor.fetchall() if row[0] and row[0].strip()]
-
-        return Response({
-            'lead_statuses': lead_statuses_list
-        }, status=status.HTTP_200_OK)
+        options = get_lead_filter_options(request.tenant)
+        return Response({"lead_statuses": options["lead_statuses"]}, status=status.HTTP_200_OK)
 
 
 class LeadStatesListView(APIView):
@@ -492,32 +416,17 @@ class LeadStatesListView(APIView):
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
-        tenant = request.tenant
+        options = get_lead_filter_options(request.tenant)
+        return Response({"lead_states": options["lead_states"]}, status=status.HTTP_200_OK)
 
-        if not tenant:
-            return Response({
-                'lead_states': []
-            }, status=status.HTTP_200_OK)
 
-        from django.db import connection
+class LeadFilterOptionsView(APIView):
+    """All lead filter dropdown values in one response (single DB round trip)."""
+    permission_classes = [IsTenantAuthenticated]
 
-        with connection.cursor() as cursor:
-            cursor.execute("""
-                SELECT DISTINCT data->>'state' as state
-                FROM records
-                WHERE tenant_id = %s
-                  AND entity_type = 'lead'
-                  AND data->>'state' IS NOT NULL
-                  AND data->>'state' != ''
-                  AND data->>'state' != 'null'
-                ORDER BY state
-            """, [tenant.id])
-
-            lead_states_list = [row[0].strip() for row in cursor.fetchall() if row[0] and row[0].strip()]
-
-        return Response({
-            'lead_states': lead_states_list
-        }, status=status.HTTP_200_OK)
+    def get(self, request):
+        options = get_lead_filter_options(request.tenant)
+        return Response(options, status=status.HTTP_200_OK)
 
 
 class QueueTypesListView(APIView):
