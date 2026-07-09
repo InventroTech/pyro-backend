@@ -21,7 +21,8 @@ from django.db import IntegrityError
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 import logging
-import os
+import threading
+from time import monotonic
 
 logger = logging.getLogger(__name__)
 
@@ -347,6 +348,39 @@ from .assignee_display import build_assigned_to_search_q
 import re
 
 _RECORD_DISTINCT_FIELD_RE = re.compile(r'^[a-zA-Z0-9_]+$')
+_RECORD_DISTINCT_VALUES_TTL_SECONDS = 30
+_record_distinct_values_cache: dict[str, tuple[float, list[str]]] = {}
+_record_distinct_values_lock = threading.Lock()
+
+
+def _fetch_distinct_record_field_values(tenant_id, entity_type: str, field: str) -> list[str]:
+    """Indexed DISTINCT on a JSON data field (tenant + entity_type scoped)."""
+    from django.db import connection
+
+    sql = f"""
+        SELECT DISTINCT TRIM(data->>'{field}') AS value
+        FROM records
+        WHERE tenant_id = %s
+          AND entity_type = %s
+          AND data->>'{field}' IS NOT NULL
+          AND TRIM(data->>'{field}') NOT IN ('', 'null')
+        ORDER BY 1
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(sql, [tenant_id, entity_type])
+        return [row[0] for row in cursor.fetchall() if row[0]]
+
+
+def get_distinct_record_field_values(tenant, entity_type: str, field: str) -> list[str]:
+    cache_key = f"{tenant.id}:{entity_type}:{field}"
+    now = monotonic()
+    with _record_distinct_values_lock:
+        cached = _record_distinct_values_cache.get(cache_key)
+        if cached and now - cached[0] < _RECORD_DISTINCT_VALUES_TTL_SECONDS:
+            return cached[1]
+        values = _fetch_distinct_record_field_values(tenant.id, entity_type, field)
+        _record_distinct_values_cache[cache_key] = (monotonic(), values)
+        return values
 
 
 class RecordDistinctFieldValuesView(TenantScopedMixin, APIView):
@@ -373,29 +407,7 @@ class RecordDistinctFieldValuesView(TenantScopedMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        json_key = f'data__{field}'
-        qs = Record.objects.filter(tenant=request.tenant, entity_type=entity_type)
-        raw_values = (
-            qs.exclude(**{json_key: None})
-            .exclude(**{json_key: ''})
-            .values_list(json_key, flat=True)
-            .distinct()
-        )
-
-        cleaned: list[str] = []
-        seen: set[str] = set()
-        for val in raw_values:
-            if val is None:
-                continue
-            text = str(val).strip()
-            if not text or text.lower() in ('null', 'none'):
-                continue
-            if text in seen:
-                continue
-            seen.add(text)
-            cleaned.append(text)
-
-        cleaned.sort(key=str.casefold)
+        cleaned = get_distinct_record_field_values(request.tenant, entity_type, field)
         results = [{'label': v, 'value': v} for v in cleaned]
 
         return Response(
