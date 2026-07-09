@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import threading
+import time
 from typing import Iterable, Optional
 
-from django.db.models import Q
+from django.db import connection
+from django.db.models import Count, Q
 from django.utils import timezone
 
 from crm_records.models import Record
@@ -131,16 +134,17 @@ def fresh_leads_counts_for_groups(tenant, groups: Iterable[Group]) -> dict[int, 
     if not lead_groups:
         return counts
 
-    # One query for all queueable leads; count per group in memory.
+    # One grouped query: bucket by filter dimensions instead of loading every row.
     inventory = list(
         Record.objects.filter(tenant=tenant, entity_type="lead")
         .extra(where=[_QUEUEABLE_LEADS_WHERE])
-        .values_list(
+        .values(
             "data__affiliated_party",
             "data__lead_source",
             "data__lead_status",
             "data__state",
         )
+        .annotate(count=Count("id"))
     )
 
     for group in lead_groups:
@@ -151,7 +155,11 @@ def fresh_leads_counts_for_groups(tenant, groups: Iterable[Group]) -> dict[int, 
         states = group_data.get("states") if isinstance(group_data.get("states"), list) else []
 
         matched = 0
-        for affiliated_party, lead_source, lead_status, state in inventory:
+        for row in inventory:
+            affiliated_party = row["data__affiliated_party"]
+            lead_source = row["data__lead_source"]
+            lead_status = row["data__lead_status"]
+            state = row["data__state"]
             if party and affiliated_party not in party:
                 continue
             if lead_sources and lead_source not in lead_sources:
@@ -160,10 +168,96 @@ def fresh_leads_counts_for_groups(tenant, groups: Iterable[Group]) -> dict[int, 
                 continue
             if states and state not in states:
                 continue
-            matched += 1
+            matched += row["count"]
         counts[group.id] = matched
 
     return counts
+
+
+_LEAD_FILTER_OPTIONS_TTL_SECONDS = 30
+_lead_filter_options_cache: dict[str, tuple[float, dict[str, list[str]]]] = {}
+_lead_filter_options_lock = threading.Lock()
+
+_LEAD_FILTER_OPTIONS_SQL = """
+    SELECT kind, value
+    FROM (
+        SELECT 'lead_types' AS kind, TRIM(data->>'affiliated_party') AS value
+        FROM records
+        WHERE tenant_id = %s
+          AND entity_type = 'lead'
+          AND data->>'affiliated_party' IS NOT NULL
+          AND TRIM(data->>'affiliated_party') NOT IN ('', 'null')
+        GROUP BY 2
+        UNION ALL
+        SELECT 'lead_sources', TRIM(data->>'lead_source')
+        FROM records
+        WHERE tenant_id = %s
+          AND entity_type = 'lead'
+          AND data->>'lead_source' IS NOT NULL
+          AND TRIM(data->>'lead_source') NOT IN ('', 'null')
+        GROUP BY 2
+        UNION ALL
+        SELECT 'lead_statuses', TRIM(data->>'lead_status')
+        FROM records
+        WHERE tenant_id = %s
+          AND entity_type = 'lead'
+          AND data->>'lead_status' IS NOT NULL
+          AND TRIM(data->>'lead_status') NOT IN ('', 'null')
+        GROUP BY 2
+        UNION ALL
+        SELECT 'lead_states', TRIM(data->>'state')
+        FROM records
+        WHERE tenant_id = %s
+          AND entity_type = 'lead'
+          AND data->>'state' IS NOT NULL
+          AND TRIM(data->>'state') NOT IN ('', 'null')
+        GROUP BY 2
+    ) options
+    WHERE value IS NOT NULL AND value != ''
+    ORDER BY kind, value
+"""
+
+
+def _fetch_lead_filter_options_from_db(tenant_id) -> dict[str, list[str]]:
+    options = {
+        "lead_types": [],
+        "lead_sources": [],
+        "lead_statuses": [],
+        "lead_states": [],
+    }
+    params = [tenant_id, tenant_id, tenant_id, tenant_id]
+    with connection.cursor() as cursor:
+        cursor.execute(_LEAD_FILTER_OPTIONS_SQL, params)
+        for kind, value in cursor.fetchall():
+            if kind in options and value:
+                options[kind].append(value)
+    return options
+
+
+def get_lead_filter_options(tenant) -> dict[str, list[str]]:
+    """
+    Distinct lead filter dropdown values for a tenant.
+
+    Cached briefly so parallel page-load requests (lead-types, lead-sources, etc.)
+    share one database round trip.
+    """
+    if not tenant:
+        return {
+            "lead_types": [],
+            "lead_sources": [],
+            "lead_statuses": [],
+            "lead_states": [],
+        }
+
+    cache_key = str(tenant.id)
+    now = time.monotonic()
+    with _lead_filter_options_lock:
+        cached = _lead_filter_options_cache.get(cache_key)
+        if cached and now - cached[0] < _LEAD_FILTER_OPTIONS_TTL_SECONDS:
+            return cached[1]
+        options = _fetch_lead_filter_options_from_db(tenant.id)
+        _lead_filter_options_cache[cache_key] = (time.monotonic(), options)
+        return options
 
 
 USER_KV_GROUP_ID_KEY = "GROUP"
