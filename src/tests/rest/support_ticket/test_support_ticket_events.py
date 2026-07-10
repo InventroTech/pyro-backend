@@ -209,8 +209,9 @@ class SupportTicketEventHandlerTest(BaseAPITestCase):
             {
                 "user_id": 123,
                 "ticket_id": 456,
-                "record_id": self.record.id,
+                "ticket_type": "self_trial",
                 "ticket_status": "RESOLVED",
                 "all_tasks_completed": True,
+                "record_id": self.record.id,
             },
         )

@@ -277,6 +277,7 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
                 name="Open ticket",
                 resolution_status="Open",
                 support_ticket_id=78901,
+                support_ticket_type="alert_words",
             ),
         )
 
@@ -302,6 +303,7 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
             data__user_id="12345",
         )
         self.assertEqual(payload["ticket_id"], 78901)
+        self.assertEqual(payload["ticket_type"], "alert_words")
         self.assertEqual(payload["record_id"], record.id)
 
     @patch("support_ticket.events.get_queue_service")
