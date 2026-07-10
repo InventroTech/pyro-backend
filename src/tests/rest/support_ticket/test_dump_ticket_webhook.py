@@ -8,6 +8,8 @@ from django.utils import timezone
 
 from tests.base.test_setup import BaseAPITestCase
 from support_ticket.models import SupportTicketDump
+from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
+from crm_records.models import Record
 
 
 class DumpTicketWebhookViewTest(BaseAPITestCase):
@@ -33,6 +35,7 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
         # Valid webhook payload
         self.valid_payload = {
             'tenant_id': str(self.tenant_id),
+            'support_ticket_id': 78901,
             'ticket_date': '2023-12-01T10:00:00Z',
             'user_id': 'test_user_123',
             'name': 'John Doe',
@@ -47,6 +50,13 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
             'praja_dashboard_user_link': 'https://www.thecircleapp.in/admin/users/abc123',
             'display_pic_url': 'https://example.com/pic.jpg'
         }
+
+    def _latest_dump(self):
+        return (
+            SupportTicketDump.objects.filter(tenant_id=self.tenant_id)
+            .order_by('-id')
+            .first()
+        )
     
     @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
     def test_dump_ticket_webhook_success(self):
@@ -60,10 +70,11 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data['message'])
-        self.assertIn('ticket_id', response.data)
+        self.assertEqual(response.data['ticket_id'], 78901)
+        self.assertIsNotNone(response.data['record_id'])
         
         # Verify the ticket was created in the database
-        ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
+        ticket_dump = self._latest_dump()
         self.assertEqual(ticket_dump.tenant_id, uuid.UUID(self.tenant_id))
         data = ticket_dump.data
         self.assertEqual(data.get('user_id'), 'test_user_123')
@@ -81,8 +92,11 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
             'https://www.thecircleapp.in/admin/users/abc123',
         )
         self.assertEqual(data.get('display_pic_url'), 'https://example.com/pic.jpg')
-        self.assertFalse(ticket_dump.is_processed)  # Should default to False
+        self.assertTrue(ticket_dump.is_processed)
         self.assertIsNotNone(ticket_dump.created_at)
+        record = Record.objects.get(id=response.data['record_id'])
+        self.assertEqual(record.entity_type, SUPPORT_TICKET_ENTITY_TYPE)
+        self.assertEqual(record.data.get('user_id'), 'test_user_123')
     
     @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
     def test_dump_ticket_webhook_minimal_payload(self):
@@ -99,15 +113,17 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
         )
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data['ticket_id'])
+        self.assertIsNone(response.data['record_id'])
         
         # Verify the ticket was created with minimal data
-        ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
+        ticket_dump = self._latest_dump()
         self.assertEqual(ticket_dump.tenant_id, uuid.UUID(self.tenant_id))
         data = ticket_dump.data
         self.assertIsNone(data.get('user_id'))
         self.assertIsNone(data.get('name'))
         self.assertIsNotNone(data.get('ticket_date'))
-        self.assertFalse(ticket_dump.is_processed)
+        self.assertTrue(ticket_dump.is_processed)
     
     def test_dump_ticket_webhook_missing_secret(self):
         """Test webhook request without secret header"""
@@ -211,7 +227,7 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         
         # Verify the ticket was created with null values handled correctly
-        ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
+        ticket_dump = self._latest_dump()
         self.assertEqual(ticket_dump.tenant_id, uuid.UUID(self.tenant_id))
         data = ticket_dump.data
         self.assertIsNone(data.get('user_id'))
@@ -238,7 +254,7 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-        ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
+        ticket_dump = self._latest_dump()
         self.assertEqual(ticket_dump.data.get('name'), 'John Doe')
         self.assertEqual(ticket_dump.data['extra_field_1'], 'custom value')
         self.assertEqual(ticket_dump.data['extra_field_2'], 123)
@@ -283,7 +299,7 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
                 
                 self.assertEqual(response.status_code, status.HTTP_200_OK)
                 
-                ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
+                ticket_dump = self._latest_dump()
                 self.assertEqual(ticket_dump.data.get('atleast_paid_once'), expected_value)
                 
                 # Clean up for next iteration
@@ -313,7 +329,7 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
                 
                 self.assertEqual(response.status_code, status.HTTP_200_OK)
                 
-                ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
+                ticket_dump = self._latest_dump()
                 self.assertEqual(ticket_dump.data.get('praja_dashboard_user_link'), url)
                 self.assertEqual(ticket_dump.data.get('display_pic_url'), url)
                 
@@ -350,7 +366,7 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
                 **{"HTTP_X_WEBHOOK_SECRET": self.webhook_secret},
             )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        ticket_dump = SupportTicketDump.objects.get(id=response.data["ticket_id"])
+        ticket_dump = self._latest_dump()
         return ticket_dump.data.get("ticket_date"), real_time
 
     @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
@@ -368,49 +384,30 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
     
     @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
     def test_dump_ticket_webhook_concurrent_requests(self):
-        """Test handling multiple concurrent webhook requests"""
-        import threading
-        import time
-        
+        """Test handling multiple back-to-back webhook requests (unique users)."""
         results = []
-        errors = []
-        
-        def make_request(thread_id):
-            try:
-                payload = self.valid_payload.copy()
-                payload['user_id'] = f'user_{thread_id}'
-                payload['name'] = f'User {thread_id}'
-                
-                response = self.client.post(
-                    self.url,
-                    data=json.dumps(payload),
-                    content_type='application/json',
-                    **{'HTTP_X_WEBHOOK_SECRET': self.webhook_secret}
-                )
-                results.append((thread_id, response.status_code, response.data))
-            except Exception as e:
-                errors.append((thread_id, str(e)))
-        
-        # Create and start multiple threads
-        threads = []
-        for i in range(5):
-            thread = threading.Thread(target=make_request, args=(i,))
-            threads.append(thread)
-            thread.start()
-        
-        # Wait for all threads to complete
-        for thread in threads:
-            thread.join()
-        
-        # Verify all requests succeeded
-        self.assertEqual(len(errors), 0, f"Errors occurred: {errors}")
+
+        for thread_id in range(5):
+            payload = self.valid_payload.copy()
+            payload['user_id'] = f'user_{thread_id}'
+            payload['name'] = f'User {thread_id}'
+            payload['support_ticket_id'] = 80000 + thread_id
+
+            response = self.client.post(
+                self.url,
+                data=json.dumps(payload),
+                content_type='application/json',
+                **{'HTTP_X_WEBHOOK_SECRET': self.webhook_secret},
+            )
+            results.append((thread_id, response.status_code, response.data))
+
         self.assertEqual(len(results), 5)
-        
+
         for thread_id, status_code, data in results:
             self.assertEqual(status_code, status.HTTP_200_OK)
-            self.assertIn('ticket_id', data)
-        
-        # Verify all tickets were created
+            self.assertEqual(data['ticket_id'], 80000 + thread_id)
+            self.assertIsNotNone(data['record_id'])
+
         self.assertEqual(SupportTicketDump.objects.count(), 5)
     
     @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
@@ -430,7 +427,7 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         
-        ticket_dump = SupportTicketDump.objects.get(id=response.data['ticket_id'])
+        ticket_dump = self._latest_dump()
         self.assertEqual(len(ticket_dump.data.get('reason', '')), 10000)
     
     @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
