@@ -2,9 +2,10 @@ import uuid
 from django.db import models
 
 from core.models import BaseModel
+from object_history.models import HistoryTrackedModel
 
 
-class AnalyticsRunCore(BaseModel):
+class AnalyticsRunCore(HistoryTrackedModel, BaseModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     completed_at = models.DateTimeField(null=True, blank=True)
     user_id = models.CharField(max_length=128, db_index=True)

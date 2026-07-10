@@ -1,7 +1,8 @@
 from django.db import models
+from object_history.tracking import HistoryTrackedModel
 
 
-class PyroJob(models.Model):
+class PyroJob(HistoryTrackedModel, models.Model):
 
     STATUS_PENDING   = "PENDING"
     STATUS_RUNNING   = "RUNNING"

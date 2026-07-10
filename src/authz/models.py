@@ -8,7 +8,7 @@ from core.soft_delete import alive_q
 from object_history.models import HistoryTrackedModel
 
 
-class Permission(SoftDeleteMixin):
+class Permission(HistoryTrackedModel, SoftDeleteMixin):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     perm_key = models.CharField(max_length=128, db_index=True)
 
@@ -22,7 +22,7 @@ class Permission(SoftDeleteMixin):
         ]
 
 
-class Role(SoftDeleteMixin):
+class Role(HistoryTrackedModel, SoftDeleteMixin):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey("core.Tenant", on_delete=models.CASCADE)
     key = models.CharField(max_length=64)
@@ -43,7 +43,7 @@ class Role(SoftDeleteMixin):
         ]
 
 
-class RolePermission(SoftDeleteMixin):
+class RolePermission(HistoryTrackedModel, SoftDeleteMixin):
     role = models.ForeignKey(Role, on_delete=models.CASCADE)
     permission = models.ForeignKey(Permission, on_delete=models.CASCADE)
 
@@ -117,7 +117,7 @@ class TenantMembership(HistoryTrackedModel, SoftDeleteMixin):
         super().save(*args, **kwargs)
 
 
-class UserGroup(SoftDeleteMixin):
+class UserGroup(HistoryTrackedModel, SoftDeleteMixin):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey("core.Tenant", on_delete=models.CASCADE)
     key = models.CharField(max_length=64)
@@ -140,7 +140,7 @@ class UserGroup(SoftDeleteMixin):
     )
 
 
-class GroupMembership(SoftDeleteMixin):
+class GroupMembership(HistoryTrackedModel, SoftDeleteMixin):
     group = models.ForeignKey(UserGroup, on_delete=models.CASCADE)
     user_id = models.UUIDField()
 
@@ -154,7 +154,7 @@ class GroupMembership(SoftDeleteMixin):
         ]
 
 
-class GroupPermission(SoftDeleteMixin):
+class GroupPermission(HistoryTrackedModel, SoftDeleteMixin):
     group = models.ForeignKey(UserGroup, on_delete=models.CASCADE)
     permission = models.ForeignKey(Permission, on_delete=models.CASCADE)
 
@@ -168,7 +168,7 @@ class GroupPermission(SoftDeleteMixin):
         ]
 
 
-class GroupRole(SoftDeleteMixin):
+class GroupRole(HistoryTrackedModel, SoftDeleteMixin):
     group = models.ForeignKey(UserGroup, on_delete=models.CASCADE)
     role = models.ForeignKey(Role, on_delete=models.CASCADE)
 
@@ -182,7 +182,7 @@ class GroupRole(SoftDeleteMixin):
         ]
 
 
-class UserPermission(SoftDeleteMixin):
+class UserPermission(HistoryTrackedModel, SoftDeleteMixin):
     """
     Per-user permission overrides, scoped by TenantMembership.
     No explicit tenant FK is needed because membership.tenant is the source of truth.
