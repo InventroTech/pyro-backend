@@ -29,6 +29,7 @@ class SupportTicketEventHandlerTest(BaseAPITestCase):
             entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data=dump_data(
                 user_id="cust_1",
+                support_ticket_id=456,
                 support_ticket_type="Self_Trial",
                 call_attempts=0,
                 assigned_to=self.supabase_uid,
@@ -208,6 +209,7 @@ class SupportTicketEventHandlerTest(BaseAPITestCase):
             {
                 "user_id": 123,
                 "ticket_id": self.record.id,
+                "ticket_type": "self_trial",
                 "ticket_status": "RESOLVED",
                 "all_tasks_completed": True,
             },
