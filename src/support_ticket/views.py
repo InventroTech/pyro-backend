@@ -149,6 +149,36 @@ def _support_ticket_id_from_dump_data(data: Mapping[str, Any]) -> Any:
     return data.get("support_ticket_id") or data.get("ticket_id")
 
 
+def _resolve_support_ticket_record_id(
+    *,
+    tenant_id: Any,
+    dump_payload: Mapping[str, Any],
+) -> Optional[int]:
+    """Find CRM record id after dump ingest for webhook response."""
+    base_qs = Record.objects.filter(
+        tenant_id=tenant_id,
+        entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+    )
+    ticket_id = _support_ticket_id_from_dump_data(dump_payload)
+    if ticket_id is not None:
+        ticket_id_str = str(ticket_id)
+        record = (
+            base_qs.filter(data__support_ticket_id=ticket_id_str).first()
+            or base_qs.filter(data__support_ticket_id=ticket_id).first()
+            or base_qs.filter(data__ticket_id=ticket_id_str).first()
+            or base_qs.filter(data__ticket_id=ticket_id).first()
+        )
+        if record:
+            return record.id
+
+    normalized_user_id = _normalize_dump_user_id(dump_payload.get("user_id"))
+    if normalized_user_id:
+        record = base_qs.filter(data__user_id=normalized_user_id).order_by("-id").first()
+        if record:
+            return record.id
+    return None
+
+
 def _enqueue_mixpanel_event(
     *,
     user_id: Any,
@@ -937,20 +967,10 @@ class DumpTicketWebhookView(APIView):
                 on_ticket_created=on_ticket_created_after_dump,
             )
 
-            record_id = None
-            normalized_user_id = _normalize_dump_user_id(dump_payload.get("user_id"))
-            if normalized_user_id:
-                record = (
-                    Record.objects.filter(
-                        tenant_id=payload['tenant_id'],
-                        entity_type=SUPPORT_TICKET_ENTITY_TYPE,
-                        data__user_id=normalized_user_id,
-                    )
-                    .order_by("-id")
-                    .first()
-                )
-                if record:
-                    record_id = record.id
+            record_id = _resolve_support_ticket_record_id(
+                tenant_id=payload['tenant_id'],
+                dump_payload=dump_payload,
+            )
 
             return Response({
                 'message': 'Ticket created successfully in dump table',

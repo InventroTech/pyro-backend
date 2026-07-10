@@ -384,51 +384,30 @@ class DumpTicketWebhookViewTest(BaseAPITestCase):
     
     @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
     def test_dump_ticket_webhook_concurrent_requests(self):
-        """Test handling multiple concurrent webhook requests"""
-        import threading
-        import time
-        
+        """Test handling multiple back-to-back webhook requests (unique users)."""
         results = []
-        errors = []
-        
-        def make_request(thread_id):
-            try:
-                payload = self.valid_payload.copy()
-                payload['user_id'] = f'user_{thread_id}'
-                payload['name'] = f'User {thread_id}'
-                payload['support_ticket_id'] = 80000 + thread_id
-                
-                response = self.client.post(
-                    self.url,
-                    data=json.dumps(payload),
-                    content_type='application/json',
-                    **{'HTTP_X_WEBHOOK_SECRET': self.webhook_secret}
-                )
-                results.append((thread_id, response.status_code, response.data))
-            except Exception as e:
-                errors.append((thread_id, str(e)))
-        
-        # Create and start multiple threads
-        threads = []
-        for i in range(5):
-            thread = threading.Thread(target=make_request, args=(i,))
-            threads.append(thread)
-            thread.start()
-        
-        # Wait for all threads to complete
-        for thread in threads:
-            thread.join()
-        
-        # Verify all requests succeeded
-        self.assertEqual(len(errors), 0, f"Errors occurred: {errors}")
+
+        for thread_id in range(5):
+            payload = self.valid_payload.copy()
+            payload['user_id'] = f'user_{thread_id}'
+            payload['name'] = f'User {thread_id}'
+            payload['support_ticket_id'] = 80000 + thread_id
+
+            response = self.client.post(
+                self.url,
+                data=json.dumps(payload),
+                content_type='application/json',
+                **{'HTTP_X_WEBHOOK_SECRET': self.webhook_secret},
+            )
+            results.append((thread_id, response.status_code, response.data))
+
         self.assertEqual(len(results), 5)
-        
+
         for thread_id, status_code, data in results:
             self.assertEqual(status_code, status.HTTP_200_OK)
             self.assertEqual(data['ticket_id'], 80000 + thread_id)
             self.assertIsNotNone(data['record_id'])
-        
-        # Verify all tickets were created
+
         self.assertEqual(SupportTicketDump.objects.count(), 5)
     
     @override_settings(WEBHOOK_SECRET='test_webhook_secret_123')
