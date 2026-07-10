@@ -1,9 +1,10 @@
 from django.db import models
 from core.models import BaseModel, Tenant
 from core.soft_delete import alive_q
+from object_history.models import HistoryTrackedModel
 
 
-class Group(BaseModel):
+class Group(HistoryTrackedModel, BaseModel):
     """Tenant-scoped lead assignment group configuration."""
 
     tenant = models.ForeignKey(
@@ -40,7 +41,7 @@ class Group(BaseModel):
         return f"Group(tenant={self.tenant_id}, name={self.name})"
 
 
-class TenantMemberSetting(BaseModel):
+class TenantMemberSetting(HistoryTrackedModel, BaseModel):
     """
     Dedicated key/value table for core per-user settings like:
       - GROUP (group id)

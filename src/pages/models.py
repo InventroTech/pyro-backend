@@ -2,9 +2,10 @@ import uuid
 from django.db import models
 from core.models import BaseModel, RoleBaseModel
 from core.soft_delete import alive_q
+from object_history.models import HistoryTrackedModel
 
 
-class Page(RoleBaseModel):
+class Page(HistoryTrackedModel, RoleBaseModel):
     """
     User-defined dashboard page: name, role visibility, and widget config (JSON).
     Stored in public.pages; tenant + role from RoleModel (role column is "role").
@@ -53,7 +54,7 @@ class Page(RoleBaseModel):
         return f"{self.name} (tenant={self.tenant_id}, user={self.user_id})"
 
 
-class CustomIcon(BaseModel):
+class CustomIcon(HistoryTrackedModel, BaseModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey('core.Tenant', on_delete=models.CASCADE)
     name = models.CharField(max_length=255)

@@ -1,5 +1,6 @@
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
+from object_history.tracking import HistoryTrackedModel
 
 class UserManager(BaseUserManager):
     def create_user(self, supabase_uid, email, **extra_fields):
@@ -15,7 +16,7 @@ class UserManager(BaseUserManager):
         extra_fields.setdefault('is_superuser', True)
         return self.create_user(supabase_uid, email, **extra_fields)
     
-class User(AbstractBaseUser, PermissionsMixin):
+class User(HistoryTrackedModel, AbstractBaseUser, PermissionsMixin):
     supabase_uid = models.CharField(max_length=255, unique=True)
     email = models.EmailField(null=True, blank=True)
     role = models.CharField(max_length=50, blank=True, null=True)
@@ -31,7 +32,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         return self.email
 
 
-class PasswordResetOTP(models.Model):
+class PasswordResetOTP(HistoryTrackedModel, models.Model):
     """
     One-time password reset codes emailed to users. Expires after OTP_TTL_SECONDS (see views).
     Plain OTP is never stored — only HMAC digest.
