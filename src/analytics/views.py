@@ -59,7 +59,11 @@ from .serializers import (
     TeamOverviewSerializer,
     MemberBreakdownSerializer,
     EventBreakdownSerializer,
-    TimeSeriesSerializer
+    TimeSeriesSerializer,
+    CseOverviewSerializer,
+    CseMemberBreakdownSerializer,
+    CseFilterOptionsSerializer,
+    CseTimeSeriesSerializer,
 )
 
 
@@ -1383,3 +1387,214 @@ class UnassignedLeadsBreakdownView(TenantScopedMixin, APIView):
         )
 
         return Response(breakdown, status=status.HTTP_200_OK)
+
+
+def _parse_cse_date_range(request):
+    date_param = request.query_params.get("date", "").strip()
+    from_param = request.query_params.get("from", "").strip()
+    to_param = request.query_params.get("to", "").strip()
+
+    if date_param:
+        try:
+            target_date = datetime.strptime(date_param, "%Y-%m-%d").date()
+            return target_date, target_date, None
+        except ValueError:
+            return None, None, Response(
+                {"error": "Invalid date format. Use YYYY-MM-DD"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    if from_param and to_param:
+        try:
+            start_date = datetime.strptime(from_param, "%Y-%m-%d").date()
+            end_date = datetime.strptime(to_param, "%Y-%m-%d").date()
+            return start_date, end_date, None
+        except ValueError:
+            return None, None, Response(
+                {"error": "Invalid date format. Use YYYY-MM-DD"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    return None, None, Response(
+        {"error": "Either 'date' or both 'from' and 'to' parameters are required"},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+def _parse_ticket_type_filter(request):
+    raw = request.query_params.get("ticket_type", "").strip()
+    if not raw:
+        return None
+    return [value.strip() for value in raw.split(",") if value.strip()]
+
+
+def _parse_cse_filter_params(request):
+    ticket_types = _parse_ticket_type_filter(request)
+    handling_status = request.query_params.get("handling_status", "").strip() or None
+    cse_name = request.query_params.get("cse_name", "").strip() or None
+    return ticket_types, handling_status, cse_name
+
+
+def _resolve_cse_analytics_context(request):
+    from .cse_metrics import CseVisibilityResolver
+
+    user_id = getattr(request.user, "supabase_uid", None) or getattr(request.user, "id", None)
+    if not user_id:
+        return None, Response(
+            {"error": "User ID not found"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    allowed_cse_emails, visibility_scope = CseVisibilityResolver.resolve(
+        str(user_id),
+        request.tenant,
+    )
+    return {
+        "allowed_cse_emails": allowed_cse_emails,
+        "visibility_scope": visibility_scope,
+    }, None
+
+
+class CseFilterOptionsView(APIView):
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from .cse_metrics import CseMetricsService
+
+        context, error_response = _resolve_cse_analytics_context(request)
+        if error_response:
+            return error_response
+
+        service = CseMetricsService(
+            request.tenant,
+            allowed_cse_emails=context["allowed_cse_emails"],
+        )
+        serializer = CseFilterOptionsSerializer(
+            service.get_filter_options(visibility_scope=context["visibility_scope"])
+        )
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class CseOverviewView(APIView):
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from .cse_metrics import CseMetricsService, CseVisibilityResolver
+
+        try:
+            context, error_response = _resolve_cse_analytics_context(request)
+            if error_response:
+                return error_response
+
+            start_date, end_date, error_response = _parse_cse_date_range(request)
+            if error_response:
+                return error_response
+
+            ticket_types, handling_status, cse_name = _parse_cse_filter_params(request)
+            cse_name = CseVisibilityResolver.clamp_cse_name_filter(
+                cse_name,
+                context["allowed_cse_emails"],
+            )
+
+            service = CseMetricsService(
+                request.tenant,
+                allowed_cse_emails=context["allowed_cse_emails"],
+            )
+            overview = service.get_overview(
+                start_date,
+                end_date,
+                ticket_types=ticket_types,
+                handling_status=handling_status,
+                cse_name=cse_name,
+            )
+            serializer = CseOverviewSerializer(overview)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as exc:
+            logger.exception("CseOverviewView failed: %s", exc)
+            return Response(
+                {"error": "Failed to load CSE overview metrics"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class CseMembersView(APIView):
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from .cse_metrics import CseMetricsService, CseVisibilityResolver
+
+        try:
+            context, error_response = _resolve_cse_analytics_context(request)
+            if error_response:
+                return error_response
+
+            start_date, end_date, error_response = _parse_cse_date_range(request)
+            if error_response:
+                return error_response
+
+            ticket_types, handling_status, cse_name = _parse_cse_filter_params(request)
+            cse_name = CseVisibilityResolver.clamp_cse_name_filter(
+                cse_name,
+                context["allowed_cse_emails"],
+            )
+
+            service = CseMetricsService(
+                request.tenant,
+                allowed_cse_emails=context["allowed_cse_emails"],
+            )
+            members = service.get_member_breakdown(
+                start_date,
+                end_date,
+                ticket_types=ticket_types,
+                handling_status=handling_status,
+                cse_name=cse_name,
+            )
+            serializer = CseMemberBreakdownSerializer(members, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as exc:
+            logger.exception("CseMembersView failed: %s", exc)
+            return Response(
+                {"error": "Failed to load CSE member metrics"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class CseTimeSeriesView(APIView):
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from .cse_metrics import CseMetricsService, CseVisibilityResolver
+
+        try:
+            context, error_response = _resolve_cse_analytics_context(request)
+            if error_response:
+                return error_response
+
+            start_date, end_date, error_response = _parse_cse_date_range(request)
+            if error_response:
+                return error_response
+
+            ticket_types, _, cse_name = _parse_cse_filter_params(request)
+            cse_name = CseVisibilityResolver.clamp_cse_name_filter(
+                cse_name,
+                context["allowed_cse_emails"],
+            )
+
+            service = CseMetricsService(
+                request.tenant,
+                allowed_cse_emails=context["allowed_cse_emails"],
+            )
+            series = service.get_time_series(
+                start_date,
+                end_date,
+                ticket_types=ticket_types,
+                cse_name=cse_name,
+            )
+            serializer = CseTimeSeriesSerializer(series, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as exc:
+            logger.exception("CseTimeSeriesView failed: %s", exc)
+            return Response(
+                {"error": "Failed to load CSE time series metrics"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )

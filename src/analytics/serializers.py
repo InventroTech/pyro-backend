@@ -56,3 +56,46 @@ class TimeSeriesSerializer(serializers.Serializer):
     calls_made = serializers.IntegerField()
     trials_activated = serializers.IntegerField()
     total_events = serializers.IntegerField()
+
+
+class CseOverviewSerializer(serializers.Serializer):
+    open_call_back = serializers.IntegerField()
+    open_not_connected = serializers.IntegerField()
+    leads_assigned = serializers.IntegerField()
+    resolved = serializers.IntegerField()
+    not_connected = serializers.IntegerField()
+    call_later = serializers.IntegerField()
+    cant_resolve = serializers.IntegerField()
+    resolve_rate = serializers.FloatField(allow_null=True)
+    average_handling_time_seconds = serializers.FloatField(allow_null=True)
+    handling_time_ticket_count = serializers.IntegerField()
+
+
+class CseMemberBreakdownSerializer(serializers.Serializer):
+    cse_name = serializers.CharField(allow_blank=True)
+    open_call_back = serializers.IntegerField()
+    open_not_connected = serializers.IntegerField()
+    leads_assigned = serializers.IntegerField()
+    resolved = serializers.IntegerField()
+    resolve_rate = serializers.FloatField(allow_null=True)
+    average_handling_time_seconds = serializers.FloatField(allow_null=True)
+    handling_time_ticket_count = serializers.IntegerField()
+
+
+class CseFilterOptionsSerializer(serializers.Serializer):
+    ticket_types = serializers.ListField(child=serializers.CharField())
+    cse_names = serializers.ListField(child=serializers.CharField())
+    handling_time_statuses = serializers.ListField(child=serializers.CharField())
+    visibility_scope = serializers.CharField()
+
+
+class CseTimeSeriesSerializer(serializers.Serializer):
+    date = serializers.CharField()
+    assigned = serializers.IntegerField()
+    resolved = serializers.IntegerField()
+    not_connected = serializers.IntegerField()
+    call_later = serializers.IntegerField()
+    resolve_rate = serializers.FloatField(allow_null=True)
+    average_handling_time_seconds = serializers.FloatField(allow_null=True)
+    stacked_resolved = serializers.IntegerField()
+    stacked_unresolved = serializers.IntegerField()
