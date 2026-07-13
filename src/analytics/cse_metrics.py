@@ -471,10 +471,11 @@ class CseMetricsService:
                     handling_by_day.setdefault(day, []).append(seconds)
             if dumped_at is not None:
                 dump_day = _timestamp_date(dumped_at)
-                if _normalize_status(data.get("resolution_status")) == "resolved":
-                    stacked_resolved_map[dump_day] = stacked_resolved_map.get(dump_day, 0) + 1
-                else:
-                    stacked_unresolved_map[dump_day] = stacked_unresolved_map.get(dump_day, 0) + 1
+                if start_date <= dump_day <= end_date:
+                    if _normalize_status(data.get("resolution_status")) == "resolved":
+                        stacked_resolved_map[dump_day] = stacked_resolved_map.get(dump_day, 0) + 1
+                    else:
+                        stacked_unresolved_map[dump_day] = stacked_unresolved_map.get(dump_day, 0) + 1
 
         avg_by_day = {
             day: (sum(values) / len(values)) for day, values in handling_by_day.items() if values
