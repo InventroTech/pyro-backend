@@ -15,6 +15,7 @@ from .serializers import (
     GroupSerializer,
 )
 from .services import (
+    coerce_kv_int,
     fresh_leads_counts_for_groups,
     get_lead_filter_options,
     upsert_user_kv_settings,
@@ -468,6 +469,71 @@ class GroupListCreateView(APIView):
         return Response(
             GroupSerializer(group, context={"fresh_leads_counts": fresh_counts}).data,
             status=status.HTTP_201_CREATED,
+        )
+
+
+class MyLeadGroupSummaryView(APIView):
+    """
+    Return the authenticated user's assigned lead group and fresh-leads pool count.
+
+    Used by the RM pending-leads page so it does not need to stitch membership +
+    core-KV + group detail calls together.
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        tenant = request.tenant
+        user = request.user
+        user_identifier = getattr(user, "supabase_uid", None) or getattr(user, "email", None)
+        if not user_identifier:
+            return Response(
+                {"error": "Unable to resolve current user"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        membership = get_tenant_membership_by_user_id(tenant, user_identifier, user=user)
+        if not membership:
+            return Response(
+                {
+                    "tenant_membership_id": None,
+                    "group_id": None,
+                    "group_name": None,
+                    "fresh_leads_count": None,
+                    "daily_limit": None,
+                    "daily_target": None,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        kv_rows = TenantMemberSetting.objects.filter(
+            tenant=tenant,
+            tenant_membership=membership,
+            key__in=[USER_KV_GROUP_ID_KEY, USER_KV_DAILY_LIMIT_KEY, USER_KV_DAILY_TARGET_KEY],
+        )
+        kv_map = {row.key: row.value for row in kv_rows}
+        group_id = coerce_kv_int(kv_map.get(USER_KV_GROUP_ID_KEY))
+        daily_limit = coerce_kv_int(kv_map.get(USER_KV_DAILY_LIMIT_KEY))
+        daily_target = coerce_kv_int(kv_map.get(USER_KV_DAILY_TARGET_KEY))
+
+        group = None
+        fresh_leads_count = None
+        if group_id is not None:
+            group = Group.objects.filter(tenant=tenant, id=group_id).first()
+            if group:
+                fresh_counts = fresh_leads_counts_for_groups(tenant, [group])
+                fresh_leads_count = fresh_counts.get(group.id)
+
+        return Response(
+            {
+                "tenant_membership_id": membership.id,
+                "group_id": group.id if group else None,
+                "group_name": group.name if group else None,
+                "fresh_leads_count": fresh_leads_count,
+                "daily_limit": daily_limit,
+                "daily_target": daily_target,
+            },
+            status=status.HTTP_200_OK,
         )
 
 

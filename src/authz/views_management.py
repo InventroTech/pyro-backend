@@ -324,7 +324,13 @@ class ListTenantUsersView(APIView):
                 tenant_membership_id__in=[m.id for m in memberships],
             )
         }
-        group_ids = {gid for gid in setting_map.values() if gid}
+        from user_settings.services import coerce_kv_int
+
+        coerced_setting_map = {
+            membership_id: coerce_kv_int(raw_value)
+            for membership_id, raw_value in setting_map.items()
+        }
+        group_ids = {gid for gid in coerced_setting_map.values() if gid is not None}
         groups_by_id = {}
         if group_ids:
             groups_by_id = {
@@ -340,7 +346,7 @@ class ListTenantUsersView(APIView):
             # Include company_name if serializer doesn't already include it
             if 'company_name' not in item:
                 item['company_name'] = membership.company_name or ''
-            item["lead_group_name"] = groups_by_id.get(setting_map.get(membership.id))
+            item["lead_group_name"] = groups_by_id.get(coerced_setting_map.get(membership.id))
         
         return Response({"count": len(data), "results": data}, status=status.HTTP_200_OK)
 
