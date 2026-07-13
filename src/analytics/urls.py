@@ -19,6 +19,12 @@ from .views import (
     TeamEventsView,
     TeamTimeSeriesView,
     UnassignedLeadsBreakdownView,
+    CseFilterOptionsView,
+    CseOverviewView,
+    CseMembersView,
+    CseTimeSeriesView,
+    AnalyticsBoardView,
+    AnalyticsBoardDetailView,
 )
 app_name = "analytics"
 
@@ -81,4 +87,18 @@ urlpatterns = [
     path("team/events/", TeamEventsView.as_view(), name="team-events"),
     path("team/time-series/", TeamTimeSeriesView.as_view(), name="team-time-series"),
     path("team/unassigned-leads/", UnassignedLeadsBreakdownView.as_view(), name="team-unassigned-leads"),
+
+    # CSE support-ticket analytics
+    path("cse/filter-options/", CseFilterOptionsView.as_view(), name="cse-filter-options"),
+    path("cse/overview/", CseOverviewView.as_view(), name="cse-overview"),
+    path("cse/members/", CseMembersView.as_view(), name="cse-members"),
+    path("cse/time-series/", CseTimeSeriesView.as_view(), name="cse-time-series"),
+
+    # Saved analytics boards (one row per board, generic across analytics types)
+    path("board/", AnalyticsBoardView.as_view(), name="analytics-board"),
+    path(
+        "board/<str:report_id>/",
+        AnalyticsBoardDetailView.as_view(),
+        name="analytics-board-detail",
+    ),
 ]
