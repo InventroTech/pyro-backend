@@ -1,9 +1,10 @@
 from django.db import models
 
 from core.soft_delete import SoftDeleteMixin
+from object_history.models import HistoryTrackedModel
 
 
-class SupportTicketDump(SoftDeleteMixin):
+class SupportTicketDump(HistoryTrackedModel, SoftDeleteMixin):
     """
     Temporary staging table for support tickets before they're processed.
 

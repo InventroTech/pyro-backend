@@ -3,12 +3,28 @@ import json
 import requests
 import logging
 import base64
-from typing import Dict, Any, Literal, Optional
+from typing import Any, Dict, Literal, Mapping, Optional
+
+from support_ticket.constants import PRAJA_SAVE_SUPPORT_TICKET_URL
 
 RmAssignedSendResult = Literal["success", "skipped_not_found", "failed"]
 CseAssignedSendResult = RmAssignedSendResult
 
 logger = logging.getLogger(__name__)
+
+
+def _praja_ticket_type_from_record_data(data: Mapping[str, Any]) -> Optional[str]:
+    """Snake_case ``support_ticket_type`` for Praja ``save_support_ticket``."""
+    raw = data.get("support_ticket_type")
+    if raw is None or str(raw).strip() == "":
+        return None
+    return (
+        str(raw)
+        .strip()
+        .lower()
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
 
 
 class MixpanelService:
@@ -388,14 +404,14 @@ class CSEAssignedMixpanelService:
 
 
 class SaveResolvedTicketPrajaService:
-    """POST resolved support ticket snapshot to Praja ``save_resolved_ticket``."""
+    """POST support ticket snapshot to Praja ``save_support_ticket``."""
 
     def __init__(self):
         from django.conf import settings
 
         self.api_url = getattr(settings, "PRAJA_API_URL", None) or os.environ.get(
             "PRAJA_API_URL",
-            "https://api.thecircleapp.in/pyro/save_support_ticket",
+            PRAJA_SAVE_SUPPORT_TICKET_URL,
         )
 
     def _request_headers(self) -> Dict[str, str]:
@@ -404,6 +420,9 @@ class SaveResolvedTicketPrajaService:
         if token:
             headers["Authorization"] = f"Bearer {token}"
         return headers
+
+    def _coerce_api_id(self, value: Any) -> Any:
+        return int(value) if str(value).isdigit() else value
 
     def build_payload(
         self,
@@ -420,7 +439,16 @@ class SaveResolvedTicketPrajaService:
         user_id = data.get("user_id")
         if user_id is None:
             logger.warning(
-                "[Praja] Skipping save_resolved_ticket — missing user_id "
+                "[Praja] Skipping save_support_ticket — missing user_id "
+                "record_id=%s",
+                record.id,
+            )
+            return None
+
+        ticket_type = _praja_ticket_type_from_record_data(data)
+        if ticket_type is None:
+            logger.warning(
+                "[Praja] Skipping save_support_ticket — missing support_ticket_type "
                 "record_id=%s",
                 record.id,
             )
@@ -433,11 +461,10 @@ class SaveResolvedTicketPrajaService:
         ticket_status = str(resolution).strip() if resolution else ""
         ticket_status = ticket_status.upper().replace(" ", "_").replace("'", "")
 
-        user_id_for_api = int(user_id) if str(user_id).isdigit() else user_id
-
         return {
-            "user_id": user_id_for_api,
-            "ticket_id": record.id,
+            "user_id": self._coerce_api_id(user_id),
+            "ticket_id": self._coerce_api_id(record.id),
+            "ticket_type": ticket_type,
             "ticket_status": ticket_status,
             "all_tasks_completed": all_support_ticket_tasks_completed(data),
         }
@@ -446,12 +473,14 @@ class SaveResolvedTicketPrajaService:
         self,
         user_id,
         ticket_id,
+        ticket_type,
         ticket_status,
         all_tasks_completed,
     ) -> bool:
         payload = {
-            "user_id": int(user_id) if str(user_id).isdigit() else user_id,
-            "ticket_id": int(ticket_id) if str(ticket_id).isdigit() else ticket_id,
+            "user_id": self._coerce_api_id(user_id),
+            "ticket_id": self._coerce_api_id(ticket_id),
+            "ticket_type": str(ticket_type).strip().lower().replace("-", "_").replace(" ", "_"),
             "ticket_status": str(ticket_status).upper().replace(" ", "_").replace("'", ""),
             "all_tasks_completed": bool(all_tasks_completed),
         }
@@ -459,7 +488,7 @@ class SaveResolvedTicketPrajaService:
 
         try:
             logger.info(
-                "[Praja] POST save_resolved_ticket url=%s payload=%s",
+                "[Praja] POST save_support_ticket url=%s payload=%s",
                 self.api_url,
                 json.dumps(payload, default=str),
             )
@@ -471,18 +500,18 @@ class SaveResolvedTicketPrajaService:
             )
             if not response.ok:
                 logger.error(
-                    "[Praja] save_resolved_ticket failed status=%s body=%s",
+                    "[Praja] save_support_ticket failed status=%s body=%s",
                     response.status_code,
                     response.text[:500],
                 )
                 return False
             logger.info(
-                "[Praja] save_resolved_ticket success ticket_id=%s",
+                "[Praja] save_support_ticket success ticket_id=%s",
                 payload.get("ticket_id"),
             )
             return True
         except requests.exceptions.RequestException as exc:
-            logger.error("[Praja] save_resolved_ticket error: %s", exc)
+            logger.error("[Praja] save_support_ticket error: %s", exc)
             return False
 
     def save_record(self, record) -> bool:
@@ -492,6 +521,7 @@ class SaveResolvedTicketPrajaService:
         return self.save_resolved_ticket(
             user_id=payload["user_id"],
             ticket_id=payload["ticket_id"],
+            ticket_type=payload["ticket_type"],
             ticket_status=payload["ticket_status"],
             all_tasks_completed=payload["all_tasks_completed"],
         )

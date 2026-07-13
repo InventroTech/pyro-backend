@@ -276,6 +276,8 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
                 user_id="12345",
                 name="Open ticket",
                 resolution_status="Open",
+                support_ticket_id=78901,
+                support_ticket_type="alert_words",
             ),
         )
 
@@ -301,6 +303,7 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
             data__user_id="12345",
         )
         self.assertEqual(payload["ticket_id"], record.id)
+        self.assertEqual(payload["ticket_type"], "alert_words")
 
     @patch("support_ticket.events.get_queue_service")
     def test_non_open_ticket_does_not_enqueue_praja_on_dump_process(self, mock_get_queue):

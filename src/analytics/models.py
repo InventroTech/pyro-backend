@@ -55,9 +55,10 @@ class AnalyticsBoard(BaseModel):
             f"AnalyticsBoard({self.tenant_id}:{self.user_id}:"
             f"{self.board_type}:{self.report_id})"
         )
+from object_history.models import HistoryTrackedModel
 
 
-class AnalyticsRunCore(BaseModel):
+class AnalyticsRunCore(HistoryTrackedModel, BaseModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     completed_at = models.DateTimeField(null=True, blank=True)
     user_id = models.CharField(max_length=128, db_index=True)
