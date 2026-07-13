@@ -1642,13 +1642,36 @@ def _analytics_board_type(value):
     return cleaned or "cse"
 
 
+def _analytics_board_role(request, user_id):
+    """Resolve the current user's role key (e.g. GM, ASM, CSE) for board sharing.
+
+    Boards are shared by role, so this key scopes which boards a user sees.
+    Returns "" when no active membership/role is found.
+    """
+    from authz.models import TenantMembership
+
+    membership = (
+        TenantMembership.objects.filter(
+            tenant=request.tenant,
+            user_id=str(user_id),
+            is_active=True,
+        )
+        .select_related("role")
+        .first()
+    )
+    if not membership or not membership.role:
+        return ""
+    return (membership.role.key or "").upper()
+
+
 class AnalyticsBoardView(APIView):
     """
-    List and create a user's analytics boards (one row per board).
+    List and create role-shared analytics boards (one row per board).
 
-    Generic across analytics types via ``type`` (e.g. cse, rm).
+    Boards are scoped by ``(tenant, role, board_type)`` so everyone with the same
+    role shares them. Generic across analytics types via ``type`` (e.g. cse, rm).
 
-    GET  ?type=<type>            -> { board_type, boards: [config, ...] }
+    GET  ?type=<type>            -> { board_type, role, boards: [config, ...] }
     POST { type?, config }       -> creates a board row and returns its config.
     """
 
@@ -1664,11 +1687,12 @@ class AnalyticsBoardView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        role = _analytics_board_role(request, user_id)
         board_type = _analytics_board_type(request.query_params.get("type"))
         rows = (
             AnalyticsBoard.objects.filter(
                 tenant=request.tenant,
-                user_id=str(user_id),
+                role=role,
                 board_type=board_type,
             )
             .order_by("created_at")
@@ -1678,7 +1702,7 @@ class AnalyticsBoardView(APIView):
         # any legacy/empty rows left over from an earlier schema.
         boards = [c for c in rows if isinstance(c, dict) and c.get("id")]
         return Response(
-            {"board_type": board_type, "boards": boards},
+            {"board_type": board_type, "role": role, "boards": boards},
             status=status.HTTP_200_OK,
         )
 
@@ -1695,6 +1719,7 @@ class AnalyticsBoardView(APIView):
 
         serializer = AnalyticsBoardSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        role = _analytics_board_role(request, user_id)
         board_type = _analytics_board_type(serializer.validated_data.get("board_type"))
         config = serializer.validated_data["config"]
         report_id = str(config.get("id") or "").strip()
@@ -1706,20 +1731,20 @@ class AnalyticsBoardView(APIView):
 
         board, _ = AnalyticsBoard.objects.update_or_create(
             tenant=request.tenant,
-            user_id=str(user_id),
+            role=role,
             board_type=board_type,
             report_id=report_id,
-            defaults={"config": config},
+            defaults={"config": config, "user_id": str(user_id)},
         )
         return Response(
-            {"board_type": board.board_type, "config": board.config},
+            {"board_type": board.board_type, "role": board.role, "config": board.config},
             status=status.HTTP_201_CREATED,
         )
 
 
 class AnalyticsBoardDetailView(APIView):
     """
-    Update or delete a single analytics board, identified by ``report_id``.
+    Update or delete a single role-shared analytics board (by ``report_id``).
 
     PUT    board/<report_id>/  { type?, config } -> updates the board's config.
     DELETE board/<report_id>/?type=<type>        -> deletes the board row.
@@ -1740,18 +1765,19 @@ class AnalyticsBoardDetailView(APIView):
 
         serializer = AnalyticsBoardSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        role = _analytics_board_role(request, user_id)
         board_type = _analytics_board_type(serializer.validated_data.get("board_type"))
         config = serializer.validated_data["config"]
 
         board, _ = AnalyticsBoard.objects.update_or_create(
             tenant=request.tenant,
-            user_id=str(user_id),
+            role=role,
             board_type=board_type,
             report_id=str(report_id),
-            defaults={"config": config},
+            defaults={"config": config, "user_id": str(user_id)},
         )
         return Response(
-            {"board_type": board.board_type, "config": board.config},
+            {"board_type": board.board_type, "role": board.role, "config": board.config},
             status=status.HTTP_200_OK,
         )
 
@@ -1765,13 +1791,12 @@ class AnalyticsBoardDetailView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        role = _analytics_board_role(request, user_id)
         board_type = _analytics_board_type(request.query_params.get("type"))
-        deleted, _ = (
-            AnalyticsBoard.objects.filter(
-                tenant=request.tenant,
-                user_id=str(user_id),
-                board_type=board_type,
-                report_id=str(report_id),
-            ).delete()
-        )
+        AnalyticsBoard.objects.filter(
+            tenant=request.tenant,
+            role=role,
+            board_type=board_type,
+            report_id=str(report_id),
+        ).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
