@@ -43,6 +43,24 @@ HANDLING_TIME_STATUS_FILTERS = {
     "pending": Q(data__resolution_status__isnull=True) | Q(data__resolution_status=""),
 }
 
+# Categorical ``data`` fields users can filter reports by (Mixpanel-style).
+# key -> human label. Kept as an allowlist so arbitrary ORM lookups can't be
+# injected via the ``af`` query param.
+CSE_ATTRIBUTE_FIELDS = [
+    ("support_ticket_type", "Ticket Type"),
+    ("resolution_status", "Resolution Status"),
+    ("call_status", "Call Status"),
+    ("cse_name", "CSE"),
+    ("source", "Source"),
+    ("subscription_status", "Subscription Status"),
+    ("layout_status", "Layout Status"),
+    ("state", "State"),
+    ("badge", "Badge"),
+    ("rm_name", "RM Name"),
+    ("poster", "Poster"),
+]
+CSE_ATTRIBUTE_KEYS = frozenset(key for key, _ in CSE_ATTRIBUTE_FIELDS)
+
 
 class CseVisibilityResolver:
     """Role/hierarchy scoping: CSE=self, ASM=team CSEs, GM=all."""
@@ -259,10 +277,29 @@ class CseMetricsService:
                 for name in cse_names
                 if CseVisibilityResolver.cse_name_allowed(name, self.allowed_cse_emails)
             ]
+
+        attributes = []
+        for key, label in CSE_ATTRIBUTE_FIELDS:
+            values = [
+                str(v).strip()
+                for v in distinct_data_values(qs, key)
+                if v is not None and str(v).strip()
+            ]
+            if key == "cse_name" and self.allowed_cse_emails is not None:
+                values = [
+                    v
+                    for v in values
+                    if CseVisibilityResolver.cse_name_allowed(v, self.allowed_cse_emails)
+                ]
+            values = sorted(set(values))[:300]
+            if values:
+                attributes.append({"key": key, "label": label, "values": values})
+
         return {
             "ticket_types": ticket_types,
             "cse_names": cse_names,
             "handling_time_statuses": list(HANDLING_TIME_STATUS_FILTERS.keys()),
+            "attributes": attributes,
             "visibility_scope": visibility_scope,
         }
 
@@ -281,13 +318,37 @@ class CseMetricsService:
             type_q |= Q(data__support_ticket_type=ticket_type) | Q(data__poster=ticket_type)
         return qs.filter(type_q)
 
-    def _assigned_qs(self, ticket_types: Optional[List[str]] = None):
+    def _apply_attribute_filters(
+        self, qs, attribute_filters: Optional[Dict[str, List[str]]]
+    ):
+        if not attribute_filters:
+            return qs
+        for field, values in attribute_filters.items():
+            if field not in CSE_ATTRIBUTE_KEYS:
+                continue
+            clean = [str(v) for v in values if v is not None and str(v) != ""]
+            if not clean:
+                continue
+            if field == "support_ticket_type":
+                qs = qs.filter(
+                    Q(data__support_ticket_type__in=clean) | Q(data__poster__in=clean)
+                )
+            else:
+                qs = qs.filter(**{f"data__{field}__in": clean})
+        return qs
+
+    def _assigned_qs(
+        self,
+        ticket_types: Optional[List[str]] = None,
+        attribute_filters: Optional[Dict[str, List[str]]] = None,
+    ):
         qs = (
             support_ticket_records_qs(tenant=self.tenant)
             .exclude(q_data_unset("cse_name"))
             .exclude(Q(data__cse_name=""))
         )
-        return self._apply_ticket_type_filter(qs, ticket_types)
+        qs = self._apply_ticket_type_filter(qs, ticket_types)
+        return self._apply_attribute_filters(qs, attribute_filters)
 
     def _iter_assigned_records(self, qs):
         for record in qs.only("id", "data"):
@@ -306,12 +367,15 @@ class CseMetricsService:
         ticket_types: Optional[List[str]] = None,
         handling_status: Optional[str] = None,
         cse_name: Optional[str] = None,
+        attribute_filters: Optional[Dict[str, List[str]]] = None,
     ) -> Dict[str, Any]:
         open_qs = self._apply_cse_filter(
-            self._assigned_qs(ticket_types).filter(_q_open_ticket()),
+            self._assigned_qs(ticket_types, attribute_filters).filter(_q_open_ticket()),
             cse_name,
         )
-        assigned_qs = self._apply_cse_filter(self._assigned_qs(ticket_types), cse_name)
+        assigned_qs = self._apply_cse_filter(
+            self._assigned_qs(ticket_types, attribute_filters), cse_name
+        )
 
         open_call_back = 0
         open_not_connected = 0
@@ -368,8 +432,11 @@ class CseMetricsService:
         end_date: date,
         ticket_types: Optional[List[str]] = None,
         cse_name: Optional[str] = None,
+        attribute_filters: Optional[Dict[str, List[str]]] = None,
     ) -> List[Dict[str, Any]]:
-        assigned_qs = self._apply_cse_filter(self._assigned_qs(ticket_types), cse_name)
+        assigned_qs = self._apply_cse_filter(
+            self._assigned_qs(ticket_types, attribute_filters), cse_name
+        )
 
         assigned_map: Dict[date, int] = {}
         resolved_map: Dict[date, int] = {}
@@ -437,12 +504,15 @@ class CseMetricsService:
         ticket_types: Optional[List[str]] = None,
         handling_status: Optional[str] = None,
         cse_name: Optional[str] = None,
+        attribute_filters: Optional[Dict[str, List[str]]] = None,
     ) -> List[Dict[str, Any]]:
         open_qs = self._apply_cse_filter(
-            self._assigned_qs(ticket_types).filter(_q_open_ticket()),
+            self._assigned_qs(ticket_types, attribute_filters).filter(_q_open_ticket()),
             cse_name,
         )
-        assigned_qs = self._apply_cse_filter(self._assigned_qs(ticket_types), cse_name)
+        assigned_qs = self._apply_cse_filter(
+            self._assigned_qs(ticket_types, attribute_filters), cse_name
+        )
 
         open_stats: Dict[str, Dict[str, int]] = {}
         for _, data in self._iter_assigned_records(open_qs):

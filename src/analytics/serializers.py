@@ -86,6 +86,7 @@ class CseFilterOptionsSerializer(serializers.Serializer):
     ticket_types = serializers.ListField(child=serializers.CharField())
     cse_names = serializers.ListField(child=serializers.CharField())
     handling_time_statuses = serializers.ListField(child=serializers.CharField())
+    attributes = serializers.ListField(child=serializers.DictField(), required=False)
     visibility_scope = serializers.CharField()
 
 
@@ -99,3 +100,10 @@ class CseTimeSeriesSerializer(serializers.Serializer):
     average_handling_time_seconds = serializers.FloatField(allow_null=True)
     stacked_resolved = serializers.IntegerField()
     stacked_unresolved = serializers.IntegerField()
+
+
+class AnalyticsBoardSerializer(serializers.Serializer):
+    """Validates a single saved analytics board (one report card)."""
+
+    board_type = serializers.CharField(max_length=64, required=False, default="cse")
+    config = serializers.DictField()

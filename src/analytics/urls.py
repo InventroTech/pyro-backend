@@ -23,6 +23,8 @@ from .views import (
     CseOverviewView,
     CseMembersView,
     CseTimeSeriesView,
+    AnalyticsBoardView,
+    AnalyticsBoardDetailView,
 )
 app_name = "analytics"
 
@@ -91,4 +93,12 @@ urlpatterns = [
     path("cse/overview/", CseOverviewView.as_view(), name="cse-overview"),
     path("cse/members/", CseMembersView.as_view(), name="cse-members"),
     path("cse/time-series/", CseTimeSeriesView.as_view(), name="cse-time-series"),
+
+    # Saved analytics boards (one row per board, generic across analytics types)
+    path("board/", AnalyticsBoardView.as_view(), name="analytics-board"),
+    path(
+        "board/<str:report_id>/",
+        AnalyticsBoardDetailView.as_view(),
+        name="analytics-board-detail",
+    ),
 ]

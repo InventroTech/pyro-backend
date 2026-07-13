@@ -1,3 +1,4 @@
+import json
 import logging
 import numpy as np
 from django.db.models import F, ExpressionWrapper, DurationField, Avg, Count, Q, Func, IntegerField, Case, When
@@ -1435,6 +1436,30 @@ def _parse_cse_filter_params(request):
     return ticket_types, handling_status, cse_name
 
 
+def _parse_attribute_filters(request):
+    """Parse the ``af`` query param (JSON ``{field: [values]}``) into a dict."""
+    raw = request.query_params.get("af", "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    result = {}
+    for key, value in parsed.items():
+        if isinstance(value, list):
+            values = [str(v) for v in value if v is not None and str(v) != ""]
+        elif value is None or value == "":
+            values = []
+        else:
+            values = [str(value)]
+        if values:
+            result[str(key)] = values
+    return result or None
+
+
 def _resolve_cse_analytics_context(request):
     from .cse_metrics import CseVisibilityResolver
 
@@ -1495,6 +1520,7 @@ class CseOverviewView(APIView):
                 cse_name,
                 context["allowed_cse_emails"],
             )
+            attribute_filters = _parse_attribute_filters(request)
 
             service = CseMetricsService(
                 request.tenant,
@@ -1506,6 +1532,7 @@ class CseOverviewView(APIView):
                 ticket_types=ticket_types,
                 handling_status=handling_status,
                 cse_name=cse_name,
+                attribute_filters=attribute_filters,
             )
             serializer = CseOverviewSerializer(overview)
             return Response(serializer.data, status=status.HTTP_200_OK)
@@ -1537,6 +1564,7 @@ class CseMembersView(APIView):
                 cse_name,
                 context["allowed_cse_emails"],
             )
+            attribute_filters = _parse_attribute_filters(request)
 
             service = CseMetricsService(
                 request.tenant,
@@ -1548,6 +1576,7 @@ class CseMembersView(APIView):
                 ticket_types=ticket_types,
                 handling_status=handling_status,
                 cse_name=cse_name,
+                attribute_filters=attribute_filters,
             )
             serializer = CseMemberBreakdownSerializer(members, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
@@ -1579,6 +1608,7 @@ class CseTimeSeriesView(APIView):
                 cse_name,
                 context["allowed_cse_emails"],
             )
+            attribute_filters = _parse_attribute_filters(request)
 
             service = CseMetricsService(
                 request.tenant,
@@ -1589,6 +1619,7 @@ class CseTimeSeriesView(APIView):
                 end_date,
                 ticket_types=ticket_types,
                 cse_name=cse_name,
+                attribute_filters=attribute_filters,
             )
             serializer = CseTimeSeriesSerializer(series, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
@@ -1598,3 +1629,149 @@ class CseTimeSeriesView(APIView):
                 {"error": "Failed to load CSE time series metrics"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+def _analytics_board_user_id(request):
+    return getattr(request.user, "supabase_uid", None) or getattr(
+        request.user, "id", None
+    )
+
+
+def _analytics_board_type(value):
+    cleaned = (value or "").strip()
+    return cleaned or "cse"
+
+
+class AnalyticsBoardView(APIView):
+    """
+    List and create a user's analytics boards (one row per board).
+
+    Generic across analytics types via ``type`` (e.g. cse, rm).
+
+    GET  ?type=<type>            -> { board_type, boards: [config, ...] }
+    POST { type?, config }       -> creates a board row and returns its config.
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from .models import AnalyticsBoard
+
+        user_id = _analytics_board_user_id(request)
+        if not user_id:
+            return Response(
+                {"error": "User ID not found"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        board_type = _analytics_board_type(request.query_params.get("type"))
+        rows = (
+            AnalyticsBoard.objects.filter(
+                tenant=request.tenant,
+                user_id=str(user_id),
+                board_type=board_type,
+            )
+            .order_by("created_at")
+            .values_list("config", flat=True)
+        )
+        # Only surface well-formed board configs (a dict with an id); this skips
+        # any legacy/empty rows left over from an earlier schema.
+        boards = [c for c in rows if isinstance(c, dict) and c.get("id")]
+        return Response(
+            {"board_type": board_type, "boards": boards},
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request):
+        from .models import AnalyticsBoard
+        from .serializers import AnalyticsBoardSerializer
+
+        user_id = _analytics_board_user_id(request)
+        if not user_id:
+            return Response(
+                {"error": "User ID not found"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = AnalyticsBoardSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        board_type = _analytics_board_type(serializer.validated_data.get("board_type"))
+        config = serializer.validated_data["config"]
+        report_id = str(config.get("id") or "").strip()
+        if not report_id:
+            return Response(
+                {"error": "config.id is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        board, _ = AnalyticsBoard.objects.update_or_create(
+            tenant=request.tenant,
+            user_id=str(user_id),
+            board_type=board_type,
+            report_id=report_id,
+            defaults={"config": config},
+        )
+        return Response(
+            {"board_type": board.board_type, "config": board.config},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AnalyticsBoardDetailView(APIView):
+    """
+    Update or delete a single analytics board, identified by ``report_id``.
+
+    PUT    board/<report_id>/  { type?, config } -> updates the board's config.
+    DELETE board/<report_id>/?type=<type>        -> deletes the board row.
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def put(self, request, report_id):
+        from .models import AnalyticsBoard
+        from .serializers import AnalyticsBoardSerializer
+
+        user_id = _analytics_board_user_id(request)
+        if not user_id:
+            return Response(
+                {"error": "User ID not found"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = AnalyticsBoardSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        board_type = _analytics_board_type(serializer.validated_data.get("board_type"))
+        config = serializer.validated_data["config"]
+
+        board, _ = AnalyticsBoard.objects.update_or_create(
+            tenant=request.tenant,
+            user_id=str(user_id),
+            board_type=board_type,
+            report_id=str(report_id),
+            defaults={"config": config},
+        )
+        return Response(
+            {"board_type": board.board_type, "config": board.config},
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, report_id):
+        from .models import AnalyticsBoard
+
+        user_id = _analytics_board_user_id(request)
+        if not user_id:
+            return Response(
+                {"error": "User ID not found"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        board_type = _analytics_board_type(request.query_params.get("type"))
+        deleted, _ = (
+            AnalyticsBoard.objects.filter(
+                tenant=request.tenant,
+                user_id=str(user_id),
+                board_type=board_type,
+                report_id=str(report_id),
+            ).delete()
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
