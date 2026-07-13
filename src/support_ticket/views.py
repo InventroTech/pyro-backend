@@ -467,52 +467,56 @@ def process_dumped_tickets(
     ] = None,
     batch_limit: int = DUMP_BATCH_LIMIT,
 ) -> ProcessDumpedTicketsResult:
-    dumped_qs = SupportTicketDump.objects.filter(
-        Q(is_processed__isnull=True) | Q(is_processed=False)
-    )
-    if tenant_id is not None:
-        dumped_qs = dumped_qs.filter(tenant_id=tenant_id)
-    dumped_tickets_list = list(dumped_qs.order_by("id")[:batch_limit])
-
-    if not dumped_tickets_list:
-        logger.info("process_dumped_tickets: No new tickets in dump table to process.")
-        return ProcessDumpedTicketsResult(0, 0, 0, 0, 0, 0)
-
-    skipped = sum(
-        1
-        for dump in dumped_tickets_list
-        if not _normalize_dump_user_id((dump.data or {}).get("user_id"))
-    )
-    unique_tickets = _dedupe_dumps_latest_wins(dumped_tickets_list)
-    candidates: List[SupportTicketDump] = []
-
-    for dump_ticket in unique_tickets:
-        if not dump_ticket.tenant_id:
-            skipped += 1
-            continue
-        if not Tenant.objects.filter(id=dump_ticket.tenant_id).exists():
-            skipped += 1
-            continue
-        candidates.append(dump_ticket)
-
-    dump_ids = [t.id for t in dumped_tickets_list]
-
-    if not candidates:
-        marked = SupportTicketDump.objects.filter(id__in=dump_ids).update(
-            is_processed=True
-        )
-        return ProcessDumpedTicketsResult(
-            total_dumped_tickets=len(dumped_tickets_list),
-            unique_tickets=len(unique_tickets),
-            inserted_tickets=0,
-            mirrored_records=0,
-            skipped_tickets=skipped,
-            marked_processed=marked,
-        )
-
     inserted_records: List[Record] = []
     dump_data_by_user_id: Dict[str, Dict[str, Any]] = {}
+
     with transaction.atomic():
+        # SELECT FOR UPDATE SKIP LOCKED: concurrent callers (webhook + background job)
+        # each lock a disjoint set of rows. A second caller racing on the same rows
+        # skips them and returns an empty list, preventing duplicate record creation.
+        dumped_qs = SupportTicketDump.objects.select_for_update(skip_locked=True).filter(
+            Q(is_processed__isnull=True) | Q(is_processed=False)
+        )
+        if tenant_id is not None:
+            dumped_qs = dumped_qs.filter(tenant_id=tenant_id)
+        dumped_tickets_list = list(dumped_qs.order_by("id")[:batch_limit])
+
+        if not dumped_tickets_list:
+            logger.info("process_dumped_tickets: No new tickets in dump table to process.")
+            return ProcessDumpedTicketsResult(0, 0, 0, 0, 0, 0)
+
+        skipped = sum(
+            1
+            for dump in dumped_tickets_list
+            if not _normalize_dump_user_id((dump.data or {}).get("user_id"))
+        )
+        unique_tickets = _dedupe_dumps_latest_wins(dumped_tickets_list)
+        candidates: List[SupportTicketDump] = []
+
+        for dump_ticket in unique_tickets:
+            if not dump_ticket.tenant_id:
+                skipped += 1
+                continue
+            if not Tenant.objects.filter(id=dump_ticket.tenant_id).exists():
+                skipped += 1
+                continue
+            candidates.append(dump_ticket)
+
+        dump_ids = [t.id for t in dumped_tickets_list]
+
+        if not candidates:
+            marked = SupportTicketDump.objects.filter(id__in=dump_ids).update(
+                is_processed=True
+            )
+            return ProcessDumpedTicketsResult(
+                total_dumped_tickets=len(dumped_tickets_list),
+                unique_tickets=len(unique_tickets),
+                inserted_tickets=0,
+                mirrored_records=0,
+                skipped_tickets=skipped,
+                marked_processed=marked,
+            )
+
         dumps_to_insert: List[SupportTicketDump] = []
         for dump_ticket in candidates:
             user_id = _normalize_dump_user_id((dump_ticket.data or {}).get("user_id"))
