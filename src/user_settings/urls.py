@@ -12,6 +12,7 @@ from .views import (
     QueueTypesListView,
     GroupListCreateView,
     GroupDetailView,
+    MyLeadGroupSummaryView,
 )
 
 urlpatterns = [
@@ -34,6 +35,11 @@ urlpatterns = [
         "users/<uuid:user_id>/leads-count/",
         UserLeadsCountView.as_view(),
         name="user-leads-count",
+    ),
+    path(
+        "me/lead-group-summary/",
+        MyLeadGroupSummaryView.as_view(),
+        name="me-lead-group-summary",
     ),
     path("lead-types/", LeadTypesListView.as_view(), name="lead-types-list"),
     path("lead-sources/", LeadSourcesListView.as_view(), name="lead-sources-list"),
