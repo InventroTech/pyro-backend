@@ -39,3 +39,13 @@ SUPPORT_EVENT_TO_PRAJA_RESOLUTION_STATUS = {
     SUPPORT_EVENT_RESOLVED: "Resolved",
     SUPPORT_EVENT_CANNOT_RESOLVE: "Can't Resolve",
 }
+
+# Overrides applied after generic normalization (upper/underscore) to match client enums.
+PRAJA_TICKET_STATUS_OVERRIDES = {
+    "CANT_RESOLVE": "CANNOT_RESOLVED",
+}
+
+
+def normalize_praja_ticket_status(raw: str) -> str:
+    normalized = str(raw).strip().upper().replace(" ", "_").replace("'", "")
+    return PRAJA_TICKET_STATUS_OVERRIDES.get(normalized, normalized)
