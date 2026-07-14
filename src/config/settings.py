@@ -42,8 +42,6 @@ ALLOWED_HOSTS = (
     ["pyro-prod-backend.onrender.com",
     "api.thepyro.ai"]
 )
-# Extra hosts (e.g. the dedicated WebSocket/Daphne service) via env, comma-separated.
-ALLOWED_HOSTS += env.list("EXTRA_ALLOWED_HOSTS", default=[])
 # Application definition
 
 INSTALLED_APPS = [
