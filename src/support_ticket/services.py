@@ -5,7 +5,7 @@ import logging
 import base64
 from typing import Any, Dict, Literal, Mapping, Optional
 
-from support_ticket.constants import PRAJA_SAVE_SUPPORT_TICKET_URL
+from support_ticket.constants import PRAJA_SAVE_SUPPORT_TICKET_URL, normalize_praja_ticket_status
 
 RmAssignedSendResult = Literal["success", "skipped_not_found", "failed"]
 CseAssignedSendResult = RmAssignedSendResult
@@ -458,8 +458,7 @@ class SaveResolvedTicketPrajaService:
             resolution_status
             or resolution_status_from_latest_object_history(record)
         )
-        ticket_status = str(resolution).strip() if resolution else ""
-        ticket_status = ticket_status.upper().replace(" ", "_").replace("'", "")
+        ticket_status = normalize_praja_ticket_status(resolution) if resolution else ""
 
         return {
             "user_id": self._coerce_api_id(user_id),
@@ -481,7 +480,7 @@ class SaveResolvedTicketPrajaService:
             "user_id": self._coerce_api_id(user_id),
             "ticket_id": self._coerce_api_id(ticket_id),
             "ticket_type": str(ticket_type).strip().lower().replace("-", "_").replace(" ", "_"),
-            "ticket_status": str(ticket_status).upper().replace(" ", "_").replace("'", ""),
+            "ticket_status": normalize_praja_ticket_status(ticket_status),
             "all_tasks_completed": bool(all_tasks_completed),
         }
         headers = self._request_headers()
