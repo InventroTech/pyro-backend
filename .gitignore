@@ -6,3 +6,6 @@ __pycache__/
 .DS_Store
 *.log
 management/
+# Cursor local noise (keep .cursor/BUGBOT.md tracked)
+.cursor/*.log
+.cursor/**/*.log
