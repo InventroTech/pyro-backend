@@ -316,7 +316,7 @@ def record_to_ticket_dict(record: Record) -> Dict[str, Any]:
         "assigned_to": data.get("assigned_to"),
         "layout_status": data.get("layout_status"),
         "state": data.get("state"),
-        "resolution_status": data.get("resolution_status"),
+        "resolution_status": data.get("resolution_status").upper(),
         "resolution_time": data.get("resolution_time"),
         "cse_name": data.get("cse_name"),
         "cse_remarks": data.get("cse_remarks"),
