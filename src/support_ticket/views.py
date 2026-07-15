@@ -50,6 +50,7 @@ from .constants import (
     SAVE_AND_CONTINUE_RESOLUTION_EVENTS,
     SUPPORT_EVENT_NOT_CONNECTED,
     SUPPORT_EVENT_TAKE_BREAK,
+    SUPPORT_RESOLUTION_STATUS_OPEN,
     SUPPORT_TICKET_ENTITY_TYPE,
 )
 from .ticket_types import (
@@ -325,6 +326,8 @@ def _build_support_record_data_from_dump(
     data.setdefault("call_attempts", 0)
     data.setdefault("other_reasons", [])
     data.setdefault("review_requested", False)
+    # Align with Praja open-ticket sync: new dump→record rows are Open unless dump set one.
+    data.setdefault("resolution_status", SUPPORT_RESOLUTION_STATUS_OPEN)
 
     snooze_until = data.get("snooze_until")
     if snooze_until:
