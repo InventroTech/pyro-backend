@@ -903,12 +903,26 @@ class PrajaJobHandler(JobHandler):
             elif object_type == "save_resolved_ticket":
                 from support_ticket.services import SaveResolvedTicketPrajaService
 
+                ticket_status = payload.get("ticket_status")
+                is_open = str(ticket_status or "").upper() == "OPEN"
+                if is_open:
+                    logger.info(
+                        "[Praja job] Processing OPEN save_resolved_ticket job_id=%s "
+                        "user_id=%s ticket_id=%s ticket_type=%s ticket_status=%s "
+                        "all_tasks_completed=%s",
+                        job.id,
+                        payload.get("user_id"),
+                        payload.get("ticket_id"),
+                        payload.get("ticket_type"),
+                        ticket_status,
+                        payload.get("all_tasks_completed"),
+                    )
                 save_service = SaveResolvedTicketPrajaService()
                 success = save_service.save_resolved_ticket(
                     user_id=payload.get("user_id"),
                     ticket_id=payload.get("ticket_id"),
                     ticket_type=payload.get("ticket_type"),
-                    ticket_status=payload.get("ticket_status"),
+                    ticket_status=ticket_status,
                     all_tasks_completed=payload.get("all_tasks_completed"),
                 )
             else:
