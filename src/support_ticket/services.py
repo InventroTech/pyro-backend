@@ -459,14 +459,26 @@ class SaveResolvedTicketPrajaService:
             or resolution_status_from_latest_object_history(record)
         )
         ticket_status = normalize_praja_ticket_status(resolution) if resolution else ""
-
-        return {
+        payload = {
             "user_id": self._coerce_api_id(user_id),
             "ticket_id": self._coerce_api_id(record.id),
             "ticket_type": ticket_type,
             "ticket_status": ticket_status,
             "all_tasks_completed": all_support_ticket_tasks_completed(data),
         }
+        if ticket_status == "OPEN":
+            logger.info(
+                "[Praja] Built OPEN save_support_ticket payload record_id=%s "
+                "user_id=%s ticket_id=%s ticket_type=%s resolution_status=%r "
+                "all_tasks_completed=%s",
+                record.id,
+                payload["user_id"],
+                payload["ticket_id"],
+                payload["ticket_type"],
+                resolution,
+                payload["all_tasks_completed"],
+            )
+        return payload
 
     def save_resolved_ticket(
         self,
@@ -484,13 +496,28 @@ class SaveResolvedTicketPrajaService:
             "all_tasks_completed": bool(all_tasks_completed),
         }
         headers = self._request_headers()
+        is_open = str(payload.get("ticket_status") or "").upper() == "OPEN"
 
         try:
-            logger.info(
-                "[Praja] POST save_support_ticket url=%s payload=%s",
-                self.api_url,
-                json.dumps(payload, default=str),
-            )
+            if is_open:
+                logger.info(
+                    "[Praja] POST OPEN save_support_ticket url=%s "
+                    "user_id=%s ticket_id=%s ticket_type=%s ticket_status=%s "
+                    "all_tasks_completed=%s payload=%s",
+                    self.api_url,
+                    payload.get("user_id"),
+                    payload.get("ticket_id"),
+                    payload.get("ticket_type"),
+                    payload.get("ticket_status"),
+                    payload.get("all_tasks_completed"),
+                    json.dumps(payload, default=str),
+                )
+            else:
+                logger.info(
+                    "[Praja] POST save_support_ticket url=%s payload=%s",
+                    self.api_url,
+                    json.dumps(payload, default=str),
+                )
             response = requests.post(
                 self.api_url,
                 json=payload,
@@ -499,18 +526,36 @@ class SaveResolvedTicketPrajaService:
             )
             if not response.ok:
                 logger.error(
-                    "[Praja] save_support_ticket failed status=%s body=%s",
+                    "[Praja] save_support_ticket failed ticket_status=%s "
+                    "ticket_id=%s http_status=%s body=%s",
+                    payload.get("ticket_status"),
+                    payload.get("ticket_id"),
                     response.status_code,
                     response.text[:500],
                 )
                 return False
-            logger.info(
-                "[Praja] save_support_ticket success ticket_id=%s",
-                payload.get("ticket_id"),
-            )
+            if is_open:
+                logger.info(
+                    "[Praja] OPEN save_support_ticket success "
+                    "user_id=%s ticket_id=%s ticket_type=%s",
+                    payload.get("user_id"),
+                    payload.get("ticket_id"),
+                    payload.get("ticket_type"),
+                )
+            else:
+                logger.info(
+                    "[Praja] save_support_ticket success ticket_id=%s ticket_status=%s",
+                    payload.get("ticket_id"),
+                    payload.get("ticket_status"),
+                )
             return True
         except requests.exceptions.RequestException as exc:
-            logger.error("[Praja] save_support_ticket error: %s", exc)
+            logger.error(
+                "[Praja] save_support_ticket error ticket_status=%s ticket_id=%s: %s",
+                payload.get("ticket_status"),
+                payload.get("ticket_id"),
+                exc,
+            )
             return False
 
     def save_record(self, record) -> bool:

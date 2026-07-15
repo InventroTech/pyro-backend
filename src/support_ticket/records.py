@@ -18,7 +18,10 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from crm_records.models import Record
-from support_ticket.constants import SUPPORT_TICKET_ENTITY_TYPE
+from support_ticket.constants import (
+    SUPPORT_RESOLUTION_STATUS_OPEN,
+    SUPPORT_TICKET_ENTITY_TYPE,
+)
 
 # JSON ``data`` keys mirroring legacy ``support_ticket`` columns.
 TICKET_DATA_SEARCH_FIELDS = (
@@ -80,12 +83,18 @@ def q_record_open_or_snoozed_resolution() -> Q:
     return (
         q_data_unset("resolution_status")
         | Q(data__resolution_status="")
+        | Q(data__resolution_status=SUPPORT_RESOLUTION_STATUS_OPEN)
         | Q(data__resolution_status="Snoozed")
     )
 
 
 def q_record_pending_resolution() -> Q:
-    return q_data_unset("resolution_status") | Q(data__resolution_status="")
+    """Unset/empty/Open — tickets not yet WIP / resolved / closed / etc."""
+    return (
+        q_data_unset("resolution_status")
+        | Q(data__resolution_status="")
+        | Q(data__resolution_status=SUPPORT_RESOLUTION_STATUS_OPEN)
+    )
 
 
 def q_data_json_has_value(field: str) -> Q:
