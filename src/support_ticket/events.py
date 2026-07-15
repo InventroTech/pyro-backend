@@ -207,12 +207,22 @@ def _enqueue_praja_save_resolved_ticket(
     record: Record,
     resolution_status: Optional[str] = None,
 ) -> None:
+    from support_ticket.constants import SUPPORT_RESOLUTION_STATUS_OPEN
     from support_ticket.services import SaveResolvedTicketPrajaService
 
     service = SaveResolvedTicketPrajaService()
     payload = service.build_payload(record, resolution_status=resolution_status)
     if not payload:
+        logger.warning(
+            "[Praja] Skipping save_resolved_ticket enqueue — empty payload "
+            "record_id=%s resolution_status=%s",
+            record.id,
+            resolution_status,
+        )
         return
+    is_open = resolution_status == SUPPORT_RESOLUTION_STATUS_OPEN or (
+        str(payload.get("ticket_status") or "").upper() == "OPEN"
+    )
     try:
         get_queue_service().enqueue_job(
             job_type=JobType.SEND_TO_PRAJA,
@@ -224,10 +234,32 @@ def _enqueue_praja_save_resolved_ticket(
             priority=0,
             max_attempts=3,
         )
+        if is_open:
+            logger.info(
+                "[Praja] Enqueued OPEN save_support_ticket record_id=%s "
+                "user_id=%s ticket_id=%s ticket_type=%s ticket_status=%s "
+                "all_tasks_completed=%s",
+                record.id,
+                payload.get("user_id"),
+                payload.get("ticket_id"),
+                payload.get("ticket_type"),
+                payload.get("ticket_status"),
+                payload.get("all_tasks_completed"),
+            )
+        else:
+            logger.info(
+                "[Praja] Enqueued save_resolved_ticket record_id=%s "
+                "ticket_status=%s ticket_id=%s",
+                record.id,
+                payload.get("ticket_status"),
+                payload.get("ticket_id"),
+            )
     except Exception as exc:
         logger.error(
-            "Failed to enqueue Praja save_resolved_ticket record_id=%s: %s",
+            "Failed to enqueue Praja save_resolved_ticket record_id=%s "
+            "resolution_status=%s: %s",
             record.id,
+            resolution_status,
             exc,
             exc_info=True,
         )
@@ -266,16 +298,41 @@ def enqueue_praja_for_open_ticket(
     """
     from support_ticket.constants import SUPPORT_RESOLUTION_STATUS_OPEN
 
+    data = record.data or {}
+    dump_status = (dump_data or {}).get("resolution_status")
+    record_status = data.get("resolution_status")
     status = _open_resolution_status_at_dump_ingest(record, dump_data)
     if status != SUPPORT_RESOLUTION_STATUS_OPEN:
-        return
-    data = record.data or {}
-    if not data.get("user_id"):
-        logger.warning(
-            "Skipping Praja save_resolved_ticket for open record_id=%s — missing user_id",
+        logger.info(
+            "[Praja] Skipping OPEN save_support_ticket — not Open at dump ingest "
+            "record_id=%s dump_resolution_status=%r record_resolution_status=%r "
+            "resolved_status=%r user_id=%s",
             record.id,
+            dump_status,
+            record_status,
+            status,
+            data.get("user_id"),
         )
         return
+    if not data.get("user_id"):
+        logger.warning(
+            "[Praja] Skipping OPEN save_support_ticket for record_id=%s — missing user_id "
+            "dump_resolution_status=%r record_resolution_status=%r",
+            record.id,
+            dump_status,
+            record_status,
+        )
+        return
+    logger.info(
+        "[Praja] OPEN ticket dump ingest → enqueue save_support_ticket "
+        "record_id=%s user_id=%s dump_resolution_status=%r record_resolution_status=%r "
+        "support_ticket_type=%r",
+        record.id,
+        data.get("user_id"),
+        dump_status,
+        record_status,
+        data.get("support_ticket_type") or data.get("poster"),
+    )
     _enqueue_praja_save_resolved_ticket(
         record=record,
         resolution_status=SUPPORT_RESOLUTION_STATUS_OPEN,

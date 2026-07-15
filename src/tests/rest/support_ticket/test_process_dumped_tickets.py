@@ -199,7 +199,7 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
             entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data__name="New self trial",
         )
-        self.assertIsNone(new_record.data.get("resolution_status"))
+        self.assertEqual(new_record.data.get("resolution_status"), "Open")
 
     @patch("support_ticket.views.get_queue_service")
     def test_ticket_created_mixpanel_includes_support_ticket_type(self, mock_get_queue):
@@ -275,7 +275,6 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
             data=dump_data(
                 user_id="12345",
                 name="Open ticket",
-                resolution_status="Open",
                 support_ticket_id=78901,
                 support_ticket_type="alert_words",
             ),
@@ -285,6 +284,13 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
             tenant_id=self.tenant_id,
             on_ticket_created=on_ticket_created_after_dump,
         )
+
+        record = Record.objects.get(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data__user_id="12345",
+        )
+        self.assertEqual(record.data.get("resolution_status"), "Open")
 
         mock_queue = mock_get_queue.return_value
         praja_calls = [
@@ -297,11 +303,6 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         self.assertEqual(payload["object_type"], "save_resolved_ticket")
         self.assertEqual(payload["user_id"], 12345)
         self.assertEqual(payload["ticket_status"], "OPEN")
-        record = Record.objects.get(
-            tenant=self.tenant,
-            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
-            data__user_id="12345",
-        )
         self.assertEqual(payload["ticket_id"], record.id)
         self.assertEqual(payload["ticket_type"], "alert_words")
 
@@ -309,13 +310,25 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
     def test_non_open_ticket_does_not_enqueue_praja_on_dump_process(self, mock_get_queue):
         SupportTicketDumpFactory.create(
             tenant_id=self.tenant_id,
-            data=dump_data(user_id="67890", name="Pending ticket"),
+            data=dump_data(
+                user_id="67890",
+                name="Closed ticket",
+                resolution_status="Closed",
+                support_ticket_type="alert_words",
+            ),
         )
 
         process_dumped_tickets(
             tenant_id=self.tenant_id,
             on_ticket_created=on_ticket_created_after_dump,
         )
+
+        record = Record.objects.get(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data__user_id="67890",
+        )
+        self.assertEqual(record.data.get("resolution_status"), "Closed")
 
         mock_queue = mock_get_queue.return_value
         praja_calls = [
@@ -366,6 +379,7 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         self.assertEqual(record.data["poster"], "in_trial")
         self.assertIsNotNone(record.data.get("dumped_at"))
         self.assertEqual(record.data["call_status"], "Call Waiting")
+        self.assertEqual(record.data["resolution_status"], "Open")
 
     def test_process_writes_records_only(self):
         SupportTicketDumpFactory.create(
