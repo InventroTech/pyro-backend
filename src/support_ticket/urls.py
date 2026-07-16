@@ -8,7 +8,11 @@ urlpatterns = [
     path('save-and-continue/', SaveAndContinueView.as_view(), name='save-and-continue'),
     path('get-next-ticket/', GetNextTicketView.as_view(), name='get-next-ticket'),
     path('get-wip-tickets/', GetWIPTicketsView.as_view(), name='get-wip-tickets'),
-    path('not-connected/', GetNotConnectedTicketsView.as_view(), name='not-connected-tickets'),
+    path(
+        'get-not-connected-tickets/',
+        GetNotConnectedTicketsView.as_view(),
+        name='get-not-connected-tickets',
+    ),
     path('daily-progress/', SupportDailyProgressView.as_view(), name='daily-progress'),
     path("update-call-status/", UpdateCallStatusView.as_view(), name="update-call-status"),
     path('update/', SupportTicketUpdateView.as_view(), name='update-ticket'),

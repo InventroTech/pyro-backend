@@ -849,8 +849,10 @@ class GetWIPTicketsView(APIView):
 
 class GetNotConnectedTicketsView(APIView):
     """
-    List non-terminal Not Connected tickets assigned to the current CSE (FE tab).
-    Ordered for dialing: day(first_assigned) desc, attempts asc, created_at desc.
+    List Not Connected tickets assigned to the authenticated CSE.
+
+    NC outcomes store ``resolution_status=Snoozed`` + ``call_status=Not Connected``
+    (same pattern as get-wip-tickets filtering on ``WIP``).
     """
     authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
@@ -858,27 +860,21 @@ class GetNotConnectedTicketsView(APIView):
     def get(self, request):
         try:
             user_id = str(request.user.supabase_uid)
-            terminal = list(SUPPORT_TERMINAL_RESOLUTION_STATUSES)
-            qs = (
-                support_ticket_records_qs(tenant=request.tenant)
-                .filter(data__assigned_to=user_id)
-                .filter(data__call_status__iexact="Not Connected")
-                .exclude(data__resolution_status__in=terminal)
-            )
-            from crm_records.lead_pipeline.pull_strategy import PullStrategyApplier
+            logger.info("Querying not-connected tickets for user ID: %s", user_id)
 
-            qs = PullStrategyApplier().apply(
-                qs=qs,
-                strategy={
-                    "order": ["-day(first_assigned_at)", "call_attempts", "-created_at"],
-                    "day_timezone": "Asia/Kolkata",
-                    "include_snoozed_due": False,
-                    "ignore_score_for_sources": [],
-                },
-                now_iso=timezone.now().isoformat(),
-                require_next_call_ready=False,
+            nc_records = (
+                support_ticket_records_qs(tenant=request.tenant)
+                .filter(
+                    data__assigned_to=user_id,
+                    data__resolution_status="Snoozed",
+                    data__call_status__iexact="Not Connected",
+                )
+                .order_by("-created_at")
             )
-            return Response(records_to_ticket_dicts(qs), status=status.HTTP_200_OK)
+            return Response(
+                records_to_ticket_dicts(nc_records),
+                status=status.HTTP_200_OK,
+            )
         except Exception as error:
             logger.error("Unexpected error in get-not-connected-tickets: %s", error)
             return Response(
