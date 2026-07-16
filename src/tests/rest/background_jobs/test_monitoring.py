@@ -8,9 +8,12 @@ Run:
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+import background_jobs.render_metrics_monitor as rm
 
 # send_email is imported lazily inside functions, so patch at the source.
 SEND_EMAIL_PATH = "email_protocol.services.send_email"
@@ -25,7 +28,6 @@ def _make_render_series(value: float) -> list:
 
 
 def _reset_render_monitor():
-    import background_jobs.render_metrics_monitor as rm
     rm._last_render_check_at = None
     rm._last_render_alert_sent.clear()
 
@@ -71,7 +73,6 @@ class TestRenderMetricsMonitorGuards:
         _reset_render_monitor()
 
     def test_skips_when_api_key_missing(self):
-        import background_jobs.render_metrics_monitor as rm
         with patch("background_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(api_key="")), \
              patch("requests.get") as mock_get:
@@ -80,7 +81,6 @@ class TestRenderMetricsMonitorGuards:
         assert result == {}
 
     def test_skips_when_service_id_missing(self):
-        import background_jobs.render_metrics_monitor as rm
         with patch("background_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(service_id="")), \
              patch("requests.get") as mock_get:
@@ -89,7 +89,6 @@ class TestRenderMetricsMonitorGuards:
         assert result == {}
 
     def test_check_interval_throttles_api_calls(self):
-        import background_jobs.render_metrics_monitor as rm
         rm._last_render_check_at = time.monotonic()
         with patch("requests.get") as mock_get:
             result = rm.check_render_metrics()
@@ -106,7 +105,6 @@ class TestRenderMetricsMonitorAlerts:
         _reset_render_monitor()
 
     def test_no_alert_when_all_healthy(self):
-        import background_jobs.render_metrics_monitor as rm
         with patch("background_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg()), \
              patch("requests.get", side_effect=_render_side_effect(cpu=5.0, latency=100.0)), \
@@ -115,7 +113,6 @@ class TestRenderMetricsMonitorAlerts:
         mock_send.assert_not_called()
 
     def test_cpu_alert_above_threshold(self):
-        import background_jobs.render_metrics_monitor as rm
         with patch("background_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(cpu_threshold=80.0)), \
              patch("requests.get", side_effect=_render_side_effect(cpu=90.0)), \
@@ -125,7 +122,6 @@ class TestRenderMetricsMonitorAlerts:
         assert any("CPU" in c[1]["subject"] for c in mock_send.call_args_list)
 
     def test_cpu_below_threshold_no_alert(self):
-        import background_jobs.render_metrics_monitor as rm
         with patch("background_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(cpu_threshold=85.0)), \
              patch("requests.get", side_effect=_render_side_effect(cpu=50.0)), \
@@ -134,7 +130,6 @@ class TestRenderMetricsMonitorAlerts:
         assert not any("CPU" in c[1]["subject"] for c in mock_send.call_args_list)
 
     def test_memory_calculated_as_percentage(self):
-        import background_jobs.render_metrics_monitor as rm
         # 1.8 GB / 2 GB ≈ 90%
         with patch("background_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(memory_threshold=89.0)), \
@@ -146,7 +141,6 @@ class TestRenderMetricsMonitorAlerts:
         assert any("Memory" in c[1]["subject"] for c in mock_send.call_args_list)
 
     def test_latency_alert_above_threshold(self):
-        import background_jobs.render_metrics_monitor as rm
         with patch("background_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg()), \
              patch("requests.get", side_effect=_render_side_effect(latency=4500.0)), \
@@ -157,7 +151,6 @@ class TestRenderMetricsMonitorAlerts:
                    for c in mock_send.call_args_list)
 
     def test_cooldown_suppresses_repeated_cpu_alert(self):
-        import background_jobs.render_metrics_monitor as rm
         rm._last_render_alert_sent["render_cpu"] = time.monotonic()
         with patch("background_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(cpu_threshold=80.0)), \
@@ -167,7 +160,6 @@ class TestRenderMetricsMonitorAlerts:
         assert not any("CPU" in c[1]["subject"] for c in mock_send.call_args_list)
 
     def test_alert_fires_again_after_cooldown(self):
-        import background_jobs.render_metrics_monitor as rm
         rm._last_render_alert_sent["render_cpu"] = time.monotonic() - rm.RENDER_ALERT_COOLDOWN - 1
         with patch("background_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(cpu_threshold=80.0)), \
@@ -177,7 +169,6 @@ class TestRenderMetricsMonitorAlerts:
         assert any("CPU" in c[1]["subject"] for c in mock_send.call_args_list)
 
     def test_api_failure_does_not_raise(self):
-        import background_jobs.render_metrics_monitor as rm
         import requests as req_lib
         with patch("background_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg()), \
@@ -185,7 +176,6 @@ class TestRenderMetricsMonitorAlerts:
             rm.check_render_metrics()  # must not raise
 
     def test_cc_included_in_email(self):
-        import background_jobs.render_metrics_monitor as rm
         with patch("background_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(cpu_threshold=80.0)), \
              patch("background_jobs.render_metrics_monitor._get_alert_recipients",
@@ -200,7 +190,6 @@ class TestRenderMetricsMonitorAlerts:
         assert "bibhab@thepyro.ai" in cc
 
     def test_send_failure_does_not_raise(self):
-        import background_jobs.render_metrics_monitor as rm
         with patch("background_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(cpu_threshold=80.0)), \
              patch("requests.get", side_effect=_render_side_effect(cpu=90.0)), \
@@ -214,46 +203,37 @@ class TestRenderMetricsMonitorAlerts:
 
 class TestLatestMaxValue:
     def test_returns_max_across_multiple_points(self):
-        from background_jobs.render_metrics_monitor import _latest_max_value
         series = [
             {"values": [{"timestamp": "t1", "value": 10}, {"timestamp": "t2", "value": 50}]},
             {"values": [{"timestamp": "t3", "value": 30}]},
         ]
-        assert _latest_max_value(series) == 50
+        assert rm._latest_max_value(series) == 50
 
     def test_empty_series_returns_none(self):
-        from background_jobs.render_metrics_monitor import _latest_max_value
-        assert _latest_max_value([]) is None
+        assert rm._latest_max_value([]) is None
 
     def test_empty_values_list_returns_none(self):
-        from background_jobs.render_metrics_monitor import _latest_max_value
-        assert _latest_max_value([{"values": []}]) is None
+        assert rm._latest_max_value([{"values": []}]) is None
 
     def test_single_point(self):
-        from background_jobs.render_metrics_monitor import _latest_max_value
-        assert _latest_max_value([{"values": [{"timestamp": "t1", "value": 42.5}]}]) == 42.5
+        assert rm._latest_max_value([{"values": [{"timestamp": "t1", "value": 42.5}]}]) == 42.5
 
     def test_negative_values(self):
-        from background_jobs.render_metrics_monitor import _latest_max_value
         series = [{"values": [{"timestamp": "t1", "value": -5}, {"timestamp": "t2", "value": -1}]}]
-        assert _latest_max_value(series) == -1
+        assert rm._latest_max_value(series) == -1
 
 
 class TestTimeWindow:
     def test_timestamps_end_with_z(self):
-        from background_jobs.render_metrics_monitor import _time_window
-        start, end = _time_window(minutes=5)
+        start, end = rm._time_window(minutes=5)
         assert start.endswith("Z") and end.endswith("Z")
 
     def test_start_before_end(self):
-        from background_jobs.render_metrics_monitor import _time_window
-        start, end = _time_window(minutes=5)
+        start, end = rm._time_window(minutes=5)
         assert start < end
 
     def test_window_is_approximately_n_minutes(self):
-        from background_jobs.render_metrics_monitor import _time_window
-        from datetime import datetime, timezone
-        start, end = _time_window(minutes=10)
+        start, end = rm._time_window(minutes=10)
         s = datetime.strptime(start, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         e = datetime.strptime(end, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         assert 590 <= (e - s).total_seconds() <= 610
