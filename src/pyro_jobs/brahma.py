@@ -4,7 +4,8 @@ import threading
 from datetime import timedelta
 from django.core.exceptions import MultipleObjectsReturned
 from django.utils import timezone
-from django.db import transaction, ProgrammingError, OperationalError
+from django.db import transaction, close_old_connections, ProgrammingError, OperationalError
+from django.db.utils import InterfaceError
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ def run_brahma_loop():
 
     while True:
         try:
+            close_old_connections()
             from pyro_jobs.models import PyroJob
 
             for job_name, config in SCHEDULE.items():
@@ -109,12 +111,15 @@ def run_brahma_loop():
                             job_name,
                         )
 
-        except (ProgrammingError, OperationalError) as e:
+        except ProgrammingError as e:
             if "pyro_job" in str(e):
                 logger.warning("[Brahma] pyro_job table not ready yet, waiting for migrations...")
                 time.sleep(30)
                 continue
             logger.error("[Brahma] Loop error: %s", e)
+        except (InterfaceError, OperationalError) as e:
+            logger.warning("[Brahma] Database connection error, reconnecting: %s", e)
+            close_old_connections()
         except Exception as e:
             logger.error("[Brahma] Loop error: %s", e)
 
