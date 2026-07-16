@@ -97,7 +97,7 @@ class LeadPipeline:
         else:
             logger.info("[LeadPipeline] daily_limit_check daily_limit not set — no fresh-bucket cap from Group/KV")
 
-        assignments = self.bucket_resolver.resolve(tenant, resolved_user)
+        assignments = self.bucket_resolver.resolve(tenant, resolved_user, entity_type="lead")
         bucket_order = [(a.bucket_slug, a.priority) for a in assignments]
         logger.info(
             "[LeadPipeline] buckets resolved count=%s order=%s user=%s",
@@ -154,6 +154,7 @@ class LeadPipeline:
                     eligible_lead_statuses=resolved_user.eligible_lead_statuses,
                     eligible_states=resolved_user.eligible_states,
                     debug=debug,
+                    entity_type="lead",
                 )
 
                 # qs = self.matrix_filter.apply(

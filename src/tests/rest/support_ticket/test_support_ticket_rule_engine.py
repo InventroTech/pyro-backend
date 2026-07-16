@@ -52,8 +52,14 @@ class SupportTicketRuleEngineTests(TestCase):
         for camel in ("cseRemarks", "callStatus", "resolutionTime"):
             self.assertNotIn(camel, prepared)
 
-    def test_not_connected_first_two_attempts_snooze_one_hour(self):
-        """Mirrors production rule: attempts 1–2 snooze 60m; 3rd closes."""
+    def test_not_connected_first_attempts_snooze_ninety_minutes(self):
+        """Mirrors production rule: keep assignee, snooze 90m."""
+        self.record.data = {
+            **self.record.data,
+            "assigned_to": "00000000-0000-0000-0000-000000000001",
+            "cse_name": "cse@example.com",
+        }
+        self.record.save(update_fields=["data"])
         ctx = {
             "record": self.record,
             "payload": {"cse_remarks": "no answer"},
@@ -62,8 +68,6 @@ class SupportTicketRuleEngineTests(TestCase):
         action_update_fields(
             ctx,
             updates={
-                "cse_name": None,
-                "assigned_to": None,
                 "call_status": "Not Connected",
                 "cse_remarks": "{{payload.cse_remarks}}",
                 "completed_at": "{{now}}",
@@ -72,21 +76,24 @@ class SupportTicketRuleEngineTests(TestCase):
             increments={"call_attempts": 1},
         )
         action_compute_next_call_from_attempts(
-            ctx, fixed_minutes=60, attempts_field="call_attempts", target_field="next_call_at"
+            ctx, fixed_minutes=90, attempts_field="call_attempts", target_field="next_call_at"
         )
         action_compute_next_call_from_attempts(
-            ctx, fixed_minutes=60, attempts_field="call_attempts", target_field="snooze_until"
+            ctx, fixed_minutes=90, attempts_field="call_attempts", target_field="snooze_until"
         )
 
         self.record.refresh_from_db()
         self.assertEqual(self.record.data["call_attempts"], 1)
         self.assertEqual(self.record.data["resolution_status"], "Snoozed")
-        self.assertIsNone(self.record.data.get("assigned_to"))
+        self.assertEqual(
+            self.record.data.get("assigned_to"),
+            "00000000-0000-0000-0000-000000000001",
+        )
 
         before = timezone.now()
         snooze_until = _parse_iso(self.record.data["snooze_until"])
         delta = (snooze_until - before).total_seconds()
-        self.assertTrue(3600 - 120 <= delta <= 3600 + 120)
+        self.assertTrue(5400 - 120 <= delta <= 5400 + 120)
 
     def test_compute_next_call_from_attempts_fixed_minutes(self):
         """Same pattern as ``test_lead_pipeline_sales_lead.test_compute_next_call...``."""

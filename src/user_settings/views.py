@@ -12,6 +12,7 @@ from .models import Group, TenantMemberSetting
 from .serializers import (
     TenantMemberSettingSerializer,
     LeadTypeAssignmentSerializer,
+    UserCoreKVSettingsPatchSerializer,
     GroupSerializer,
 )
 from .services import (
@@ -20,9 +21,13 @@ from .services import (
     get_lead_filter_options,
     upsert_user_kv_settings,
     upsert_user_lead_assignment_kv,
+    upsert_support_daily_limit_kv,
     USER_KV_GROUP_ID_KEY,
     USER_KV_DAILY_LIMIT_KEY,
     USER_KV_DAILY_TARGET_KEY,
+    USER_KV_SUPPORT_DAILY_LIMIT_SELF_TRIAL_KEY,
+    USER_KV_SUPPORT_DAILY_LIMIT_OTHER_KEY,
+    USER_KV_SUPPORT_RESOLVE_RATE_GOAL_KEY,
 )
 from crm_records.models import Record
 from django.db.models import Q
@@ -326,12 +331,33 @@ class UserLeadTypesView(APIView):
         })
 
 
+_CORE_KV_SETTING_KEYS = (
+    USER_KV_GROUP_ID_KEY,
+    USER_KV_DAILY_TARGET_KEY,
+    USER_KV_DAILY_LIMIT_KEY,
+    USER_KV_SUPPORT_DAILY_LIMIT_SELF_TRIAL_KEY,
+    USER_KV_SUPPORT_DAILY_LIMIT_OTHER_KEY,
+    USER_KV_SUPPORT_RESOLVE_RATE_GOAL_KEY,
+)
+
+
+def _resolve_tenant_membership_for_settings(tenant, user_id):
+    try:
+        return TenantMembership.objects.filter(tenant=tenant, id=int(user_id)).first()
+    except (ValueError, TypeError):
+        return get_tenant_membership_by_user_id(tenant, user_id)
+
+
 class UserCoreKVSettingsView(APIView):
     """
-    Returns per-user key/value settings for core fields:
-    - GROUP
-    - DAILY_TARGET
-    - DAILY_LIMIT
+    Per-user core KV settings (GET + PATCH support daily limits / resolve-rate goal for CSE).
+
+    GET returns GROUP, DAILY_TARGET, DAILY_LIMIT, and CSE support ST/other
+    limit + resolve-rate goal keys when set.
+
+    PATCH accepts any of:
+    ``support_daily_limit_self_trial``, ``support_daily_limit_other``,
+    ``support_resolve_rate_goal`` (null clears). Membership must have CSE role.
     """
 
     permission_classes = [IsTenantAuthenticated]
@@ -339,11 +365,7 @@ class UserCoreKVSettingsView(APIView):
     def get(self, request, user_id):
         tenant = request.tenant
 
-        tenant_membership = None
-        try:
-            tenant_membership = TenantMembership.objects.filter(tenant=tenant, id=int(user_id)).first()
-        except (ValueError, TypeError):
-            tenant_membership = get_tenant_membership_by_user_id(tenant, user_id)
+        tenant_membership = _resolve_tenant_membership_for_settings(tenant, user_id)
 
         if not tenant_membership:
             return Response(
@@ -354,7 +376,51 @@ class UserCoreKVSettingsView(APIView):
         qs = TenantMemberSetting.objects.filter(
             tenant=tenant,
             tenant_membership=tenant_membership,
-            key__in=[USER_KV_GROUP_ID_KEY, USER_KV_DAILY_TARGET_KEY, USER_KV_DAILY_LIMIT_KEY],
+            key__in=_CORE_KV_SETTING_KEYS,
+        ).order_by("key")
+        return Response(TenantMemberSettingSerializer(qs, many=True).data, status=status.HTTP_200_OK)
+
+    def patch(self, request, user_id):
+        tenant = request.tenant
+        tenant_membership = _resolve_tenant_membership_for_settings(tenant, user_id)
+        if not tenant_membership:
+            return Response(
+                {"error": f"TenantMembership not found for user_id={user_id}"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        role_key = (tenant_membership.role.key or "").upper() if tenant_membership.role else ""
+        if role_key != "CSE":
+            return Response(
+                {
+                    "error": (
+                        "TenantMembership must have CSE role to set support "
+                        "daily limits / resolve-rate goals"
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = UserCoreKVSettingsPatchSerializer(data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        upsert_support_daily_limit_kv(
+            tenant=tenant,
+            tenant_membership=tenant_membership,
+            self_trial_limit=data.get("support_daily_limit_self_trial"),
+            other_limit=data.get("support_daily_limit_other"),
+            update_self_trial="support_daily_limit_self_trial" in data,
+            update_other="support_daily_limit_other" in data,
+            resolve_rate_goal=data.get("support_resolve_rate_goal"),
+            update_resolve_rate_goal="support_resolve_rate_goal" in data,
+        )
+
+        qs = TenantMemberSetting.objects.filter(
+            tenant=tenant,
+            tenant_membership=tenant_membership,
+            key__in=_CORE_KV_SETTING_KEYS,
         ).order_by("key")
         return Response(TenantMemberSettingSerializer(qs, many=True).data, status=status.HTTP_200_OK)
 

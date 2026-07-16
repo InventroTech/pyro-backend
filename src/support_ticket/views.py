@@ -31,35 +31,42 @@ from crm_records.models import Record
 from crm_records.permissions import HasAPISecret
 from crm_records.serializers import RecordSerializer
 from user_settings.models import Group, TenantMemberSetting
-from user_settings.services import USER_KV_GROUP_ID_KEY
+from user_settings.services import (
+    USER_KV_GROUP_ID_KEY,
+    USER_KV_SUPPORT_RESOLVE_RATE_GOAL_KEY,
+    coerce_kv_int,
+)
 from authz.permissions import IsTenantAuthenticated
 from authz.models import TenantMembership
 from accounts.models import SupabaseAuthUser
 from datetime import date, datetime, timezone as dt_timezone
 from .records import (
     apply_record_data_updates,
-    filter_records_callback_due,
     q_record_open_or_snoozed_resolution,
     q_record_pending_resolution,
-    q_record_unassigned,
     record_to_ticket_dict,
     records_to_ticket_dicts,
     support_ticket_records_qs,
 )
 from .constants import (
     SAVE_AND_CONTINUE_RESOLUTION_EVENTS,
+    SUPPORT_DEFAULT_RESOLVE_RATE_GOAL_PERCENT,
     SUPPORT_EVENT_NOT_CONNECTED,
     SUPPORT_EVENT_TAKE_BREAK,
     SUPPORT_RESOLUTION_STATUS_OPEN,
+    SUPPORT_RESOLVE_RATE_SUCCESS_STATUSES,
+    SUPPORT_TERMINAL_RESOLUTION_STATUSES,
     SUPPORT_TICKET_ENTITY_TYPE,
 )
 from .ticket_types import (
-    SELF_TRIAL_MAX_CALL_ATTEMPTS,
     SELF_TRIAL_TICKET_TYPE_KEY as _SELF_TRIAL_TICKET_TYPE_KEY,
     canonical_support_ticket_type_key as _canonical_support_ticket_type_key,
+    q_record_self_trial,
 )
 from .events import log_and_dispatch_support_ticket_event, resolve_support_ticket_record
 from .mixpanel_properties import support_ticket_mixpanel_properties
+from .buckets import seed_cse_support_buckets
+from .pipeline import SupportTicketPipeline
 
 logger = logging.getLogger(__name__)
 DUMP_BATCH_LIMIT = 5000
@@ -598,29 +605,6 @@ _EXPIRED_SUPPORT_TICKET_TYPES = frozenset({
     "premium_expired",
 })
 
-# Queue routing: priority-1 ``support_ticket_type`` values share one LIFO pool; rest is priority 0.
-@dataclass(frozen=True)
-class _SupportTicketRoutingRule:
-    ticket_type_key: str
-    priority: int
-    max_attempts: int
-
-
-_SUPPORT_TICKET_ROUTING_RULES: Tuple[_SupportTicketRoutingRule, ...] = (
-    _SupportTicketRoutingRule("self_trail", 1, SELF_TRIAL_MAX_CALL_ATTEMPTS),
-    _SupportTicketRoutingRule("in_trial", 1, 3),
-    _SupportTicketRoutingRule("paid", 1, 3),
-    _SupportTicketRoutingRule("trial_extension", 1, 3),
-    _SupportTicketRoutingRule("premium_extension", 1, 3),
-    _SupportTicketRoutingRule("rest", 0, 3),
-)
-
-_TICKET_TYPE_KEY_TO_ROUTING_RULE: Dict[str, _SupportTicketRoutingRule] = {
-    rule.ticket_type_key: rule for rule in _SUPPORT_TICKET_ROUTING_RULES
-}
-
-_ROUTING_PICK_BATCH_SIZE = 500
-
 
 def _record_support_ticket_type_raw(record: Record) -> Any:
     data = record.data or {}
@@ -696,71 +680,6 @@ def _delete_open_non_self_trial_records_for_user(
     return count
 
 
-def _record_call_attempts(record: Record) -> int:
-    attempts = (record.data or {}).get("call_attempts", 0)
-    try:
-        return int(attempts) if attempts is not None else 0
-    except (TypeError, ValueError):
-        return 0
-
-
-def _routing_rule_for_record(record: Record) -> _SupportTicketRoutingRule:
-    return _TICKET_TYPE_KEY_TO_ROUTING_RULE[_record_ticket_type_key(record)]
-
-
-def _record_eligible_for_routing_queue(record: Record) -> bool:
-    rule = _routing_rule_for_record(record)
-    return _record_call_attempts(record) < rule.max_attempts
-
-
-def _pick_routed_support_record(
-    candidates: Iterable[Record],
-    *,
-    current_time: Optional[datetime] = None,
-    only_due_snoozed: bool = False,
-) -> Optional[Record]:
-    """
-    Pick the next ticket for the queue.
-
-    Priority-1 ``support_ticket_type`` values (self_trail, in_trial, paid,
-    trial_extension, premium_extension) compete in a single LIFO pool (newest
-    ``created_at`` wins). Rest (priority 0) is only considered when no
-    priority-1 ticket is eligible. Records at or above max call attempts are skipped.
-    """
-    pool: List[Record] = []
-    for record in candidates:
-        if only_due_snoozed:
-            if current_time is None:
-                continue
-            compare_at = current_time
-            if not timezone.is_aware(compare_at):
-                compare_at = timezone.make_aware(compare_at, dt_timezone.utc)
-            snooze_until = _parse_record_data_datetime((record.data or {}).get("snooze_until"))
-            next_call_at = _parse_record_data_datetime((record.data or {}).get("next_call_at"))
-            due_at = snooze_until or next_call_at
-            if due_at is None or due_at > compare_at:
-                continue
-        if not _record_eligible_for_routing_queue(record):
-            continue
-        pool.append(record)
-
-    if not pool:
-        return None
-
-    for priority in (1, 0):
-        tier = [
-            record
-            for record in pool
-            if _routing_rule_for_record(record).priority == priority
-        ]
-        if not tier:
-            continue
-        tier.sort(key=lambda record: record.created_at, reverse=True)
-        return tier[0]
-
-    return None
-
-
 def _support_ticket_records_qs(tenant: Tenant):
     return Record.objects.filter(
         tenant=tenant,
@@ -814,8 +733,14 @@ def _assign_support_record(
     user_email: str,
 ) -> Record:
     payload = dict(record.data or {})
+    previous = payload.get("assigned_to")
+    is_fresh = previous in (None, "", "null", "None")
     payload["assigned_to"] = str(user_uuid)
     payload["cse_name"] = user_email
+    if is_fresh and not payload.get("first_assigned_at"):
+        now = timezone.now()
+        payload["first_assigned_at"] = now.isoformat()
+        payload["first_assigned_to"] = str(user_uuid)
     record.data = payload
     record.save(update_fields=["data", "updated_at"])
     return record
@@ -920,6 +845,126 @@ class GetWIPTicketsView(APIView):
                 'error': 'An unexpected error occurred.',
                 'details': str(error)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class GetNotConnectedTicketsView(APIView):
+    """
+    List non-terminal Not Connected tickets assigned to the current CSE (FE tab).
+    Ordered for dialing: day(first_assigned) desc, attempts asc, created_at desc.
+    """
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        try:
+            user_id = str(request.user.supabase_uid)
+            terminal = list(SUPPORT_TERMINAL_RESOLUTION_STATUSES)
+            qs = (
+                support_ticket_records_qs(tenant=request.tenant)
+                .filter(data__assigned_to=user_id)
+                .filter(data__call_status__iexact="Not Connected")
+                .exclude(data__resolution_status__in=terminal)
+            )
+            from crm_records.lead_pipeline.pull_strategy import PullStrategyApplier
+
+            qs = PullStrategyApplier().apply(
+                qs=qs,
+                strategy={
+                    "order": ["-day(first_assigned_at)", "call_attempts", "-created_at"],
+                    "day_timezone": "Asia/Kolkata",
+                    "include_snoozed_due": False,
+                    "ignore_score_for_sources": [],
+                },
+                now_iso=timezone.now().isoformat(),
+                require_next_call_ready=False,
+            )
+            return Response(records_to_ticket_dicts(qs), status=status.HTTP_200_OK)
+        except Exception as error:
+            logger.error("Unexpected error in get-not-connected-tickets: %s", error)
+            return Response(
+                {"error": "An unexpected error occurred.", "details": str(error)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+def _resolve_rate_goal_percent(raw: Optional[int]) -> int:
+    if raw is None:
+        return SUPPORT_DEFAULT_RESOLVE_RATE_GOAL_PERCENT
+    return max(0, min(100, int(raw)))
+
+
+class SupportDailyProgressView(APIView):
+    """
+    Today's overall CSE resolve rate vs a single goal.
+
+    ``taken_today`` uses first-assigned-today (same rules as daily limit counting).
+    ``resolved_today`` is the subset with success resolution statuses
+    (Resolved / Already Resolved / No Issue).
+    ``goal_percent`` comes from CSE KV (default 80 when unset).
+    """
+
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        try:
+            from crm_records.lead_pipeline.daily_limit import DailyLimitChecker
+
+            user_id = str(request.user.supabase_uid)
+            tenant = request.tenant
+            now = timezone.now()
+            membership = TenantMembership.objects.filter(
+                tenant=tenant, user_id=request.user.supabase_uid
+            ).first()
+
+            goal_raw = None
+            if membership:
+                row = TenantMemberSetting.objects.filter(
+                    tenant=tenant,
+                    tenant_membership=membership,
+                    key=USER_KV_SUPPORT_RESOLVE_RATE_GOAL_KEY,
+                ).first()
+                if row is not None:
+                    goal_raw = coerce_kv_int(row.value)
+
+            success = list(SUPPORT_RESOLVE_RATE_SUCCESS_STATUSES)
+            checker = DailyLimitChecker()
+            taken = checker.count_assigned_today(
+                tenant=tenant,
+                user_identifier=user_id,
+                now=now,
+                entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                type_q=None,
+            )
+            resolved = checker.count_assigned_today(
+                tenant=tenant,
+                user_identifier=user_id,
+                now=now,
+                entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+                type_q=None,
+                resolution_statuses=success,
+            )
+            goal_percent = _resolve_rate_goal_percent(goal_raw)
+            resolve_rate = (
+                round((resolved / taken) * 100, 1) if taken > 0 else None
+            )
+
+            return Response(
+                {
+                    "taken_today": taken,
+                    "resolved_today": resolved,
+                    "resolve_rate": resolve_rate,
+                    "goal_percent": goal_percent,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except Exception as error:
+            logger.error("Unexpected error in support daily-progress: %s", error)
+            return Response(
+                {"error": "An unexpected error occurred.", "details": str(error)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
 
 @method_decorator(csrf_exempt, name='dispatch')
 class DumpTicketWebhookView(APIView):
@@ -1230,13 +1275,10 @@ class GetNextTicketView(APIView):
 
     def _get_and_assign_ticket(self, request, user, user_email):
         """
-        Assign the next support ticket ``Record`` to the CSE.
+        Assign the next support ticket via ``SupportTicketPipeline`` (bucket architecture).
 
-        1. Open or snoozed ticket already assigned to this user
-        2. Due snoozed unassigned ticket (``snooze_until`` / ``next_call_at`` passed)
-        3. Unassigned open ticket (support_ticket_type priority routing, LIFO)
+        Bucket order: fresh Open (ST/other equal) → NC today → WIP today → NC yesterday → WIP yesterday.
         """
-        current_time = timezone.now()
         tenant = getattr(request, "tenant", None)
         if not tenant:
             logger.warning("[_get_and_assign_ticket] Missing tenant on request")
@@ -1248,120 +1290,24 @@ class GetNextTicketView(APIView):
             logger.error("[_get_and_assign_ticket] Invalid user supabase_uid: %s", e)
             return None
 
-        assignee_id = str(user.supabase_uid)
+        # Ensure CSE buckets exist (idempotent).
+        seed_cse_support_buckets(tenant)
 
-        # Step 1: ticket already assigned to this CSE (open or snoozed).
-        already_assigned_qs = _exclude_expired_support_ticket_types(
-            _support_ticket_records_qs(tenant)
-            .select_for_update(skip_locked=True, of=("self",))
-            .filter(data__assigned_to=assignee_id)
-            .filter(q_record_open_or_snoozed_resolution())
-        )
-        try:
-            already_assigned_qs = _apply_support_record_group_filters(
-                already_assigned_qs,
+        with transaction.atomic():
+            record = SupportTicketPipeline().get_next(
                 tenant=tenant,
                 request_user=request.user,
-            )
-        except Exception as routing_error:
-            logger.error(
-                "[_get_and_assign_ticket] Step 1 routing filter failed: %s",
-                routing_error,
-                exc_info=True,
-            )
-
-        already_assigned = already_assigned_qs.order_by("created_at").first()
-        if already_assigned:
-            record = _assign_support_record(
-                already_assigned,
-                user_uuid=user_uuid_obj,
                 user_email=user_email,
             )
-            _enqueue_support_assignment_mixpanel(
-                record,
-                user_uuid=user_uuid_obj,
-                user_email=user_email,
-            )
-            return record
+        if not record:
+            return None
 
-        # Step 2: due snoozed retries (before fresh open queue — same as get-next-lead).
-        snoozed_qs = filter_records_callback_due(
-            _exclude_expired_support_ticket_types(
-                _support_ticket_records_qs(tenant)
-                .select_for_update(skip_locked=True, of=("self",))
-                .filter(data__resolution_status="Snoozed")
-                .filter(q_record_unassigned())
-            ),
-            at=current_time,
+        _enqueue_support_assignment_mixpanel(
+            record,
+            user_uuid=user_uuid_obj,
+            user_email=user_email,
         )
-        try:
-            snoozed_qs = _apply_support_record_group_filters(
-                snoozed_qs,
-                tenant=tenant,
-                request_user=request.user,
-            )
-        except Exception as routing_error:
-            logger.error(
-                "[_get_and_assign_ticket] Step 2 snoozed routing filter failed: %s",
-                routing_error,
-                exc_info=True,
-            )
-
-        snoozed = _pick_routed_support_record(
-            snoozed_qs.order_by("-created_at")[:_ROUTING_PICK_BATCH_SIZE],
-            current_time=current_time,
-            only_due_snoozed=True,
-        )
-        if snoozed:
-            record = _assign_support_record(
-                snoozed,
-                user_uuid=user_uuid_obj,
-                user_email=user_email,
-            )
-            _enqueue_support_assignment_mixpanel(
-                record,
-                user_uuid=user_uuid_obj,
-                user_email=user_email,
-            )
-            return record
-
-        # Step 3: newest unassigned open ticket.
-        unassigned_qs = _exclude_expired_support_ticket_types(
-            _support_ticket_records_qs(tenant)
-            .select_for_update(skip_locked=True, of=("self",))
-            .filter(q_record_unassigned())
-            .filter(q_record_pending_resolution())
-        )
-        try:
-            unassigned_qs = _apply_support_record_group_filters(
-                unassigned_qs,
-                tenant=tenant,
-                request_user=request.user,
-            )
-        except Exception as routing_error:
-            logger.error(
-                "[_get_and_assign_ticket] Step 3 open routing filter failed: %s",
-                routing_error,
-                exc_info=True,
-            )
-
-        unassigned = _pick_routed_support_record(
-            unassigned_qs.order_by("-created_at")[:_ROUTING_PICK_BATCH_SIZE],
-        )
-        if unassigned:
-            record = _assign_support_record(
-                unassigned,
-                user_uuid=user_uuid_obj,
-                user_email=user_email,
-            )
-            _enqueue_support_assignment_mixpanel(
-                record,
-                user_uuid=user_uuid_obj,
-                user_email=user_email,
-            )
-            return record
-
-        return None
+        return record
 
 class UpdateCallStatusView(APIView):
     permission_classes = [IsTenantAuthenticated]
@@ -1477,10 +1423,55 @@ class SupportTicketUpdateView(APIView):
             return response
 
 #
+def _call_status_is_not_connected(call_status: Any) -> bool:
+    normalized = str(call_status or "").strip().lower().replace("_", " ")
+    return normalized in {"not connected", "notconnected"}
+
+
+def _is_fresh_take_break_ticket(
+    data: Mapping[str, Any],
+    *,
+    payload_resolution_status: Optional[str] = None,
+) -> bool:
+    """
+    Fresh tickets may be released on take-break (frees daily-limit quota).
+
+    WIP and Snoozed / Not Connected stay locked to the CSE.
+    """
+    resolution = (data or {}).get("resolution_status")
+    if resolution == "WIP" or payload_resolution_status == "WIP":
+        return False
+    if resolution == "Snoozed" or payload_resolution_status == "Snoozed":
+        return False
+    if _call_status_is_not_connected((data or {}).get("call_status")):
+        return False
+    return True
+
+
+def _clear_take_break_assignment_fields(record: Record) -> bool:
+    """
+    Unassign + clear first_assigned_* so daily-limit / taken-today counts drop.
+
+    Returns True if ``record.data`` changed.
+    """
+    payload = dict(record.data or {})
+    changed = False
+    for key in ("assigned_to", "cse_name", "first_assigned_at", "first_assigned_to"):
+        if payload.get(key) is not None:
+            payload[key] = None
+            changed = True
+    if changed:
+        record.data = payload
+        record.save(update_fields=["data", "updated_at"])
+    return changed
+
+
 class TakeBreakView(APIView):
     """
-    Django equivalent of the Supabase take-break edge function.
-    Unassigns a ticket from the current user, unless the ticket is in WIP status.
+    Take a break on the current ticket.
+
+    For **fresh** tickets: unassign + clear ``first_assigned_*`` so today's
+    daily-limit count decreases. WIP / Snoozed (NC) stay locked to the CSE.
     """
     authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
@@ -1524,7 +1515,12 @@ class TakeBreakView(APIView):
             if not record:
                 return Response({'error': 'Ticket not found'}, status=status.HTTP_404_NOT_FOUND)
 
-            was_wip = (record.data or {}).get('resolution_status') == 'WIP' or resolution_status_payload == 'WIP'
+            data_before = dict(record.data or {})
+            is_fresh = _is_fresh_take_break_ticket(
+                data_before,
+                payload_resolution_status=resolution_status_payload,
+            )
+
             log_and_dispatch_support_ticket_event(
                 record=record,
                 tenant=request.tenant,
@@ -1533,12 +1529,21 @@ class TakeBreakView(APIView):
                 actor_user_id=str(user_id),
                 actor_email=user_email,
             )
-            should_unassign = not was_wip
-            message = (
-                "Ticket is in progress. Taking a break without unassigning."
-                if was_wip
-                else "Ticket unassigned. Taking a break."
-            )
+            record.refresh_from_db()
+            # Guarantee quota release for fresh tickets even if RuleSet is stale.
+            if is_fresh:
+                _clear_take_break_assignment_fields(record)
+                record.refresh_from_db()
+
+            assigned = str((record.data or {}).get("assigned_to") or "").strip()
+            still_assigned = assigned not in ("", "null", "None")
+            should_unassign = not still_assigned
+            if still_assigned:
+                message = (
+                    "Ticket kept assigned (WIP or Snoozed / Not Connected). Taking a break."
+                )
+            else:
+                message = "Ticket unassigned. Taking a break."
 
             response_data = {
                 'success': True,
