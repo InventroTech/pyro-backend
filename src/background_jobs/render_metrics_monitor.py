@@ -36,7 +36,7 @@ RENDER_CHECK_INTERVAL = 300  # 5 minutes
 # Cooldown between same-type alerts (seconds)
 RENDER_ALERT_COOLDOWN = 1800  # 30 minutes
 
-_last_render_check_at: Optional[float] = None
+_last_render_check_at: list[Optional[float]] = [None]  # [0] = last check timestamp
 _last_render_alert_sent: dict[str, float] = {}
 
 
@@ -243,12 +243,10 @@ def check_render_metrics() -> dict:
     Poll Render API metrics and send alerts if thresholds exceeded.
     Rate-limited to once per RENDER_CHECK_INTERVAL. Safe to call every worker tick.
     """
-    global _last_render_check_at
-
     now = time.monotonic()
-    if _last_render_check_at is not None and (now - _last_render_check_at) < RENDER_CHECK_INTERVAL:
+    if _last_render_check_at[0] is not None and (now - _last_render_check_at[0]) < RENDER_CHECK_INTERVAL:
         return {}
-    _last_render_check_at = now
+    _last_render_check_at[0] = now
 
     cfg = _get_render_config()
 

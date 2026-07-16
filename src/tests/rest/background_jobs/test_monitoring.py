@@ -28,7 +28,7 @@ def _make_render_series(value: float) -> list:
 
 
 def _reset_render_monitor():
-    rm._last_render_check_at = None
+    rm._last_render_check_at[0] = None
     rm._last_render_alert_sent.clear()
 
 
@@ -89,7 +89,7 @@ class TestRenderMetricsMonitorGuards:
         assert result == {}
 
     def test_check_interval_throttles_api_calls(self):
-        rm._last_render_check_at = time.monotonic()
+        rm._last_render_check_at[0] = time.monotonic()
         with patch("requests.get") as mock_get:
             result = rm.check_render_metrics()
         mock_get.assert_not_called()
