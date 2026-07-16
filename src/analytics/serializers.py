@@ -8,8 +8,14 @@ class SupportTicketSerializer(serializers.Serializer):
 
     def to_representation(self, instance):
         if isinstance(instance, dict):
-            return instance
-        return record_to_ticket_dict(instance)
+            data = instance
+        else:
+            data = record_to_ticket_dict(instance)
+
+        if data.get("resolution_status"):
+            data["resolution_status"] = data["resolution_status"].upper()
+
+        return data
 
 
 # Analytics serializers

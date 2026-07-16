@@ -315,12 +315,8 @@ def record_to_ticket_dict(record: Record) -> Dict[str, Any]:
         "tenant_id": str(record.tenant_id) if record.tenant_id else data.get("tenant_id"),
         "assigned_to": data.get("assigned_to"),
         "layout_status": data.get("layout_status"),
-        "state": data.get("state"),
-        "resolution_status": (
-    data.get("resolution_status").upper()
-    if data.get("resolution_status")
-    else data.get("resolution_status")
-),
+        "state": data.get("state"), 
+        "resolution_status": data.get("resolution_status"),
         "resolution_time": data.get("resolution_time"),
         "cse_name": data.get("cse_name"),
         "cse_remarks": data.get("cse_remarks"),
