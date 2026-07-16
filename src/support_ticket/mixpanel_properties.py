@@ -43,6 +43,7 @@ def support_ticket_mixpanel_properties(
         "source": data.get("source"),
         "subscription_status": data.get("subscription_status"),
         "atleast_paid_once": data.get("atleast_paid_once"),
+        "is_mandate_active": data.get("is_mandate_active"),
         "reason": data.get("reason"),
         "other_reasons": data.get("other_reasons") or [],
         "badge": data.get("badge"),
