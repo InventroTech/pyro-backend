@@ -1201,7 +1201,7 @@ class UnassignSnoozedLeadsJobHandler(JobHandler):
         return delays[min(attempt - 1, len(delays) - 1)]
 
 
-# Same CASE body as GetNextLeadView subscription_time_stamp sort SQL.
+# Kept for backwards compatibility / docs; ST stale close now uses Record.created_at.
 _CLOSE_STALE_SUBSCRIPTION_TS_CASE = """
 CASE
     WHEN (data->>'subscription_time_stamp') IS NOT NULL
@@ -1230,18 +1230,10 @@ def _close_stale_self_trial_support_tickets_queryset(
     tenant_id: Optional[Union[str, UUID]] = None,
 ):
     """
-    Base queryset: open SELF TRIAL support ticket records with ``subscription_ts`` from
-    ``subscription_time_stamp`` (same rules as the lead CASE SQL).
+    Base queryset: open SELF TRIAL support ticket records (age measured via created_at).
     """
     qs = (
-        Record.objects.annotate(
-            subscription_ts=RawSQL(
-                f"({_CLOSE_STALE_SUBSCRIPTION_TS_CASE.strip()})",
-                [],
-                output_field=DateTimeField(),
-            )
-        )
-        .filter(entity_type=SUPPORT_TICKET_ENTITY_TYPE)
+        Record.objects.filter(entity_type=SUPPORT_TICKET_ENTITY_TYPE)
         .filter(q_record_self_trial())
         .filter(
             q_record_open_or_snoozed_resolution() | Q(data__resolution_status="WIP")
@@ -1277,18 +1269,17 @@ def _close_stale_self_trial_support_tickets_for_tenant(
 ) -> Tuple[int, str]:
     if days < 1:
         raise ValueError("days must be >= 1")
-    cutoff = (timezone.now() - timedelta(days=days)).date()
+    cutoff = timezone.now() - timedelta(days=days)
     now = timezone.now()
     tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
-    stale_qs = (
-        _close_stale_self_trial_support_tickets_queryset(tid)
-        .filter(subscription_ts__date__lte=cutoff)
+    stale_qs = _close_stale_self_trial_support_tickets_queryset(tid).filter(
+        created_at__lte=cutoff
     )
     records_updated = _close_stale_self_trial_support_tickets_apply(
         stale_qs,
         now=now,
     )
-    return records_updated, cutoff.isoformat()
+    return records_updated, cutoff.date().isoformat()
 
 
 def _close_stale_self_trial_support_tickets_all_tenants(
@@ -1296,17 +1287,95 @@ def _close_stale_self_trial_support_tickets_all_tenants(
 ) -> Tuple[int, int, str]:
     if days < 1:
         raise ValueError("days must be >= 1")
-    cutoff = (timezone.now() - timedelta(days=days)).date()
+    cutoff = timezone.now() - timedelta(days=days)
     now = timezone.now()
     n_tenants = Tenant.objects.count()
     stale_qs = _close_stale_self_trial_support_tickets_queryset(None).filter(
-        subscription_ts__date__lte=cutoff
+        created_at__lte=cutoff
     )
     records_updated = _close_stale_self_trial_support_tickets_apply(
         stale_qs,
         now=now,
     )
-    return records_updated, n_tenants, cutoff.isoformat()
+    return records_updated, n_tenants, cutoff.date().isoformat()
+
+
+_FIRST_ASSIGNED_AT_TS = """
+CASE
+    WHEN (data->>'first_assigned_at') IS NOT NULL
+        AND TRIM(COALESCE(data->>'first_assigned_at', '')) != ''
+        AND LOWER(TRIM(COALESCE(data->>'first_assigned_at', ''))) NOT IN ('null', 'none')
+    THEN (data->>'first_assigned_at')::timestamptz
+    ELSE NULL
+END
+"""
+
+NON_SELF_TRIAL_MAX_DAYS_FROM_FIRST_ASSIGN = 3
+
+
+def _close_stale_non_self_trial_support_tickets_queryset(
+    tenant_id: Optional[Union[str, UUID]] = None,
+):
+    """Non–Self Trial open/snoozed/WIP support tickets."""
+    qs = (
+        Record.objects.annotate(
+            first_assigned_ts=RawSQL(
+                f"({_FIRST_ASSIGNED_AT_TS.strip()})",
+                [],
+                output_field=DateTimeField(),
+            )
+        )
+        .filter(entity_type=SUPPORT_TICKET_ENTITY_TYPE)
+        .filter(
+            q_record_open_or_snoozed_resolution() | Q(data__resolution_status="WIP")
+        )
+    )
+    if tenant_id is not None:
+        tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
+        qs = qs.filter(tenant_id=tid)
+    st_ids = set(qs.filter(q_record_self_trial()).values_list("id", flat=True))
+    if st_ids:
+        qs = qs.exclude(id__in=st_ids)
+    return qs
+
+
+def _close_stale_non_self_trial_by_first_assign_for_tenant(
+    tenant_id: Union[str, UUID],
+    *,
+    days: int = NON_SELF_TRIAL_MAX_DAYS_FROM_FIRST_ASSIGN,
+) -> Tuple[int, str]:
+    if days < 1:
+        raise ValueError("days must be >= 1")
+    cutoff = timezone.now() - timedelta(days=days)
+    now = timezone.now()
+    tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
+    stale_qs = _close_stale_non_self_trial_support_tickets_queryset(tid).filter(
+        first_assigned_ts__lte=cutoff
+    )
+    records_updated = _close_stale_self_trial_support_tickets_apply(
+        stale_qs,
+        now=now,
+    )
+    return records_updated, cutoff.date().isoformat()
+
+
+def _close_stale_non_self_trial_by_first_assign_all_tenants(
+    *,
+    days: int = NON_SELF_TRIAL_MAX_DAYS_FROM_FIRST_ASSIGN,
+) -> Tuple[int, int, str]:
+    if days < 1:
+        raise ValueError("days must be >= 1")
+    cutoff = timezone.now() - timedelta(days=days)
+    now = timezone.now()
+    n_tenants = Tenant.objects.count()
+    stale_qs = _close_stale_non_self_trial_support_tickets_queryset(None).filter(
+        first_assigned_ts__lte=cutoff
+    )
+    records_updated = _close_stale_self_trial_support_tickets_apply(
+        stale_qs,
+        now=now,
+    )
+    return records_updated, n_tenants, cutoff.date().isoformat()
 
 
 class PurgeOldLogTablesJobHandler(JobHandler):
@@ -1503,11 +1572,16 @@ class ProcessDumpedTicketsJobHandler(JobHandler):
 
 class CloseStaleSelfTrialSupportTicketsJobHandler(JobHandler):
     """
-    Set ``data.resolution_status`` to **Closed** for open **SELF TRIAL** support ticket
-    records whose ``subscription_time_stamp`` is at least ``days`` (default 15) in the past.
+    Close expired support tickets in one run:
+
+    - **Self Trial**: ``created_at`` at least ``days`` old (default 15).
+    - **Non–Self Trial**: ``first_assigned_at`` at least ``other_days`` old (default 3).
+
+    Non–Self Trial attempt terminal (5th NC) is handled by RuleSets, not this job.
 
     Payload:
-    - ``days`` (int, optional, default 15): minimum age of subscription timestamp in days.
+    - ``days`` (int, optional, default 15): Self Trial age from ticket creation.
+    - ``other_days`` (int, optional, default 3): non–Self Trial age from first assignment.
     - ``tenant_id`` (str UUID, optional): if set in payload, only that tenant; if omitted,
       uses ``job.tenant_id`` when the job row has a tenant (worker enqueues one job per tenant).
     """
@@ -1518,47 +1592,74 @@ class CloseStaleSelfTrialSupportTicketsJobHandler(JobHandler):
             days = int(payload["days"])
         else:
             days = 15
-        if days < 1:
-            raise ValueError("days must be >= 1")
+        other_days = int(
+            payload.get("other_days", NON_SELF_TRIAL_MAX_DAYS_FROM_FIRST_ASSIGN)
+        )
+        if days < 1 or other_days < 1:
+            raise ValueError("days and other_days must be >= 1")
 
         tid = job.tenant_id or payload.get("tenant_id")
         if tid:
-            records_updated, cutoff = (
-                _close_stale_self_trial_support_tickets_for_tenant(tid, days)
+            st_updated, st_cutoff = _close_stale_self_trial_support_tickets_for_tenant(
+                tid, days
             )
+            other_updated, other_cutoff = (
+                _close_stale_non_self_trial_by_first_assign_for_tenant(
+                    tid, days=other_days
+                )
+            )
+            records_updated = st_updated + other_updated
             job.result = {
                 "success": True,
                 "updated": records_updated,
                 "records_updated": records_updated,
+                "self_trial_updated": st_updated,
+                "other_updated": other_updated,
                 "days": days,
-                "cutoff": cutoff,
+                "other_days": other_days,
+                "self_trial_cutoff": st_cutoff,
+                "other_cutoff": other_cutoff,
                 "tenant_id": str(tid),
                 "tenant_scope": "single",
             }
             logger.info(
-                "[CloseStaleSelfTrialSupportTickets] tenant=%s records=%s days=%s",
+                "[CloseStaleSelfTrialSupportTickets] tenant=%s self_trial=%s other=%s "
+                "days=%s other_days=%s",
                 tid,
-                records_updated,
+                st_updated,
+                other_updated,
                 days,
+                other_days,
             )
         else:
-            records_updated, n_tenants, cutoff = (
+            st_updated, n_tenants, st_cutoff = (
                 _close_stale_self_trial_support_tickets_all_tenants(days)
             )
+            other_updated, _, other_cutoff = (
+                _close_stale_non_self_trial_by_first_assign_all_tenants(days=other_days)
+            )
+            records_updated = st_updated + other_updated
             job.result = {
                 "success": True,
                 "updated": records_updated,
                 "records_updated": records_updated,
+                "self_trial_updated": st_updated,
+                "other_updated": other_updated,
                 "days": days,
-                "cutoff": cutoff,
+                "other_days": other_days,
+                "self_trial_cutoff": st_cutoff,
+                "other_cutoff": other_cutoff,
                 "tenants_processed": n_tenants,
                 "tenant_scope": "all",
             }
             logger.info(
-                "[CloseStaleSelfTrialSupportTickets] all tenants records=%s tenants=%s days=%s",
-                records_updated,
+                "[CloseStaleSelfTrialSupportTickets] all tenants self_trial=%s other=%s "
+                "tenants=%s days=%s other_days=%s",
+                st_updated,
+                other_updated,
                 n_tenants,
                 days,
+                other_days,
             )
         return True
 
@@ -1569,13 +1670,13 @@ class CloseStaleSelfTrialSupportTicketsJobHandler(JobHandler):
     def validate_payload(self, payload: Dict[str, Any]) -> bool:
         try:
             p = payload or {}
-            if "days" in p:
-                days = int(p["days"])
-            else:
-                days = 15
+            days = int(p.get("days", 15))
+            other_days = int(
+                p.get("other_days", NON_SELF_TRIAL_MAX_DAYS_FROM_FIRST_ASSIGN)
+            )
         except (TypeError, ValueError):
             return False
-        return days >= 1
+        return days >= 1 and other_days >= 1
 
 
 class SnoozedToNotConnectedMidnightJobHandler(JobHandler):

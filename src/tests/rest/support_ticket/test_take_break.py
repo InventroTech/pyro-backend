@@ -123,40 +123,118 @@ class TestTakeBreakView:
             ),
         )
 
-    def test_take_break_unassigns_ticket_successfully(self, authenticated_client, test_record):
+    def test_take_break_unassigns_ticket(self, authenticated_client, test_record):
         client, user_id, user_email = authenticated_client
         url = reverse('support_ticket:take-break')
 
         test_record.data = {
             **test_record.data,
-            "resolution_status": "Resolved",
+            "resolution_status": "Open",
+            "call_status": "Call Waiting",
             "assigned_to": user_id,
             "cse_name": user_email,
+            "first_assigned_to": user_id,
+            "first_assigned_at": "2026-07-16T10:00:00+00:00",
         }
         test_record.save(update_fields=["data"])
 
         payload = {
             'ticketId': test_record.id,
-            'resolutionStatus': 'Resolved'
+            'resolutionStatus': 'Open'
         }
 
         response = client.post(url, payload, format='json')
 
         assert response.status_code == status.HTTP_200_OK
         assert response.json()['success'] is True
-        assert "Ticket unassigned" in response.json()['message']
         assert response.json()['ticketUnassigned'] is True
+        assert "unassigned" in response.json()['message']
         assert response.json()['userId'] == user_id
         assert response.json()['userEmail'] == user_email
 
         test_record.refresh_from_db()
         assert test_record.data.get("assigned_to") is None
         assert test_record.data.get("cse_name") is None
-        assert test_record.data.get("resolution_status") == "Resolved"
+        assert test_record.data.get("first_assigned_to") is None
+        assert test_record.data.get("first_assigned_at") is None
 
         event_log = EventLog.objects.filter(record=test_record).order_by("-id").first()
         assert event_log is not None
         assert event_log.event == SUPPORT_EVENT_TAKE_BREAK
+
+    def test_take_break_decreases_daily_limit_count(self, authenticated_client, test_record):
+        from crm_records.lead_pipeline.daily_limit import DailyLimitChecker
+        from django.utils import timezone
+
+        client, user_id, user_email = authenticated_client
+        url = reverse('support_ticket:take-break')
+        now = timezone.now()
+
+        test_record.data = {
+            **test_record.data,
+            "resolution_status": "Open",
+            "call_status": "Call Waiting",
+            "assigned_to": user_id,
+            "cse_name": user_email,
+            "first_assigned_to": user_id,
+            "first_assigned_at": now.isoformat(),
+            "call_attempts": 0,
+        }
+        test_record.save(update_fields=["data"])
+
+        checker = DailyLimitChecker()
+        before = checker.count_assigned_today(
+            tenant=self.test_tenant,
+            user_identifier=str(user_id),
+            now=now,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+        )
+        assert before == 1
+
+        response = client.post(
+            url,
+            {'ticketId': test_record.id, 'resolutionStatus': 'Open'},
+            format='json',
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()['ticketUnassigned'] is True
+
+        after = checker.count_assigned_today(
+            tenant=self.test_tenant,
+            user_identifier=str(user_id),
+            now=now,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+        )
+        assert after == 0
+
+    def test_take_break_keeps_not_connected_ticket(self, authenticated_client, test_record):
+        client, user_id, user_email = authenticated_client
+        url = reverse('support_ticket:take-break')
+
+        test_record.data = {
+            **test_record.data,
+            "resolution_status": "Snoozed",
+            "call_status": "Not Connected",
+            "assigned_to": user_id,
+            "cse_name": user_email,
+            "first_assigned_to": user_id,
+            "first_assigned_at": "2026-07-16T10:00:00+00:00",
+        }
+        test_record.save(update_fields=["data"])
+
+        response = client.post(
+            url,
+            {'ticketId': test_record.id, 'resolutionStatus': 'Snoozed'},
+            format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()['ticketUnassigned'] is False
+
+        test_record.refresh_from_db()
+        assert test_record.data.get("assigned_to") == user_id
+        assert test_record.data.get("first_assigned_to") == user_id
+        assert test_record.data.get("first_assigned_at") == "2026-07-16T10:00:00+00:00"
 
     def test_take_break_does_not_unassign_wip_ticket(self, authenticated_client, test_record):
         client, user_id, user_email = authenticated_client
@@ -181,7 +259,7 @@ class TestTakeBreakView:
 
         assert response.status_code == status.HTTP_200_OK
         assert response.json()['success'] is True
-        assert "in progress" in response.json()['message']
+        assert "kept assigned" in response.json()['message'].lower()
         assert response.json()['ticketUnassigned'] is False
 
         test_record.refresh_from_db()
@@ -210,7 +288,7 @@ class TestTakeBreakView:
 
         assert response.status_code == status.HTTP_200_OK
         assert response.json()['success'] is True
-        assert "in progress" in response.json()['message']
+        assert "kept assigned" in response.json()['message'].lower()
         assert response.json()['ticketUnassigned'] is False
 
         test_record.refresh_from_db()

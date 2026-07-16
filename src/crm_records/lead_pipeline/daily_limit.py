@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from django.db.models import Q, QuerySet
 from django.utils import timezone
-from django.db.models import QuerySet
 
 from crm_records.models import Record
 
@@ -19,26 +19,35 @@ class DailyLimitStatus:
 class DailyLimitChecker:
     """
     Extracted from GetNextLeadView Step 2.5.
+
+    ``entity_type`` defaults to ``lead``. Optional ``type_q`` further scopes the
+    count (e.g. Self Trial vs other support tickets).
     """
 
-    def check(self, *, tenant, user_identifier: str, daily_limit: Optional[int], now, debug: bool) -> DailyLimitStatus:
-        if daily_limit is None:
-            return DailyLimitStatus(daily_limit=None, assigned_today=0, is_reached=False)
-
-        try:
-            daily_limit_int = int(daily_limit)
-        except (TypeError, ValueError):
-            return DailyLimitStatus(daily_limit=daily_limit, assigned_today=0, is_reached=False)
-
-        if daily_limit_int < 0:
-            return DailyLimitStatus(daily_limit=daily_limit_int, assigned_today=0, is_reached=False)
-
+    def count_assigned_today(
+        self,
+        *,
+        tenant,
+        user_identifier: str,
+        now,
+        entity_type: str = "lead",
+        type_q: Optional[Q] = None,
+        resolution_statuses: Optional[list[str]] = None,
+    ) -> int:
+        """Count records first-assigned to ``user_identifier`` since local start of day."""
         if timezone.is_aware(now):
-            start_of_day = timezone.localtime(now).replace(hour=0, minute=0, second=0, microsecond=0)
+            start_of_day = timezone.localtime(now).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
         else:
             start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-        assigned_today = Record.objects.filter(tenant=tenant, entity_type="lead").extra(
+        qs = Record.objects.filter(tenant=tenant, entity_type=entity_type)
+        if type_q is not None:
+            qs = qs.filter(type_q)
+        if resolution_statuses:
+            qs = qs.filter(data__resolution_status__in=list(resolution_statuses))
+        return qs.extra(
             where=[
                 """
                 (
@@ -61,6 +70,40 @@ class DailyLimitChecker:
             params=[user_identifier, start_of_day, user_identifier, start_of_day],
         ).count()
 
+    def check(
+        self,
+        *,
+        tenant,
+        user_identifier: str,
+        daily_limit: Optional[int],
+        now,
+        debug: bool,
+        entity_type: str = "lead",
+        type_q: Optional[Q] = None,
+    ) -> DailyLimitStatus:
+        if daily_limit is None:
+            return DailyLimitStatus(daily_limit=None, assigned_today=0, is_reached=False)
+
+        try:
+            daily_limit_int = int(daily_limit)
+        except (TypeError, ValueError):
+            return DailyLimitStatus(daily_limit=daily_limit, assigned_today=0, is_reached=False)
+
+        if daily_limit_int < 0:
+            return DailyLimitStatus(daily_limit=daily_limit_int, assigned_today=0, is_reached=False)
+
+        assigned_today = self.count_assigned_today(
+            tenant=tenant,
+            user_identifier=user_identifier,
+            now=now,
+            entity_type=entity_type,
+            type_q=type_q,
+        )
+
         is_reached = assigned_today >= daily_limit_int and not debug
-        return DailyLimitStatus(daily_limit=daily_limit_int, assigned_today=assigned_today, is_reached=is_reached)
+        return DailyLimitStatus(
+            daily_limit=daily_limit_int,
+            assigned_today=assigned_today,
+            is_reached=is_reached,
+        )
 
