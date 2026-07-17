@@ -428,6 +428,36 @@ class GetNextTicketAPITest(BaseAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["ticket"]["id"], nc_yest.id)
 
+    def test_get_next_ticket_pulls_due_nc_older_than_yesterday(self):
+        """Due NC first-assigned before yesterday still routes (cse_nc_older bucket)."""
+        past = (timezone.now() - timedelta(minutes=10)).isoformat()
+        older = (timezone.now() - timedelta(days=3)).isoformat()
+        nc_older = Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data={
+                **dump_data(
+                    user_id="nc_older_only",
+                    name="NC Older Only",
+                    support_ticket_type="in_trial",
+                ),
+                "resolution_status": "Snoozed",
+                "call_status": "Not Connected",
+                "call_attempts": 1,
+                "snooze_until": past,
+                "next_call_at": past,
+                "assigned_to": self.supabase_uid,
+                "cse_name": self.email,
+                "first_assigned_at": older,
+                "first_assigned_to": self.supabase_uid,
+            },
+        )
+
+        response = self.client.get(self.url, **self.auth_headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["ticket"]["id"], nc_older.id)
+
     def test_get_next_ticket_nc_today_before_due_wip_today(self):
         """Same first-assigned day: due NC is tried before due WIP."""
         past = (timezone.now() - timedelta(minutes=10)).isoformat()

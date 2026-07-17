@@ -12,6 +12,8 @@ CSE_NC_TODAY_SLUG = "cse_nc_today"
 CSE_WIP_TODAY_SLUG = "cse_wip_today"
 CSE_NC_YESTERDAY_SLUG = "cse_nc_yesterday"
 CSE_WIP_YESTERDAY_SLUG = "cse_wip_yesterday"
+CSE_NC_OLDER_SLUG = "cse_nc_older"
+CSE_WIP_OLDER_SLUG = "cse_wip_older"
 
 # Marks which daily-limit KV applies when daily_limit_applies is true.
 DAILY_LIMIT_KIND_SELF_TRIAL = "self_trial"  # SUPPORT_DAILY_LIMIT_SELF_TRIAL
@@ -51,6 +53,8 @@ def seed_cse_support_buckets(tenant, *, clear_cache: bool = True) -> dict:
     3. WIP — first_assigned today (IST), call-ready (90m)
     4. Not Connected — first_assigned yesterday (IST), call-ready
     5. WIP — first_assigned yesterday (IST), call-ready (90m)
+    6. Not Connected — first_assigned before yesterday (IST), call-ready
+    7. WIP — first_assigned before yesterday (IST), call-ready (90m)
 
     Daily targets (two KV keys):
     - ``SUPPORT_DAILY_LIMIT_SELF_TRIAL`` — caps Self Trial assigns today
@@ -161,12 +165,53 @@ def seed_cse_support_buckets(tenant, *, clear_cache: bool = True) -> dict:
     )
     buckets[CSE_WIP_YESTERDAY_SLUG] = wip_yesterday
 
+    nc_older, _ = Bucket.objects.update_or_create(
+        tenant=tenant,
+        slug=CSE_NC_OLDER_SLUG,
+        defaults={
+            "name": "CSE Not Connected Older",
+            "description": "Assigned NC tickets first-assigned before yesterday (IST), call-ready",
+            "is_system": True,
+            "is_active": True,
+            "filter_conditions": {
+                "entity_type": SUPPORT_TICKET_ENTITY_TYPE,
+                "assigned_scope": "me",
+                "resolution_status": ["Open", "Snoozed"],
+                "call_status": ["Not Connected"],
+                "first_assigned_day": "older",
+                "day_timezone": _DAY_TZ,
+            },
+        },
+    )
+    buckets[CSE_NC_OLDER_SLUG] = nc_older
+
+    wip_older, _ = Bucket.objects.update_or_create(
+        tenant=tenant,
+        slug=CSE_WIP_OLDER_SLUG,
+        defaults={
+            "name": "CSE WIP Older",
+            "description": "Assigned WIP tickets first-assigned before yesterday (IST), call-ready (90m)",
+            "is_system": True,
+            "is_active": True,
+            "filter_conditions": {
+                "entity_type": SUPPORT_TICKET_ENTITY_TYPE,
+                "assigned_scope": "me",
+                "resolution_status": ["WIP"],
+                "first_assigned_day": "older",
+                "day_timezone": _DAY_TZ,
+            },
+        },
+    )
+    buckets[CSE_WIP_OLDER_SLUG] = wip_older
+
     assignments = (
         (fresh, 10, _pull_strategy_fresh()),
         (nc_today, 30, _pull_strategy_retry()),
         (wip_today, 35, _pull_strategy_retry()),
         (nc_yesterday, 40, _pull_strategy_retry()),
         (wip_yesterday, 45, _pull_strategy_retry()),
+        (nc_older, 50, _pull_strategy_retry()),
+        (wip_older, 55, _pull_strategy_retry()),
     )
     for bucket, priority, strategy in assignments:
         UserBucketAssignment.objects.update_or_create(
