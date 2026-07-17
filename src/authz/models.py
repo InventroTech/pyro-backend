@@ -106,9 +106,11 @@ class TenantMembership(HistoryTrackedModel, SoftDeleteMixin):
     company_name = models.CharField(max_length=255, null=True, blank=True, help_text="Optional company name")
     department = models.CharField(max_length=255, null=True, blank=True, help_text="Optional department")
 
+    # NOTE: "direct_reports" is intentionally NOT cascaded. Deleting a manager
+    # must not delete the people reporting to them. Reports are re-parented to
+    # the manager's own parent in accounts.services.delete_user_everywhere.
     soft_delete_cascade = (
         "userpermission_set",
-        "direct_reports",
     )
 
     def save(self, *args, **kwargs):

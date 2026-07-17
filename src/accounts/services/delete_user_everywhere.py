@@ -25,6 +25,7 @@ class DeleteReport(dict):
             'tenant_memberships': int
         },
         'memberships_deactivated': int,
+        'reports_reassigned': int,
         'sessions_revoked': [ { user_id, revoked, ... }, ... ],
         'notes': [ ... ]
     }
@@ -92,6 +93,42 @@ def _force_logout_and_clear_caches(*, tenant, resolved_uid=None, email=None) -> 
     return results
 
 
+def _reassign_reports_before_delete(*, tenant, tm_q) -> int:
+    """
+    Re-parent the direct reports of every membership about to be deleted.
+
+    When a manager is deleted we must NOT delete their reports (that was the old
+    cascade behavior). Instead each report is promoted to the deleted manager's
+    own parent. If that parent is also being deleted we walk up until we find an
+    ancestor that survives; if none survives the report becomes top-level (null).
+
+    Returns the number of report rows re-parented.
+    """
+    memberships_to_delete = list(tm_q.values_list("id", "user_parent_id_id"))
+    if not memberships_to_delete:
+        return 0
+
+    deleted_ids = {mid for mid, _ in memberships_to_delete}
+    parent_of = {mid: pid for mid, pid in memberships_to_delete}
+
+    def _surviving_parent(parent_id):
+        seen: set = set()
+        while parent_id in deleted_ids and parent_id not in seen:
+            seen.add(parent_id)
+            parent_id = parent_of.get(parent_id)
+        return parent_id
+
+    reassigned = 0
+    for mid, pid in memberships_to_delete:
+        reassigned += (
+            TenantMembership.objects
+            .filter(tenant=tenant, user_parent_id_id=mid)
+            .exclude(id__in=deleted_ids)
+            .update(user_parent_id_id=_surviving_parent(pid))
+        )
+    return reassigned
+
+
 @transaction.atomic
 def delete_user_everywhere(*, tenant, uid=None, email=None, role_id=None):
     """
@@ -112,6 +149,7 @@ def delete_user_everywhere(*, tenant, uid=None, email=None, role_id=None):
             "tenant_memberships": 0
         },
         memberships_deactivated=0,
+        reports_reassigned=0,
         sessions_revoked=[],
         notes=[]
     )
@@ -137,6 +175,12 @@ def delete_user_everywhere(*, tenant, uid=None, email=None, role_id=None):
 
     # 3) Deactivate + unlink TenantMembership rows, then soft-delete.
     tm_q = _build_membership_queryset(tenant=tenant, resolved_uid=resolved_uid, email=email)
+
+    # Re-parent reports BEFORE deleting: deleting a manager must not delete or
+    # orphan the people reporting to them. Each report is promoted to the deleted
+    # manager's own parent (nearest surviving ancestor), or becomes top-level.
+    report["reports_reassigned"] = _reassign_reports_before_delete(tenant=tenant, tm_q=tm_q)
+
     report["memberships_deactivated"] = tm_q.update(is_active=False, user_id=None)
     tm_deleted, _ = tm_q.delete()
     report["deleted"]["tenant_memberships"] = tm_deleted

@@ -164,7 +164,8 @@ class TestSoftDeleteCascade:
         assert not UserPermission.objects.filter(id=up.id).exists()
         assert UserPermission.all_objects.get(id=up.id).is_deleted
 
-    def test_membership_cascades_direct_reports(self, tenant):
+    def test_membership_delete_does_not_cascade_direct_reports(self, tenant):
+        """Deleting a manager must NOT delete the people reporting to them."""
         from tests.factories import RoleFactory, TenantMembershipFactory
 
         role = RoleFactory(tenant=tenant, key="CASC_DR", name="CascDr")
@@ -184,8 +185,9 @@ class TestSoftDeleteCascade:
             user_parent_id=manager,
         )
         manager.delete()
-        assert not TenantMembership.objects.filter(id=report.id).exists()
-        assert TenantMembership.all_objects.get(id=report.id).is_deleted
+        # Report survives the manager's deletion.
+        assert TenantMembership.objects.filter(id=report.id).exists()
+        assert not TenantMembership.all_objects.get(id=report.id).is_deleted
 
     def test_queryset_delete_cascades_user_permissions(self, tenant):
         from tests.factories import RoleFactory, TenantMembershipFactory
