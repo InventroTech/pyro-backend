@@ -286,6 +286,9 @@ USER_KV_GROUP_ID_KEY = "GROUP"
 USER_KV_DAILY_TARGET_KEY = "DAILY_TARGET"
 USER_KV_DAILY_LIMIT_KEY = "DAILY_LIMIT"
 USER_KV_LEAD_ASSIGNMENT_KEY = "LEAD_TYPE_ASSIGNMENT"
+USER_KV_SUPPORT_DAILY_LIMIT_SELF_TRIAL_KEY = "SUPPORT_DAILY_LIMIT_SELF_TRIAL"
+USER_KV_SUPPORT_DAILY_LIMIT_OTHER_KEY = "SUPPORT_DAILY_LIMIT_OTHER"
+USER_KV_SUPPORT_RESOLVE_RATE_GOAL_KEY = "SUPPORT_RESOLVE_RATE_GOAL"
 
 
 def coerce_kv_int(value) -> Optional[int]:
@@ -373,4 +376,65 @@ def upsert_user_lead_assignment_kv(
         key=USER_KV_LEAD_ASSIGNMENT_KEY,
         defaults={"value": assignment_value},
     )
+
+
+def _upsert_or_clear_kv(
+    *,
+    tenant,
+    tenant_membership,
+    key: str,
+    value: Optional[int],
+) -> None:
+    if value is None:
+        TenantMemberSetting.objects.filter(
+            tenant=tenant,
+            tenant_membership=tenant_membership,
+            key=key,
+        ).delete()
+    else:
+        TenantMemberSetting.objects.update_or_create(
+            tenant=tenant,
+            tenant_membership=tenant_membership,
+            key=key,
+            defaults={"value": value},
+        )
+
+
+def upsert_support_daily_limit_kv(
+    *,
+    tenant,
+    tenant_membership,
+    self_trial_limit: Optional[int] = None,
+    other_limit: Optional[int] = None,
+    update_self_trial: bool = False,
+    update_other: bool = False,
+    resolve_rate_goal: Optional[int] = None,
+    update_resolve_rate_goal: bool = False,
+) -> None:
+    """
+    Persist CSE support daily limits (hard caps) and/or resolve-rate goal (%).
+
+    When an ``update_*`` flag is True and the value is ``None``, the KV row is removed.
+    """
+    if update_self_trial:
+        _upsert_or_clear_kv(
+            tenant=tenant,
+            tenant_membership=tenant_membership,
+            key=USER_KV_SUPPORT_DAILY_LIMIT_SELF_TRIAL_KEY,
+            value=self_trial_limit,
+        )
+    if update_other:
+        _upsert_or_clear_kv(
+            tenant=tenant,
+            tenant_membership=tenant_membership,
+            key=USER_KV_SUPPORT_DAILY_LIMIT_OTHER_KEY,
+            value=other_limit,
+        )
+    if update_resolve_rate_goal:
+        _upsert_or_clear_kv(
+            tenant=tenant,
+            tenant_membership=tenant_membership,
+            key=USER_KV_SUPPORT_RESOLVE_RATE_GOAL_KEY,
+            value=resolve_rate_goal,
+        )
 

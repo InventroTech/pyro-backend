@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import DumpTicketWebhookView, SaveAndContinueView, GetNextTicketView, SupportTicketUpdateView, TakeBreakView, UpdateCallStatusView, GetWIPTicketsView, ProcessDumpedTicketsView
+from .views import DumpTicketWebhookView, SaveAndContinueView, GetNextTicketView, SupportTicketUpdateView, TakeBreakView, UpdateCallStatusView, GetWIPTicketsView, GetNotConnectedTicketsView, SupportDailyProgressView, ProcessDumpedTicketsView
 
 app_name = 'support_ticket'
 
@@ -8,6 +8,12 @@ urlpatterns = [
     path('save-and-continue/', SaveAndContinueView.as_view(), name='save-and-continue'),
     path('get-next-ticket/', GetNextTicketView.as_view(), name='get-next-ticket'),
     path('get-wip-tickets/', GetWIPTicketsView.as_view(), name='get-wip-tickets'),
+    path(
+        'get-not-connected-tickets/',
+        GetNotConnectedTicketsView.as_view(),
+        name='get-not-connected-tickets',
+    ),
+    path('daily-progress/', SupportDailyProgressView.as_view(), name='daily-progress'),
     path("update-call-status/", UpdateCallStatusView.as_view(), name="update-call-status"),
     path('update/', SupportTicketUpdateView.as_view(), name='update-ticket'),
     path('take-break/', TakeBreakView.as_view(), name='take-break'),
