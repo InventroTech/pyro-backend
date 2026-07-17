@@ -3,7 +3,8 @@ import logging
 import threading
 from datetime import timedelta
 from django.utils import timezone
-from django.db import transaction, ProgrammingError, OperationalError
+from django.db import transaction, close_old_connections, ProgrammingError, OperationalError
+from django.db.utils import InterfaceError
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ def run_vishnu_loop():
 
     while True:
         try:
+            close_old_connections()
             from pyro_jobs.models import PyroJob
             from pyro_jobs.handlers import JOB_HANDLERS
 
@@ -147,12 +149,15 @@ def run_vishnu_loop():
                             job.job_name, job.attempts
                         )
 
-        except (ProgrammingError, OperationalError) as e:
+        except ProgrammingError as e:
             if "pyro_job" in str(e):
                 logger.warning("[Vishnu] pyro_job table not ready yet, waiting for migrations...")
                 time.sleep(30)
                 continue
             logger.error("[Vishnu] Loop error: %s", e)
+        except (InterfaceError, OperationalError) as e:
+            logger.warning("[Vishnu] Database connection error, reconnecting: %s", e)
+            close_old_connections()
         except Exception as e:
             logger.error("[Vishnu] Loop error: %s", e)
 
