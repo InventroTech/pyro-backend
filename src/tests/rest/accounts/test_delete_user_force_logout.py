@@ -48,3 +48,43 @@ class DeleteUserEverywhereForceLogoutTest(TestCase):
         self.assertTrue(archived.is_deleted)
         self.assertFalse(archived.is_active)
         self.assertIsNone(archived.user_id)
+
+    @patch("accounts.services.delete_user_everywhere.revoke_supabase_sessions_globally")
+    def test_delete_manager_reparents_reports_instead_of_deleting(self, mock_revoke):
+        """Deleting a manager keeps their reports and promotes them to the grandparent."""
+        mock_revoke.return_value = {"user_id": str(self.uid), "revoked": True}
+
+        # self.membership is the GM (top-level). Add an ASM under it, and an RM under the ASM.
+        asm = TenantMembershipFactory(
+            tenant=self.tenant,
+            role=self.role,
+            email="asm@example.com",
+            user_id=uuid.uuid4(),
+            is_active=True,
+            user_parent_id=self.membership,
+        )
+        rm = TenantMembershipFactory(
+            tenant=self.tenant,
+            role=self.role,
+            email="rm@example.com",
+            user_id=uuid.uuid4(),
+            is_active=True,
+            user_parent_id=asm,
+        )
+
+        report = delete_user_everywhere(
+            tenant=self.tenant,
+            email=self.email,
+            role_id=str(self.role.id),
+        )
+
+        # The GM's direct report (ASM) is re-parented, not deleted.
+        self.assertEqual(report["reports_reassigned"], 1)
+        asm.refresh_from_db()
+        self.assertFalse(asm.is_deleted)
+        # GM had no parent, so the ASM becomes top-level.
+        self.assertIsNone(asm.user_parent_id_id)
+        # The RM further down is untouched and still reports to the ASM.
+        rm.refresh_from_db()
+        self.assertFalse(rm.is_deleted)
+        self.assertEqual(rm.user_parent_id_id, asm.id)
