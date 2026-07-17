@@ -464,6 +464,7 @@ class DeleteUserEverywhereView(APIView):
                     "resolved_uid": report.get("resolved_uid"),
                     "deleted": report.get("deleted"),
                     "memberships_deactivated": report.get("memberships_deactivated", 0),
+                    "reports_reassigned": report.get("reports_reassigned", 0),
                     "sessions_revoked": report.get("sessions_revoked", []),
                     "notes": report.get("notes", []),
                 },
