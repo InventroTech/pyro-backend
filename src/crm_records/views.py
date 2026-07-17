@@ -2835,8 +2835,9 @@ class GetNextLeadView(APIView):
         serialized_data = RecordSerializer(candidate_locked).data
         lead_data = candidate_locked.data or {}
 
-        # Flatten the response structure for easier frontend access
-        # Map data fields to top-level for backward compatibility with defaults
+        logger.info("lead_data = %s", lead_data)
+        logger.info("lead_source_description = %s", lead_data.get("lead_source_description"))
+
         flattened_response = {
             "id": candidate_locked.id,
             "name": (candidate_locked.data or {}).get('name', '') if isinstance(candidate_locked.data, dict) else '',
@@ -2861,6 +2862,7 @@ class GetNextLeadView(APIView):
             "user_profile_link": lead_data.get('user_profile_link'),
             "whatsapp_link": lead_data.get('whatsapp_link'),
             "lead_source": lead_data.get('lead_source'),
+            "lead_source_description": lead_data.get('lead_source_description'),
             "created_at": serialized_data.get('created_at'),
             "updated_at": serialized_data.get('updated_at'),
             "data": lead_data,
@@ -2988,6 +2990,7 @@ class GetMyCurrentLeadView(APIView):
             "user_profile_link": lead_data.get('user_profile_link'),
             "whatsapp_link": lead_data.get('whatsapp_link'),
             "lead_source": lead_data.get('lead_source'),
+            "lead_source_description": lead_data.get('lead_source_description'),
             "created_at": serialized_data.get('created_at'),
             "updated_at": serialized_data.get('updated_at'),
             "data": lead_data,
@@ -3032,6 +3035,7 @@ def _flatten_lead_response(record):
         "user_profile_link": lead_data.get('user_profile_link'),
         "whatsapp_link": lead_data.get('whatsapp_link'),
         "lead_source": lead_data.get('lead_source'),
+        "lead_source_description": lead_data.get('lead_source_description'),
         "created_at": serialized_data.get('created_at'),
         "updated_at": serialized_data.get('updated_at'),
         "data": lead_data,
