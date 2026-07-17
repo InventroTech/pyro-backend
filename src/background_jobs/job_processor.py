@@ -865,6 +865,14 @@ class JobProcessor:
             self.mark_job_failed(job, error_msg)
             return True  # We did process it, just failed
     
+    def _maybe_check_render_metrics(self):
+        """Poll Render API every 5 min and send email alerts when metrics exceed thresholds."""
+        try:
+            from background_jobs.render_metrics_monitor import check_render_metrics
+            check_render_metrics()
+        except Exception as e:
+            logger.warning("[Worker %s] Render metrics monitor error: %s", self.worker_id, e)
+
     def start_worker_loop(
         self,
         poll_interval: float = 1.0,
@@ -942,6 +950,8 @@ class JobProcessor:
                     self._maybe_enqueue_dispatch_sync()
                     # Periodic purge of object_history, event_logs, rule_exec_logs, finished background_jobs
                     self._maybe_enqueue_log_retention()
+                    # Every 5 min: poll Render API metrics and email alerts if thresholds exceeded
+                    self._maybe_check_render_metrics()
 
                 if jobs_processed > 0:
                     logger.debug(
