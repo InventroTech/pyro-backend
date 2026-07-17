@@ -448,4 +448,20 @@ DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default=EMAIL_HOST_USER)
 # WARNING: Only disable in development, never in production!
 EMAIL_SSL_VERIFY = env.bool('EMAIL_SSL_VERIFY', default=not IS_DEV)  # Disable in dev by default
 
+# Render metrics polling — reads from Render REST API to trigger email alerts
+# Get API key: Render Dashboard → Account Settings → API Keys → Create API Key
+# Get service ID: run `python manage.py find_render_service` after setting RENDER_API_KEY
+RENDER_API_KEY = env('RENDER_API_KEY', default='')
+RENDER_SERVICE_ID = env('RENDER_SERVICE_ID', default='')
+RENDER_CPU_THRESHOLD = env.float('RENDER_CPU_THRESHOLD', default=85.0)
+RENDER_MEMORY_THRESHOLD = env.float('RENDER_MEMORY_THRESHOLD', default=90.0)
+RENDER_LATENCY_P95_THRESHOLD = env.float('RENDER_LATENCY_P95_THRESHOLD', default=3000.0)  # ms
+
+# System health alerts — email notifications for high CPU, memory, or slow responses
+HEALTH_ALERT_RECIPIENTS = env('HEALTH_ALERT_RECIPIENTS', default='support@thepyro.ai')
+HEALTH_ALERT_CC = env('HEALTH_ALERT_CC', default='ranjith@thepyro.ai,ritam@thepyro.ai,bibhab@thepyro.ai')
+HEALTH_CPU_THRESHOLD = env.float('HEALTH_CPU_THRESHOLD', default=70.0)          # % CPU before alert
+HEALTH_MEMORY_THRESHOLD = env.float('HEALTH_MEMORY_THRESHOLD', default=60.0)    # % RAM before alert
+HEALTH_RESPONSE_TIME_THRESHOLD_SECONDS = env.float('HEALTH_RESPONSE_TIME_THRESHOLD_SECONDS', default=1.0)
+
 import config.spectacular_auth
