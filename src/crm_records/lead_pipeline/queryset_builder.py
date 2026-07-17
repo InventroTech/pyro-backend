@@ -24,8 +24,9 @@ class BucketQuerysetBuilder:
     - ``resolution_status`` (list[str]): match ``data.resolution_status`` (case-sensitive values)
     - ``self_trial`` (bool): if True only Self Trial types; if False exclude them
     - ``call_status`` (str | list[str]): match ``data.call_status`` (case-insensitive)
-    - ``first_assigned_day`` (``"today"`` | ``"yesterday"``): calendar day of
-      ``data.first_assigned_at`` in ``day_timezone`` (default Asia/Kolkata)
+    - ``first_assigned_day`` (``"today"`` | ``"yesterday"`` | ``"older"``): calendar day
+      of ``data.first_assigned_at`` in ``day_timezone`` (default Asia/Kolkata);
+      ``older`` matches anything before yesterday (<= today - 2)
     """
 
     _UNASSIGNED_WHERE = """
@@ -273,17 +274,12 @@ class BucketQuerysetBuilder:
         """
         Filter by calendar day of ``data.first_assigned_at`` in ``tz``.
 
-        ``day_key``: ``today`` (offset 0) or ``yesterday`` (offset 1).
+        ``day_key``:
+        - ``today`` — first_assigned date == today
+        - ``yesterday`` — first_assigned date == today - 1
+        - ``older`` — first_assigned date <= today - 2 (anything before yesterday)
         """
         key = day_key.strip().lower()
-        if key == "today":
-            day_offset = 0
-        elif key == "yesterday":
-            day_offset = 1
-        else:
-            raise ValueError(
-                f"first_assigned_day must be 'today' or 'yesterday', got: {day_key}"
-            )
         safe_tz = tz.replace("'", "''")
         ts_expr = """
             CASE
@@ -295,10 +291,19 @@ class BucketQuerysetBuilder:
                 ELSE NULL
             END
         """
-        where = (
-            f"(timezone('{safe_tz}', {ts_expr.strip()}))::date "
-            f"= ((timezone('{safe_tz}', NOW()))::date - {day_offset})"
-        )
+        assigned_date = f"(timezone('{safe_tz}', {ts_expr.strip()}))::date"
+        today = f"(timezone('{safe_tz}', NOW()))::date"
+        if key == "today":
+            where = f"{assigned_date} = ({today} - 0)"
+        elif key == "yesterday":
+            where = f"{assigned_date} = ({today} - 1)"
+        elif key == "older":
+            where = f"{assigned_date} <= ({today} - 2)"
+        else:
+            raise ValueError(
+                "first_assigned_day must be 'today', 'yesterday', or 'older', "
+                f"got: {day_key}"
+            )
         return qs.extra(where=[where])
 
     def _apply_call_attempts_range(self, qs: QuerySet, ca: Dict[str, Any]) -> QuerySet:

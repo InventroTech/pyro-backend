@@ -7,6 +7,8 @@ Order:
 3. cse_wip_today — assigned WIP, first_assigned today (IST), call-ready (90m)
 4. cse_nc_yesterday — assigned NC, first_assigned yesterday (IST), call-ready
 5. cse_wip_yesterday — assigned WIP, first_assigned yesterday (IST), call-ready (90m)
+6. cse_nc_older — assigned NC, first_assigned before yesterday (IST), call-ready
+7. cse_wip_older — assigned WIP, first_assigned before yesterday (IST), call-ready (90m)
 """
 
 from __future__ import annotations
