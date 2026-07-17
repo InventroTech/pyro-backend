@@ -1,7 +1,8 @@
 from unittest.mock import patch, MagicMock
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 
-from support_ticket.services import TicketTimeService, MixpanelService
+from background_jobs.job_handlers import CSEAssignedMixpanelJobHandler
+from support_ticket.services import TicketTimeService, MixpanelService, CSEAssignedMixpanelService
 
 
 class TicketTimeServiceTest(TestCase):
@@ -186,3 +187,72 @@ class MixpanelServiceTest(TestCase):
         )
         
         self.assertFalse(result)
+
+
+class CSEAssignedMixpanelServiceTest(SimpleTestCase):
+    @patch("requests.post")
+    @patch("os.environ.get")
+    def test_422_invalid_user_is_skipped(self, mock_env, mock_post):
+        mock_env.return_value = "test_token"
+        service = CSEAssignedMixpanelService()
+
+        mock_response = MagicMock()
+        mock_response.ok = False
+        mock_response.status_code = 422
+        mock_response.json.return_value = {"error": "Invalid user"}
+        mock_response.headers = {}
+        mock_post.return_value = mock_response
+
+        result = service.send_to_mixpanel_sync(user_id=123456, cse_email="cse@example.com")
+        self.assertEqual(result, "skipped_invalid_user")
+
+    @patch("requests.post")
+    @patch("os.environ.get")
+    def test_other_422_is_failed(self, mock_env, mock_post):
+        mock_env.return_value = "test_token"
+        service = CSEAssignedMixpanelService()
+
+        mock_response = MagicMock()
+        mock_response.ok = False
+        mock_response.status_code = 422
+        mock_response.json.return_value = {"error": "Something else"}
+        mock_response.text = '{"error": "Something else"}'
+        mock_response.headers = {}
+        mock_post.return_value = mock_response
+
+        result = service.send_to_mixpanel_sync(user_id=123456, cse_email="cse@example.com")
+        self.assertEqual(result, "failed")
+
+    @patch("requests.post")
+    @patch("os.environ.get")
+    def test_404_is_skipped_not_found(self, mock_env, mock_post):
+        mock_env.return_value = "test_token"
+        service = CSEAssignedMixpanelService()
+
+        mock_response = MagicMock()
+        mock_response.ok = False
+        mock_response.status_code = 404
+        mock_response.json.return_value = {"message": "Not found"}
+        mock_response.headers = {}
+        mock_post.return_value = mock_response
+
+        result = service.send_to_mixpanel_sync(user_id=123456, cse_email="cse@example.com")
+        self.assertEqual(result, "skipped_not_found")
+
+
+class CSEAssignedMixpanelJobHandlerTest(SimpleTestCase):
+    @patch("background_jobs.job_handlers.CSEAssignedMixpanelService")
+    def test_invalid_user_skip_marks_job_result(self, mock_service_cls):
+        mock_service_cls.return_value.send_to_mixpanel_sync.return_value = "skipped_invalid_user"
+        job = MagicMock()
+        job.id = "job-1"
+        job.payload = {"user_id": 123456, "cse_email": "cse@example.com"}
+        job.result = None
+
+        handler = CSEAssignedMixpanelJobHandler()
+        ok = handler.process(job)
+
+        self.assertTrue(ok)
+        self.assertTrue(job.result["skipped"])
+        self.assertEqual(job.result["reason"], "invalid_user_422")
+        self.assertEqual(job.result["user_id"], 123456)
