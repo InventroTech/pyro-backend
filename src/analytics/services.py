@@ -20,6 +20,158 @@ from .constants import TRACKED_EVENTS, TERMINAL_EVENTS
 from .utils import get_utc_datetime_range_for_ist_date
 
 
+def _normalize_role_token(value: str) -> str:
+    return (
+        str(value or "")
+        .strip()
+        .upper()
+        .replace("-", "")
+        .replace("_", "")
+        .replace(" ", "")
+    )
+
+
+def _is_manager_i_membership(membership) -> bool:
+    """
+    Detect Manager I / Manager roles used above CSE/RM teams.
+
+    Accepts common keys/names: M, MI, Manager, Manager I, Manager1, manager_i, etc.
+    Avoids unrelated *Manager roles (Engineering Manager, Area Sales Manager, …).
+    """
+    role = getattr(membership, "role", None)
+    key = _normalize_role_token(getattr(role, "key", "") or "")
+    name = _normalize_role_token(getattr(role, "name", "") or "")
+    exact = {"M", "MI", "M1", "MANAGER", "MANAGERI", "MANAGER1", "MANAGERL1"}
+    if key in exact or name in exact:
+        return True
+    # "Manager I", "Manager-I", "manager_i", "Manager I - RM", etc.
+    if "MANAGERI" in key or key.startswith("MANAGERI"):
+        return True
+    if name == "MANAGERI" or name.startswith("MANAGERI"):
+        return True
+    return False
+
+
+def _manager_i_label(membership) -> str:
+    return str(membership.name or membership.email or "Manager I").strip()
+
+
+def list_manager_i_memberships(tenant) -> List[Any]:
+    """All active Manager I memberships in the tenant."""
+    return [
+        membership
+        for membership in TenantMembership.objects.filter(
+            tenant=tenant,
+            is_active=True,
+        ).select_related("role")
+        if _is_manager_i_membership(membership)
+    ]
+
+
+def get_manager_i_options(tenant) -> List[str]:
+    """
+    Labels for the Manager I filter.
+
+    Prefer people with the Manager I role. Also include nearest hierarchy
+    parents of CSE/RM who themselves look like Manager I (covers custom keys).
+    """
+    labels = {
+        _manager_i_label(membership)
+        for membership in list_manager_i_memberships(tenant)
+        if _manager_i_label(membership)
+    }
+
+    # Fallback / supplement: nearest Manager I ancestor of each CSE/RM.
+    cse_rm = TenantMembership.objects.filter(
+        tenant=tenant,
+        is_active=True,
+    ).filter(
+        Q(role__key__iexact="CSE") | Q(role__key__iexact="RM")
+    ).select_related("role")
+    manager_map = get_manager_i_map(
+        {str(m.user_id) for m in cse_rm if m.user_id},
+        tenant,
+    )
+    labels.update(name for name in manager_map.values() if name and str(name).strip())
+    return sorted(labels)
+
+
+def get_manager_i_map(user_ids: Set[str], tenant) -> Dict[str, str]:
+    """Map each user ID to the nearest Manager I ancestor's display name."""
+    memberships = list(
+        TenantMembership.objects.filter(tenant=tenant, is_active=True).select_related(
+            "role", "user_parent_id__role"
+        )
+    )
+    by_id = {membership.id: membership for membership in memberships}
+    by_user_id = {
+        str(membership.user_id): membership
+        for membership in memberships
+        if membership.user_id
+    }
+    result: Dict[str, str] = {}
+    for user_id in user_ids:
+        membership = by_user_id.get(str(user_id))
+        visited = set()
+        parent_id = membership.user_parent_id_id if membership else None
+        while parent_id and parent_id not in visited:
+            visited.add(parent_id)
+            parent = by_id.get(parent_id)
+            if not parent:
+                break
+            if _is_manager_i_membership(parent):
+                result[str(user_id)] = _manager_i_label(parent)
+                break
+            parent_id = parent.user_parent_id_id
+    return result
+
+
+def filter_user_ids_by_manager_i(
+    user_ids: Set[str],
+    tenant,
+    manager_names: Optional[List[str]],
+) -> Set[str]:
+    """Keep only users who report (directly or indirectly) to the selected Manager I(s)."""
+    if not manager_names:
+        return user_ids
+
+    selected = {
+        str(name).strip().lower() for name in manager_names if str(name).strip()
+    }
+    if not selected:
+        return user_ids
+
+    team_ids: Set[str] = set()
+    for membership in list_manager_i_memberships(tenant):
+        labels = {
+            _manager_i_label(membership).lower(),
+            str(membership.email or "").strip().lower(),
+            str(membership.name or "").strip().lower(),
+        }
+        labels.discard("")
+        if not (labels & selected):
+            continue
+        if not membership.user_id:
+            continue
+        # Full hierarchy under this Manager I.
+        team_ids.update(
+            TeamResolver.get_team_user_ids(str(membership.user_id), tenant)
+        )
+        team_ids.discard(str(membership.user_id))
+
+    # Also keep anyone whose nearest Manager I ancestor matches the selection.
+    # Keeps filtering consistent with manager_i_name on member rows.
+    manager_map = get_manager_i_map(user_ids, tenant)
+    for user_id in user_ids:
+        label = str(manager_map.get(str(user_id), "") or "").strip().lower()
+        if label in selected:
+            team_ids.add(str(user_id))
+
+    if not team_ids:
+        return set()
+    return {str(user_id) for user_id in user_ids if str(user_id) in team_ids}
+
+
 class TeamResolver:
     """
     Resolves team members for a given manager using TenantMembership hierarchy.
@@ -184,15 +336,28 @@ class TeamMetricsService:
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
     ) -> Dict[str, float]:
+        stats = self._get_handling_time_stats_bulk(user_ids, start_date, end_date)
+        return {
+            user_id: float(values["average_seconds"])
+            for user_id, values in stats.items()
+        }
+
+    def _get_handling_time_stats_bulk(
+        self,
+        user_ids: List[str],
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+    ) -> Dict[str, Dict[str, float]]:
         """
-        Calculate average time spent per lead for multiple users in bulk (avoids N+1).
-        Returns dict mapping user_id -> average_seconds.
+        Average handling time and the exact lead volume used as its denominator.
+
+        For each lead session: time from ``lead.get_next_lead`` to the first
+        subsequent call outcome by the same user on that record. The established
+        denominator is get-next-lead volume minus take-break volume.
         """
-        logger = logging.getLogger(__name__)
         if not user_ids:
             return {}
-        
-        # Single bulk query: fetch ALL relevant events for all users at once
+
         queryset = EventLog.objects.filter(
             tenant=self.tenant,
             event__in=TRACKED_EVENTS,
@@ -204,152 +369,166 @@ class TeamMetricsService:
         if end_date:
             _, utc_end = get_utc_datetime_range_for_ist_date(end_date)
             queryset = queryset.filter(timestamp__lte=utc_end)
-        
-        events = list(queryset.values('event', 'timestamp', 'record_id', 'payload'))
-        
-        # Group by user_id in memory
-        CALLS_MADE_EVENTS = [
-            'lead.call_not_connected',
-            'lead.call_back_later',
-            'lead.trial_activated',
-            'lead.not_interested',
-        ]
-        
-        result = {}
+
+        events = list(queryset.values("event", "timestamp", "record_id", "payload"))
+
+        CALLS_MADE_EVENTS = {
+            "lead.call_not_connected",
+            "lead.call_back_later",
+            "lead.trial_activated",
+            "lead.not_interested",
+        }
+
+        result: Dict[str, Dict[str, float]] = {}
         for user_id in user_ids:
             user_id_str = str(user_id)
-            get_next_by_record = {}
-            calls_made_by_record = {}
+            get_next_by_record: Dict[Any, List[Any]] = {}
+            calls_made_by_record: Dict[Any, List[Any]] = {}
             take_break_count = 0
-            
+
             for e in events:
-                payload_user = e.get('payload') or {}
-                if str(payload_user.get('user_id')) != user_id_str:
+                payload_user = e.get("payload") or {}
+                if str(payload_user.get("user_id")) != user_id_str:
                     continue
-                record_id = e.get('record_id')
-                event_type = e.get('event')
-                ts = e.get('timestamp')
-                
-                if event_type == 'lead.get_next_lead':
+                record_id = e.get("record_id")
+                event_type = e.get("event")
+                ts = e.get("timestamp")
+
+                if event_type == "lead.get_next_lead":
                     get_next_by_record.setdefault(record_id, []).append(ts)
                 elif event_type in CALLS_MADE_EVENTS:
                     calls_made_by_record.setdefault(record_id, []).append(ts)
-                elif event_type == 'agent.take_break':
+                elif event_type == "agent.take_break":
                     take_break_count += 1
-            
-            get_next_count = sum(len(v) for v in get_next_by_record.values())
-            denominator = get_next_count - take_break_count
-            if denominator <= 0:
-                result[user_id_str] = 0.0
-                continue
-            
+
             time_sum = 0.0
             for record_id, get_next_list in get_next_by_record.items():
-                calls_list = calls_made_by_record.get(record_id, [])
-                sorted_calls = sorted(calls_list)
+                sorted_calls = sorted(calls_made_by_record.get(record_id, []))
+                if not sorted_calls:
+                    continue
                 for get_next_ts in sorted(get_next_list):
                     for call_ts in sorted_calls:
                         if call_ts > get_next_ts:
-                            time_sum += (call_ts - get_next_ts).total_seconds()
+                            diff = (call_ts - get_next_ts).total_seconds()
+                            if diff > 0:
+                                time_sum += diff
                             break
-            
-            result[user_id_str] = time_sum / denominator if time_sum > 0 else 0.0
-        
+
+            get_next_count = sum(
+                len(values) for values in get_next_by_record.values()
+            )
+            volume = max(0, get_next_count - take_break_count)
+            result[user_id_str] = {
+                "average_seconds": (
+                    time_sum / volume if volume > 0 else 0.0
+                ),
+                "volume": float(volume),
+                "total_seconds": time_sum,
+            }
+
         return result
+
+    def get_handling_time_stats_by_day(
+        self,
+        user_ids: List[str],
+        start_date: date,
+        end_date: date,
+    ) -> Dict[str, Dict[str, float]]:
+        """Return weighted handling average and volume grouped by work-start day."""
+        if not user_ids:
+            return {}
+
+        utc_start, _ = get_utc_datetime_range_for_ist_date(start_date)
+        _, utc_end = get_utc_datetime_range_for_ist_date(end_date)
+        events = list(
+            EventLog.objects.filter(
+                tenant=self.tenant,
+                event__in=TRACKED_EVENTS,
+                payload__user_id__in=user_ids,
+                timestamp__gte=utc_start,
+                timestamp__lte=utc_end,
+            ).values("event", "timestamp", "record_id", "payload")
+        )
+        outcome_events = {
+            "lead.call_not_connected",
+            "lead.call_back_later",
+            "lead.trial_activated",
+            "lead.not_interested",
+        }
+        starts: Dict[tuple, List[Any]] = {}
+        outcomes: Dict[tuple, List[Any]] = {}
+        breaks_by_day: Dict[str, int] = {}
+        for event in events:
+            payload = event.get("payload") or {}
+            user_id = str(payload.get("user_id") or "")
+            key = (user_id, event.get("record_id"))
+            if event.get("event") == "lead.get_next_lead":
+                starts.setdefault(key, []).append(event.get("timestamp"))
+            elif event.get("event") in outcome_events:
+                outcomes.setdefault(key, []).append(event.get("timestamp"))
+            elif event.get("event") == "agent.take_break":
+                timestamp = event.get("timestamp")
+                local_timestamp = (
+                    timezone.localtime(timestamp)
+                    if timezone.is_aware(timestamp)
+                    else timestamp
+                )
+                day = local_timestamp.date().isoformat()
+                breaks_by_day[day] = breaks_by_day.get(day, 0) + 1
+
+        totals: Dict[str, Dict[str, float]] = {}
+        for key, start_times in starts.items():
+            sorted_outcomes = sorted(outcomes.get(key, []))
+            for start_time in sorted(start_times):
+                local_start = (
+                    timezone.localtime(start_time)
+                    if timezone.is_aware(start_time)
+                    else start_time
+                )
+                day = local_start.date().isoformat()
+                bucket = totals.setdefault(
+                    day,
+                    {
+                        "total_seconds": 0.0,
+                        "get_next_count": 0.0,
+                        "volume": 0.0,
+                    },
+                )
+                bucket["get_next_count"] += 1
+                for outcome_time in sorted_outcomes:
+                    if outcome_time <= start_time:
+                        continue
+                    seconds = (outcome_time - start_time).total_seconds()
+                    if seconds > 0:
+                        bucket["total_seconds"] += seconds
+                    break
+
+        for day, bucket in totals.items():
+            volume = max(
+                0, int(bucket["get_next_count"]) - breaks_by_day.get(day, 0)
+            )
+            bucket["volume"] = float(volume)
+            bucket["average_seconds"] = (
+                bucket["total_seconds"] / volume if volume > 0 else 0.0
+            )
+        return totals
 
     def get_average_time_spent_per_user(self, user_id: str, start_date: Optional[date] = None, end_date: Optional[date] = None) -> Optional[float]:
         """
-        Calculate average time spent per lead for a specific user.
-        Formula: sum of (calls_made time - get_next_lead time) / (get_next_lead events - take_break events)
-        
-        Where:
-        - calls_made events are: lead.call_not_connected, lead.call_back_later, lead.trial_activated, lead.not_interested
-        - For each get_next_lead by this user, find the first calls_made event by same user for same record
+        Average active work time per lead for one user.
+
+        Only counts sessions where the RM got a lead and later recorded a call
+        outcome on that same lead (time they actually worked it).
         """
         logger = logging.getLogger(__name__)
-        logger.info(f"[TeamMetricsService] Calculating average time spent for user {user_id} from {start_date} to {end_date}")
-        
-        # Get all get_next_lead events for this user
-        get_next_lead_events = self._get_base_queryset(start_date, end_date).filter(
-            event='lead.get_next_lead',
-            payload__user_id=user_id
-        ).order_by('record_id', 'timestamp')
-        
-        # Get all calls_made events (any call outcome) for this user
-        # This includes: call_not_connected, call_back_later, trial_activated, not_interested
-        calls_made_events = self._get_base_queryset(start_date, end_date).filter(
-            event__in=[
-                'lead.call_not_connected',
-                'lead.call_back_later',
-                'lead.trial_activated',
-                'lead.not_interested'
-            ],
-            payload__user_id=user_id
-        ).order_by('record_id', 'timestamp')
-        
-        # Get all take_break events for this user
-        take_break_events = self._get_base_queryset(start_date, end_date).filter(
-            event='agent.take_break',
-            payload__user_id=user_id
+        logger.info(
+            f"[TeamMetricsService] Calculating average time spent for user {user_id} "
+            f"from {start_date} to {end_date}"
         )
-        
-        get_next_count = get_next_lead_events.count()
-        take_break_count = take_break_events.count()
-        
-        logger.info(f"[TeamMetricsService] User {user_id}: {get_next_count} get_next_lead, {take_break_count} take_break, {calls_made_events.count()} calls_made events")
-        
-        # Build maps by record_id
-        get_next_by_record = {}
-        for event in get_next_lead_events:
-            record_id = event.record_id
-            if record_id not in get_next_by_record:
-                get_next_by_record[record_id] = []
-            get_next_by_record[record_id].append(event)
-        
-        calls_made_by_record = {}
-        for event in calls_made_events:
-            record_id = event.record_id
-            if record_id not in calls_made_by_record:
-                calls_made_by_record[record_id] = []
-            calls_made_by_record[record_id].append(event)
-        
-        # Calculate time differences: sum of (calls_made time - get_next_lead time)
-        time_sum = 0.0
-        for record_id, get_next_list in get_next_by_record.items():
-            if record_id not in calls_made_by_record:
-                continue
-            
-            calls_list = calls_made_by_record[record_id]
-            
-            # For each get_next_lead, find the first calls_made event after it
-            for get_next_event in get_next_list:
-                get_next_time = get_next_event.timestamp
-                
-                # Find first calls_made event after this get_next_lead
-                for calls_event in calls_list:
-                    if calls_event.timestamp > get_next_time:
-                        diff = (calls_event.timestamp - get_next_time).total_seconds()
-                        if diff > 0:
-                            time_sum += diff
-                            logger.debug(f"[TeamMetricsService] User {user_id}, Record {record_id}: {diff:.2f}s between get_next_lead and calls_made")
-                        break
-        
-        # Denominator: get_next_lead events - take_break events
-        denominator = get_next_count - take_break_count
-        
-        if denominator <= 0:
-            logger.warning(f"[TeamMetricsService] User {user_id}: denominator is {denominator}, returning 0")
-            return 0.0
-        
-        if time_sum == 0:
-            logger.warning(f"[TeamMetricsService] User {user_id}: no time differences found, returning 0")
-            return 0.0
-        
-        average_time = time_sum / denominator
-        logger.info(f"[TeamMetricsService] User {user_id}: average time spent = {time_sum:.2f}s / {denominator} = {average_time:.2f}s")
-        
-        return average_time
-    
+        avg_by_user = self._get_average_time_spent_bulk(
+            [str(user_id)], start_date, end_date
+        )
+        return avg_by_user.get(str(user_id), 0.0)    
     def get_average_time_spent(self, start_date: Optional[date] = None, end_date: Optional[date] = None, manager_user_id: Optional[str] = None) -> Optional[float]:
         """
         Calculate team-wide average time spent per lead (excluding manager).
@@ -370,7 +549,7 @@ class TeamMetricsService:
             end_date,
         )
         user_averages = [v for v in avg_by_user.values() if v is not None]
-        
+
         if not user_averages:
             logger.warning(f"[TeamMetricsService] No user averages found for team average calculation")
             return None
@@ -659,7 +838,7 @@ class TeamMetricsService:
             uid for uid in user_metrics.keys()
             if not manager_user_id or str(uid) != str(manager_user_id)
         ]
-        avg_time_by_user = self._get_average_time_spent_bulk(
+        handling_stats_by_user = self._get_handling_time_stats_bulk(
             user_ids_for_avg, start_date, end_date
         ) if user_ids_for_avg else {}
         
@@ -685,8 +864,14 @@ class TeamMetricsService:
             else:
                 member_data['connected_to_trial_ratio'] = None
             
-            # Per-user average time spent (from bulk fetch)
-            member_data['average_time_spent_seconds'] = avg_time_by_user.get(user_id_str, 0.0)
+            # Per-user average and the completed lead volume behind that average.
+            handling_stats = handling_stats_by_user.get(user_id_str, {})
+            member_data['average_time_spent_seconds'] = handling_stats.get(
+                "average_seconds", 0.0
+            )
+            member_data['handling_time_volume'] = int(
+                handling_stats.get("volume", 0)
+            )
             
             result.append(member_data)
 

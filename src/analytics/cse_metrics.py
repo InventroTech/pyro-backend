@@ -14,7 +14,12 @@ from authz.models import TenantMembership
 from support_ticket.records import distinct_data_values, q_data_unset, support_ticket_records_qs
 from support_ticket.ticket_types import canonical_support_ticket_type_key, q_record_support_ticket_type_key
 
-from .services import TeamResolver
+from .services import (
+    TeamResolver,
+    filter_user_ids_by_manager_i,
+    get_manager_i_map,
+    get_manager_i_options,
+)
 from .utils import get_date_range
 
 TERMINAL_RESOLUTION_STATUSES = frozenset({
@@ -59,7 +64,9 @@ CSE_ATTRIBUTE_FIELDS = [
     ("rm_name", "RM Name"),
     ("poster", "Poster"),
 ]
-CSE_ATTRIBUTE_KEYS = frozenset(key for key, _ in CSE_ATTRIBUTE_FIELDS)
+CSE_ATTRIBUTE_KEYS = frozenset(key for key, _ in CSE_ATTRIBUTE_FIELDS) | {
+    "manager_i"
+}
 
 
 class CseVisibilityResolver:
@@ -111,15 +118,11 @@ class CseVisibilityResolver:
             own_email = cls._normalize_email(membership.email)
             return ({own_email} if own_email else set()), "self"
 
-        if role_key == "ASM":
-            return cls._cse_emails_in_team(str(user_id), tenant), "team"
-
         team_emails = cls._cse_emails_in_team(str(user_id), tenant)
         if team_emails:
             return team_emails, "team"
 
-        own_email = cls._normalize_email(membership.email)
-        return ({own_email} if own_email else set()), "self"
+        return set(), "none"
 
     @staticmethod
     def cse_name_allowed(cse_name: str, allowed_cse_emails: Optional[Set[str]]) -> bool:
@@ -146,20 +149,34 @@ class CseVisibilityResolver:
 
 
 def _resolution_time_to_seconds(value: Any) -> Optional[int]:
+    """
+    Parse ticket work time (MM:SS or HH:MM:SS) to seconds.
+
+    ``resolution_time`` is accumulated session time the CSE actively worked on
+    the ticket (not wall-clock assigned→completed). Returns None when missing
+    or zero so averages only include tickets that were actually worked.
+    """
     if value is None:
         return None
     text = str(value).strip()
     if not text or ":" not in text:
         return None
-    parts = text.split(":", 1)
-    if len(parts) != 2:
-        return None
+    parts = text.split(":")
     try:
-        minutes = int(parts[0])
-        seconds = int(parts[1])
-        if minutes < 0 or seconds < 0 or seconds >= 60:
+        if len(parts) == 2:
+            minutes = int(parts[0])
+            seconds = int(parts[1])
+        elif len(parts) == 3:
+            hours = int(parts[0])
+            minutes = int(parts[1]) + hours * 60
+            seconds = int(parts[2])
+        else:
             return None
-        return minutes * 60 + seconds
+        if minutes < 0 or seconds < 0:
+            return None
+        # Normalize non-canonical values like "1:99".
+        total = minutes * 60 + seconds
+        return total if total > 0 else None
     except (TypeError, ValueError):
         return None
 
@@ -295,12 +312,78 @@ class CseMetricsService:
             if values:
                 attributes.append({"key": key, "label": label, "values": values})
 
+        if self.allowed_cse_emails is None:
+            # Always expose Manager I for GM-scope so the filter/breakdown appear
+            # even before Manager I users are assigned in the hierarchy.
+            attributes.append(
+                {
+                    "key": "manager_i",
+                    "label": "Manager I",
+                    "values": get_manager_i_options(self.tenant),
+                }
+            )
+
         return {
             "ticket_types": ticket_types,
             "cse_names": cse_names,
             "handling_time_statuses": list(HANDLING_TIME_STATUS_FILTERS.keys()),
             "attributes": attributes,
             "visibility_scope": visibility_scope,
+        }
+
+    def get_support_ticket_breakdown(
+        self,
+        ticket_type_filter: Optional[List[str]] = None,
+        resolution_status_filter: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Current assigned-ticket inventory by type and resolution status."""
+        inventory: List[Tuple[str, str]] = []
+        for _, data in self._iter_assigned_records(self._assigned_qs()):
+            ticket_type = str(
+                data.get("support_ticket_type") or data.get("poster") or "Unknown"
+            ).strip() or "Unknown"
+            resolution_status = str(
+                data.get("resolution_status") or "Open"
+            ).strip() or "Open"
+            inventory.append((ticket_type, resolution_status))
+
+        available_types = sorted({ticket_type for ticket_type, _ in inventory})
+        available_statuses = sorted({status for _, status in inventory})
+        selected_types = set(ticket_type_filter or [])
+
+        by_type_counts: Dict[str, int] = {}
+        by_status_counts: Dict[str, int] = {}
+        total = 0
+        for ticket_type, resolution_status in inventory:
+            if selected_types and ticket_type not in selected_types:
+                continue
+            if (
+                resolution_status_filter
+                and resolution_status.lower() != resolution_status_filter.lower()
+            ):
+                continue
+            total += 1
+            by_type_counts[ticket_type] = by_type_counts.get(ticket_type, 0) + 1
+            by_status_counts[resolution_status] = (
+                by_status_counts.get(resolution_status, 0) + 1
+            )
+
+        return {
+            "total": total,
+            "by_type": [
+                {"ticket_type": ticket_type, "count": count}
+                for ticket_type, count in sorted(
+                    by_type_counts.items(), key=lambda item: (-item[1], item[0])
+                )
+            ],
+            "by_status": [
+                {"resolution_status": resolution_status, "count": count}
+                for resolution_status, count in sorted(
+                    by_status_counts.items(), key=lambda item: (-item[1], item[0])
+                )
+            ],
+            "available_types": available_types,
+            "available_statuses": available_statuses,
         }
 
     def _apply_cse_filter(self, qs, cse_name: Optional[str]):
@@ -329,6 +412,8 @@ class CseMetricsService:
             clean = [str(v) for v in values if v is not None and str(v) != ""]
             if not clean:
                 continue
+            if field == "manager_i":
+                continue
             if field == "support_ticket_type":
                 qs = qs.filter(
                     Q(data__support_ticket_type__in=clean) | Q(data__poster__in=clean)
@@ -347,6 +432,41 @@ class CseMetricsService:
             .exclude(q_data_unset("cse_name"))
             .exclude(Q(data__cse_name=""))
         )
+        manager_names = (
+            attribute_filters.get("manager_i")
+            if attribute_filters
+            else None
+        )
+        if manager_names:
+            cse_memberships = list(
+                TenantMembership.objects.filter(
+                    tenant=self.tenant,
+                    is_active=True,
+                    role__key__iexact="CSE",
+                )
+            )
+            by_user_id = {
+                str(membership.user_id): membership
+                for membership in cse_memberships
+                if membership.user_id
+            }
+            selected_ids = filter_user_ids_by_manager_i(
+                set(by_user_id.keys()), self.tenant, manager_names
+            )
+            # Match tickets by CSE email or display name under the selected Manager I.
+            identifiers: List[str] = []
+            for user_id in selected_ids:
+                membership = by_user_id.get(user_id)
+                if not membership:
+                    continue
+                if membership.email:
+                    identifiers.append(str(membership.email).strip())
+                if membership.name:
+                    identifiers.append(str(membership.name).strip())
+            manager_q = Q()
+            for identifier in {i for i in identifiers if i}:
+                manager_q |= Q(data__cse_name__iexact=identifier)
+            qs = qs.filter(manager_q) if manager_q else qs.none()
         qs = self._apply_ticket_type_filter(qs, ticket_types)
         return self._apply_attribute_filters(qs, attribute_filters)
 
@@ -493,6 +613,7 @@ class CseMetricsService:
                 "call_later": call_later_map.get(day, 0),
                 "resolve_rate": (resolved / assigned) if assigned > 0 else None,
                 "average_handling_time_seconds": avg_by_day.get(day),
+                "handling_time_ticket_count": len(handling_by_day.get(day, [])),
                 "stacked_resolved": stacked_resolved_map.get(day, 0),
                 "stacked_unresolved": stacked_unresolved_map.get(day, 0),
             })
@@ -539,6 +660,31 @@ class CseMetricsService:
                 if seconds is not None:
                     handling_stats.setdefault(cse, []).append(seconds)
 
+        cse_memberships = list(
+            TenantMembership.objects.filter(
+                tenant=self.tenant,
+                is_active=True,
+                role__key__iexact="CSE",
+            )
+        )
+        manager_map = get_manager_i_map(
+            {
+                str(membership.user_id)
+                for membership in cse_memberships
+                if membership.user_id
+            },
+            self.tenant,
+        )
+        manager_by_identity = {}
+        for membership in cse_memberships:
+            if not membership.user_id:
+                continue
+            manager_name = manager_map.get(str(membership.user_id), "")
+            if membership.email:
+                manager_by_identity[str(membership.email).strip().lower()] = manager_name
+            if membership.name:
+                manager_by_identity[str(membership.name).strip().lower()] = manager_name
+
         result = []
         for cse in sorted(set(open_stats.keys()) | set(period_stats.keys())):
             open_row = open_stats.get(cse, {})
@@ -549,6 +695,9 @@ class CseMetricsService:
             avg_handling = (sum(handling_values) / len(handling_values)) if handling_values else None
             result.append({
                 "cse_name": cse,
+                "manager_i_name": manager_by_identity.get(
+                    str(cse).strip().lower(), ""
+                ),
                 "open_call_back": open_row.get("open_call_back", 0),
                 "open_not_connected": open_row.get("open_not_connected", 0),
                 "leads_assigned": leads_assigned,
