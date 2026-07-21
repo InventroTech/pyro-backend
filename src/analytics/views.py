@@ -1460,6 +1460,61 @@ def _parse_attribute_filters(request):
     return result or None
 
 
+class AnalyticsAvailableTypesView(APIView):
+    """Return analytics sections the authenticated member is allowed to access."""
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from authz.models import TenantMembership
+        from .cse_metrics import CseVisibilityResolver
+        from .rm_metrics import RmVisibilityResolver
+
+        user_id = getattr(request.user, "supabase_uid", None) or getattr(
+            request.user, "id", None
+        )
+        if not user_id:
+            return Response(
+                {"error": "User ID not found"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        membership = (
+            TenantMembership.objects.filter(
+                tenant=request.tenant,
+                user_id=str(user_id),
+                is_active=True,
+            )
+            .select_related("role")
+            .first()
+        )
+        role_key = (
+            (membership.role.key or "").upper()
+            if membership and membership.role
+            else ""
+        )
+
+        if role_key in CseVisibilityResolver.TENANT_WIDE_ROLES:
+            analytics_types = ["cse", "rm"]
+        else:
+            analytics_types = []
+            allowed_cse_emails, _ = CseVisibilityResolver.resolve(
+                str(user_id), request.tenant
+            )
+            allowed_rm_user_ids, _ = RmVisibilityResolver.resolve(
+                str(user_id), request.tenant
+            )
+            if allowed_cse_emails:
+                analytics_types.append("cse")
+            if allowed_rm_user_ids:
+                analytics_types.append("rm")
+
+        return Response(
+            {"types": analytics_types, "role": role_key},
+            status=status.HTTP_200_OK,
+        )
+
+
 def _resolve_cse_analytics_context(request):
     from .cse_metrics import CseVisibilityResolver
 
@@ -1498,6 +1553,38 @@ class CseFilterOptionsView(APIView):
             service.get_filter_options(visibility_scope=context["visibility_scope"])
         )
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class CseSupportTicketBreakdownView(APIView):
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from .cse_metrics import CseMetricsService
+
+        try:
+            context, error_response = _resolve_cse_analytics_context(request)
+            if error_response:
+                return error_response
+
+            ticket_types = _parse_ticket_type_filter(request)
+            resolution_status = (
+                request.query_params.get("resolution_status", "").strip() or None
+            )
+            service = CseMetricsService(
+                request.tenant,
+                allowed_cse_emails=context["allowed_cse_emails"],
+            )
+            breakdown = service.get_support_ticket_breakdown(
+                ticket_type_filter=ticket_types,
+                resolution_status_filter=resolution_status,
+            )
+            return Response(breakdown, status=status.HTTP_200_OK)
+        except Exception as exc:
+            logger.exception("CseSupportTicketBreakdownView failed: %s", exc)
+            return Response(
+                {"error": "Failed to load support ticket breakdown"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class CseOverviewView(APIView):
@@ -1588,6 +1675,158 @@ class CseMembersView(APIView):
             )
 
 
+def _resolve_rm_analytics_context(request):
+    from .rm_metrics import RmVisibilityResolver
+
+    user_id = getattr(request.user, "supabase_uid", None) or getattr(request.user, "id", None)
+    if not user_id:
+        return None, Response(
+            {"error": "User ID not found"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    allowed_user_ids, visibility_scope = RmVisibilityResolver.resolve(
+        str(user_id),
+        request.tenant,
+    )
+    return {
+        "allowed_user_ids": allowed_user_ids,
+        "visibility_scope": visibility_scope,
+    }, None
+
+
+class RmFilterOptionsView(APIView):
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from .rm_metrics import RmMetricsService
+        from .serializers import RmFilterOptionsSerializer
+
+        context, error_response = _resolve_rm_analytics_context(request)
+        if error_response:
+            return error_response
+
+        service = RmMetricsService(
+            request.tenant,
+            context["allowed_user_ids"],
+            visibility_scope=context["visibility_scope"],
+        )
+        serializer = RmFilterOptionsSerializer(
+            service.get_filter_options(visibility_scope=context["visibility_scope"])
+        )
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class RmOverviewView(APIView):
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from .rm_metrics import RmMetricsService
+        from .serializers import RmOverviewSerializer
+
+        try:
+            context, error_response = _resolve_rm_analytics_context(request)
+            if error_response:
+                return error_response
+
+            start_date, end_date, error_response = _parse_cse_date_range(request)
+            if error_response:
+                return error_response
+
+            attribute_filters = _parse_attribute_filters(request)
+            service = RmMetricsService(
+                request.tenant,
+                context["allowed_user_ids"],
+                visibility_scope=context["visibility_scope"],
+            )
+            overview = service.get_overview(
+                start_date, end_date, attribute_filters=attribute_filters
+            )
+            return Response(
+                RmOverviewSerializer(overview).data, status=status.HTTP_200_OK
+            )
+        except Exception as exc:
+            logger.exception("RmOverviewView failed: %s", exc)
+            return Response(
+                {"error": "Failed to load RM overview metrics"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class RmMembersView(APIView):
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from .rm_metrics import RmMetricsService
+        from .serializers import RmMemberBreakdownSerializer
+
+        try:
+            context, error_response = _resolve_rm_analytics_context(request)
+            if error_response:
+                return error_response
+
+            start_date, end_date, error_response = _parse_cse_date_range(request)
+            if error_response:
+                return error_response
+
+            attribute_filters = _parse_attribute_filters(request)
+            service = RmMetricsService(
+                request.tenant,
+                context["allowed_user_ids"],
+                visibility_scope=context["visibility_scope"],
+            )
+            members = service.get_member_breakdown(
+                start_date, end_date, attribute_filters=attribute_filters
+            )
+            return Response(
+                RmMemberBreakdownSerializer(members, many=True).data,
+                status=status.HTTP_200_OK,
+            )
+        except Exception as exc:
+            logger.exception("RmMembersView failed: %s", exc)
+            return Response(
+                {"error": "Failed to load RM member metrics"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class RmTimeSeriesView(APIView):
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from .rm_metrics import RmMetricsService
+        from .serializers import RmTimeSeriesSerializer
+
+        try:
+            context, error_response = _resolve_rm_analytics_context(request)
+            if error_response:
+                return error_response
+
+            start_date, end_date, error_response = _parse_cse_date_range(request)
+            if error_response:
+                return error_response
+
+            attribute_filters = _parse_attribute_filters(request)
+            service = RmMetricsService(
+                request.tenant,
+                context["allowed_user_ids"],
+                visibility_scope=context["visibility_scope"],
+            )
+            series = service.get_time_series(
+                start_date, end_date, attribute_filters=attribute_filters
+            )
+            return Response(
+                RmTimeSeriesSerializer(series, many=True).data,
+                status=status.HTTP_200_OK,
+            )
+        except Exception as exc:
+            logger.exception("RmTimeSeriesView failed: %s", exc)
+            return Response(
+                {"error": "Failed to load RM time series metrics"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
 class CseTimeSeriesView(APIView):
     permission_classes = [IsTenantAuthenticated]
 
@@ -1642,36 +1881,14 @@ def _analytics_board_type(value):
     return cleaned or "cse"
 
 
-def _analytics_board_role(request, user_id):
-    """Resolve the current user's role key (e.g. GM, ASM, CSE) for board sharing.
-
-    Boards are shared by role, so this key scopes which boards a user sees.
-    Returns "" when no active membership/role is found.
-    """
-    from authz.models import TenantMembership
-
-    membership = (
-        TenantMembership.objects.filter(
-            tenant=request.tenant,
-            user_id=str(user_id),
-            is_active=True,
-        )
-        .select_related("role")
-        .first()
-    )
-    if not membership or not membership.role:
-        return ""
-    return (membership.role.key or "").upper()
-
-
 class AnalyticsBoardView(APIView):
     """
-    List and create role-shared analytics boards (one row per board).
+    List and create a user's private analytics boards (one row per board).
 
-    Boards are scoped by ``(tenant, role, board_type)`` so everyone with the same
-    role shares them. Generic across analytics types via ``type`` (e.g. cse, rm).
+    Boards are scoped by ``(tenant, user_id, board_type)`` so only their creator
+    can see them. Generic across analytics types via ``type`` (e.g. cse, rm).
 
-    GET  ?type=<type>            -> { board_type, role, boards: [config, ...] }
+    GET  ?type=<type>            -> { board_type, boards: [config, ...] }
     POST { type?, config }       -> creates a board row and returns its config.
     """
 
@@ -1687,12 +1904,11 @@ class AnalyticsBoardView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        role = _analytics_board_role(request, user_id)
         board_type = _analytics_board_type(request.query_params.get("type"))
         rows = (
             AnalyticsBoard.objects.filter(
                 tenant=request.tenant,
-                role=role,
+                user_id=str(user_id),
                 board_type=board_type,
             )
             .order_by("created_at")
@@ -1702,7 +1918,7 @@ class AnalyticsBoardView(APIView):
         # any legacy/empty rows left over from an earlier schema.
         boards = [c for c in rows if isinstance(c, dict) and c.get("id")]
         return Response(
-            {"board_type": board_type, "role": role, "boards": boards},
+            {"board_type": board_type, "boards": boards},
             status=status.HTTP_200_OK,
         )
 
@@ -1719,7 +1935,6 @@ class AnalyticsBoardView(APIView):
 
         serializer = AnalyticsBoardSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        role = _analytics_board_role(request, user_id)
         board_type = _analytics_board_type(serializer.validated_data.get("board_type"))
         config = serializer.validated_data["config"]
         report_id = str(config.get("id") or "").strip()
@@ -1731,20 +1946,20 @@ class AnalyticsBoardView(APIView):
 
         board, _ = AnalyticsBoard.objects.update_or_create(
             tenant=request.tenant,
-            role=role,
+            user_id=str(user_id),
             board_type=board_type,
             report_id=report_id,
-            defaults={"config": config, "user_id": str(user_id)},
+            defaults={"config": config},
         )
         return Response(
-            {"board_type": board.board_type, "role": board.role, "config": board.config},
+            {"board_type": board.board_type, "config": board.config},
             status=status.HTTP_201_CREATED,
         )
 
 
 class AnalyticsBoardDetailView(APIView):
     """
-    Update or delete a single role-shared analytics board (by ``report_id``).
+    Update or delete a single private analytics board (by ``report_id``).
 
     PUT    board/<report_id>/  { type?, config } -> updates the board's config.
     DELETE board/<report_id>/?type=<type>        -> deletes the board row.
@@ -1765,19 +1980,18 @@ class AnalyticsBoardDetailView(APIView):
 
         serializer = AnalyticsBoardSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        role = _analytics_board_role(request, user_id)
         board_type = _analytics_board_type(serializer.validated_data.get("board_type"))
         config = serializer.validated_data["config"]
 
         board, _ = AnalyticsBoard.objects.update_or_create(
             tenant=request.tenant,
-            role=role,
+            user_id=str(user_id),
             board_type=board_type,
             report_id=str(report_id),
-            defaults={"config": config, "user_id": str(user_id)},
+            defaults={"config": config},
         )
         return Response(
-            {"board_type": board.board_type, "role": board.role, "config": board.config},
+            {"board_type": board.board_type, "config": board.config},
             status=status.HTTP_200_OK,
         )
 
@@ -1791,11 +2005,10 @@ class AnalyticsBoardDetailView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        role = _analytics_board_role(request, user_id)
         board_type = _analytics_board_type(request.query_params.get("type"))
         AnalyticsBoard.objects.filter(
             tenant=request.tenant,
-            role=role,
+            user_id=str(user_id),
             board_type=board_type,
             report_id=str(report_id),
         ).delete()

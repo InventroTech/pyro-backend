@@ -20,9 +20,15 @@ from .views import (
     TeamTimeSeriesView,
     UnassignedLeadsBreakdownView,
     CseFilterOptionsView,
+    CseSupportTicketBreakdownView,
     CseOverviewView,
     CseMembersView,
     CseTimeSeriesView,
+    AnalyticsAvailableTypesView,
+    RmFilterOptionsView,
+    RmOverviewView,
+    RmMembersView,
+    RmTimeSeriesView,
     AnalyticsBoardView,
     AnalyticsBoardDetailView,
 )
@@ -89,10 +95,26 @@ urlpatterns = [
     path("team/unassigned-leads/", UnassignedLeadsBreakdownView.as_view(), name="team-unassigned-leads"),
 
     # CSE support-ticket analytics
+    path(
+        "available-types/",
+        AnalyticsAvailableTypesView.as_view(),
+        name="analytics-available-types",
+    ),
     path("cse/filter-options/", CseFilterOptionsView.as_view(), name="cse-filter-options"),
+    path(
+        "cse/support-ticket-breakdown/",
+        CseSupportTicketBreakdownView.as_view(),
+        name="cse-support-ticket-breakdown",
+    ),
     path("cse/overview/", CseOverviewView.as_view(), name="cse-overview"),
     path("cse/members/", CseMembersView.as_view(), name="cse-members"),
     path("cse/time-series/", CseTimeSeriesView.as_view(), name="cse-time-series"),
+
+    # RM lead analytics (EventLog)
+    path("rm/filter-options/", RmFilterOptionsView.as_view(), name="rm-filter-options"),
+    path("rm/overview/", RmOverviewView.as_view(), name="rm-overview"),
+    path("rm/members/", RmMembersView.as_view(), name="rm-members"),
+    path("rm/time-series/", RmTimeSeriesView.as_view(), name="rm-time-series"),
 
     # Saved analytics boards (one row per board, generic across analytics types)
     path("board/", AnalyticsBoardView.as_view(), name="analytics-board"),
