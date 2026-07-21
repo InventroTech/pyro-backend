@@ -96,6 +96,22 @@ def _not_connected_snooze_actions(*, minutes: int = SELF_TRIAL_SNOOZE_MINUTES) -
             },
         },
         *_snooze_next_call_actions(minutes=minutes),
+        {
+            "action": "compute_next_call_from_attempts",
+            "args": {
+                "target_field": "next_call_at",
+                "fixed_minutes": NOT_CONNECTED_SNOOZE_MINUTES,
+                "attempts_field": "call_attempts",
+            },
+        },
+        {
+            "action": "compute_next_call_from_attempts",
+            "args": {
+                "target_field": "snooze_until",
+                "fixed_minutes": NOT_CONNECTED_SNOOZE_MINUTES,
+                "attempts_field": "call_attempts",
+            },
+        },
     ]
 
 
@@ -156,6 +172,43 @@ SUPPORT_TICKET_RULE_DEFINITIONS: List[Dict[str, Any]] = [
         "condition": _record_is_self_trial_condition(),
         "description": "Support call later / WIP — Self Trial, snooze 90m",
         "actions": _call_later_actions(minutes=SELF_TRIAL_SNOOZE_MINUTES),
+        "condition": {},
+        "description": "Support call later / WIP — keep assignee, snooze 90m",
+        "actions": [
+            {
+                "action": "update_fields",
+                "args": {
+                    "updates": {
+                        "cse_name": "{{payload.cse_name}}",
+                        "assigned_to": "{{payload.assigned_to}}",
+                        "call_status": "{{payload.call_status}}",
+                        "cse_remarks": "{{payload.cse_remarks}}",
+                        "completed_at": "{{now}}",
+                        "other_reasons": "{{payload.other_reasons}}",
+                        "resolution_time": "{{payload.resolution_time}}",
+                        "review_requested": "{{payload.review_requested}}",
+                        "resolution_status": "WIP",
+                    },
+                    "increments": {"call_attempts": 1},
+                },
+            },
+            {
+                "action": "compute_next_call_from_attempts",
+                "args": {
+                    "target_field": "next_call_at",
+                    "fixed_minutes": NOT_CONNECTED_SNOOZE_MINUTES,
+                    "attempts_field": "call_attempts",
+                },
+            },
+            {
+                "action": "compute_next_call_from_attempts",
+                "args": {
+                    "target_field": "snooze_until",
+                    "fixed_minutes": NOT_CONNECTED_SNOOZE_MINUTES,
+                    "attempts_field": "call_attempts",
+                },
+            },
+        ],
     },
     {
         "event_name": "support.take_break",
