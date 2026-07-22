@@ -1391,30 +1391,9 @@ class UnassignedLeadsBreakdownView(TenantScopedMixin, APIView):
 
 
 def _parse_cse_date_range(request):
-    """Parse analytics date range; reject spans longer than 31 days."""
-    MAX_ANALYTICS_RANGE_DAYS = 31
     date_param = request.query_params.get("date", "").strip()
     from_param = request.query_params.get("from", "").strip()
     to_param = request.query_params.get("to", "").strip()
-
-    def _validate_span(start_date, end_date):
-        if end_date < start_date:
-            return None, None, Response(
-                {"error": "'to' must be on or after 'from'"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        span_days = (end_date - start_date).days + 1
-        if span_days > MAX_ANALYTICS_RANGE_DAYS:
-            return None, None, Response(
-                {
-                    "error": (
-                        f"Date range cannot exceed {MAX_ANALYTICS_RANGE_DAYS} days "
-                        f"(got {span_days})"
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        return start_date, end_date, None
 
     if date_param:
         try:
@@ -1430,7 +1409,7 @@ def _parse_cse_date_range(request):
         try:
             start_date = datetime.strptime(from_param, "%Y-%m-%d").date()
             end_date = datetime.strptime(to_param, "%Y-%m-%d").date()
-            return _validate_span(start_date, end_date)
+            return start_date, end_date, None
         except ValueError:
             return None, None, Response(
                 {"error": "Invalid date format. Use YYYY-MM-DD"},
