@@ -369,6 +369,24 @@ class CSEAssignedMixpanelJobHandler(JobHandler):
                 )
                 return True
 
+            if outcome == "skipped_invalid_user":
+                job.result = {
+                    "success": True,
+                    "skipped": True,
+                    "reason": "invalid_user_422",
+                    "user_id": user_id_int,
+                    "cse_email": cse_email,
+                    "execution_time_seconds": round(execution_time, 3),
+                    "timestamp": ts,
+                }
+                logger.warning(
+                    "CSE assigned event skipped for job %s (invalid user): user_id=%s cse_email=%s",
+                    job.id,
+                    user_id_int,
+                    cse_email,
+                )
+                return True
+
             job.result = {
                 "success": False,
                 "user_id": user_id_int,
