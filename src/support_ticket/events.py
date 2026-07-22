@@ -93,13 +93,22 @@ def prepare_support_ticket_event_payload(
             out[snake] = out[camel]
         del out[camel]
 
-    email = _payload_get(out, "cse_name", "actor_email", "cse_email", "userEmail") or actor_email
+    record_data = record.data or {}
+    email = (
+        _payload_get(out, "cse_name", "actor_email", "cse_email", "userEmail")
+        or actor_email
+        or record_data.get("cse_name")
+    )
     if email and not out.get("cse_name"):
         out["cse_name"] = email
 
     # Take break unassigns the ticket — do not inject the actor as assignee.
     if event_name != SUPPORT_EVENT_TAKE_BREAK:
-        assignee = _payload_get(out, "assigned_to", "actor_user_id", "userId") or actor_user_id
+        assignee = (
+            _payload_get(out, "assigned_to", "actor_user_id", "userId")
+            or actor_user_id
+            or record_data.get("assigned_to")
+        )
         if assignee and not out.get("assigned_to"):
             try:
                 out["assigned_to"] = str(UUID(str(assignee)))
