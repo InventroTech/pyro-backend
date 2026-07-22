@@ -73,7 +73,6 @@ class CseOverviewSerializer(serializers.Serializer):
 
 class CseMemberBreakdownSerializer(serializers.Serializer):
     cse_name = serializers.CharField(allow_blank=True)
-    manager_i_name = serializers.CharField(allow_blank=True)
     open_call_back = serializers.IntegerField()
     open_not_connected = serializers.IntegerField()
     leads_assigned = serializers.IntegerField()
@@ -99,7 +98,6 @@ class CseTimeSeriesSerializer(serializers.Serializer):
     call_later = serializers.IntegerField()
     resolve_rate = serializers.FloatField(allow_null=True)
     average_handling_time_seconds = serializers.FloatField(allow_null=True)
-    handling_time_ticket_count = serializers.IntegerField()
     stacked_resolved = serializers.IntegerField()
     stacked_unresolved = serializers.IntegerField()
 
@@ -109,51 +107,3 @@ class AnalyticsBoardSerializer(serializers.Serializer):
 
     board_type = serializers.CharField(max_length=64, required=False, default="cse")
     config = serializers.DictField()
-
-
-class RmFilterOptionsSerializer(serializers.Serializer):
-    attributes = serializers.ListField(child=serializers.DictField(), required=False)
-    visibility_scope = serializers.CharField()
-
-
-class RmOverviewSerializer(serializers.Serializer):
-    attendance = serializers.IntegerField()
-    calls_made = serializers.IntegerField()
-    calls_connected = serializers.IntegerField()
-    trials_activated = serializers.IntegerField()
-    connected_to_trial_ratio = serializers.FloatField(allow_null=True)
-    average_time_spent_seconds = serializers.FloatField(allow_null=True)
-    handling_time_volume = serializers.IntegerField()
-    take_break_count = serializers.IntegerField()
-    not_interested_count = serializers.IntegerField()
-    allotted_leads = serializers.IntegerField()
-    unassigned_leads = serializers.IntegerField()
-
-
-class RmMemberBreakdownSerializer(serializers.Serializer):
-    rm_name = serializers.CharField(allow_blank=True)
-    manager_i_name = serializers.CharField(allow_blank=True)
-    user_id = serializers.CharField()
-    attendance = serializers.IntegerField()
-    calls_made = serializers.IntegerField()
-    calls_connected = serializers.IntegerField()
-    trials_activated = serializers.IntegerField()
-    connected_to_trial_ratio = serializers.FloatField(allow_null=True)
-    average_time_spent_seconds = serializers.FloatField(allow_null=True)
-    handling_time_volume = serializers.IntegerField()
-    take_break_count = serializers.IntegerField()
-    not_interested_count = serializers.IntegerField()
-    allotted_leads = serializers.IntegerField()
-
-
-class RmTimeSeriesSerializer(serializers.Serializer):
-    date = serializers.CharField()
-    attendance = serializers.IntegerField()
-    calls_made = serializers.IntegerField()
-    calls_connected = serializers.IntegerField()
-    trials_activated = serializers.IntegerField()
-    connected_to_trial_ratio = serializers.FloatField(allow_null=True)
-    average_time_spent_seconds = serializers.FloatField(allow_null=True)
-    handling_time_volume = serializers.IntegerField()
-    take_break_count = serializers.IntegerField()
-    not_interested_count = serializers.IntegerField()
