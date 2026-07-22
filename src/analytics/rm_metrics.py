@@ -230,8 +230,16 @@ class RmMetricsService:
         handling_time_volume = sum(
             int(values.get("volume", 0)) for values in handling_stats.values()
         )
-        # Preserve the established team-average calculation; volume is context.
-        avg_time = service.get_average_time_spent(start_date, end_date)
+        # Reuse one EventLog pass: mean of per-user averages (same as
+        # TeamMetricsService.get_average_time_spent).
+        user_averages = [
+            float(values["average_seconds"])
+            for values in handling_stats.values()
+            if values.get("average_seconds") is not None
+        ]
+        avg_time = (
+            sum(user_averages) / len(user_averages) if user_averages else None
+        )
         memberships = list(
             self._rm_memberships(user_ids).values_list("id", flat=True)
         )
