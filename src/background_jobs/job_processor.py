@@ -963,8 +963,9 @@ class JobProcessor:
                     consecutive_empty_polls += 1
                     # Adaptive polling: wait longer if no jobs for a while
                     wait_time = poll_interval * min(consecutive_empty_polls, max_empty_polls)
+                    close_old_connections()
                     self._stop_event.wait(wait_time)
-                    
+
             except (InterfaceError, OperationalError) as e:
                 # Database connection has likely been closed by the server (e.g. idle timeout).
                 # Reset Django's connection state so the next iteration can obtain a fresh one.
