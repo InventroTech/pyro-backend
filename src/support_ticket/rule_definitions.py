@@ -1,4 +1,4 @@
-"""Production-shaped support ticket RuleSet definitions (NC lock, typed snooze)."""
+"""Production-shaped support ticket RuleSet definitions (NC lock, 90m snooze)."""
 
 from __future__ import annotations
 
@@ -12,11 +12,7 @@ from support_ticket.ticket_types import (
 _SELF_TRIAL_RAW_VALUES = list(raw_field_values_for_type_key(SELF_TRIAL_TICKET_TYPE_KEY))
 # Non–Self Trial: close on 5th NC attempt (condition uses attempts before increment).
 NON_SELF_TRIAL_NC_CLOSE_AT = 4
-# WIP + NC snooze: non–Self Trial 60m, Self Trial 90m.
-NON_SELF_TRIAL_SNOOZE_MINUTES = 60
-SELF_TRIAL_SNOOZE_MINUTES = 90
-# Back-compat alias (Self Trial NC snooze).
-NOT_CONNECTED_SNOOZE_MINUTES = SELF_TRIAL_SNOOZE_MINUTES
+NOT_CONNECTED_SNOOZE_MINUTES = 90
 
 
 def _record_is_self_trial_condition() -> Dict[str, Any]:
@@ -32,60 +28,13 @@ def _record_not_self_trial_condition() -> Dict[str, Any]:
     return {"!": _record_is_self_trial_condition()}
 
 
-def _snooze_next_call_actions(*, minutes: int) -> List[Dict[str, Any]]:
-    return [
-        {
-            "action": "compute_next_call_from_attempts",
-            "args": {
-                "target_field": "next_call_at",
-                "fixed_minutes": minutes,
-                "attempts_field": "call_attempts",
-            },
-        },
-        {
-            "action": "compute_next_call_from_attempts",
-            "args": {
-                "target_field": "snooze_until",
-                "fixed_minutes": minutes,
-                "attempts_field": "call_attempts",
-            },
-        },
-    ]
-
-
-def _call_later_actions(*, minutes: int) -> List[Dict[str, Any]]:
-    """Keep assignee; snooze next_call_at / snooze_until by ``minutes``."""
+def _not_connected_snooze_actions() -> List[Dict[str, Any]]:
+    """Keep assignee — permanent CSE lock until terminal. Snooze 90 minutes."""
     return [
         {
             "action": "update_fields",
             "args": {
                 "updates": {
-                    "cse_name": "{{payload.cse_name}}",
-                    "assigned_to": "{{payload.assigned_to}}",
-                    "call_status": "{{payload.call_status}}",
-                    "cse_remarks": "{{payload.cse_remarks}}",
-                    "completed_at": "{{now}}",
-                    "other_reasons": "{{payload.other_reasons}}",
-                    "resolution_time": "{{payload.resolution_time}}",
-                    "review_requested": "{{payload.review_requested}}",
-                    "resolution_status": "WIP",
-                },
-                "increments": {"call_attempts": 1},
-            },
-        },
-        *_snooze_next_call_actions(minutes=minutes),
-    ]
-
-
-def _not_connected_snooze_actions(*, minutes: int = SELF_TRIAL_SNOOZE_MINUTES) -> List[Dict[str, Any]]:
-    """Keep assignee — permanent CSE lock until terminal."""
-    return [
-        {
-            "action": "update_fields",
-            "args": {
-                "updates": {
-                    "cse_name": "{{payload.cse_name}}",
-                    "assigned_to": "{{payload.assigned_to}}",
                     "call_status": "Not Connected",
                     "cse_remarks": "{{payload.cse_remarks}}",
                     "completed_at": "{{now}}",
@@ -95,7 +44,6 @@ def _not_connected_snooze_actions(*, minutes: int = SELF_TRIAL_SNOOZE_MINUTES) -
                 "increments": {"call_attempts": 1},
             },
         },
-        *_snooze_next_call_actions(minutes=minutes),
         {
             "action": "compute_next_call_from_attempts",
             "args": {
@@ -163,15 +111,6 @@ SUPPORT_TICKET_RULE_DEFINITIONS: List[Dict[str, Any]] = [
     },
     {
         "event_name": "support.call_later",
-        "condition": _record_not_self_trial_condition(),
-        "description": "Support call later / WIP — non–Self Trial, snooze 60m",
-        "actions": _call_later_actions(minutes=NON_SELF_TRIAL_SNOOZE_MINUTES),
-    },
-    {
-        "event_name": "support.call_later",
-        "condition": _record_is_self_trial_condition(),
-        "description": "Support call later / WIP — Self Trial, snooze 90m",
-        "actions": _call_later_actions(minutes=SELF_TRIAL_SNOOZE_MINUTES),
         "condition": {},
         "description": "Support call later / WIP — keep assignee, snooze 90m",
         "actions": [
@@ -260,8 +199,8 @@ SUPPORT_TICKET_RULE_DEFINITIONS: List[Dict[str, Any]] = [
                 {"<": [{"var": "record_data.call_attempts"}, NON_SELF_TRIAL_NC_CLOSE_AT]},
             ]
         },
-        "description": "Support not connected — attempts 1–4: snooze 60m (UpdateCallStatusView)",
-        "actions": _not_connected_snooze_actions(minutes=NON_SELF_TRIAL_SNOOZE_MINUTES),
+        "description": "Support not connected — attempts 1–4: snooze 90m (UpdateCallStatusView)",
+        "actions": _not_connected_snooze_actions(),
     },
     {
         "event_name": "support.not_connected",
@@ -278,7 +217,7 @@ SUPPORT_TICKET_RULE_DEFINITIONS: List[Dict[str, Any]] = [
         "event_name": "support.not_connected",
         "condition": _record_is_self_trial_condition(),
         "description": "Self trial not connected — always snooze 90m (no attempt terminal)",
-        "actions": _not_connected_snooze_actions(minutes=SELF_TRIAL_SNOOZE_MINUTES),
+        "actions": _not_connected_snooze_actions(),
     },
     {
         "event_name": "support.resolved",
@@ -309,10 +248,10 @@ SUPPORT_TICKET_RULE_DEFINITIONS: List[Dict[str, Any]] = [
 
 def sync_support_ticket_rules_for_tenant(tenant, *, disable_stale: bool = True) -> dict:
     """
-    Upsert CSE lock / typed snooze rules for a tenant.
+    Upsert CSE lock / 90m NC rules for a tenant.
 
-    Disables older support.not_connected / support.take_break / support.call_later
-    rows that do not match the new descriptions so legacy rules stop firing.
+    Disables older support.not_connected / support.take_break rows that do not
+    match the new descriptions so legacy unassign+60m rules stop firing.
     """
     from crm_records.models import RuleSet
 
@@ -322,11 +261,7 @@ def sync_support_ticket_rules_for_tenant(tenant, *, disable_stale: bool = True) 
     if disable_stale:
         stale = RuleSet.objects.filter(
             tenant=tenant,
-            event_name__in=[
-                "support.not_connected",
-                "support.take_break",
-                "support.call_later",
-            ],
+            event_name__in=["support.not_connected", "support.take_break"],
             enabled=True,
         ).exclude(description__in=kept_descriptions)
         disabled = stale.update(enabled=False)
