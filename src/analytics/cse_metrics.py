@@ -487,7 +487,9 @@ class CseMetricsService:
         return self._apply_attribute_filters(qs, attribute_filters)
 
     def _iter_assigned_records(self, qs):
-        for record in qs.only("id", "data").iterator(chunk_size=500):
+        # Avoid QuerySet.iterator(chunk_size=...): it opens server-side cursors that
+        # fail against Supabase/PgBouncer transaction pooling.
+        for record in qs.only("id", "data"):
             data = record.data or {}
             cse = _cse_name_from_data(data)
             if not cse:
