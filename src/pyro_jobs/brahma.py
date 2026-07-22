@@ -119,9 +119,10 @@ def run_brahma_loop():
             logger.error("[Brahma] Loop error: %s", e)
         except (InterfaceError, OperationalError) as e:
             logger.warning("[Brahma] Database connection error, reconnecting: %s", e)
-            close_old_connections()
         except Exception as e:
             logger.error("[Brahma] Loop error: %s", e)
+        finally:
+            close_old_connections()
 
         time.sleep(60)
 

@@ -240,7 +240,7 @@ else:
             'OPTIONS': {
                 'sslmode': 'require',
             },
-            'CONN_MAX_AGE': 60,
+            'CONN_MAX_AGE': 0 if IS_DEV else 60,
             'CONN_HEALTH_CHECKS': True,
         }
     }

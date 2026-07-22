@@ -157,9 +157,10 @@ def run_vishnu_loop():
             logger.error("[Vishnu] Loop error: %s", e)
         except (InterfaceError, OperationalError) as e:
             logger.warning("[Vishnu] Database connection error, reconnecting: %s", e)
-            close_old_connections()
         except Exception as e:
             logger.error("[Vishnu] Loop error: %s", e)
+        finally:
+            close_old_connections()
 
         time.sleep(5)
 
