@@ -3,7 +3,7 @@ CSE support-ticket analytics (Mixpanel-style metrics from CRM records).
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from django.db.models import Q
@@ -224,6 +224,22 @@ def _record_in_period(data: Dict[str, Any], start_date: date, end_date: date) ->
         day = _timestamp_date(dumped_at)
         return start_date <= day <= end_date
     return False
+
+
+def _q_period_activity(start_date: date, end_date: date) -> Q:
+    """
+    Coarse DB predicate so period scans skip tickets clearly outside the window.
+
+    ``completed_at`` / ``dumped_at`` are ISO-ish strings in JSON. Compare on the
+    ``YYYY-MM-DD`` prefix so timezone suffixes do not break the filter. Python
+    still applies ``_record_in_period`` for exact IST day membership.
+    """
+    start_s = start_date.isoformat()
+    end_exclusive = (end_date + timedelta(days=1)).isoformat()
+    return (
+        (Q(data__completed_at__gte=start_s) & Q(data__completed_at__lt=end_exclusive))
+        | (Q(data__dumped_at__gte=start_s) & Q(data__dumped_at__lt=end_exclusive))
+    )
 
 
 def _is_call_back_data(data: Dict[str, Any]) -> bool:
@@ -471,7 +487,7 @@ class CseMetricsService:
         return self._apply_attribute_filters(qs, attribute_filters)
 
     def _iter_assigned_records(self, qs):
-        for record in qs.only("id", "data"):
+        for record in qs.only("id", "data").iterator(chunk_size=500):
             data = record.data or {}
             cse = _cse_name_from_data(data)
             if not cse:
@@ -494,7 +510,10 @@ class CseMetricsService:
             cse_name,
         )
         assigned_qs = self._apply_cse_filter(
-            self._assigned_qs(ticket_types, attribute_filters), cse_name
+            self._assigned_qs(ticket_types, attribute_filters).filter(
+                _q_period_activity(start_date, end_date)
+            ),
+            cse_name,
         )
 
         open_call_back = 0
@@ -555,7 +574,10 @@ class CseMetricsService:
         attribute_filters: Optional[Dict[str, List[str]]] = None,
     ) -> List[Dict[str, Any]]:
         assigned_qs = self._apply_cse_filter(
-            self._assigned_qs(ticket_types, attribute_filters), cse_name
+            self._assigned_qs(ticket_types, attribute_filters).filter(
+                _q_period_activity(start_date, end_date)
+            ),
+            cse_name,
         )
 
         assigned_map: Dict[date, int] = {}
@@ -633,7 +655,10 @@ class CseMetricsService:
             cse_name,
         )
         assigned_qs = self._apply_cse_filter(
-            self._assigned_qs(ticket_types, attribute_filters), cse_name
+            self._assigned_qs(ticket_types, attribute_filters).filter(
+                _q_period_activity(start_date, end_date)
+            ),
+            cse_name,
         )
 
         open_stats: Dict[str, Dict[str, int]] = {}
