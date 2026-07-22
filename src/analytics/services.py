@@ -370,10 +370,7 @@ class TeamMetricsService:
             _, utc_end = get_utc_datetime_range_for_ist_date(end_date)
             queryset = queryset.filter(timestamp__lte=utc_end)
 
-        # Avoid loading full JSON payloads — only the user_id key is needed.
-        events = queryset.values(
-            "event", "timestamp", "record_id", "payload__user_id"
-        )
+        events = list(queryset.values("event", "timestamp", "record_id", "payload"))
 
         CALLS_MADE_EVENTS = {
             "lead.call_not_connected",
@@ -382,36 +379,27 @@ class TeamMetricsService:
             "lead.not_interested",
         }
 
-        # Single-pass bucket by user (O(events) instead of O(users × events)).
-        get_next_by_user: Dict[str, Dict[Any, List[Any]]] = {}
-        calls_by_user: Dict[str, Dict[Any, List[Any]]] = {}
-        breaks_by_user: Dict[str, int] = {}
-
-        for e in events.iterator(chunk_size=2000):
-            user_id_str = str(e.get("payload__user_id") or "")
-            if not user_id_str:
-                continue
-            record_id = e.get("record_id")
-            event_type = e.get("event")
-            ts = e.get("timestamp")
-
-            if event_type == "lead.get_next_lead":
-                get_next_by_user.setdefault(user_id_str, {}).setdefault(
-                    record_id, []
-                ).append(ts)
-            elif event_type in CALLS_MADE_EVENTS:
-                calls_by_user.setdefault(user_id_str, {}).setdefault(
-                    record_id, []
-                ).append(ts)
-            elif event_type == "agent.take_break":
-                breaks_by_user[user_id_str] = breaks_by_user.get(user_id_str, 0) + 1
-
         result: Dict[str, Dict[str, float]] = {}
         for user_id in user_ids:
             user_id_str = str(user_id)
-            get_next_by_record = get_next_by_user.get(user_id_str, {})
-            calls_made_by_record = calls_by_user.get(user_id_str, {})
-            take_break_count = breaks_by_user.get(user_id_str, 0)
+            get_next_by_record: Dict[Any, List[Any]] = {}
+            calls_made_by_record: Dict[Any, List[Any]] = {}
+            take_break_count = 0
+
+            for e in events:
+                payload_user = e.get("payload") or {}
+                if str(payload_user.get("user_id")) != user_id_str:
+                    continue
+                record_id = e.get("record_id")
+                event_type = e.get("event")
+                ts = e.get("timestamp")
+
+                if event_type == "lead.get_next_lead":
+                    get_next_by_record.setdefault(record_id, []).append(ts)
+                elif event_type in CALLS_MADE_EVENTS:
+                    calls_made_by_record.setdefault(record_id, []).append(ts)
+                elif event_type == "agent.take_break":
+                    take_break_count += 1
 
             time_sum = 0.0
             for record_id, get_next_list in get_next_by_record.items():
@@ -452,13 +440,15 @@ class TeamMetricsService:
 
         utc_start, _ = get_utc_datetime_range_for_ist_date(start_date)
         _, utc_end = get_utc_datetime_range_for_ist_date(end_date)
-        events = EventLog.objects.filter(
-            tenant=self.tenant,
-            event__in=TRACKED_EVENTS,
-            payload__user_id__in=user_ids,
-            timestamp__gte=utc_start,
-            timestamp__lte=utc_end,
-        ).values("event", "timestamp", "record_id", "payload__user_id")
+        events = list(
+            EventLog.objects.filter(
+                tenant=self.tenant,
+                event__in=TRACKED_EVENTS,
+                payload__user_id__in=user_ids,
+                timestamp__gte=utc_start,
+                timestamp__lte=utc_end,
+            ).values("event", "timestamp", "record_id", "payload")
+        )
         outcome_events = {
             "lead.call_not_connected",
             "lead.call_back_later",
@@ -468,8 +458,9 @@ class TeamMetricsService:
         starts: Dict[tuple, List[Any]] = {}
         outcomes: Dict[tuple, List[Any]] = {}
         breaks_by_day: Dict[str, int] = {}
-        for event in events.iterator(chunk_size=2000):
-            user_id = str(event.get("payload__user_id") or "")
+        for event in events:
+            payload = event.get("payload") or {}
+            user_id = str(payload.get("user_id") or "")
             key = (user_id, event.get("record_id"))
             if event.get("event") == "lead.get_next_lead":
                 starts.setdefault(key, []).append(event.get("timestamp"))
