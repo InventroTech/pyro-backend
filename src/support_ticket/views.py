@@ -1087,6 +1087,21 @@ class SaveAndContinueView(APIView):
             if not record:
                 return Response({'error': 'Ticket not found'}, status=status.HTTP_404_NOT_FOUND)
 
+            ticket_assigned_to = (record.data or {}).get("assigned_to")
+            if ticket_assigned_to and str(ticket_assigned_to).lower() not in ("", "null", "none"):
+                try:
+                    if str(UUID(str(ticket_assigned_to))) != str(UUID(str(user_id))):
+                        logger.warning(
+                            "[SaveAndContinueView] Ownership conflict: user=%s attempted action on ticket=%s assigned_to=%s",
+                            user_id, ticket_id, ticket_assigned_to,
+                        )
+                        return Response(
+                            {'error': 'This ticket is no longer assigned to you. Please refresh and get a new ticket.'},
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                except (ValueError, AttributeError, TypeError):
+                    pass  # Non-UUID assigned_to value — skip ownership check
+
             payload = {
                 'resolutionStatus': resolution_status,
                 'callStatus': validated_data.get('callStatus'),
@@ -1331,6 +1346,22 @@ class UpdateCallStatusView(APIView):
             if not record:
                 return Response({"error": "Ticket not found"}, status=status.HTTP_404_NOT_FOUND)
 
+            actor_uid = str(request.user.supabase_uid)
+            ticket_assigned_to = (record.data or {}).get("assigned_to")
+            if ticket_assigned_to and str(ticket_assigned_to).lower() not in ("", "null", "none"):
+                try:
+                    if str(UUID(str(ticket_assigned_to))) != str(UUID(actor_uid)):
+                        logger.warning(
+                            "[UpdateCallStatusView] Ownership conflict: user=%s attempted NC on ticket=%s assigned_to=%s",
+                            actor_uid, ticket_id, ticket_assigned_to,
+                        )
+                        return Response(
+                            {"error": "This ticket is no longer assigned to you. Please refresh and get a new ticket."},
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                except (ValueError, AttributeError, TypeError):
+                    pass  # Non-UUID assigned_to value — skip ownership check
+
             event_payload = {
                 "callStatus": call_status,
                 "resolutionStatus": validated.get("resolutionStatus"),
@@ -1343,7 +1374,7 @@ class UpdateCallStatusView(APIView):
                 tenant=request.tenant,
                 event_name=SUPPORT_EVENT_NOT_CONNECTED,
                 payload=event_payload,
-                actor_user_id=str(request.user.supabase_uid),
+                actor_user_id=actor_uid,
                 actor_email=getattr(request.user, "email", None),
             )
             return Response(_support_ticket_payload_from_record(record), status=200)
