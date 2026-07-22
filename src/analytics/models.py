@@ -7,31 +7,21 @@ from core.soft_delete import alive_q
 
 class AnalyticsBoard(BaseModel):
     """
-    A single saved analytics board (one report card), shared by role.
+    A single saved analytics board (one report card), private to its creator.
 
-    Boards are scoped by ``(tenant, role, board_type)`` so everyone with the same
-    role shares the same set (e.g. all GMs see the same boards), while different
-    roles (CSE, ASM, ...) keep their own. Each row is one board/report, so
-    creating a board inserts a row and deleting a board removes its row.
-    ``config`` stores that board's definition (title, chart type, breakdown,
-    metrics and filters) as an opaque JSON object owned by the frontend.
-    ``report_id`` is the frontend-generated identifier; ``user_id`` records who
-    created it (informational only, not used for scoping).
+    Boards are scoped by ``(tenant, user_id, board_type)`` so only the user who
+    created a board can see it; there is no role-based sharing. Each row is one
+    board/report, so creating a board inserts a row and deleting a board removes
+    its row. ``config`` stores that board's definition (title, chart type,
+    breakdown, metrics and filters) as an opaque JSON object owned by the
+    frontend. ``report_id`` is the frontend-generated identifier for the board.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    role = models.CharField(
-        max_length=64,
-        default="",
-        db_index=True,
-        help_text="Role key that shares this board, e.g. 'GM', 'ASM', 'CSE'.",
-    )
     user_id = models.CharField(
         max_length=128,
-        blank=True,
-        default="",
         db_index=True,
-        help_text="User who created the board (informational only).",
+        help_text="User who owns this board; only they can see it.",
     )
     board_type = models.CharField(
         max_length=64,
@@ -55,19 +45,19 @@ class AnalyticsBoard(BaseModel):
         db_table = "analytics_boards"
         constraints = [
             models.UniqueConstraint(
-                fields=["tenant", "role", "board_type", "report_id"],
+                fields=["tenant", "user_id", "board_type", "report_id"],
                 condition=alive_q(),
-                name="analytics_board_tenant_role_type_report_uniq_alive",
+                name="analytics_board_tenant_user_type_report_uniq_alive",
             ),
         ]
         indexes = [
             *BaseModel.Meta.indexes,
-            models.Index(fields=["tenant", "role", "board_type"]),
+            models.Index(fields=["tenant", "user_id", "board_type"]),
         ]
 
     def __str__(self):
         return (
-            f"AnalyticsBoard({self.tenant_id}:{self.role}:"
+            f"AnalyticsBoard({self.tenant_id}:{self.user_id}:"
             f"{self.board_type}:{self.report_id})"
         )
 from object_history.models import HistoryTrackedModel
