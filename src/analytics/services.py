@@ -371,8 +371,10 @@ class TeamMetricsService:
             queryset = queryset.filter(timestamp__lte=utc_end)
 
         # Avoid loading full JSON payloads — only the user_id key is needed.
-        events = queryset.values(
-            "event", "timestamp", "record_id", "payload__user_id"
+        # Materialize skinny rows (no iterator/server-side cursor: breaks on
+        # Supabase/PgBouncer transaction pooling).
+        events = list(
+            queryset.values("event", "timestamp", "record_id", "payload__user_id")
         )
 
         CALLS_MADE_EVENTS = {
@@ -387,7 +389,7 @@ class TeamMetricsService:
         calls_by_user: Dict[str, Dict[Any, List[Any]]] = {}
         breaks_by_user: Dict[str, int] = {}
 
-        for e in events.iterator(chunk_size=2000):
+        for e in events:
             user_id_str = str(e.get("payload__user_id") or "")
             if not user_id_str:
                 continue
@@ -452,13 +454,15 @@ class TeamMetricsService:
 
         utc_start, _ = get_utc_datetime_range_for_ist_date(start_date)
         _, utc_end = get_utc_datetime_range_for_ist_date(end_date)
-        events = EventLog.objects.filter(
-            tenant=self.tenant,
-            event__in=TRACKED_EVENTS,
-            payload__user_id__in=user_ids,
-            timestamp__gte=utc_start,
-            timestamp__lte=utc_end,
-        ).values("event", "timestamp", "record_id", "payload__user_id")
+        events = list(
+            EventLog.objects.filter(
+                tenant=self.tenant,
+                event__in=TRACKED_EVENTS,
+                payload__user_id__in=user_ids,
+                timestamp__gte=utc_start,
+                timestamp__lte=utc_end,
+            ).values("event", "timestamp", "record_id", "payload__user_id")
+        )
         outcome_events = {
             "lead.call_not_connected",
             "lead.call_back_later",
@@ -468,7 +472,7 @@ class TeamMetricsService:
         starts: Dict[tuple, List[Any]] = {}
         outcomes: Dict[tuple, List[Any]] = {}
         breaks_by_day: Dict[str, int] = {}
-        for event in events.iterator(chunk_size=2000):
+        for event in events:
             user_id = str(event.get("payload__user_id") or "")
             key = (user_id, event.get("record_id"))
             if event.get("event") == "lead.get_next_lead":
