@@ -1100,7 +1100,7 @@ class SaveAndContinueView(APIView):
                             status=status.HTTP_409_CONFLICT,
                         )
                 except (ValueError, AttributeError, TypeError):
-                    pass
+                    pass  # Non-UUID assigned_to value — skip ownership check
 
             payload = {
                 'resolutionStatus': resolution_status,
@@ -1360,7 +1360,7 @@ class UpdateCallStatusView(APIView):
                             status=status.HTTP_409_CONFLICT,
                         )
                 except (ValueError, AttributeError, TypeError):
-                    pass
+                    pass  # Non-UUID assigned_to value — skip ownership check
 
             event_payload = {
                 "callStatus": call_status,
