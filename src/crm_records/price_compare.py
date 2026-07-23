@@ -35,6 +35,48 @@ USER_AGENT = (
 DEFAULT_TIMEOUT = 18
 MAX_RESULTS_PER_SOURCE = 5
 
+# Cap HTML fed to regex extractors to bound worst-case ReDoS cost (CodeQL).
+_MAX_HTML_SCAN_CHARS = 1_500_000
+
+# Bounded regexes — avoid unbounded [^>]* / .*? on attacker-controlled HTML.
+_LD_JSON_SCRIPT_RE = re.compile(
+    r'<script\b[^>]{0,400}?\btype\s*=\s*["\']application/ld\+json["\'][^>]{0,400}?>'
+    r'([\s\S]{0,500000}?)</script\s*>',
+    re.IGNORECASE,
+)
+_OG_CURRENCY_RE = re.compile(
+    r'property\s*=\s*["\'](?:product:price:currency|og:price:currency)["\']'
+    r'[^>]{0,300}?content\s*=\s*["\']([^"\']{1,32})["\']',
+    re.IGNORECASE,
+)
+_OG_CURRENCY_RE_ALT = re.compile(
+    r'content\s*=\s*["\']([^"\']{1,32})["\']'
+    r'[^>]{0,300}?property\s*=\s*["\'](?:product:price:currency|og:price:currency)["\']',
+    re.IGNORECASE,
+)
+# Titles rarely contain tags; reject '<' inside to keep matching linear.
+_TITLE_RE = re.compile(
+    r'<title\b[^>]{0,200}?>([^<]{0,2000})</title\s*>',
+    re.IGNORECASE,
+)
+
+
+def _html_for_regex(html: str) -> str:
+    """Return a length-capped HTML slice for regex scanning."""
+    if not html:
+        return ""
+    if len(html) <= _MAX_HTML_SCAN_CHARS:
+        return html
+    return html[:_MAX_HTML_SCAN_CHARS]
+
+
+def _extract_html_title(html: str) -> str:
+    m = _TITLE_RE.search(_html_for_regex(html))
+    if not m:
+        return ""
+    return html_lib.unescape(m.group(1).strip())
+
+
 SUPPORTED_SOURCES = ("amazon", "robu", "flipkart")  # legacy; prefer vendor registry
 
 try:
@@ -387,11 +429,8 @@ def _extract_robu_delivery(product: Dict[str, Any], page_html: str = "") -> Opti
 
 def _extract_json_ld_blocks(html: str) -> List[Any]:
     blocks: List[Any] = []
-    for m in re.finditer(
-        r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-        html,
-        re.I | re.S,
-    ):
+    scanned = _html_for_regex(html)
+    for m in _LD_JSON_SCRIPT_RE.finditer(scanned):
         raw = m.group(1).strip()
         if not raw:
             continue
@@ -452,32 +491,28 @@ def extract_price_from_html(html: str, fallback_url: str = "") -> Optional[Dict[
             product["link"] = fallback_url
         return product
 
+    scanned = _html_for_regex(html)
     meta_patterns = [
-        r'<meta[^>]+property=["\']product:price:amount["\'][^>]+content=["\']([^"\']+)["\']',
-        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']product:price:amount["\']',
-        r'<meta[^>]+property=["\']og:price:amount["\'][^>]+content=["\']([^"\']+)["\']',
-        r'<meta[^>]+itemprop=["\']price["\'][^>]+content=["\']([^"\']+)["\']',
-        r'"price"\s*:\s*"?(?P<p>[\d.]+)"?',
+        r'<meta[^>]{1,400}?property=["\']product:price:amount["\'][^>]{1,400}?content=["\']([^"\']{1,64})["\']',
+        r'<meta[^>]{1,400}?content=["\']([^"\']{1,64})["\'][^>]{1,400}?property=["\']product:price:amount["\']',
+        r'<meta[^>]{1,400}?property=["\']og:price:amount["\'][^>]{1,400}?content=["\']([^"\']{1,64})["\']',
+        r'<meta[^>]{1,400}?itemprop=["\']price["\'][^>]{1,400}?content=["\']([^"\']{1,64})["\']',
+        r'"price"\s*:\s*"?(?P<p>[\d.]{1,20})"?',
     ]
     for pat in meta_patterns:
-        m = re.search(pat, html, re.I)
+        m = re.search(pat, scanned, re.I)
         if not m:
             continue
         price = _parse_price_number(m.groupdict().get("p") or m.group(1))
         if price is None:
             continue
         currency = "INR"
-        cur_m = re.search(
-            r'property=["\'](?:product:price:currency|og:price:currency)["\'][^>]+content=["\']([^"\']+)["\']',
-            html,
-            re.I,
-        )
+        cur_m = _OG_CURRENCY_RE.search(scanned) or _OG_CURRENCY_RE_ALT.search(scanned)
         if cur_m:
             currency = cur_m.group(1).upper()
-        title_m = re.search(r"<title>(.*?)</title>", html, re.I | re.S)
-        title = re.sub(r"<[^>]+>", "", title_m.group(1)).strip() if title_m else ""
+        title = _extract_html_title(scanned)
         return {
-            "title": html_lib.unescape(title),
+            "title": title,
             "price": price,
             "currency": currency,
             "link": fallback_url,
@@ -589,10 +624,9 @@ def fetch_url_price(url: str, session: Optional[requests.Session] = None) -> Dic
             price_s = whole.group(1).replace(",", "")
             if frac:
                 price_s = f"{price_s}.{frac.group(1)}"
-            title_m = re.search(r"<title>(.*?)</title>", html, re.I | re.S)
-            title = re.sub(r"<[^>]+>", "", title_m.group(1)).strip() if title_m else ""
+            title = _extract_html_title(html)
             extracted = {
-                "title": html_lib.unescape(title),
+                "title": title,
                 "price": _parse_price_number(price_s),
                 "currency": "INR",
                 "link": final_url,
