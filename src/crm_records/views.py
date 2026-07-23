@@ -5488,3 +5488,64 @@ class PriceCompareView(APIView):
             )
         return Response(payload, status=status.HTTP_200_OK)
 
+
+class ShipmentTrackView(APIView):
+    """
+    Live shipment status for inventory tracking numbers / links.
+
+    POST /crm-records/shipment-track/
+    {
+      "tracking_number": "AWB...",
+      "tracking_link": "https://...",
+      "courier_name": "Delhivery"   # optional hint
+    }
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+    authentication_classes = [SupabaseJWTAuthentication]
+
+    @extend_schema(
+        summary="Track shipment by number or link",
+        description=(
+            "Resolves the current delivery pipeline status from a tracking number "
+            "and/or tracking link (Delhivery API, optional AfterShip, allowlisted pages)."
+        ),
+        request={
+            "application/json": {
+                "type": "object",
+                "properties": {
+                    "tracking_number": {"type": "string"},
+                    "tracking_link": {"type": "string", "format": "uri"},
+                    "courier_name": {"type": "string"},
+                },
+            }
+        },
+        responses={
+            200: OpenApiResponse(description="Shipment tracking result"),
+            400: OpenApiResponse(description="Missing tracking number/link"),
+        },
+        tags=["Inventory"],
+    )
+    def post(self, request, *args, **kwargs):
+        from .inventory_shipment_live_track import ShipmentTrackError, track_shipment
+
+        try:
+            payload = track_shipment(
+                tracking_number=request.data.get("tracking_number"),
+                tracking_link=request.data.get("tracking_link"),
+                courier_name=request.data.get("courier_name"),
+            )
+        except ShipmentTrackError:
+            logger.warning("ShipmentTrackView validation failed", exc_info=True)
+            return Response(
+                {"error": "Provide a valid tracking number or supported tracking link."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception:
+            logger.exception("ShipmentTrackView failed")
+            return Response(
+                {"error": "Shipment tracking failed."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(payload, status=status.HTTP_200_OK)
+

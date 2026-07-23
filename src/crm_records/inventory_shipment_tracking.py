@@ -112,8 +112,13 @@ def _norm_str(value: Any) -> Optional[str]:
     return s or None
 
 
-def _norm_shipment_status(value: Any) -> str:
-    s = str(value or "").strip().upper().replace(" ", "_")
+def _norm_shipment_status(value: Any) -> Optional[str]:
+    """Return a known shipment status, or None when unset (do not invent NOT_SHIPPED)."""
+    if value is None:
+        return None
+    s = str(value).strip().upper().replace(" ", "_")
+    if not s:
+        return None
     if s in SHIPMENT_STATUSES:
         return s
     return DEFAULT_SHIPMENT_STATUS
@@ -131,6 +136,7 @@ def apply_shipment_tracking_normalization(
     - If a single paste-style value was stored only in tracking_link or tracking_number,
       split via normalize_tracking_paste when the other is empty.
     - Set tracking_updated_at when any tracked field changes vs previous.
+    - Leave shipment_status null on new requests until tracking is actually used.
     """
     if not isinstance(data, dict):
         return data
@@ -158,12 +164,15 @@ def apply_shipment_tracking_normalization(
         if number is not None:
             data["tracking_number"] = number
 
-    if "shipment_status" in data or data.get("shipment_status") is None:
-        # Only normalize when key present or we are initializing
-        if "shipment_status" in data:
-            data["shipment_status"] = _norm_shipment_status(data.get("shipment_status"))
-        elif any(data.get(k) for k in ("tracking_number", "tracking_link", "courier_name")):
+    has_tracking_payload = any(
+        _norm_str(data.get(k)) for k in ("tracking_number", "tracking_link", "courier_name", "eta")
+    )
+    if "shipment_status" in data:
+        normalized = _norm_shipment_status(data.get("shipment_status"))
+        if normalized is None and has_tracking_payload:
             data["shipment_status"] = DEFAULT_SHIPMENT_STATUS
+        else:
+            data["shipment_status"] = normalized
 
     courier = _norm_str(data.get("courier_name"))
     if "courier_name" in data:
@@ -180,16 +189,11 @@ def apply_shipment_tracking_normalization(
             continue
         new_v = data.get(key)
         old_v = prev.get(key)
-        if _norm_str(new_v) != _norm_str(old_v) and not (
-            key == "shipment_status"
-            and _norm_shipment_status(new_v) == _norm_shipment_status(old_v)
-        ):
-            # Compare shipment_status normalized
-            if key == "shipment_status":
-                if _norm_shipment_status(new_v) != _norm_shipment_status(old_v or DEFAULT_SHIPMENT_STATUS):
-                    changed = True
-            else:
+        if key == "shipment_status":
+            if _norm_shipment_status(new_v) != _norm_shipment_status(old_v):
                 changed = True
+        elif _norm_str(new_v) != _norm_str(old_v):
+            changed = True
 
     if changed:
         data["tracking_updated_at"] = datetime.now(timezone.utc).isoformat()

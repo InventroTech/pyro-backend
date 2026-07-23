@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RecordListCreateView, RecordDistinctFieldValuesView, RecordDetailView, RecordHistoryView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, TenantEntityTypeListView, LeadScoringView, GetMyCurrentLeadView, PartnerEventsView, PartnerLeadView, CallAttemptMatrixListCreateView, CallAttemptMatrixDetailView, CallAttemptMatrixByLeadTypeView, LeadAssignmentWebhookProxyView, RMAssignedMixpanelView, ScoringRuleListCreateView, ScoringRuleDetailView, ApiSecretKeySetView, ApiSecretKeyUpdateView, PriceCompareView
+from .views import RecordListCreateView, RecordDistinctFieldValuesView, RecordDetailView, RecordHistoryView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, TenantEntityTypeListView, LeadScoringView, GetMyCurrentLeadView, PartnerEventsView, PartnerLeadView, CallAttemptMatrixListCreateView, CallAttemptMatrixDetailView, CallAttemptMatrixByLeadTypeView, LeadAssignmentWebhookProxyView, RMAssignedMixpanelView, ScoringRuleListCreateView, ScoringRuleDetailView, ApiSecretKeySetView, ApiSecretKeyUpdateView, PriceCompareView, ShipmentTrackView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 from .public_views import PublicJobsView, PublicJobApplicationView
 
@@ -72,4 +72,6 @@ urlpatterns = [
 
     # Live e-commerce price comparison (Amazon / Robu / Flipkart)
     path("price-compare/", PriceCompareView.as_view(), name="price-compare"),
+    # Live shipment status from tracking number / link
+    path("shipment-track/", ShipmentTrackView.as_view(), name="shipment-track"),
 ]
