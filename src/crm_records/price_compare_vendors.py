@@ -386,7 +386,7 @@ def _search_shopify(spec: VendorSpec, query: str, session: Optional[requests.Ses
         data = json.loads(raw)
     except Exception as exc:
         logger.warning("shopify search failed vendor=%s err=%s", spec.id, exc)
-        return _empty(spec, search_link, f"{spec.label} search failed: {exc}")
+        return _empty(spec, search_link, f"{spec.label} search failed.")
 
     products = (((data.get("resources") or {}).get("results") or {}).get("products") or [])
     out: List[Dict[str, Any]] = []
@@ -436,7 +436,7 @@ def _search_wc_store(spec: VendorSpec, query: str, session: Optional[requests.Se
         # Fall back to HTML search page when available.
         if spec.search_url:
             return _search_html(spec, query, session=session)
-        return _empty(spec, search_link, f"{spec.label} search failed: {exc}")
+        return _empty(spec, search_link, f"{spec.label} search failed.")
 
     if not isinstance(data, list) or not data:
         if spec.search_url:
@@ -590,7 +590,8 @@ def _search_html(spec: VendorSpec, query: str, session: Optional[requests.Sessio
         try:
             html = _get_text(url, session=session, headers={"Referer": base + "/"})
         except Exception as exc:
-            last_err = str(exc)
+            logger.warning("html search fetch failed vendor=%s err=%s", spec.id, exc)
+            last_err = f"{spec.label} request failed"
             continue
         low = html.lower()
         if len(html) < 2000 and ("access denied" in low or "just a moment" in low):
@@ -637,7 +638,7 @@ def search_vendor(
     except Exception as exc:
         logger.exception("vendor search failed id=%s", spec.id)
         link = spec.search_url.format(q=urllib.parse.quote_plus(query)) if spec.search_url else spec.base_url
-        return _empty(spec, link, f"{spec.label} search failed: {exc}")
+        return _empty(spec, link, f"{spec.label} search failed.")
 
 
 def search_vendors(
@@ -677,6 +678,6 @@ def search_vendors(
                 results.extend(fut.result())
             except Exception as exc:
                 logger.exception("vendor future failed id=%s", spec.id)
-                errors.append(f"{spec.id}: {exc}")
-                results.extend(_empty(spec, spec.base_url, str(exc)))
+                errors.append(f"{spec.id}: request failed")
+                results.extend(_empty(spec, spec.base_url, f"{spec.label} search failed."))
     return results, errors

@@ -5474,8 +5474,8 @@ class PriceCompareView(APIView):
                 pincode=pincode,
                 profile=profile or None,
             )
-        except PriceCompareError as exc:
-            logger.warning("PriceCompareView validation failed: %s", exc)
+        except PriceCompareError:
+            logger.warning("PriceCompareView validation failed", exc_info=True)
             return Response(
                 {"error": "Invalid price comparison request."},
                 status=status.HTTP_400_BAD_REQUEST,

@@ -134,10 +134,37 @@ def _host_matches_vendor_pattern(host: str, pattern: str) -> bool:
     return _is_host_or_subdomain(host, pattern)
 
 
+_FALLBACK_VENDOR_BASES = {
+    "amazon": "https://www.amazon.in",
+    "robu": "https://robu.in",
+    "flipkart": "https://www.flipkart.com",
+}
+
+
+def _trusted_base_url_for_vendor(vendor_id: str) -> Optional[str]:
+    """Return a server-controlled base URL for a known vendor id."""
+    vid = (vendor_id or "").strip().lower()
+    if not vid or vid == "other":
+        return None
+    if detect_vendor_id is not None:
+        try:
+            from .price_compare_vendors import get_all_vendors
+
+            for spec in get_all_vendors():
+                if spec.id == vid and spec.base_url:
+                    return str(spec.base_url)
+        except Exception:
+            # Catalog unavailable; fall through to built-in bases.
+            pass
+    return _FALLBACK_VENDOR_BASES.get(vid)
+
+
 def _assert_safe_outbound_url(url: str) -> str:
     """
     Allow only https URLs whose host belongs to a known marketplace.
-    Prevents SSRF via user-supplied product URLs.
+
+    Rebuilds the URL with urlunparse() using a server-controlled netloc from the
+    vendor catalog so CodeQL treats the result as constructed (not full SSRF).
     """
     raw = str(url or "").strip()
     if not raw:
@@ -148,6 +175,8 @@ def _assert_safe_outbound_url(url: str) -> str:
         raise PriceCompareError("Invalid URL.") from exc
     if parsed.scheme.lower() != "https":
         raise PriceCompareError("Only https product URLs are allowed.")
+    if parsed.username or parsed.password:
+        raise PriceCompareError("URL credentials are not allowed.")
     host = (parsed.hostname or "").lower().strip(".")
     if not host:
         raise PriceCompareError("URL host is required.")
@@ -158,10 +187,22 @@ def _assert_safe_outbound_url(url: str) -> str:
         raise PriceCompareError("IP address hosts are not allowed.")
 
     vendor = detect_source(raw)
-    if vendor and vendor != "other":
-        return raw
-    raise PriceCompareError("URL host is not an allowed vendor marketplace.")
+    base = _trusted_base_url_for_vendor(vendor) if vendor else None
+    if not base:
+        raise PriceCompareError("URL host is not an allowed vendor marketplace.")
 
+    base_parsed = urllib.parse.urlparse(base)
+    netloc = base_parsed.netloc
+    if not netloc:
+        raise PriceCompareError("URL host is not an allowed vendor marketplace.")
+
+    path = parsed.path or "/"
+    if path.startswith("//") or "\\" in path or "@" in path:
+        raise PriceCompareError("Invalid URL path.")
+    # Round-trip encode so path/query are freshly constructed strings.
+    path = urllib.parse.quote(urllib.parse.unquote(path), safe="/-._~")
+    query = urllib.parse.quote(urllib.parse.unquote(parsed.query or ""), safe="=&%+-._~")
+    return urllib.parse.urlunparse(("https", netloc, path, "", query, ""))
 
 def _session() -> requests.Session:
     s = requests.Session()
@@ -654,14 +695,15 @@ def fetch_url_price(url: str, session: Optional[requests.Session] = None) -> Dic
     try:
         url = _assert_safe_outbound_url(url)
     except PriceCompareError as exc:
+        logger.warning("Rejected product URL: %s", exc)
         return _result(
             source="other",
             title="",
             price=None,
             currency="INR",
-            link=str(url or ""),
+            link="",
             available=False,
-            error=str(exc),
+            error="Invalid or unsupported product URL.",
             method="url",
         )
 
@@ -797,6 +839,7 @@ def search_amazon(
         )
         resp.raise_for_status()
     except requests.RequestException as exc:
+        logger.warning("Amazon search request failed: %s", exc)
         return [
             _result(
                 source="amazon",
@@ -805,7 +848,7 @@ def search_amazon(
                 currency="INR",
                 link=url,
                 available=False,
-                error=f"Amazon search failed: {exc}",
+                error="Amazon search failed.",
             )
         ]
 
@@ -999,7 +1042,7 @@ def search_robu(query: str, session: Optional[requests.Session] = None) -> List[
                     currency="INR",
                     link=search_link,
                     available=False,
-                    error=f"Robu search failed: {fallback_exc}",
+                    error="Robu search failed.",
                 )
             ]
 
@@ -1110,6 +1153,7 @@ def search_flipkart(
         )
         resp.raise_for_status()
     except requests.RequestException as exc:
+        logger.warning("Flipkart search request failed: %s", exc)
         return [
             _result(
                 source="flipkart",
@@ -1118,7 +1162,7 @@ def search_flipkart(
                 currency="INR",
                 link=url,
                 available=False,
-                error=f"Flipkart search failed: {exc}",
+                error="Flipkart search failed.",
             )
         ]
 
