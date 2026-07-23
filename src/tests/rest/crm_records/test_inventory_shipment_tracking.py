@@ -49,3 +49,13 @@ class InventoryShipmentTrackingTests(SimpleTestCase):
         data = dict(prev)
         out = apply_shipment_tracking_normalization(data, previous=prev)
         self.assertEqual(out.get("tracking_updated_at"), "2020-01-01T00:00:00+00:00")
+
+    def test_apply_keeps_null_shipment_status_on_new_request(self):
+        data = {
+            "status": "PENDING_PM",
+            "shipment_status": None,
+            "tracking_number": None,
+            "tracking_link": None,
+        }
+        out = apply_shipment_tracking_normalization(data, previous={})
+        self.assertIsNone(out.get("shipment_status"))
