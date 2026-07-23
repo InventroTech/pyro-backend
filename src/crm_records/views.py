@@ -5382,3 +5382,170 @@ class ScoringRuleDetailView(TenantScopedMixin, generics.RetrieveUpdateDestroyAPI
             )
 
 
+class PriceCompareView(APIView):
+    """
+    Live e-commerce price comparison for inventory requestors.
+
+    GET  /crm-records/price-compare/vendors/  -> vendor catalog
+    Or GET /crm-records/price-compare/?meta=vendors
+
+    POST /crm-records/price-compare/
+    {
+      "query": "arduino uno",
+      "profile": "core",                 # optional: core|extended
+      "sources": ["amazon", "robu"],     # optional explicit override
+      "urls": ["https://robu.in/product/..."],
+      "pincode": "560001"
+    }
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+    authentication_classes = [SupabaseJWTAuthentication]
+
+    @extend_schema(
+        summary="List price-compare vendors",
+        description="Returns the configured vendor catalog (id, label, profile, strategy).",
+        responses={200: OpenApiResponse(description="Vendor catalog")},
+        tags=["Inventory"],
+    )
+    def get(self, request, *args, **kwargs):
+        from .price_compare_vendors import get_runtime_defaults, list_vendor_catalog
+
+        include_disabled = str(request.query_params.get("include_disabled") or "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        return Response(
+            {
+                "defaults": get_runtime_defaults(),
+                "vendors": list_vendor_catalog(include_disabled=include_disabled),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @extend_schema(
+        summary="Compare live product prices",
+        description=(
+            "Fetches current prices from configured vendor sites for a product query, "
+            "and/or extracts prices from provided product page URLs. "
+            "Default profile is `core` (small reliable set). Use `profile=extended` or "
+            "explicit `sources` to widen the search. "
+            "Optional Indian PIN code improves Amazon delivery date accuracy."
+        ),
+        request={
+            "application/json": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "profile": {"type": "string", "enum": ["core", "extended"]},
+                    "sources": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional explicit vendor ids. Overrides profile when provided.",
+                    },
+                    "urls": {"type": "array", "items": {"type": "string", "format": "uri"}},
+                    "pincode": {
+                        "type": "string",
+                        "description": "6-digit Indian PIN code for location-based delivery ETAs",
+                    },
+                },
+            }
+        },
+        responses={
+            200: OpenApiResponse(description="Price comparison results"),
+            400: OpenApiResponse(description="Missing query/urls"),
+        },
+        tags=["Inventory"],
+    )
+    def post(self, request, *args, **kwargs):
+        from .price_compare import PriceCompareError, compare_prices
+
+        query = request.data.get("query") or ""
+        sources = request.data.get("sources")
+        urls = request.data.get("urls")
+        pincode = request.data.get("pincode") or request.data.get("delivery_pincode") or ""
+        profile = request.data.get("profile") or ""
+        try:
+            payload = compare_prices(
+                query=query,
+                sources=sources,
+                urls=urls,
+                pincode=pincode,
+                profile=profile or None,
+            )
+        except PriceCompareError:
+            logger.warning("PriceCompareView validation failed", exc_info=True)
+            return Response(
+                {"error": "Invalid price comparison request."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception:
+            logger.exception("PriceCompareView failed")
+            return Response(
+                {"error": "Price comparison failed."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class ShipmentTrackView(APIView):
+    """
+    Live shipment status for inventory tracking numbers / links.
+
+    POST /crm-records/shipment-track/
+    {
+      "tracking_number": "AWB...",
+      "tracking_link": "https://...",
+      "courier_name": "Delhivery"   # optional hint
+    }
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+    authentication_classes = [SupabaseJWTAuthentication]
+
+    @extend_schema(
+        summary="Track shipment by number or link",
+        description=(
+            "Resolves the current delivery pipeline status from a tracking number "
+            "and/or tracking link (Delhivery API, optional AfterShip, allowlisted pages)."
+        ),
+        request={
+            "application/json": {
+                "type": "object",
+                "properties": {
+                    "tracking_number": {"type": "string"},
+                    "tracking_link": {"type": "string", "format": "uri"},
+                    "courier_name": {"type": "string"},
+                },
+            }
+        },
+        responses={
+            200: OpenApiResponse(description="Shipment tracking result"),
+            400: OpenApiResponse(description="Missing tracking number/link"),
+        },
+        tags=["Inventory"],
+    )
+    def post(self, request, *args, **kwargs):
+        from .inventory_shipment_live_track import ShipmentTrackError, track_shipment
+
+        try:
+            payload = track_shipment(
+                tracking_number=request.data.get("tracking_number"),
+                tracking_link=request.data.get("tracking_link"),
+                courier_name=request.data.get("courier_name"),
+            )
+        except ShipmentTrackError:
+            logger.warning("ShipmentTrackView validation failed", exc_info=True)
+            return Response(
+                {"error": "Provide a valid tracking number or supported tracking link."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception:
+            logger.exception("ShipmentTrackView failed")
+            return Response(
+                {"error": "Shipment tracking failed."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(payload, status=status.HTTP_200_OK)
+
