@@ -134,6 +134,12 @@ def fresh_leads_counts_for_groups(tenant, groups: Iterable[Group]) -> dict[int, 
     if not lead_groups:
         return counts
 
+    # Single group: one targeted COUNT is cheaper than a tenant-wide GROUP BY.
+    if len(lead_groups) == 1:
+        group = lead_groups[0]
+        counts[group.id] = count_available_fresh_leads_for_group(tenant, group)
+        return counts
+
     # One grouped query: bucket by filter dimensions instead of loading every row.
     inventory = list(
         Record.objects.filter(tenant=tenant, entity_type="lead")
