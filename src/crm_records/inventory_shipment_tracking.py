@@ -142,7 +142,6 @@ def apply_shipment_tracking_normalization(
     if link and _looks_like_url(link) and not number:
         extracted = extract_tracking_number_from_url(link)
         if extracted:
-            number = extracted
             data["tracking_number"] = extracted
         data["tracking_link"] = _ensure_http_url(link)
     elif number and _looks_like_url(number) and not link:

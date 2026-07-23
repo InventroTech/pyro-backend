@@ -5475,11 +5475,15 @@ class PriceCompareView(APIView):
                 profile=profile or None,
             )
         except PriceCompareError as exc:
-            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as exc:
+            logger.warning("PriceCompareView validation failed: %s", exc)
+            return Response(
+                {"error": "Invalid price comparison request."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception:
             logger.exception("PriceCompareView failed")
             return Response(
-                {"error": f"Price comparison failed: {exc}"},
+                {"error": "Price comparison failed."},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
         return Response(payload, status=status.HTTP_200_OK)

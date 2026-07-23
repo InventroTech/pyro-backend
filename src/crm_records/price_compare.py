@@ -81,16 +81,13 @@ SUPPORTED_SOURCES = ("amazon", "robu", "flipkart")  # legacy; prefer vendor regi
 
 try:
     from .price_compare_vendors import (  # type: ignore
-        SUPPORTED_VENDOR_IDS,
-        VENDOR_SPECS,
         detect_vendor_id,
         list_vendor_catalog,
         resolve_vendors,
         search_vendors,
     )
 except Exception:  # pragma: no cover - allow partial imports in isolation
-    SUPPORTED_VENDOR_IDS = SUPPORTED_SOURCES
-    VENDOR_SPECS = []
+    # Vendors module may be unavailable in isolated unit-test imports.
     detect_vendor_id = None  # type: ignore
     list_vendor_catalog = None  # type: ignore
     resolve_vendors = None  # type: ignore
@@ -99,6 +96,71 @@ except Exception:  # pragma: no cover - allow partial imports in isolation
 
 class PriceCompareError(Exception):
     """Raised for invalid price-compare requests."""
+
+
+_A_PRICE_WHOLE_RE = re.compile(r"a-price-whole[^>]{0,80}?>([\d,]{1,20})", re.IGNORECASE)
+_A_PRICE_FRAC_RE = re.compile(r"a-price-fraction[^>]{0,80}?>(\d{1,4})", re.IGNORECASE)
+_DELIVERY_BLOCK_RE = re.compile(
+    r'data-cy="delivery-block"[^>]{0,200}?>([\s\S]{0,4000}?)</div>\s*</div>\s*</div>',
+    re.IGNORECASE,
+)
+_DELIVERY_RECIPE_RE = re.compile(
+    r'data-cy="delivery-recipe"[^>]{0,200}?>([\s\S]{0,2000}?)</div>',
+    re.IGNORECASE,
+)
+_AMAZON_ASIN_CARD_RE = re.compile(
+    r'<div[^>]{0,400}?data-asin="([A-Z0-9]{10})"[^>]{0,400}?data-component-type="s-search-result"',
+    re.IGNORECASE,
+)
+
+
+def _is_host_or_subdomain(host: str, domain: str) -> bool:
+    host = (host or "").lower().strip(".")
+    domain = (domain or "").lower().strip(".")
+    if not host or not domain:
+        return False
+    return host == domain or host.endswith("." + domain)
+
+
+def _host_matches_vendor_pattern(host: str, pattern: str) -> bool:
+    """Match vendor host patterns from catalog (exact domain, subdomain, or label like 'amazon')."""
+    host = (host or "").lower().strip(".")
+    pattern = (pattern or "").lower().strip(".")
+    if not host or not pattern:
+        return False
+    if "." not in pattern:
+        # Bare label (e.g. "amazon") — require it as a DNS label in the hostname.
+        return pattern in host.split(".")
+    return _is_host_or_subdomain(host, pattern)
+
+
+def _assert_safe_outbound_url(url: str) -> str:
+    """
+    Allow only https URLs whose host belongs to a known marketplace.
+    Prevents SSRF via user-supplied product URLs.
+    """
+    raw = str(url or "").strip()
+    if not raw:
+        raise PriceCompareError("URL is required.")
+    try:
+        parsed = urllib.parse.urlparse(raw)
+    except Exception as exc:
+        raise PriceCompareError("Invalid URL.") from exc
+    if parsed.scheme.lower() != "https":
+        raise PriceCompareError("Only https product URLs are allowed.")
+    host = (parsed.hostname or "").lower().strip(".")
+    if not host:
+        raise PriceCompareError("URL host is required.")
+    if host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".localhost"):
+        raise PriceCompareError("Local hosts are not allowed.")
+    # Reject literal IPv4 / IPv6 hosts.
+    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host) or ":" in host:
+        raise PriceCompareError("IP address hosts are not allowed.")
+
+    vendor = detect_source(raw)
+    if vendor and vendor != "other":
+        return raw
+    raise PriceCompareError("URL host is not an allowed vendor marketplace.")
 
 
 def _session() -> requests.Session:
@@ -323,18 +385,15 @@ def _delivery_from_schema_delivery_time(delivery_time: Dict[str, Any]) -> Option
 
 
 def _extract_amazon_delivery(chunk: str) -> Optional[str]:
+    scanned = _html_for_regex(chunk)
     # Prefer the dedicated delivery block (has bold date spans).
-    block = re.search(
-        r'data-cy="delivery-block"[^>]*>(.*?)</div>\s*</div>\s*</div>',
-        chunk,
-        re.I | re.S,
-    )
+    block = _DELIVERY_BLOCK_RE.search(scanned)
     if block:
         cleaned = _clean_delivery_text(block.group(0))
         if cleaned:
             return cleaned
 
-    recipe = re.search(r'data-cy="delivery-recipe"[^>]*>(.*?)</div>', chunk, re.I | re.S)
+    recipe = _DELIVERY_RECIPE_RE.search(scanned)
     if recipe:
         cleaned = _clean_delivery_text(recipe.group(0))
         if cleaned:
@@ -530,24 +589,27 @@ def _fetch_html(url: str, headers: Optional[Dict[str, str]] = None) -> str:
     import ssl
     import time
 
+    safe_url = _assert_safe_outbound_url(url)
     sess = _session()
     req_headers = dict(headers or {})
     last_exc: Optional[Exception] = None
+    host = (urllib.parse.urlparse(safe_url).hostname or "").lower()
 
     # Warm cookies for Robu — bare product hits are often 403 without a prior home visit.
-    if "robu.in" in (url or "").lower():
+    if _is_host_or_subdomain(host, "robu.in"):
         try:
             sess.get("https://robu.in/", timeout=min(8, DEFAULT_TIMEOUT), allow_redirects=True)
         except requests.RequestException:
+            # Cookie warm-up is best-effort; continue to the product fetch.
             pass
 
     for attempt in range(2):
         try:
-            resp = sess.get(url, headers=req_headers, timeout=DEFAULT_TIMEOUT, allow_redirects=True)
+            resp = sess.get(safe_url, headers=req_headers, timeout=DEFAULT_TIMEOUT, allow_redirects=True)
             if resp.status_code != 403:
                 resp.raise_for_status()
                 return resp.text
-            last_exc = requests.HTTPError(f"403 for {url}", response=resp)
+            last_exc = requests.HTTPError(f"403 for {safe_url}", response=resp)
         except requests.RequestException as exc:
             last_exc = exc
         if attempt == 0:
@@ -570,13 +632,14 @@ def _fetch_html(url: str, headers: Optional[Dict[str, str]] = None) -> str:
             urllib.request.HTTPCookieProcessor(cj),
             urllib.request.HTTPSHandler(context=ctx),
         )
-        if "robu.in" in (url or "").lower():
+        if _is_host_or_subdomain(host, "robu.in"):
             home_req = urllib.request.Request("https://robu.in/", headers=ua_headers)
             try:
                 opener.open(home_req, timeout=DEFAULT_TIMEOUT).read()
             except Exception:
+                # Home-page warm-up failed; still attempt the product URL.
                 pass
-        req = urllib.request.Request(url, headers=ua_headers)
+        req = urllib.request.Request(safe_url, headers=ua_headers)
         with opener.open(req, timeout=DEFAULT_TIMEOUT) as response:
             charset = response.headers.get_content_charset() or "utf-8"
             return response.read().decode(charset, errors="replace")
@@ -588,6 +651,20 @@ def _fetch_html(url: str, headers: Optional[Dict[str, str]] = None) -> str:
 
 def fetch_url_price(url: str, session: Optional[requests.Session] = None) -> Dict[str, Any]:
     """Fetch a single product URL and return a normalized price result."""
+    try:
+        url = _assert_safe_outbound_url(url)
+    except PriceCompareError as exc:
+        return _result(
+            source="other",
+            title="",
+            price=None,
+            currency="INR",
+            link=str(url or ""),
+            available=False,
+            error=str(exc),
+            method="url",
+        )
+
     source = detect_source(url)
     headers: Dict[str, str] = {}
     if source == "robu":
@@ -611,15 +688,16 @@ def fetch_url_price(url: str, session: Optional[requests.Session] = None) -> Dic
             currency="INR",
             link=url,
             available=False,
-            error=f"Failed to fetch URL: {exc}",
+            error="Failed to fetch product URL.",
             method="url",
         )
 
     extracted = extract_price_from_html(html, fallback_url=final_url)
     if not extracted:
         # Amazon product pages sometimes omit JSON-LD; try a-price markers.
-        whole = re.search(r"a-price-whole[^>]*>([\d,]+)", html)
-        frac = re.search(r"a-price-fraction[^>]*>(\d+)", html)
+        scanned = _html_for_regex(html)
+        whole = _A_PRICE_WHOLE_RE.search(scanned)
+        frac = _A_PRICE_FRAC_RE.search(scanned)
         if whole:
             price_s = whole.group(1).replace(",", "")
             if frac:
@@ -671,15 +749,14 @@ def detect_source(url: str) -> str:
     if detect_vendor_id is not None:
         return detect_vendor_id(url)
     try:
-        host = urllib.parse.urlparse(url).hostname or ""
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
     except Exception:
         return "other"
-    host = host.lower()
-    if "amazon." in host:
+    if _host_matches_vendor_pattern(host, "amazon") or _is_host_or_subdomain(host, "amazon.in") or _is_host_or_subdomain(host, "amazon.com"):
         return "amazon"
-    if "robu.in" in host:
+    if _is_host_or_subdomain(host, "robu.in"):
         return "robu"
-    if "flipkart.com" in host:
+    if _is_host_or_subdomain(host, "flipkart.com"):
         return "flipkart"
     return "other"
 
@@ -747,19 +824,22 @@ def search_amazon(
         ]
 
     results: List[Dict[str, Any]] = []
-    pattern = re.compile(
-        r'<div[^>]*data-asin="([A-Z0-9]{10})"[^>]*data-component-type="s-search-result"[^>]*>(.*?)'
-        r'(?=<div[^>]*data-asin="[A-Z0-9]{10}"[^>]*data-component-type="s-search-result"|$)',
-        re.S,
-    )
-    for m in pattern.finditer(html):
-        asin, chunk = m.group(1), m.group(2)
+    scanned = _html_for_regex(html)
+    card_starts = list(_AMAZON_ASIN_CARD_RE.finditer(scanned))
+    for idx, m in enumerate(card_starts):
+        asin = m.group(1)
+        end = (
+            card_starts[idx + 1].start()
+            if idx + 1 < len(card_starts)
+            else min(len(scanned), m.end() + 12000)
+        )
+        chunk = scanned[m.start() : end]
         if re.search(r">\s*Sponsored\s*<", chunk, re.I):
             continue
-        price_m = re.search(r"a-price-whole[^>]*>([\d,]+)", chunk)
+        price_m = _A_PRICE_WHOLE_RE.search(chunk)
         if not price_m:
             continue
-        frac_m = re.search(r"a-price-fraction[^>]*>(\d+)", chunk)
+        frac_m = _A_PRICE_FRAC_RE.search(chunk)
         price_s = price_m.group(1).replace(",", "")
         if frac_m:
             price_s = f"{price_s}.{frac_m.group(1)}"
@@ -769,18 +849,17 @@ def search_amazon(
 
         title = ""
         for title_pat in (
-            r'<h2[^>]*aria-label=["\']([^"\']+)["\']',
-            r'<h2[^>]*>.*?<span[^>]*class="[^"]*a-text-normal[^"]*"[^>]*>(.*?)</span>',
-            r"<h2[^>]*>.*?<span[^>]*>(.*?)</span>",
+            r'<h2[^>]{0,200}?aria-label=["\']([^"\']{1,500})["\']',
+            r'<h2[^>]{0,200}?>[\s\S]{0,1200}?<span[^>]{0,200}?class="[^"]{0,200}?a-text-normal[^"]{0,200}?"[^>]{0,80}?>([^<]{1,500})</span>',
+            r"<h2[^>]{0,200}?>[\s\S]{0,1200}?<span[^>]{0,80}?>([^<]{1,500})</span>",
         ):
-            tm = re.search(title_pat, chunk, re.S | re.I)
+            tm = re.search(title_pat, chunk, re.I)
             if tm:
-                title = re.sub(r"<[^>]+>", "", tm.group(1)).strip()
-                title = html_lib.unescape(title)
+                title = html_lib.unescape(tm.group(1).strip())
                 if title:
                     break
 
-        link_m = re.search(rf'href="(/[^"]*/dp/{asin}[^"]*)"', chunk)
+        link_m = re.search(rf'href="(/[^"]{{0,300}}/dp/{asin}[^"]{{0,200}})"', chunk)
         if link_m:
             path = html_lib.unescape(link_m.group(1)).split("?")[0]
             link = "https://www.amazon.in" + path
@@ -1147,9 +1226,9 @@ def compare_prices(
 
     url_sess = _session()
     if pin:
-        if any("amazon." in (u or "").lower() for u in urls):
+        if any(detect_source(u) == "amazon" for u in urls):
             _apply_amazon_pincode(url_sess, pin)
-        if any("flipkart." in (u or "").lower() for u in urls):
+        if any(detect_source(u) == "flipkart" for u in urls):
             _apply_flipkart_pincode(url_sess, pin)
     for u in urls[:10]:
         results.append(fetch_url_price(u, url_sess))
@@ -1178,7 +1257,7 @@ def compare_prices(
                         results.extend(fut.result())
                     except Exception as exc:
                         logger.exception("price_compare source failed source=%s", source)
-                        errors.append(f"{source}: {exc}")
+                        errors.append(f"{source}: request failed")
                         results.append(
                             _result(
                                 source=source,
@@ -1187,7 +1266,7 @@ def compare_prices(
                                 currency="INR",
                                 link="",
                                 available=False,
-                                error=str(exc),
+                                error="request failed",
                             )
                         )
 

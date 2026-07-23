@@ -129,6 +129,7 @@ def get_runtime_defaults() -> Dict[str, Any]:
 
         profile = getattr(dj_settings, "PRICE_COMPARE_PROFILE", None) or profile
     except Exception:
+        # Django settings may be unavailable outside a configured app context.
         pass
     profile = (os.getenv("PRICE_COMPARE_PROFILE") or profile or "core").strip().lower()
     if profile not in {"core", "extended"}:
@@ -245,7 +246,24 @@ VENDOR_TIMEOUT = _defaults["timeout_seconds"]
 
 VENDOR_SPECS: List[VendorSpec] = list(get_all_vendors())
 SUPPORTED_VENDOR_IDS = tuple(v.id for v in VENDOR_SPECS)
-_VENDOR_BY_ID = {v.id: v for v in VENDOR_SPECS}
+
+
+def _is_host_or_subdomain(host: str, domain: str) -> bool:
+    host = (host or "").lower().strip(".")
+    domain = (domain or "").lower().strip(".")
+    if not host or not domain:
+        return False
+    return host == domain or host.endswith("." + domain)
+
+
+def _host_matches_vendor_pattern(host: str, pattern: str) -> bool:
+    host = (host or "").lower().strip(".")
+    pattern = (pattern or "").lower().strip(".")
+    if not host or not pattern:
+        return False
+    if "." not in pattern:
+        return pattern in host.split(".")
+    return _is_host_or_subdomain(host, pattern)
 
 
 def detect_vendor_id(url: str) -> str:
@@ -254,9 +272,9 @@ def detect_vendor_id(url: str) -> str:
     except Exception:
         return "other"
     for spec in get_all_vendors():
-        if any(h in host for h in spec.hosts):
+        if any(_host_matches_vendor_pattern(host, h) for h in spec.hosts):
             return spec.id
-    if "flipkart.com" in host:
+    if _is_host_or_subdomain(host, "flipkart.com"):
         return "flipkart"
     return "other"
 
