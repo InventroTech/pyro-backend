@@ -321,6 +321,62 @@ class InventoryRequestFormBackendTests(TestCase):
             "RequestRejectedNotification",
         )
 
+    @patch("crm_records.views.send_email")
+    def test_team_lead_order_emails_manager_requester_and_team_lead(self, mock_send_email):
+        mock_send_email.return_value = (True, "ok")
+        from types import SimpleNamespace
+        from crm_records.views import _notify_on_team_lead_ordered
+
+        pm_role = Role.objects.create(
+            tenant=self.tenant,
+            key="PM",
+            name="Procurement Manager",
+        )
+        pm_user = User.objects.create_user(
+            email="pm@example.com",
+            password="pass1234",
+            supabase_uid=str(uuid.uuid4()),
+        )
+        pm_membership = TenantMembership.objects.create(
+            tenant=self.tenant,
+            user_id=pm_user.supabase_uid,
+            email=pm_user.email,
+            role=pm_role,
+            is_active=True,
+            name="PM User",
+            user_parent_id=self.team_lead_membership,
+        )
+        self.requester_membership.user_parent_id = pm_membership
+        self.requester_membership.save(update_fields=["user_parent_id"])
+
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "IN_SHIPPING",
+                "status_text": "IN_SHIPPING",
+                "requester_id": str(self.user.supabase_uid),
+                "requester_name": "Test Requester",
+                "item_name_freeform": "Drone",
+                "team_lead": self.team_lead_membership.id,
+                "manager": pm_membership.id,
+            },
+        )
+        request = SimpleNamespace(
+            tenant=self.tenant,
+            user=self.team_lead_user,
+            build_absolute_uri=lambda path: f"https://example.com{path}",
+        )
+        _notify_on_team_lead_ordered(request, record, previous_status="VENDOR_IDENTIFIED")
+
+        emails = [c.kwargs.get("to_emails") for c in mock_send_email.call_args_list]
+        self.assertIn("pm@example.com", emails)
+        self.assertIn("requester@example.com", emails)
+        self.assertIn("teamlead@example.com", emails)
+        self.assertTrue(
+            all(c.kwargs.get("client_name") == "RequestOrderedNotification" for c in mock_send_email.call_args_list)
+        )
+
     @patch.dict(os.environ, {"PYRO_FRONTEND_URL": "https://app.thepyro.ai"}, clear=False)
     @patch("crm_records.views.send_email")
     def test_create_unmannd_request_sends_email_with_app_redirect(self, mock_send_email):
