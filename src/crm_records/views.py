@@ -70,6 +70,7 @@ from email_protocol.templates.newRequestUnmannd import build_new_request_unmannd
 from email_protocol.templates.requestPaidUnmannd import build_request_paid_unmannd_email
 from email_protocol.templates.requestApprovedUnmannd import build_request_approved_unmannd_email
 from email_protocol.templates.requestRejectedUnmannd import build_request_rejected_unmannd_email
+from email_protocol.templates.requestOrderedUnmannd import build_request_ordered_unmannd_email
 
 from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
 from crm_records.lead_pipeline.pipeline import LeadPipeline
@@ -106,6 +107,12 @@ MANAGER_APPROVED_STATUSES = frozenset({"VENDOR_IDENTIFIED"})
 MANAGER_APPROVE_FROM_STATUSES = frozenset({
     "",
     "NEW_REQUEST",
+})
+# Team Lead Order button sets IN_SHIPPING.
+TEAM_LEAD_ORDERED_STATUSES = frozenset({"IN_SHIPPING"})
+TEAM_LEAD_ORDER_FROM_STATUSES = frozenset({
+    "VENDOR_IDENTIFIED",
+    "PAYMENT_PENDING",
 })
 
 
@@ -705,9 +712,136 @@ def _notify_requester_when_rejected(request, record, previous_status):
         )
 
 
+def _notify_on_team_lead_ordered(request, record, previous_status):
+    """
+    When team lead Order runs (status → IN_SHIPPING from VENDOR_IDENTIFIED/PAYMENT_PENDING):
+    email Manager, Requestor, and Team Lead.
+    Best-effort only; never raises.
+    """
+    if not record or record.entity_type not in REQUEST_NOTIFICATION_ENTITY_TYPES:
+        return
+
+    tenant = getattr(request, "tenant", None)
+    if not tenant:
+        return
+
+    data = record.data if isinstance(record.data, dict) else {}
+    current_status = _normalize_status_value(data.get("status"))
+    old_status = _normalize_status_value(previous_status)
+    if current_status not in TEAM_LEAD_ORDERED_STATUSES:
+        return
+    if old_status in TEAM_LEAD_ORDERED_STATUSES:
+        return
+    if old_status not in TEAM_LEAD_ORDER_FROM_STATUSES:
+        logger.info(
+            "[RequestOrderedEmail] Skip: record=%s status %s → %s is not a team-lead-order transition.",
+            getattr(record, "id", None),
+            old_status or "(empty)",
+            current_status,
+        )
+        return
+
+    try:
+        recipients = []  # (email, label, recipient_name)
+        seen_emails = set()
+
+        def _add_recipient(email, label, name):
+            if not email or email in seen_emails:
+                return
+            seen_emails.add(email)
+            recipients.append((email, label, name))
+
+        manager_ref = _resolve_manager_membership_id(tenant, data)
+        manager_email, manager_name = _membership_email_name(
+            tenant, manager_ref, default_name="Manager"
+        )
+        if manager_email:
+            _add_recipient(manager_email, "manager", manager_name or "Manager")
+        else:
+            logger.info(
+                "[RequestOrderedEmail] Skip manager: record=%s email not found (ref=%s).",
+                getattr(record, "id", None),
+                manager_ref,
+            )
+
+        requester_email, requester_name = _resolve_requester_email_name(tenant, data)
+        if requester_email:
+            _add_recipient(requester_email, "requester", requester_name or "Requester")
+        else:
+            logger.info(
+                "[RequestOrderedEmail] Skip requester: record=%s email not found.",
+                getattr(record, "id", None),
+            )
+
+        team_lead_ref = _resolve_team_lead_membership_id(tenant, data)
+        team_lead_email, team_lead_name = _membership_email_name(
+            tenant, team_lead_ref, default_name="Team Lead"
+        )
+        if team_lead_email:
+            _add_recipient(team_lead_email, "team_lead", team_lead_name or "Team Lead")
+        else:
+            logger.info(
+                "[RequestOrderedEmail] Skip team_lead: record=%s email not found (ref=%s).",
+                getattr(record, "id", None),
+                team_lead_ref,
+            )
+
+        if not recipients:
+            logger.info(
+                "[RequestOrderedEmail] Skip: record=%s no manager/requester/team_lead recipients.",
+                getattr(record, "id", None),
+            )
+            return
+
+        base_context = {
+            "request_id": record.id,
+            "tenant_name": getattr(tenant, "name", "Pyro"),
+            "requester_name": requester_name or "Requester",
+            "ordered_by_name": team_lead_name or "Team Lead",
+            "item_name": str(data.get("item_name_freeform") or data.get("item_name") or "N/A").strip(),
+            "status_text": str(data.get("status_text") or data.get("status") or current_status).strip(),
+            "redirect_url": _record_app_redirect_url(request, record),
+        }
+
+        for email, label, recipient_name in recipients:
+            subject, text_body, html_body = build_request_ordered_unmannd_email(
+                {**base_context, "recipient_name": recipient_name}
+            )
+            send_ok, send_msg = send_email(
+                to_emails=email,
+                subject=subject,
+                message=text_body,
+                html_message=html_body,
+                client_name="RequestOrderedNotification",
+                fail_silently=True,
+            )
+            if not send_ok:
+                logger.warning(
+                    "[RequestOrderedEmail] Failed: record=%s %s=%s msg=%s",
+                    getattr(record, "id", None),
+                    label,
+                    email,
+                    send_msg,
+                )
+            else:
+                logger.info(
+                    "[RequestOrderedEmail] Sent: record=%s %s=%s status=%s",
+                    getattr(record, "id", None),
+                    label,
+                    email,
+                    current_status,
+                )
+    except Exception:
+        logger.exception(
+            "Unexpected error while sending team-lead-ordered emails for record=%s",
+            getattr(record, "id", None),
+        )
+
+
 def _notify_request_status_emails(request, record, previous_status):
-    """Dispatch status-transition emails (manager approve / reject / paid)."""
+    """Dispatch status-transition emails (approve / order / reject / paid)."""
     _notify_on_manager_approved(request, record, previous_status)
+    _notify_on_team_lead_ordered(request, record, previous_status)
     _notify_requester_when_rejected(request, record, previous_status)
     _notify_requester_when_paid(request, record, previous_status)
 
