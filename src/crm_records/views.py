@@ -5535,6 +5535,17 @@ class ShipmentTrackView(APIView):
                 tracking_link=request.data.get("tracking_link"),
                 courier_name=request.data.get("courier_name"),
             )
+            logger.info(
+                "ShipmentTrackView result awb=%s ok=%s status=%s method=%s courier=%s detail=%s error=%s aftership_key_set=%s",
+                payload.get("tracking_number"),
+                payload.get("ok"),
+                payload.get("shipment_status"),
+                payload.get("method"),
+                payload.get("courier") or payload.get("courier_name"),
+                payload.get("status_detail"),
+                payload.get("error"),
+                bool((os.environ.get("AFTERSHIP_API_KEY") or "").strip()),
+            )
         except ShipmentTrackError:
             logger.warning("ShipmentTrackView validation failed", exc_info=True)
             return Response(
