@@ -52,7 +52,7 @@ class InventoryShipmentTrackingTests(SimpleTestCase):
 
     def test_apply_keeps_null_shipment_status_on_new_request(self):
         data = {
-            "status": "PENDING_PM",
+            "status": "NEW_REQUEST",
             "shipment_status": None,
             "tracking_number": None,
             "tracking_link": None,
