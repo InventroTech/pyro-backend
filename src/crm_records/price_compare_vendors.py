@@ -91,7 +91,7 @@ def _load_config() -> Dict[str, Any]:
         logger.exception("Failed to load price compare vendor config: %s", exc)
         return {
             "defaults": {
-                "profile": "core",
+                "profile": "extended",
                 "max_results_per_vendor": 3,
                 "timeout_seconds": 10,
                 "max_workers": 8,
@@ -123,7 +123,7 @@ def _load_config() -> Dict[str, Any]:
 
 def get_runtime_defaults() -> Dict[str, Any]:
     cfg = _load_config().get("defaults") or {}
-    profile = (cfg.get("profile") or "core")
+    profile = (cfg.get("profile") or "extended")
     try:
         from django.conf import settings as dj_settings
 
@@ -131,9 +131,9 @@ def get_runtime_defaults() -> Dict[str, Any]:
     except Exception:
         # Django settings may be unavailable outside a configured app context.
         pass
-    profile = (os.getenv("PRICE_COMPARE_PROFILE") or profile or "core").strip().lower()
+    profile = (os.getenv("PRICE_COMPARE_PROFILE") or profile or "extended").strip().lower()
     if profile not in {"core", "extended"}:
-        profile = "core"
+        profile = "extended"
     return {
         "profile": profile,
         "max_results_per_vendor": int(cfg.get("max_results_per_vendor") or 3),
@@ -234,7 +234,7 @@ def resolve_vendors(
 
     selected_profile = (profile or get_runtime_defaults()["profile"]).strip().lower()
     if selected_profile not in {"core", "extended"}:
-        selected_profile = "core"
+        selected_profile = "extended"
     if selected_profile == "extended":
         return enabled
     return [v for v in enabled if v.profile == "core"]
