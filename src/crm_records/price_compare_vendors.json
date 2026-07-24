@@ -1,0 +1,227 @@
+{
+  "defaults": {
+    "profile": "core",
+    "max_results_per_vendor": 3,
+    "timeout_seconds": 10,
+    "max_workers": 8
+  },
+  "vendors": [
+    {
+      "id": "amazon",
+      "label": "Amazon",
+      "vendor_name": "AMAZON",
+      "hosts": ["amazon."],
+      "strategy": "amazon",
+      "base_url": "https://www.amazon.in",
+      "enabled": true,
+      "profile": "core"
+    },
+    {
+      "id": "robu",
+      "label": "Robu",
+      "vendor_name": "ROBU",
+      "hosts": ["robu.in"],
+      "strategy": "robu",
+      "base_url": "https://robu.in",
+      "enabled": true,
+      "profile": "core"
+    },
+    {
+      "id": "robocraze",
+      "label": "Robocraze",
+      "vendor_name": "ROBOCRAZE",
+      "hosts": ["robocraze.com"],
+      "strategy": "shopify",
+      "base_url": "https://robocraze.com",
+      "enabled": true,
+      "profile": "core"
+    },
+    {
+      "id": "zbotic",
+      "label": "Zbotic",
+      "vendor_name": "ZBOTIC",
+      "hosts": ["zbotic.in"],
+      "strategy": "wc_store",
+      "base_url": "https://zbotic.in",
+      "search_url": "https://zbotic.in/?s={q}&post_type=product",
+      "enabled": true,
+      "profile": "core"
+    },
+    {
+      "id": "flyrobo",
+      "label": "Flyrobo",
+      "vendor_name": "FLYROBO",
+      "hosts": ["flyrobo.in"],
+      "strategy": "html",
+      "base_url": "https://www.flyrobo.in",
+      "search_url": "https://www.flyrobo.in/index.php?route=product/search&search={q}",
+      "enabled": true,
+      "profile": "extended"
+    },
+    {
+      "id": "robokits",
+      "label": "Robokits",
+      "vendor_name": "ROBOKITS",
+      "hosts": ["robokits.co.in"],
+      "strategy": "html",
+      "base_url": "https://robokits.co.in",
+      "search_url": "https://robokits.co.in/index.php?route=product/search&search={q}",
+      "enabled": true,
+      "profile": "extended"
+    },
+    {
+      "id": "mouser",
+      "label": "Mouser",
+      "vendor_name": "MOUSER",
+      "hosts": ["mouser."],
+      "strategy": "html",
+      "base_url": "https://www.mouser.in",
+      "search_url": "https://www.mouser.in/c/?q={q}",
+      "enabled": true,
+      "profile": "extended"
+    },
+    {
+      "id": "digikey",
+      "label": "DigiKey",
+      "vendor_name": "DIGIKEY",
+      "hosts": ["digikey."],
+      "strategy": "html",
+      "base_url": "https://www.digikey.in",
+      "search_url": "https://www.digikey.in/en/products/result?keywords={q}",
+      "enabled": true,
+      "profile": "extended"
+    },
+    {
+      "id": "tannatechbiz",
+      "label": "Tanna TechBiz",
+      "vendor_name": "TANNATECHBIZ",
+      "hosts": ["tannatechbiz.com"],
+      "strategy": "html",
+      "base_url": "https://www.tannatechbiz.com",
+      "search_url": "https://www.tannatechbiz.com/catalogsearch/result/?q={q}",
+      "enabled": true,
+      "profile": "extended"
+    },
+    {
+      "id": "anubisrc",
+      "label": "Anubis RC",
+      "vendor_name": "ANUBISRC",
+      "hosts": ["anubisrc.com"],
+      "strategy": "html",
+      "base_url": "https://anubisrc.com",
+      "search_url": "https://anubisrc.com/?s={q}&post_type=product",
+      "enabled": true,
+      "profile": "extended"
+    },
+    {
+      "id": "uavstore",
+      "label": "UAV Store",
+      "vendor_name": "UAVSTORE",
+      "hosts": ["uavstore.in"],
+      "strategy": "html",
+      "base_url": "https://www.uavstore.in",
+      "search_url": "https://www.uavstore.in/?s={q}&post_type=product",
+      "enabled": true,
+      "profile": "extended"
+    },
+    {
+      "id": "fpvstore",
+      "label": "FPV Store",
+      "vendor_name": "FPVSTORE",
+      "hosts": ["fpvstore.in"],
+      "strategy": "html",
+      "base_url": "https://fpvstore.in",
+      "search_url": "https://fpvstore.in/?s={q}&post_type=product",
+      "enabled": true,
+      "profile": "extended"
+    },
+    {
+      "id": "fpvguru",
+      "label": "FPV Guru",
+      "vendor_name": "FPVGURU",
+      "hosts": ["fpvguru.in", "fpvguru.com"],
+      "strategy": "html",
+      "base_url": "https://fpvguru.in",
+      "search_url": "https://fpvguru.in/?s={q}&post_type=product",
+      "enabled": true,
+      "profile": "extended"
+    },
+    {
+      "id": "evelta",
+      "label": "Evelta",
+      "vendor_name": "EVELTA",
+      "hosts": ["evelta.com"],
+      "strategy": "html",
+      "base_url": "https://evelta.com",
+      "search_url": "https://evelta.com/?s={q}&post_type=product",
+      "enabled": true,
+      "profile": "extended"
+    },
+    {
+      "id": "tujorc",
+      "label": "Tujorc",
+      "vendor_name": "TUJORC",
+      "hosts": ["tujorc.com"],
+      "strategy": "html",
+      "base_url": "https://tujorc.com",
+      "search_url": "https://tujorc.com/?s={q}&post_type=product",
+      "enabled": true,
+      "profile": "extended"
+    },
+    {
+      "id": "quadkart",
+      "label": "Quad Kart",
+      "vendor_name": "QUADKART",
+      "hosts": ["quadkart.in"],
+      "strategy": "html",
+      "base_url": "https://quadkart.in",
+      "search_url": "https://quadkart.in/?s={q}&post_type=product",
+      "enabled": true,
+      "profile": "extended"
+    },
+    {
+      "id": "ktron",
+      "label": "Ktron",
+      "vendor_name": "KTRON",
+      "hosts": ["ktron.in"],
+      "strategy": "html",
+      "base_url": "https://www.ktron.in",
+      "search_url": "https://www.ktron.in/?s={q}&post_type=product",
+      "enabled": true,
+      "profile": "extended"
+    },
+    {
+      "id": "drkstore",
+      "label": "DRK Store",
+      "vendor_name": "DRKSTORE",
+      "hosts": ["drkstore.in"],
+      "strategy": "html",
+      "base_url": "https://drkstore.in",
+      "search_url": "https://drkstore.in/?s={q}&post_type=product",
+      "enabled": true,
+      "profile": "extended"
+    },
+    {
+      "id": "uavgarage",
+      "label": "UAV Garage",
+      "vendor_name": "UAVGARAGE",
+      "hosts": ["uavgarage.com"],
+      "strategy": "html",
+      "base_url": "https://uavgarage.com",
+      "search_url": "https://uavgarage.com/?s={q}&post_type=product",
+      "enabled": true,
+      "profile": "extended"
+    },
+    {
+      "id": "fabtolab",
+      "label": "Fab to Lab",
+      "vendor_name": "FABTOLAB",
+      "hosts": ["fabtolab.com"],
+      "strategy": "html",
+      "base_url": "https://www.fabtolab.com",
+      "search_url": "https://www.fabtolab.com/?s={q}&post_type=product",
+      "enabled": true,
+      "profile": "extended"
+    }
+  ]
+}

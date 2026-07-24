@@ -72,6 +72,19 @@ class RecordSerializer(serializers.ModelSerializer):
         if not isinstance(value, dict):
             raise serializers.ValidationError("Data must be a valid JSON object.")
         return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        entity_type = attrs.get("entity_type") or getattr(self.instance, "entity_type", None)
+        data = attrs.get("data")
+        if entity_type == "inventory_request" and isinstance(data, dict):
+            from crm_records.inventory_shipment_tracking import apply_shipment_tracking_normalization
+
+            previous = None
+            if self.instance is not None and isinstance(getattr(self.instance, "data", None), dict):
+                previous = self.instance.data
+            attrs["data"] = apply_shipment_tracking_normalization(data, previous=previous)
+        return attrs
     
     def validate_pyro_data(self, value):
         """

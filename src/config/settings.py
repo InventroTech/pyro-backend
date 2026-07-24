@@ -464,4 +464,19 @@ HEALTH_CPU_THRESHOLD = env.float('HEALTH_CPU_THRESHOLD', default=70.0)          
 HEALTH_MEMORY_THRESHOLD = env.float('HEALTH_MEMORY_THRESHOLD', default=60.0)    # % RAM before alert
 HEALTH_RESPONSE_TIME_THRESHOLD_SECONDS = env.float('HEALTH_RESPONSE_TIME_THRESHOLD_SECONDS', default=1.0)
 
+# Optional Amazon Product Advertising API (PA-API 5) for inventory price comparison.
+# Without these, Amazon results fall back to live HTML search (may be rate-limited/captcha'd).
+AMAZON_PAAPI_ACCESS_KEY = env('AMAZON_PAAPI_ACCESS_KEY', default='')
+AMAZON_PAAPI_SECRET_KEY = env('AMAZON_PAAPI_SECRET_KEY', default='')
+AMAZON_PAAPI_PARTNER_TAG = env('AMAZON_PAAPI_PARTNER_TAG', default='')
+AMAZON_PAAPI_HOST = env('AMAZON_PAAPI_HOST', default='webservices.amazon.in')
+AMAZON_PAAPI_REGION = env('AMAZON_PAAPI_REGION', default='eu-west-1')
+AMAZON_PAAPI_COUNTRY = env('AMAZON_PAAPI_COUNTRY', default='IN')
+
+# Price-compare vendor fan-out:
+#   PRICE_COMPARE_PROFILE=core|extended
+#   PRICE_COMPARE_VENDORS=amazon,robu,robocraze   (optional explicit allow-list)
+PRICE_COMPARE_PROFILE = env('PRICE_COMPARE_PROFILE', default='core')
+PRICE_COMPARE_VENDORS = env('PRICE_COMPARE_VENDORS', default='')
+
 import config.spectacular_auth
