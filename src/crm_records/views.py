@@ -102,14 +102,10 @@ def _legacy_get_next_lead_assignees_match(stored, requester: str) -> bool:
 
 REQUEST_NOTIFICATION_ENTITY_TYPES = frozenset({"inventory_request", "unmannd_request"})
 # Manager Approve button (inventoryWorkflow) sets VENDOR_IDENTIFIED.
-# Legacy UNMANND flow used APPROVED(2/2).
-MANAGER_APPROVED_STATUSES = frozenset({"APPROVED(2/2)", "VENDOR_IDENTIFIED"})
+MANAGER_APPROVED_STATUSES = frozenset({"VENDOR_IDENTIFIED"})
 MANAGER_APPROVE_FROM_STATUSES = frozenset({
     "",
     "NEW_REQUEST",
-    "DRAFT",
-    "PENDING_PM",
-    "APPROVED(1/2)",
 })
 
 
@@ -532,7 +528,7 @@ def _notify_team_lead_for_inventory_request(request, record):
 
 def _notify_on_manager_approved(request, record, previous_status):
     """
-    When manager Approve runs (status → VENDOR_IDENTIFIED or APPROVED(2/2)):
+    When manager Approve runs (status → VENDOR_IDENTIFIED from NEW_REQUEST):
     email Requestor and Team Lead.
     Best-effort only; never raises.
     """
