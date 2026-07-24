@@ -46,7 +46,7 @@ class InventoryRequestFormBackendTests(TestCase):
             key="AGENT",
             name="Agent",
         )
-        TenantMembership.objects.create(
+        self.requester_membership = TenantMembership.objects.create(
             tenant=self.tenant,
             user_id=self.user.supabase_uid,
             email=self.user.email,
@@ -58,14 +58,21 @@ class InventoryRequestFormBackendTests(TestCase):
             password="pass1234",
             supabase_uid=str(uuid.uuid4()),
         )
+        self.team_lead_role = Role.objects.create(
+            tenant=self.tenant,
+            key="team_lead_unmannd",
+            name="Team Lead",
+        )
         self.team_lead_membership = TenantMembership.objects.create(
             tenant=self.tenant,
             user_id=self.team_lead_user.supabase_uid,
             email=self.team_lead_user.email,
-            role=role,
+            role=self.team_lead_role,
             is_active=True,
             name="Team Lead User",
         )
+        self.requester_membership.user_parent_id = self.team_lead_membership
+        self.requester_membership.save(update_fields=["user_parent_id"])
         self.client = APIClient()
         self.list_url = "/crm-records/records/"
 
@@ -129,26 +136,186 @@ class InventoryRequestFormBackendTests(TestCase):
             "data": {
                 "status": "NEW_REQUEST",
                 "status_text": "Submitted",
-                "request_date": "2026-02-09",
-                "requester_id": str(self.user.id),
+                "requester_id": str(self.user.supabase_uid),
                 "requester_name": "Test Requester",
-                "department": "Engineering",
                 "item_name_freeform": "Laptop stand",
-                "quantity_required": 2,
-                "urgency_level": "HIGH",
                 "team_lead": self.team_lead_membership.id,
             },
-        }
-        response = self.client.post(
-            self.list_url,
-            payload,
-            format="json",
-            **self._auth_headers(),
         )
-        self.assertEqual(response.status_code, 201, response.data)
-        self.assertTrue(mock_send_email.called)
-        kwargs = mock_send_email.call_args.kwargs
-        self.assertEqual(kwargs.get("to_emails"), "teamlead@example.com")
+        request = SimpleNamespace(
+            tenant=self.tenant,
+            user=self.user,
+            build_absolute_uri=lambda path: f"https://example.com{path}",
+        )
+        _notify_team_lead_for_inventory_request(request, record)
+        emails = [c.kwargs.get("to_emails") for c in mock_send_email.call_args_list]
+        # No separate manager → team_lead used for both manager + team_lead slots (deduped) + requester
+        self.assertIn("teamlead@example.com", emails)
+        self.assertIn("requester@example.com", emails)
+
+    @patch("crm_records.views.send_email")
+    def test_create_emails_include_pm_manager_and_team_lead(self, mock_send_email):
+        """Create emails go to PM (manager role), Team Lead role, and requestor."""
+        mock_send_email.return_value = (True, "ok")
+        from types import SimpleNamespace
+        from crm_records.views import _notify_team_lead_for_inventory_request
+
+        pm_role = Role.objects.create(
+            tenant=self.tenant,
+            key="PM",
+            name="Procurement Manager",
+        )
+        pm_user = User.objects.create_user(
+            email="pm@example.com",
+            password="pass1234",
+            supabase_uid=str(uuid.uuid4()),
+        )
+        pm_membership = TenantMembership.objects.create(
+            tenant=self.tenant,
+            user_id=pm_user.supabase_uid,
+            email=pm_user.email,
+            role=pm_role,
+            is_active=True,
+            name="PM User",
+            user_parent_id=self.team_lead_membership,
+        )
+        self.requester_membership.user_parent_id = pm_membership
+        self.requester_membership.save(update_fields=["user_parent_id"])
+
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "NEW_REQUEST",
+                "requester_id": str(self.user.supabase_uid),
+                "requester_name": "Test Requester",
+                "item_name_freeform": "Drone",
+                # Intentionally inverted stored fields — backend should still find PM by role.
+                "team_lead": pm_membership.id,
+                "manager": self.team_lead_membership.id,
+            },
+        )
+        request = SimpleNamespace(
+            tenant=self.tenant,
+            user=self.user,
+            build_absolute_uri=lambda path: f"https://example.com{path}",
+        )
+        _notify_team_lead_for_inventory_request(request, record)
+        emails = [c.kwargs.get("to_emails") for c in mock_send_email.call_args_list]
+        self.assertIn("pm@example.com", emails)
+        self.assertIn("teamlead@example.com", emails)
+        self.assertIn("requester@example.com", emails)
+
+    @patch("crm_records.views.send_email")
+    def test_manager_approve_emails_requestor_and_team_lead(self, mock_send_email):
+        mock_send_email.return_value = (True, "ok")
+        from types import SimpleNamespace
+        from crm_records.views import _notify_on_manager_approved
+
+        manager_user = User.objects.create_user(
+            email="manager@example.com",
+            password="pass1234",
+            supabase_uid=str(uuid.uuid4()),
+        )
+        manager_membership = TenantMembership.objects.create(
+            tenant=self.tenant,
+            user_id=manager_user.supabase_uid,
+            email=manager_user.email,
+            role=Role.objects.get(tenant=self.tenant, key="AGENT"),
+            is_active=True,
+            name="Manager User",
+        )
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "VENDOR_IDENTIFIED",
+                "status_text": "VENDOR_IDENTIFIED",
+                "requester_id": str(self.user.supabase_uid),
+                "requester_name": "Test Requester",
+                "item_name_freeform": "Drone",
+                "team_lead": self.team_lead_membership.id,
+                "manager": manager_membership.id,
+            },
+        )
+        request = SimpleNamespace(
+            tenant=self.tenant,
+            user=manager_user,
+            build_absolute_uri=lambda path: f"https://example.com{path}",
+        )
+        _notify_on_manager_approved(request, record, previous_status="NEW_REQUEST")
+
+        emails = [c.kwargs.get("to_emails") for c in mock_send_email.call_args_list]
+        self.assertIn("requester@example.com", emails)
+        self.assertIn("teamlead@example.com", emails)
+        self.assertNotIn("manager@example.com", emails)
+        self.assertTrue(
+            all(c.kwargs.get("client_name") == "RequestApprovedNotification" for c in mock_send_email.call_args_list)
+        )
+
+    @patch("crm_records.views.send_email")
+    def test_manager_approve_emails_team_lead_when_field_is_requestor(self, mock_send_email):
+        """If data.team_lead was wrongly saved as the requestor, still email real Team Lead."""
+        mock_send_email.return_value = (True, "ok")
+        from types import SimpleNamespace
+        from crm_records.views import _notify_on_manager_approved
+
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "VENDOR_IDENTIFIED",
+                "status_text": "VENDOR_IDENTIFIED",
+                "requester_id": str(self.user.supabase_uid),
+                "requester_name": "Test Requester",
+                "item_name_freeform": "Drone",
+                # Bug case seen in prod: team_lead saved as requestor's own membership id.
+                "team_lead": self.requester_membership.id,
+            },
+        )
+        request = SimpleNamespace(
+            tenant=self.tenant,
+            user=self.user,
+            build_absolute_uri=lambda path: f"https://example.com{path}",
+        )
+        _notify_on_manager_approved(request, record, previous_status="NEW_REQUEST")
+
+        emails = [c.kwargs.get("to_emails") for c in mock_send_email.call_args_list]
+        self.assertIn("requester@example.com", emails)
+        self.assertIn("teamlead@example.com", emails)
+        self.assertEqual(len(emails), 2)
+
+    @patch("crm_records.views.send_email")
+    def test_reject_emails_requestor(self, mock_send_email):
+        mock_send_email.return_value = (True, "ok")
+        from types import SimpleNamespace
+        from crm_records.views import _notify_requester_when_rejected
+
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "REJECTED",
+                "status_text": "REJECTED",
+                "requester_id": str(self.user.supabase_uid),
+                "requester_name": "Test Requester",
+                "item_name_freeform": "Drone",
+                "team_lead": self.team_lead_membership.id,
+            },
+        )
+        request = SimpleNamespace(
+            tenant=self.tenant,
+            user=self.user,
+            build_absolute_uri=lambda path: f"https://example.com{path}",
+        )
+        _notify_requester_when_rejected(request, record, previous_status="NEW_REQUEST")
+
+        self.assertEqual(mock_send_email.call_count, 1)
+        self.assertEqual(mock_send_email.call_args.kwargs.get("to_emails"), "requester@example.com")
+        self.assertEqual(
+            mock_send_email.call_args.kwargs.get("client_name"),
+            "RequestRejectedNotification",
+        )
 
     @patch.dict(os.environ, {"PYRO_FRONTEND_URL": "https://app.thepyro.ai"}, clear=False)
     @patch("crm_records.views.send_email")
@@ -160,7 +327,7 @@ class InventoryRequestFormBackendTests(TestCase):
                 "status": "NEW_REQUEST",
                 "status_text": "New request submitted",
                 "request_date": "2026-02-09",
-                "requester_id": str(self.user.id),
+                "requester_id": str(self.user.supabase_uid),
                 "requester_name": "Test Requester",
                 "department": "Engineering",
                 "item_name_freeform": "Drone",
@@ -176,9 +343,7 @@ class InventoryRequestFormBackendTests(TestCase):
             **self._auth_headers(),
         )
         self.assertEqual(response.status_code, 201, response.data)
-        kwargs = mock_send_email.call_args.kwargs
-        self.assertEqual(kwargs.get("to_emails"), "teamlead@example.com")
-        html_message = kwargs.get("html_message", "")
+        html_message = mock_send_email.call_args_list[0].kwargs.get("html_message", "")
         self.assertIn(f"https://app.thepyro.ai/app/{self.tenant.slug}", html_message)
 
     def test_create_inventory_request_with_empty_optional_fields(self):
