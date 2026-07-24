@@ -7,12 +7,10 @@ carrier state into the canonical pipeline statuses:
   ORDERED → IN_TRANSIT → OUT_FOR_DELIVERY → DELIVERED  (+ EXCEPTION)
 
 Sources (tried in smart order per AWB / courier hint):
-  - BlueDart TrackDart page (no key)
-  - Delhivery unified-tracking API (no key)
+  - AfterShip when AFTERSHIP_API_KEY is set (FedEx / DHL / BlueDart / Delhivery / …)
+  - BlueDart TrackDart page / Delhivery API (no key; only when courier/link is clearly them,
+    or as fallback after AfterShip for bare AWBs)
   - Vendor order-track pages (e.g. genxbattery.com/track?…)
-  - FedEx Track API when FEDEX_API_KEY + FEDEX_SECRET_KEY are set
-  - DHL Unified Tracking when DHL_API_KEY is set
-  - AfterShip when AFTERSHIP_API_KEY is set (covers FedEx / DHL / BlueDart / …)
 """
 
 from __future__ import annotations
@@ -23,6 +21,7 @@ import os
 import re
 import socket
 import ipaddress
+import time
 import urllib.parse
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -50,7 +49,6 @@ _ALLOWED_TRACK_HOST_SUFFIXES: Dict[str, Tuple[str, ...]] = {
     "bluedart": ("bluedart.com",),
     "aftership": ("aftership.com", "aftership.io"),
     "indiapost": ("indiapost.gov.in", "www.indiapost.gov.in"),
-    "amazon": ("amazon.in", "amazon.com"),
     "dtdc": ("dtdc.com", "dtdc.in"),
     "fedex": ("fedex.com",),
     "dhl": ("dhl.com", "dhl.in"),
@@ -174,10 +172,29 @@ def _detect_courier_from_host(host: str) -> Optional[str]:
     return None
 
 
+_AMAZON_ORDER_ID_RE = re.compile(r"^\d{3}-\d{7}-\d{7}$")
+_AMAZON_TBA_RE = re.compile(r"^TBA[0-9A-Z]{8,}$", re.I)
+
+
+def looks_like_amazon_tracking_id(value: Optional[str]) -> bool:
+    """True for Amazon order ids (402-…) or Amazon Logistics TBA package ids."""
+    v = _norm_str(value)
+    if not v:
+        return False
+    if _AMAZON_ORDER_ID_RE.match(v):
+        return True
+    if _AMAZON_TBA_RE.match(v):
+        return True
+    if v.upper().startswith(("TBA", "AMZL")):
+        return True
+    return False
+
+
 def detect_courier(
     *,
     tracking_link: Optional[str] = None,
     courier_name: Optional[str] = None,
+    tracking_number: Optional[str] = None,
 ) -> Optional[str]:
     name = (_norm_str(courier_name) or "").lower().replace(" ", "").replace("-", "").replace("_", "")
     if name:
@@ -189,11 +206,16 @@ def detect_courier(
             return "bluedart"
         if "delhivery" in name:
             return "delhivery"
+        if "amazon" in name or name in {"amzn", "amzl"}:
+            return "amazon"
         if "post" in name:
             return "indiapost"
         for courier in _ALLOWED_TRACK_HOST_SUFFIXES:
             if courier in name or name in courier:
                 return courier
+
+    if looks_like_amazon_tracking_id(tracking_number):
+        return "amazon"
 
     link = _norm_str(tracking_link)
     if link:
@@ -201,10 +223,145 @@ def detect_courier(
             host = (urllib.parse.urlparse(_ensure_https(link)).hostname or "").lower()
         except Exception:
             host = ""
+        if "amazon." in host or host.endswith("amzn.in"):
+            return "amazon"
         detected = _detect_courier_from_host(host)
         if detected:
             return detected
     return None
+
+
+
+def _normalize_courier_slug(courier: Optional[str]) -> Optional[str]:
+    raw = _norm_str(courier)
+    if not raw:
+        return None
+    c = raw.lower().replace(" ", "-").replace("_", "-")
+    if "amazon" in c or c in {"amzn", "amzl"}:
+        return "amazon"
+    if "fedex" in c:
+        return "fedex"
+    if c == "dhl" or c.startswith("dhl-") or c.startswith("dhl"):
+        if "germany" in c:
+            return "dhl-germany"
+        if "global" in c or "ecommerce" in c or "packet" in c:
+            return "dhl-global-mail"
+        if "express" in c:
+            return "dhl-express"
+        return "dhl"
+    if "bluedart" in c or "blue-dart" in c:
+        return "bluedart"
+    if "delhivery" in c:
+        return "delhivery"
+    if "dtdc" in c:
+        return "dtdc"
+    if "shiprocket" in c:
+        return "shiprocket"
+    if "india-post" in c or "indiapost" in c or c in {"india-post", "post"}:
+        return "india-post"
+    if c in {"aftership", "vendor", "fallback", "link-scrape", "link_scrape"}:
+        return None
+    return c
+
+
+def _courier_display_name(courier: Optional[str]) -> Optional[str]:
+    """Map AfterShip slugs to UI courier labels (Amazon Order → Amazon)."""
+    slug = _normalize_courier_slug(courier) or _norm_str(courier)
+    if not slug:
+        return None
+    c = slug.lower()
+    if c.startswith("amazon"):
+        return "Amazon"
+    if c.startswith("fedex"):
+        return "FedEx"
+    if c == "dhl" or c.startswith("dhl"):
+        return "DHL"
+    if "bluedart" in c:
+        return "BlueDart"
+    if "delhivery" in c:
+        return "Delhivery"
+    if c == "dtdc":
+        return "DTDC"
+    if "shiprocket" in c:
+        return "Shiprocket"
+    if "india-post" in c or "indiapost" in c:
+        return "India Post"
+    return slug.replace("-", " ").title()
+
+
+def _public_tracking_link(awb: Optional[str], courier: Optional[str] = None) -> Optional[str]:
+    """
+    Build a public track URL from AWB + courier when the user did not paste a link.
+
+    Prefers official carrier pages; falls back to AfterShip (with slug when known,
+    or bare number for auto-detect).
+    """
+    number = _norm_str(awb)
+    if not number:
+        return None
+    safe = urllib.parse.quote(number, safe="")
+    slug = _normalize_courier_slug(courier)
+    if slug == "amazon":
+        return f"https://www.aftership.com/track/amazon/{safe}"
+    if slug == "fedex":
+        return f"https://www.fedex.com/fedextrack/?trknbr={safe}"
+    if slug and slug.startswith("dhl"):
+        return f"https://www.dhl.com/en/express/tracking.html?AWB={safe}&brand=DHL"
+    if slug == "delhivery":
+        return f"https://www.delhivery.com/track/package/?waybill={safe}"
+    if slug == "bluedart":
+        return f"https://www.aftership.com/track/bluedart/{safe}"
+    if slug == "dtdc":
+        return f"https://www.aftership.com/track/dtdc/{safe}"
+    if slug == "shiprocket":
+        return f"https://www.aftership.com/track/shiprocket/{safe}"
+    if slug == "india-post":
+        return f"https://www.aftership.com/track/india-post/{safe}"
+    if slug:
+        return f"https://www.aftership.com/track/{slug}/{safe}"
+    # No courier yet — AfterShip landing page auto-detects for many carriers.
+    return f"https://www.aftership.com/track/{safe}"
+
+
+def _resolve_tracking_link(
+    *,
+    awb: Optional[str],
+    courier: Optional[str] = None,
+    user_link: Optional[str] = None,
+    carrier_link: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Choose the best tracking URL.
+
+    Priority:
+      1) User-pasted link
+      2) Carrier official link from AfterShip (courier_tracking_link)
+      3) Synthesized public URL from AWB + courier
+    """
+    pasted = _norm_str(user_link)
+    if pasted:
+        return pasted
+    official = _norm_str(carrier_link)
+    if official:
+        # Prefer real carrier hosts over a generic AfterShip page when both exist.
+        host = ""
+        path = ""
+        try:
+            parsed = urllib.parse.urlparse(official)
+            host = (parsed.hostname or "").lower()
+            path = (parsed.path or "").lower()
+        except Exception:
+            host = ""
+            path = ""
+        # AfterShip sometimes returns a bare Amazon progress-tracker URL with no id — useless.
+        if "amazon." in host and "progress-tracker" in path and "packageid" not in official.lower() and "trackingid" not in official.lower():
+            official = None
+        elif host and "aftership." not in host and official:
+            return official
+    synthesized = _public_tracking_link(awb, courier)
+    if synthesized:
+        return synthesized
+    return official
 
 
 def _ensure_https(url: str) -> str:
@@ -338,7 +495,7 @@ def _extract_order_id_from_url(url: str) -> Optional[str]:
     try:
         parsed = urllib.parse.urlparse(url)
         qs = urllib.parse.parse_qs(parsed.query or "")
-        for key in ("order", "order_id", "orderId", "orderno"):
+        for key in ("order", "order_id", "orderId", "orderID", "orderno", "packageId"):
             vals = qs.get(key) or []
             if vals and str(vals[0]).strip():
                 return str(vals[0]).strip()
@@ -594,6 +751,25 @@ def _track_delhivery(awb: str) -> Dict[str, Any]:
     }
 
 
+def _bluedart_page_looks_like_error_chrome(cleaned: str) -> bool:
+    """
+    BlueDart error / empty-result pages still contain words like UNDELIVERED
+    (e.g. "available only for UNDELIVERED Waybills") which must not be treated
+    as a real shipment status — that false positive blocked AfterShip/FedEx/DHL.
+    """
+    lower = (cleaned or "").lower()
+    return any(
+        phrase in lower
+        for phrase in (
+            "available only for undelivered waybills",
+            "no records found",
+            "invalid waybill",
+            "please enter a valid",
+            "waybill number does not exist",
+        )
+    )
+
+
 def _track_bluedart(awb: str) -> Dict[str, Any]:
     """Fetch BlueDart public TrackDart result page (server-built URL)."""
     safe_awb = urllib.parse.quote(str(awb).strip(), safe="")
@@ -635,6 +811,7 @@ def _track_bluedart(awb: str) -> Dict[str, Any]:
     # Prefer the explicit status row on TrackDart pages.
     status = None
     status_detail = None
+    explicit_status = False
     m = re.search(
         r"Status\s+(Shipment\s+Delivered|Shipment\s+Out\s+for\s+Delivery|"
         r"In\s+Transit|Shipment\s+Undelivered|Delivered|Out\s+for\s+Delivery)",
@@ -644,22 +821,37 @@ def _track_bluedart(awb: str) -> Dict[str, Any]:
     if m:
         status_detail = m.group(1).strip()
         status = map_status_text(status_detail)
+        explicit_status = bool(status)
+
+    # Error chrome (wrong AWB / not BlueDart) — never treat as a successful track.
+    if not explicit_status and _bluedart_page_looks_like_error_chrome(cleaned):
+        return {
+            "ok": False,
+            "courier": "bluedart",
+            "error": "No BlueDart tracking data found for this AWB.",
+            "method": "bluedart_page",
+        }
+
     if not status:
         parsed = _parse_vendor_tracking_html(text)
-        status = parsed.get("shipment_status")
-        status_detail = parsed.get("status_detail")
+        # Only accept strong SHIPMENT / Current Status hits — not keyword chrome.
+        detail = (parsed.get("status_detail") or "")
+        if detail and re.search(
+            r"(?i)(shipment\s+(delivered|out for delivery|in transit|undelivered)|"
+            r"current status)",
+            detail,
+        ):
+            status = parsed.get("shipment_status")
+            status_detail = detail
 
     if not status:
         # No usable BlueDart result for this AWB (wrong courier / not found).
-        if "waybill no" not in cleaned.lower() and awb not in cleaned:
-            return {
-                "ok": False,
-                "courier": "bluedart",
-                "error": "No BlueDart tracking data found for this AWB.",
-                "method": "bluedart_page",
-            }
-        # Page mentions AWB but status unclear — keyword fallback.
-        status = _pick_best_status([cleaned[i : i + 80] for i in range(0, min(len(cleaned), 4000), 200)])
+        return {
+            "ok": False,
+            "courier": "bluedart",
+            "error": "No BlueDart tracking data found for this AWB.",
+            "method": "bluedart_page",
+        }
 
     eta = None
     m = re.search(r"Date of Delivery\s*([0-9]{1,2}\s+[A-Za-z]{3,9}\s+[0-9]{4})", cleaned, re.I)
@@ -667,17 +859,17 @@ def _track_bluedart(awb: str) -> Dict[str, Any]:
         eta = m.group(1).strip()
 
     return {
-        "ok": bool(status),
+        "ok": True,
         "courier": "bluedart",
         "courier_name": "BlueDart",
-        "shipment_status": status or "ORDERED",
+        "shipment_status": status,
         "status_detail": status_detail,
         "eta": eta,
         "tracking_number": awb,
         "tracking_link": url,
         "method": "bluedart_page",
         "tracked_at": datetime.now(timezone.utc).isoformat(),
-        "error": None if status else "Could not determine delivery status from BlueDart.",
+        "error": None,
     }
 
 
@@ -685,246 +877,233 @@ def _carrier_trackers_for_awb(
     awb: str, courier: Optional[str]
 ) -> List[Tuple[str, Any]]:
     """
-    Ordered list of (name, tracker_fn) to try for a bare AWB.
+    Ordered free scrapers for a bare AWB (BlueDart / Delhivery only).
 
-    Includes free scrapers always; FedEx/DHL/AfterShip run when configured
-    (trackers no-op / return not-ok when env keys are missing).
+    FedEx / DHL / most couriers are resolved via AfterShip — not native carrier APIs.
     """
     trackers = {
         "bluedart": _track_bluedart,
         "delhivery": _track_delhivery,
-        "fedex": _track_fedex,
-        "dhl": _track_dhl,
     }
 
-    # AWB shape heuristics (best-effort — still fall through to others).
     digits = awb.isdigit()
     length = len(awb)
     guessed: List[str] = []
     if courier in trackers:
         guessed.append(courier)
     if digits and length == 11:
-        guessed.extend(["bluedart", "delhivery", "fedex", "dhl"])
-    elif digits and length == 12:
-        guessed.extend(["fedex", "dhl", "delhivery", "bluedart"])
-    elif digits and length in {10, 9}:
-        guessed.extend(["dhl", "fedex", "bluedart", "delhivery"])
+        guessed.extend(["bluedart", "delhivery"])
     else:
-        guessed.extend(["bluedart", "delhivery", "fedex", "dhl"])
+        guessed.extend(["delhivery", "bluedart"])
 
-    # De-dupe, preserve order, always eventually try every native tracker.
     order: List[str] = []
-    for name in guessed + ["bluedart", "delhivery", "fedex", "dhl"]:
+    for name in guessed + ["bluedart", "delhivery"]:
         if name not in order and name in trackers:
             order.append(name)
     return [(name, trackers[name]) for name in order]
 
 
-def _fedex_access_token() -> Optional[str]:
-    client_id = _norm_str(os.environ.get("FEDEX_API_KEY") or os.environ.get("FEDEX_CLIENT_ID"))
-    client_secret = _norm_str(os.environ.get("FEDEX_SECRET_KEY") or os.environ.get("FEDEX_CLIENT_SECRET"))
-    if not client_id or not client_secret:
+def _map_aftership_tag(tag: Any, detail: Any = None) -> Optional[str]:
+    """Map AfterShip canonical tags; fall back to free-text mapping."""
+    raw = _norm_str(tag) or ""
+    # AfterShip tags are PascalCase; accept snake / spaced forms too.
+    key = raw.replace(" ", "").replace("_", "").lower()
+    mapping = {
+        "pending": "ORDERED",
+        "inforeceived": "ORDERED",
+        "intransit": "IN_TRANSIT",
+        "outfordelivery": "OUT_FOR_DELIVERY",
+        "delivered": "DELIVERED",
+        "availableforpickup": "OUT_FOR_DELIVERY",
+        "attemptfail": "EXCEPTION",
+        "exception": "EXCEPTION",
+        "expired": "EXCEPTION",
+    }
+    if key in mapping:
+        return mapping[key]
+    return map_status_text(tag) or map_status_text(detail)
+
+
+def _aftership_extract_tracking(payload: Any) -> Optional[Dict[str, Any]]:
+    """Normalize AfterShip list/create/get-by-id envelopes to one tracking dict."""
+    if not isinstance(payload, dict):
         return None
-    # Fixed FedEx API host.
-    url = "https://apis.fedex.com/oauth/token"
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    if not isinstance(data, dict):
+        return None
+    trackings = data.get("trackings")
+    if isinstance(trackings, list) and trackings and isinstance(trackings[0], dict):
+        return trackings[0]
+    one = data.get("tracking")
+    if isinstance(one, dict):
+        return one
+    # GET by id returns the tracking fields directly under data.
+    if data.get("tracking_number") or data.get("tag") or data.get("id"):
+        return data
+    return None
+
+
+def _aftership_status_from_tracking(t0: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Prefer real carrier checkpoints over a bare Pending tag.
+
+    AfterShip often creates trackings as Pending with 0 checkpoints until the
+    carrier sync runs (minutes to hours). Pending alone must not look like a
+    final delivery status.
+    """
+    checkpoints = t0.get("checkpoints") if isinstance(t0.get("checkpoints"), list) else []
+    tag = t0.get("tag") or ""
+    detail = t0.get("subtag_message") or t0.get("subtag") or tag
+
+    # Newest checkpoint first in AfterShip responses.
+    if checkpoints:
+        last = checkpoints[0] if isinstance(checkpoints[0], dict) else {}
+        if not isinstance(last, dict) and len(checkpoints) > 0:
+            last = checkpoints[-1] if isinstance(checkpoints[-1], dict) else {}
+        # Prefer the latest non-empty checkpoint tag.
+        for cp in checkpoints:
+            if isinstance(cp, dict) and (cp.get("tag") or cp.get("message")):
+                last = cp
+                break
+        # AfterShip lists oldest→newest; use the last element as latest.
+        if checkpoints and isinstance(checkpoints[-1], dict):
+            last = checkpoints[-1]
+        cp_tag = last.get("tag") or ""
+        cp_msg = last.get("message") or last.get("subtag_message") or detail
+        status = _map_aftership_tag(cp_tag, cp_msg) or _map_aftership_tag(tag, detail)
+        return status, _norm_str(cp_msg) or _norm_str(detail) or _norm_str(tag)
+
+    status = _map_aftership_tag(tag, detail)
+    return status, _norm_str(detail) or _norm_str(tag)
+
+
+def _aftership_is_weak_pending(t0: Dict[str, Any]) -> bool:
+    tag = (_norm_str(t0.get("tag")) or "").lower()
+    checkpoints = t0.get("checkpoints") if isinstance(t0.get("checkpoints"), list) else []
+    subtag = (_norm_str(t0.get("subtag")) or "").lower()
+    # Pending with no scans — carrier has not reported yet (or stale Pending_005).
+    if tag == "pending" and not checkpoints:
+        return True
+    if subtag.startswith("pending_") and not checkpoints:
+        return True
+    return False
+
+
+
+def _join_place_parts(*parts: Any) -> Optional[str]:
+    """Comma-join unique non-empty place fragments."""
+    cleaned: List[str] = []
+    for part in parts:
+        s = _norm_str(part)
+        if not s:
+            continue
+        if s not in cleaned:
+            cleaned.append(s)
+    return ", ".join(cleaned) if cleaned else None
+
+
+def _empty_shipment_details() -> Dict[str, Any]:
+    return {
+        "origin": None,
+        "destination": None,
+        "current_location": None,
+        "events": [],
+    }
+
+
+def _aftership_shipment_details(t0: Dict[str, Any]) -> Dict[str, Any]:
+    """Origin / destination / scan timeline from an AfterShip tracking object."""
+    origin = _norm_str(t0.get("origin_raw_location")) or _join_place_parts(
+        t0.get("origin_city"),
+        t0.get("origin_state"),
+        t0.get("origin_postal_code"),
+        t0.get("origin_country_region"),
+    )
+    destination = _norm_str(t0.get("destination_raw_location")) or _join_place_parts(
+        t0.get("destination_city"),
+        t0.get("destination_state"),
+        t0.get("destination_postal_code"),
+        t0.get("destination_country_region") or t0.get("courier_destination_country_region"),
+    )
+    events: List[Dict[str, Any]] = []
+    checkpoints = t0.get("checkpoints") if isinstance(t0.get("checkpoints"), list) else []
+    # AfterShip is oldest → newest; reverse for newest-first UI.
+    for cp in reversed(checkpoints):
+        if not isinstance(cp, dict):
+            continue
+        loc = _norm_str(cp.get("location")) or _join_place_parts(
+            cp.get("city"),
+            cp.get("state"),
+            cp.get("zip"),
+            cp.get("country_region_name") or cp.get("country_region"),
+        )
+        msg = _norm_str(cp.get("message") or cp.get("subtag_message") or cp.get("tag"))
+        if not msg and not loc:
+            continue
+        events.append(
+            {
+                "time": _norm_str(cp.get("checkpoint_time") or cp.get("created_at")),
+                "message": msg,
+                "location": loc,
+                "status": _map_aftership_tag(cp.get("tag"), msg),
+            }
+        )
+    current_location = events[0].get("location") if events else None
+    return {
+        "origin": origin,
+        "destination": destination,
+        "current_location": current_location,
+        "events": events,
+    }
+
+
+
+def _aftership_detect_slugs(
+    awb: str,
+    *,
+    headers: Dict[str, str],
+) -> List[str]:
+    """
+    Ask AfterShip which couriers match this tracking number.
+    Returns slug list (best first). Empty on failure.
+    """
+    url = "https://api.aftership.com/tracking/2024-04/couriers/detect"
     try:
         resp = requests.post(
             url,
-            data={
-                "grant_type": "client_credentials",
-                "client_id": client_id,
-                "client_secret": client_secret,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": USER_AGENT},
+            json={"tracking_number": awb},
+            headers=headers,
             timeout=DEFAULT_TIMEOUT,
         )
     except requests.RequestException as exc:
-        logger.warning("fedex oauth failed err=%s", exc)
-        return None
+        logger.warning("aftership detect failed awb=%s err=%s", awb, exc)
+        return []
     if resp.status_code >= 400:
-        logger.warning("fedex oauth status=%s", resp.status_code)
-        return None
-    try:
-        return _norm_str((resp.json() or {}).get("access_token"))
-    except Exception:
-        return None
-
-
-def _track_fedex(awb: str) -> Dict[str, Any]:
-    """FedEx Track API (requires FEDEX_API_KEY + FEDEX_SECRET_KEY)."""
-    token = _fedex_access_token()
-    if not token:
-        return {
-            "ok": False,
-            "courier": "fedex",
-            "error": "FedEx API not configured (set FEDEX_API_KEY and FEDEX_SECRET_KEY).",
-            "method": "fedex_api",
-        }
-    url = "https://apis.fedex.com/track/v1/trackingnumbers"
-    body = {
-        "includeDetailedScans": True,
-        "trackingInfo": [{"trackingNumberInfo": {"trackingNumber": awb}}],
-    }
-    try:
-        resp = requests.post(
-            url,
-            json=body,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "X-locale": "en_US",
-                "User-Agent": USER_AGENT,
-            },
-            timeout=DEFAULT_TIMEOUT,
-        )
-    except requests.RequestException as exc:
-        logger.warning("fedex track failed awb=%s err=%s", awb, exc)
-        return {
-            "ok": False,
-            "courier": "fedex",
-            "error": "Could not reach FedEx tracking.",
-            "method": "fedex_api",
-        }
-    if resp.status_code >= 400:
-        return {
-            "ok": False,
-            "courier": "fedex",
-            "error": "FedEx tracking returned an error.",
-            "method": "fedex_api",
-        }
+        logger.info("aftership detect status=%s awb=%s", resp.status_code, awb)
+        return []
     try:
         payload = resp.json()
     except Exception:
-        return {
-            "ok": False,
-            "courier": "fedex",
-            "error": "FedEx returned invalid JSON.",
-            "method": "fedex_api",
-        }
-
-    candidates = _walk_strings(payload)
-    # Prefer latestStatusDetail fields when present.
-    try:
-        results = (
-            (((payload or {}).get("output") or {}).get("completeTrackResults") or [])[0].get("trackResults")
-            or []
-        )
-        if results and isinstance(results[0], dict):
-            detail = results[0].get("latestStatusDetail") or {}
-            for key in ("description", "statusByLocale", "code", "derivedCode"):
-                if detail.get(key):
-                    candidates.insert(0, str(detail.get(key)))
-    except Exception:
-        pass
-
-    status = _pick_best_status(candidates)
-    eta = _extract_eta(candidates, payload if isinstance(payload, dict) else None)
-    safe_awb = urllib.parse.quote(awb, safe="")
-    return {
-        "ok": bool(status),
-        "courier": "fedex",
-        "courier_name": "FedEx",
-        "shipment_status": status or "ORDERED",
-        "status_detail": next((c for c in candidates if map_status_text(c) == status), None),
-        "eta": eta,
-        "tracking_number": awb,
-        "tracking_link": f"https://www.fedex.com/fedextrack/?trknbr={safe_awb}",
-        "method": "fedex_api",
-        "tracked_at": datetime.now(timezone.utc).isoformat(),
-        "error": None if status else "Could not determine delivery status from FedEx.",
-    }
+        return []
+    data = payload.get("data") if isinstance(payload, dict) else None
+    couriers = (data or {}).get("couriers") if isinstance(data, dict) else None
+    if not isinstance(couriers, list):
+        return []
+    slugs: List[str] = []
+    for c in couriers:
+        if not isinstance(c, dict):
+            continue
+        slug = _norm_str(c.get("slug"))
+        if slug and slug not in slugs:
+            slugs.append(slug)
+    logger.info("aftership detect awb=%s slugs=%s", awb, slugs[:8])
+    return slugs
 
 
-def _track_dhl(awb: str) -> Dict[str, Any]:
-    """DHL Unified Tracking API (requires DHL_API_KEY)."""
-    api_key = _norm_str(os.environ.get("DHL_API_KEY"))
-    if not api_key:
-        return {
-            "ok": False,
-            "courier": "dhl",
-            "error": "DHL API not configured (set DHL_API_KEY).",
-            "method": "dhl_api",
-        }
-    # Fixed DHL API host; AWB only as query param.
-    url = "https://api-eu.dhl.com/track/shipments"
-    try:
-        resp = requests.get(
-            url,
-            params={"trackingNumber": awb},
-            headers={
-                "DHL-API-Key": api_key,
-                "Accept": "application/json",
-                "User-Agent": USER_AGENT,
-            },
-            timeout=DEFAULT_TIMEOUT,
-        )
-    except requests.RequestException as exc:
-        logger.warning("dhl track failed awb=%s err=%s", awb, exc)
-        return {
-            "ok": False,
-            "courier": "dhl",
-            "error": "Could not reach DHL tracking.",
-            "method": "dhl_api",
-        }
-    if resp.status_code >= 400:
-        return {
-            "ok": False,
-            "courier": "dhl",
-            "error": "DHL tracking returned an error.",
-            "method": "dhl_api",
-        }
-    try:
-        payload = resp.json()
-    except Exception:
-        return {
-            "ok": False,
-            "courier": "dhl",
-            "error": "DHL returned invalid JSON.",
-            "method": "dhl_api",
-        }
-
-    candidates = _walk_strings(payload)
-    try:
-        shipments = (payload or {}).get("shipments") or []
-        if shipments and isinstance(shipments[0], dict):
-            st = shipments[0].get("status") or {}
-            for key in ("statusCode", "status", "description", "remark"):
-                if st.get(key):
-                    candidates.insert(0, str(st.get(key)))
-    except Exception:
-        pass
-
-    # DHL statusCode values: pre-transit, transit, delivered, failure, unknown
-    status = _pick_best_status(candidates)
-    if not status:
-        raw = " ".join(candidates[:8]).lower()
-        if "delivered" in raw:
-            status = "DELIVERED"
-        elif "failure" in raw or "exception" in raw:
-            status = "EXCEPTION"
-        elif "transit" in raw:
-            status = "IN_TRANSIT"
-        elif "pre-transit" in raw or "pretransit" in raw:
-            status = "ORDERED"
-
-    eta = _extract_eta(candidates, payload if isinstance(payload, dict) else None)
-    safe_awb = urllib.parse.quote(awb, safe="")
-    return {
-        "ok": bool(status),
-        "courier": "dhl",
-        "courier_name": "DHL",
-        "shipment_status": status or "ORDERED",
-        "status_detail": next((c for c in candidates if map_status_text(c) == status), None),
-        "eta": eta,
-        "tracking_number": awb,
-        "tracking_link": f"https://www.dhl.com/en/express/tracking.html?AWB={safe_awb}&brand=DHL",
-        "method": "dhl_api",
-        "tracked_at": datetime.now(timezone.utc).isoformat(),
-        "error": None if status else "Could not determine delivery status from DHL.",
-    }
-
-
-def _track_aftership_api(awb: str, courier: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def _track_aftership_api(
+    awb: str,
+    courier: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     api_key = _norm_str(os.environ.get("AFTERSHIP_API_KEY"))
     if not api_key:
         return None
@@ -936,30 +1115,60 @@ def _track_aftership_api(awb: str, courier: Optional[str] = None) -> Optional[Di
         "User-Agent": USER_AGENT,
     }
     # Fixed AfterShip API host — not user controlled.
+    # 2024-04+ create body is flat: {"tracking_number": "...", "slug": "..."}
+    # (nested {"tracking": {...}} returns 4007 tracking_number is required).
     base = "https://api.aftership.com/tracking/2024-04/trackings"
 
     slug_hint = None
-    if courier and courier not in {"aftership", "amazon", "vendor"}:
+    if courier and courier not in {"aftership", "vendor"}:
         slug_hint = courier.replace("_", "-")
 
-    # Try GET (existing), then POST create + GET, across likely carrier slugs.
+    # Prefer likely carriers for digit-length heuristics when courier unknown.
+    length = len(awb)
+    digits = awb.isdigit()
+    amazonish = (courier == "amazon") or looks_like_amazon_tracking_id(awb)
     slug_candidates: List[Optional[str]] = []
     if slug_hint:
         slug_candidates.append(slug_hint)
-    slug_candidates.extend(
-        [
-            None,  # auto / any
-            "fedex",
-            "dhl",
-            "dhl-germany",
-            "dhl-global-mail",
-            "bluedart",
-            "delhivery",
-            "dtdc",
-            "india-post",
-            "shiprocket",
-        ]
-    )
+
+    # Amazon ids must NOT fall through FedEx/DHL length heuristics (common mislabel).
+    if amazonish or slug_hint in {"amazon", "amazon-order", "amazon-mcf"}:
+        slug_candidates.extend(["amazon", "amazon-order", "amazon-mcf", None])
+    elif slug_hint in {"fedex", "dhl", "dhl-express", "dhl-germany", "dhl-global-mail"}:
+        related = [slug_hint, "fedex", "dhl", "dhl-express", "dhl-germany", None]
+        slug_candidates.extend(related)
+    elif slug_hint in {"bluedart", "delhivery", "dtdc", "shiprocket", "india-post"}:
+        slug_candidates.extend([slug_hint, None])
+    else:
+        # Auto-detect FIRST. Length heuristics alone mislabel Amazon package ids
+        # like 371022899423 as FedEx (both are often 12 digits).
+        detected = _aftership_detect_slugs(awb, headers=headers)
+        if detected:
+            slug_candidates.extend(detected)
+        slug_candidates.append(None)
+        if digits and length == 12:
+            slug_candidates.extend(["fedex", "dhl", "dhl-express"])
+        elif digits and length in {10, 9}:
+            slug_candidates.extend(["dhl", "dhl-express", "fedex"])
+        elif digits and length == 11:
+            slug_candidates.extend(["bluedart", "dhl", "fedex"])
+        slug_candidates.extend(
+            [
+                "amazon",
+                "amazon-order",
+                "fedex",
+                "dhl",
+                "dhl-express",
+                "dhl-germany",
+                "dhl-global-mail",
+                "bluedart",
+                "delhivery",
+                "dtdc",
+                "india-post",
+                "shiprocket",
+            ]
+        )
+
     # de-dupe
     seen = set()
     slugs: List[Optional[str]] = []
@@ -970,94 +1179,314 @@ def _track_aftership_api(awb: str, courier: Optional[str] = None) -> Optional[Di
         seen.add(key)
         slugs.append(s)
 
+    preferred_couriers = {
+        c
+        for c in (
+            slug_hint,
+            "amazon",
+            "amazon-order",
+            "amazon-mcf",
+            "fedex",
+            "dhl",
+            "dhl-express",
+            courier,
+        )
+        if c
+    }
+
     last_err: Optional[Dict[str, Any]] = None
 
-    def _parse_trackings(payload: Any) -> Optional[Dict[str, Any]]:
-        trackings = (((payload or {}).get("data") or {}).get("trackings")) if isinstance(payload, dict) else None
-        if not isinstance(trackings, list) or not trackings:
-            # create response nests under data.tracking
-            one = ((payload or {}).get("data") or {}).get("tracking") if isinstance(payload, dict) else None
-            if isinstance(one, dict):
-                trackings = [one]
-            else:
-                return None
-        t0 = trackings[0] if isinstance(trackings[0], dict) else {}
-        tag = t0.get("tag") or t0.get("subtag") or ""
-        status = map_status_text(str(tag)) or map_status_text(str(t0.get("subtag_message") or ""))
-        eta = _norm_str(t0.get("expected_delivery"))
+    def _err_rank(err: Dict[str, Any]) -> int:
+        """Higher is better soft-failure to keep."""
+        c = str(err.get("courier") or "").lower()
+        detail = f"{err.get('status_detail') or ''} {err.get('error') or ''}".lower()
+        score = 0
+        if c.startswith("amazon"):
+            score += 50
+        elif c.startswith("fedex") or c.startswith("dhl"):
+            score += 30
+        elif c in preferred_couriers:
+            score += 20
+        if "wrong carrier" in detail:
+            score -= 40
+        if "pending_001" in detail or "no carrier scans" in detail:
+            score += 5
+        return score
+
+    def _remember_err(err: Optional[Dict[str, Any]]) -> None:
+        """Keep the best soft-failure — prefer Amazon Pending over Wrong-carrier FedEx/DHL."""
+        nonlocal last_err
+        if not err:
+            return
+        if not last_err:
+            last_err = err
+            return
+        if _err_rank(err) > _err_rank(last_err):
+            last_err = err
+
+    def _result_from_tracking(t0: Dict[str, Any], *, allow_weak_pending: bool) -> Optional[Dict[str, Any]]:
+        status, detail = _aftership_status_from_tracking(t0)
         slug = _norm_str(t0.get("slug")) or courier or "aftership"
+        link = _resolve_tracking_link(
+            awb=awb,
+            courier=slug if slug != "aftership" else courier,
+            carrier_link=_norm_str(t0.get("courier_tracking_link")),
+        )
+        eta = _norm_str(t0.get("expected_delivery") or t0.get("shipment_delivery_date"))
+
+        if _aftership_is_weak_pending(t0) and not allow_weak_pending:
+            subtag = _norm_str(t0.get("subtag")) or ""
+            msg = (
+                "AfterShip has this number but no carrier scans yet "
+                f"({detail or 'Pending'}). Carrier updates usually arrive within a few hours — "
+                "set Courier correctly (DHL / FedEx / BlueDart) and click Refresh later."
+            )
+            if subtag.upper().startswith("PENDING_005"):
+                msg = (
+                    "AfterShip reports no recent carrier updates for this number "
+                    "(Pending_005). Check the tracking id and Courier (DHL / FedEx / BlueDart), "
+                    "then try Refresh later."
+                )
+            logger.info(
+                "aftership weak pending awb=%s slug=%s tag=%s subtag=%s detail=%s checkpoints=%s",
+                awb,
+                slug,
+                t0.get("tag"),
+                subtag,
+                detail,
+                len(t0.get("checkpoints") or []) if isinstance(t0.get("checkpoints"), list) else 0,
+            )
+            details = _aftership_shipment_details(t0)
+            out_slug = slug
+            out_name = _courier_display_name(slug) or slug.replace("-", " ").title()
+            if amazonish and not str(slug).startswith("amazon"):
+                out_slug = "amazon"
+                out_name = "Amazon"
+                link = _resolve_tracking_link(awb=awb, courier="amazon", carrier_link=link)
+            if str(out_slug).startswith("amazon"):
+                msg = (
+                    "AfterShip recognized this as Amazon but has no delivery scans yet. "
+                    "Courier set to Amazon — refresh later when Amazon reports tracking."
+                )
+            return {
+                "ok": False,
+                "courier": out_slug,
+                "courier_name": out_name,
+                # Do not claim ORDERED — Pending is unknown, not a real pipeline step.
+                "shipment_status": None,
+                "status_detail": detail,
+                "eta": eta,
+                "tracking_number": awb,
+                "tracking_link": link,
+                "method": "aftership_api",
+                "tracked_at": datetime.now(timezone.utc).isoformat(),
+                "error": msg,
+                "_aftership_id": _norm_str(t0.get("id")),
+                **details,
+            }
+
+        if not status and _norm_str(t0.get("tag")):
+            status = "ORDERED"
+        details = _aftership_shipment_details(t0)
+        out_slug = slug
+        out_name = _courier_display_name(slug) or slug.replace("-", " ").title()
+        # Amazon-looking ids must not be labeled FedEx/DHL from length heuristics.
+        if amazonish and not str(slug).startswith("amazon"):
+            out_slug = "amazon"
+            out_name = "Amazon"
+            link = _resolve_tracking_link(awb=awb, courier="amazon", carrier_link=link)
         return {
             "ok": bool(status),
-            "courier": slug,
-            "courier_name": slug.replace("-", " ").title(),
+            "courier": out_slug,
+            "courier_name": out_name,
             "shipment_status": status or "ORDERED",
-            "status_detail": str(tag or "") or None,
+            "status_detail": detail,
             "eta": eta,
             "tracking_number": awb,
-            "tracking_link": f"https://www.aftership.com/track/{slug}/{urllib.parse.quote(awb, safe='')}",
+            "tracking_link": link,
             "method": "aftership_api",
             "tracked_at": datetime.now(timezone.utc).isoformat(),
             "error": None if status else "Could not map AfterShip status.",
+            "_aftership_id": _norm_str(t0.get("id")),
+            **details,
         }
+
+    def _poll_until_ready(tracking_id: str) -> Optional[Dict[str, Any]]:
+        """AfterShip often needs a short wait before carrier checkpoints appear."""
+        last_local: Optional[Dict[str, Any]] = None
+        for attempt in range(4):
+            try:
+                resp = requests.get(
+                    f"{base}/{urllib.parse.quote(tracking_id, safe='')}",
+                    headers=headers,
+                    timeout=DEFAULT_TIMEOUT,
+                )
+            except requests.RequestException:
+                break
+            if resp.status_code >= 400:
+                break
+            try:
+                t0 = _aftership_extract_tracking(resp.json())
+            except Exception:
+                t0 = None
+            if not t0:
+                break
+            parsed = _result_from_tracking(t0, allow_weak_pending=False)
+            last_local = parsed
+            if parsed and parsed.get("ok") and not _aftership_is_weak_pending(t0):
+                return parsed
+            # First attempts wait; last attempt returns the weak pending message.
+            if attempt < 3:
+                time.sleep(2.0)
+        return last_local
+
+    def _aftership_meta_error(payload: Any) -> Optional[str]:
+        if not isinstance(payload, dict):
+            return None
+        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        code = meta.get("code")
+        msg = _norm_str(meta.get("message"))
+        if code in {401, 403, 40101, 40102, 40300, 40301, 40302, 40303}:
+            return "AfterShip API key was rejected — check AFTERSHIP_API_KEY."
+        if code == 4007:
+            return "AfterShip create failed (tracking_number required) — API body mismatch."
+        return msg
+
+    def _handle_tracking_obj(t0: Dict[str, Any], *, poll: bool = False) -> Optional[Dict[str, Any]]:
+        if not _aftership_is_weak_pending(t0):
+            return _result_from_tracking(t0, allow_weak_pending=False)
+        # Weak Pending: only poll when the user picked this courier (slug_hint),
+        # otherwise keep trying other carrier slugs quickly.
+        if poll:
+            tid = _norm_str(t0.get("id"))
+            if tid:
+                polled = _poll_until_ready(tid)
+                if polled and polled.get("ok"):
+                    return polled
+                if polled:
+                    return polled
+        return _result_from_tracking(t0, allow_weak_pending=False)
 
     for slug in slugs:
         params: Dict[str, str] = {"tracking_numbers": awb}
         if slug:
             params["slug"] = slug
+        # Poll only when this slug matches an explicit courier hint.
+        should_poll = bool(slug_hint and slug == slug_hint)
         try:
             resp = requests.get(base, params=params, headers=headers, timeout=DEFAULT_TIMEOUT)
         except requests.RequestException as exc:
             logger.warning("aftership get failed awb=%s err=%s", awb, exc)
-            last_err = {
-                "ok": False,
-                "courier": slug or courier or "aftership",
-                "error": "Could not reach AfterShip.",
-                "method": "aftership_api",
-            }
+            _remember_err(
+                {
+                    "ok": False,
+                    "courier": slug or courier or "aftership",
+                    "error": "Could not reach AfterShip.",
+                    "method": "aftership_api",
+                }
+            )
             continue
 
         if resp.status_code < 400:
             try:
-                parsed = _parse_trackings(resp.json())
+                t0 = _aftership_extract_tracking(resp.json())
             except Exception:
-                parsed = None
-            if parsed and parsed.get("ok"):
-                return parsed
-            if parsed:
-                last_err = parsed
+                t0 = None
+            if t0:
+                parsed = _handle_tracking_obj(t0, poll=should_poll)
+                if parsed and parsed.get("ok"):
+                    parsed.pop("_aftership_id", None)
+                    logger.info(
+                        "aftership hit awb=%s slug=%s status=%s",
+                        awb,
+                        parsed.get("courier"),
+                        parsed.get("shipment_status"),
+                    )
+                    return parsed
+                if parsed:
+                    _remember_err(parsed)
+                    # Keep trying other slugs — wrong carrier often stays Pending forever.
+        else:
+            err_msg = _aftership_meta_error(resp.json() if resp.content else None)
+            if err_msg:
+                err_payload = {
+                    "ok": False,
+                    "courier": slug or courier or "aftership",
+                    "error": err_msg,
+                    "method": "aftership_api",
+                }
+                _remember_err(err_payload)
+                if "API key" in err_msg:
+                    return err_payload
 
-        # Create tracking then re-fetch (AfterShip often needs registration first).
+        # Create tracking then re-fetch (AfterShip needs registration first).
         create_body: Dict[str, Any] = {"tracking_number": awb}
         if slug:
             create_body["slug"] = slug
         try:
             created = requests.post(
                 base,
-                json={"tracking": create_body},
+                json=create_body,
                 headers=headers,
                 timeout=DEFAULT_TIMEOUT,
             )
         except requests.RequestException:
             continue
-        if created.status_code < 400 or created.status_code in {400, 409}:
-            # 409 = already exists; either way try parse create body or GET again.
-            try:
-                parsed = _parse_trackings(created.json())
+
+        created_payload = None
+        try:
+            created_payload = created.json()
+        except Exception:
+            created_payload = None
+
+        meta_code = None
+        if isinstance(created_payload, dict):
+            meta_code = ((created_payload.get("meta") or {}) or {}).get("code")
+
+        if created.status_code < 400 or meta_code in {4003, 400}:
+            t0 = _aftership_extract_tracking(created_payload) if created_payload else None
+            if t0:
+                parsed = _handle_tracking_obj(t0, poll=should_poll)
                 if parsed and parsed.get("ok"):
+                    parsed.pop("_aftership_id", None)
                     return parsed
-            except Exception:
-                pass
+                if parsed:
+                    _remember_err(parsed)
             try:
                 resp2 = requests.get(base, params=params, headers=headers, timeout=DEFAULT_TIMEOUT)
                 if resp2.status_code < 400:
-                    parsed = _parse_trackings(resp2.json())
-                    if parsed and parsed.get("ok"):
-                        return parsed
-                    if parsed:
-                        last_err = parsed
+                    t0 = _aftership_extract_tracking(resp2.json())
+                    if t0:
+                        parsed = _handle_tracking_obj(t0, poll=should_poll)
+                        if parsed and parsed.get("ok"):
+                            parsed.pop("_aftership_id", None)
+                            return parsed
+                        if parsed:
+                            _remember_err(parsed)
             except requests.RequestException:
                 continue
+        else:
+            err_msg = _aftership_meta_error(created_payload)
+            if err_msg:
+                err_payload = {
+                    "ok": False,
+                    "courier": slug or courier or "aftership",
+                    "error": err_msg,
+                    "method": "aftership_api",
+                }
+                _remember_err(err_payload)
+                if "API key" in err_msg:
+                    return err_payload
 
+    if last_err:
+        last_err.pop("_aftership_id", None)
+        logger.info(
+            "aftership exhausted slugs awb=%s last_courier=%s ok=%s error=%s",
+            awb,
+            last_err.get("courier"),
+            last_err.get("ok"),
+            last_err.get("error"),
+        )
     return last_err or {
         "ok": False,
         "courier": courier or "aftership",
@@ -1203,56 +1632,112 @@ def track_shipment(
     if not number and not link:
         raise ShipmentTrackError("Provide a tracking number or tracking link.")
 
-    courier = detect_courier(tracking_link=link, courier_name=courier_name)
+    courier = detect_courier(
+        tracking_link=link,
+        courier_name=courier_name,
+        tracking_number=number,
+    )
     last: Optional[Dict[str, Any]] = None
+    aftership_last: Optional[Dict[str, Any]] = None
+    scraper_names = {"bluedart", "delhivery"}
+    aftership_ready = bool(_norm_str(os.environ.get("AFTERSHIP_API_KEY")))
+    logger.info(
+        "track_shipment start awb=%s link=%s courier_hint=%s aftership_ready=%s",
+        number,
+        (link[:80] + "…") if link and len(link) > 80 else link,
+        courier or courier_name,
+        aftership_ready,
+    )
 
-    # 1) Try carrier-native trackers for AWB (BlueDart / Delhivery / FedEx / DHL).
-    #    Wrong-courier failures are ignored — keep trying the rest.
+    def _finalize(result: Dict[str, Any]) -> Dict[str, Any]:
+        """Always attach a usable tracking_link when the user only pasted an AWB."""
+        courier_for_link = (
+            courier
+            or _normalize_courier_slug(_norm_str(result.get("courier")))
+            or _normalize_courier_slug(_norm_str(result.get("courier_name")))
+            or _normalize_courier_slug(courier_name)
+        )
+        result["tracking_link"] = _resolve_tracking_link(
+            awb=number or result.get("tracking_number"),
+            courier=courier_for_link,
+            user_link=link,
+            carrier_link=result.get("tracking_link"),
+        )
+        if number and not result.get("tracking_number"):
+            result["tracking_number"] = number
+        return result
+
+    def _try_scraper(name: str, tracker: Any) -> Optional[Dict[str, Any]]:
+        nonlocal last
+        if link:
+            host_l = link.lower()
+            if "bluedart" in host_l and name == "delhivery":
+                return None
+            if "delhivery" in host_l and name == "bluedart":
+                return None
+            # Don't let scrapers steal FedEx/DHL numbers — those go through AfterShip.
+            if "fedex" in host_l or "dhl." in host_l or "dhl/" in host_l:
+                return None
+        result = tracker(number)
+        if result.get("ok"):
+            return _finalize(result)
+        if result.get("error") and "not configured" not in str(result.get("error")).lower():
+            last = result
+        elif last is None:
+            last = result
+        return None
+
+    # AfterShip is the single multi-carrier source (FedEx / DHL / BlueDart / …).
+    # BlueDart / Delhivery scrapers only when the courier/link is clearly them,
+    # or as a last fallback after AfterShip for bare AWBs.
     if number:
-        for name, tracker in _carrier_trackers_for_awb(number, courier):
-            if link:
-                host_l = link.lower()
-                if "bluedart" in host_l and name == "delhivery":
-                    continue
-                if "delhivery" in host_l and name == "bluedart":
-                    continue
-                if "fedex" in host_l and name in {"bluedart", "delhivery", "dhl"}:
-                    # Still allow fedex tracker; skip unrelated scrapers first pass
-                    if name != "fedex":
-                        continue
-                if ("dhl." in host_l or "dhl/" in host_l) and name in {"bluedart", "delhivery", "fedex"}:
-                    if name != "dhl":
-                        continue
-            result = tracker(number)
-            if result.get("ok"):
-                if link:
-                    result["tracking_link"] = link
-                return result
-            # Ignore "not configured" soft skips when deciding last error priority.
-            if result.get("error") and "not configured" not in str(result.get("error")).lower():
-                last = result
-            elif last is None:
-                last = result
+        scrape_trackers = list(_carrier_trackers_for_awb(number, courier))
 
-    # 2) Optional AfterShip API (covers FedEx / DHL / BlueDart / … with one key).
-    if number:
-        after = _track_aftership_api(number, courier=courier)
-        if after and after.get("ok"):
-            if link:
-                after["tracking_link"] = link
-            return after
-        if after and after.get("error") and "not configured" not in str(after.get("error")).lower():
-            last = after
+        prefer_scraper_first = courier in scraper_names or (
+            bool(link) and any(k in link.lower() for k in ("bluedart", "delhivery"))
+        )
 
+        def _run_aftership() -> Optional[Dict[str, Any]]:
+            nonlocal aftership_last, last
+            if not aftership_ready:
+                return None
+            after = _track_aftership_api(number, courier=courier)
+            if after and after.get("ok"):
+                after.pop("_aftership_id", None)
+                return _finalize(after)
+            if after:
+                after.pop("_aftership_id", None)
+                aftership_last = after
+                if after.get("error") and "not configured" not in str(after.get("error")).lower():
+                    last = after
+                after_courier = str(after.get("courier") or "").lower()
+                if courier and after_courier in {courier, courier.replace("_", "-")} and after.get("error"):
+                    return _finalize(after)
+            return None
 
-    # 3) Allowlisted / vendor tracking link scrape.
+        if prefer_scraper_first:
+            for name, tracker in scrape_trackers:
+                hit = _try_scraper(name, tracker)
+                if hit:
+                    return hit
+            hit = _run_aftership()
+            if hit:
+                return hit
+        else:
+            hit = _run_aftership()
+            if hit:
+                return hit
+            for name, tracker in scrape_trackers:
+                hit = _try_scraper(name, tracker)
+                if hit:
+                    return hit
+
+    # Allowlisted / vendor tracking link scrape.
     if link:
         try:
             scraped = _track_allowlisted_link(link)
             if scraped.get("ok"):
-                if number and not scraped.get("tracking_number"):
-                    scraped["tracking_number"] = number
-                return scraped
+                return _finalize(scraped)
             last = scraped
         except ShipmentTrackError as exc:
             last = {
@@ -1266,8 +1751,12 @@ def track_shipment(
         return last
 
     # Soft fallback: we have tracking identifiers but couldn't read live status.
-    # Avoid leaking a wrong-courier message like Delhivery "invalid AWB".
-    err = (last or {}).get("error") if last else None
+    # Prefer AfterShip's error over a wrong-courier scraper message.
+    err = None
+    if aftership_last and aftership_last.get("error"):
+        err = aftership_last.get("error")
+    elif last:
+        err = last.get("error")
     if err and any(
         phrase in str(err).lower()
         for phrase in (
@@ -1278,35 +1767,50 @@ def track_shipment(
             "not configured",
         )
     ):
-        err = "Could not resolve live carrier status for this tracking number yet."
+        # Keep AfterShip-specific failures readable.
+        if not (aftership_last and aftership_last.get("error")):
+            err = "Could not resolve live carrier status for this tracking number yet."
 
     if not err:
-        err = "Live carrier status unavailable — pipeline set to Ordered until tracking resolves."
+        err = "Live carrier status unavailable. Click Refresh later when the carrier has scans."
 
-    # Hint when FedEx/DHL need API keys (their public sites block scrapers).
-    missing = []
-    if not _norm_str(os.environ.get("FEDEX_API_KEY") or os.environ.get("FEDEX_CLIENT_ID")):
-        missing.append("FEDEX_API_KEY/FEDEX_SECRET_KEY")
-    if not _norm_str(os.environ.get("DHL_API_KEY")):
-        missing.append("DHL_API_KEY")
+    # Only hint about missing AfterShip when it really isn't configured.
     if not _norm_str(os.environ.get("AFTERSHIP_API_KEY")):
-        missing.append("AFTERSHIP_API_KEY")
-    if missing and (not courier or courier in {"fedex", "dhl"}):
         err = (
-            f"{err} For FedEx/DHL set AFTERSHIP_API_KEY "
-            f"(or {' / '.join(missing[:2])})."
+            f"{err} Set AFTERSHIP_API_KEY in pyro-backend .env "
+            "(covers FedEx / DHL / BlueDart / …) and restart the backend."
         )
 
-    return {
-        "ok": False,
-        "courier": courier or (last or {}).get("courier"),
-        "courier_name": (_norm_str(courier_name) or (courier.title() if courier else None)),
-        "shipment_status": "ORDERED",
-        "status_detail": None,
-        "eta": None,
-        "tracking_number": number,
-        "tracking_link": link,
-        "method": "fallback",
-        "tracked_at": datetime.now(timezone.utc).isoformat(),
-        "error": err,
-    }
+    # Prefer AfterShip soft-fail payload (null status) — never invent ORDERED/Delivered.
+    src = aftership_last or last or {}
+    courier_out = src.get("courier") or courier
+    name_out = _norm_str(courier_name) or _courier_display_name(src.get("courier_name")) or src.get("courier_name")
+    if not name_out and courier_out:
+        name_out = _courier_display_name(str(courier_out)) or str(courier_out).replace("-", " ").title()
+    # Normalize AfterShip amazon-* slugs to the UI label "Amazon".
+    if name_out and str(name_out).lower().startswith("amazon"):
+        name_out = "Amazon"
+    status_out = src.get("shipment_status") if src else None
+    # Only default to ORDERED when we have no AfterShip answer at all.
+    if status_out is None and not aftership_last:
+        status_out = "ORDERED"
+
+    return _finalize(
+        {
+            "ok": False,
+            "courier": courier_out,
+            "courier_name": name_out,
+            "shipment_status": status_out,
+            "status_detail": src.get("status_detail"),
+            "eta": src.get("eta"),
+            "tracking_number": number,
+            "tracking_link": src.get("tracking_link"),
+            "method": src.get("method") or "fallback",
+            "tracked_at": datetime.now(timezone.utc).isoformat(),
+            "error": err,
+            "origin": src.get("origin"),
+            "destination": src.get("destination"),
+            "current_location": src.get("current_location"),
+            "events": src.get("events") or [],
+        }
+    )
