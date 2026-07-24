@@ -68,6 +68,8 @@ from authz.models import TenantMembership
 from email_protocol.services import send_email
 from email_protocol.templates.newRequestUnmannd import build_new_request_unmannd_email
 from email_protocol.templates.requestPaidUnmannd import build_request_paid_unmannd_email
+from email_protocol.templates.requestApprovedUnmannd import build_request_approved_unmannd_email
+from email_protocol.templates.requestRejectedUnmannd import build_request_rejected_unmannd_email
 
 from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
 from crm_records.lead_pipeline.pipeline import LeadPipeline
@@ -99,6 +101,16 @@ def _legacy_get_next_lead_assignees_match(stored, requester: str) -> bool:
 
 
 REQUEST_NOTIFICATION_ENTITY_TYPES = frozenset({"inventory_request", "unmannd_request"})
+# Manager Approve button (inventoryWorkflow) sets VENDOR_IDENTIFIED.
+# Legacy UNMANND flow used APPROVED(2/2).
+MANAGER_APPROVED_STATUSES = frozenset({"APPROVED(2/2)", "VENDOR_IDENTIFIED"})
+MANAGER_APPROVE_FROM_STATUSES = frozenset({
+    "",
+    "NEW_REQUEST",
+    "DRAFT",
+    "PENDING_PM",
+    "APPROVED(1/2)",
+})
 
 
 def _normalize_status_value(raw_status):
@@ -123,6 +135,223 @@ def _record_app_redirect_url(request, record):
     return request.build_absolute_uri(f"/crm-records/records/{record.id}/")
 
 
+def _membership_email_name(tenant, membership_ref, default_name: str = ""):
+    """Resolve active TenantMembership email/name from id (int) or user_id (uuid)."""
+    if tenant is None or membership_ref in (None, ""):
+        return "", default_name
+
+    ref_str = str(membership_ref).strip()
+    if not ref_str:
+        return "", default_name
+
+    membership = None
+    try:
+        membership_id = int(ref_str)
+    except (TypeError, ValueError):
+        membership_id = None
+
+    if membership_id is not None:
+        membership = (
+            TenantMembership.objects
+            .filter(tenant=tenant, id=membership_id, is_active=True)
+            .only("id", "email", "name")
+            .first()
+        )
+
+    if membership is None:
+        membership = (
+            TenantMembership.objects
+            .filter(tenant=tenant, user_id=ref_str, is_active=True)
+            .only("id", "email", "name")
+            .first()
+        )
+
+    if not membership:
+        return "", default_name
+
+    email = (membership.email or "").strip().lower()
+    name = (membership.name or membership.email or default_name or "").strip()
+    return email, name
+
+
+def _resolve_requester_email_name(tenant, data: dict):
+    """Resolve requester email/name from record data fields."""
+    requester_email = str(data.get("requester_email") or "").strip().lower()
+    requester_name = str(data.get("requester_name") or "").strip()
+
+    if not requester_email:
+        requester_ref = data.get("requester_id") or data.get("created_by_id")
+        email, name = _membership_email_name(
+            tenant, requester_ref, default_name=requester_name or "Requester"
+        )
+        requester_email = email
+        if not requester_name and name:
+            requester_name = name
+
+    if not requester_name:
+        requester_name = "Requester"
+    return requester_email, requester_name
+
+
+def _resolve_requester_membership(tenant, data: dict):
+    """Return active TenantMembership for the requestor, if found."""
+    if tenant is None or not isinstance(data, dict):
+        return None
+
+    requester_ref = data.get("requester_id") or data.get("created_by_id")
+    if requester_ref in (None, ""):
+        return None
+
+    ref_str = str(requester_ref).strip()
+    if not ref_str:
+        return None
+
+    membership = (
+        TenantMembership.objects
+        .filter(tenant=tenant, user_id=ref_str, is_active=True)
+        .select_related("role")
+        .first()
+    )
+    if membership:
+        return membership
+
+    try:
+        membership_id = int(ref_str)
+    except (TypeError, ValueError):
+        return None
+
+    return (
+        TenantMembership.objects
+        .filter(tenant=tenant, id=membership_id, is_active=True)
+        .select_related("role")
+        .first()
+    )
+
+
+def _is_team_lead_role(membership) -> bool:
+    if membership is None:
+        return False
+    role = getattr(membership, "role", None)
+    blob = f"{getattr(role, 'key', '')} {getattr(role, 'name', '')}".lower()
+    if "team_lead" in blob or "teamlead" in blob:
+        return True
+    if "team" in blob and "lead" in blob:
+        return True
+    return False
+
+
+def _is_manager_or_pm_role(membership) -> bool:
+    """True for Manager / PM / Procurement Manager (not Team Lead)."""
+    if membership is None or _is_team_lead_role(membership):
+        return False
+    role = getattr(membership, "role", None)
+    blob = f"{getattr(role, 'key', '')} {getattr(role, 'name', '')}".lower().strip()
+    if not blob:
+        return False
+    if blob in {"pm", "manager"}:
+        return True
+    if "procurement" in blob:
+        return True
+    if "manager" in blob:
+        return True
+    return False
+
+
+def _walk_requester_parents(tenant, data: dict, max_depth: int = 5):
+    """Return (requester_membership, parents closest-first)."""
+    requester_membership = _resolve_requester_membership(tenant, data)
+    cursor = requester_membership
+    seen = set()
+    parents = []
+    for _ in range(max_depth):
+        parent_pk = getattr(cursor, "user_parent_id_id", None) if cursor else None
+        if not parent_pk or parent_pk in seen:
+            break
+        seen.add(parent_pk)
+        parent = (
+            TenantMembership.objects
+            .filter(tenant=tenant, id=parent_pk, is_active=True)
+            .select_related("role")
+            .first()
+        )
+        if not parent:
+            break
+        parents.append(parent)
+        cursor = parent
+    return requester_membership, parents
+
+
+def _resolve_team_lead_membership_id(tenant, data: dict):
+    """
+    Resolve Team Lead for create/approve emails.
+    Prefer an ancestor with a Team Lead role; else data.team_lead if not the requestor;
+    else requestor's parent.
+    """
+    requester_membership, parents = _walk_requester_parents(tenant, data)
+    requester_pk = getattr(requester_membership, "id", None)
+
+    for parent in parents:
+        if _is_team_lead_role(parent):
+            return parent.id
+
+    team_lead_ref = data.get("team_lead") if isinstance(data, dict) else None
+    if team_lead_ref not in (None, ""):
+        try:
+            team_lead_pk = int(str(team_lead_ref).strip())
+        except (TypeError, ValueError):
+            team_lead_pk = None
+        if team_lead_pk is not None and team_lead_pk != requester_pk:
+            return team_lead_pk
+        if team_lead_pk is None:
+            ref_str = str(team_lead_ref).strip()
+            if requester_membership is None or ref_str != str(requester_membership.user_id):
+                return team_lead_ref
+
+    if parents:
+        return parents[0].id
+    return None
+
+
+def _resolve_manager_membership_id(tenant, data: dict):
+    """
+    Manager / Procurement Manager for create emails.
+    Prefer ancestor with Manager/PM/Procurement Manager role;
+    else data.manager (if not Team Lead / requestor); else first non-TL parent.
+    """
+    requester_membership, parents = _walk_requester_parents(tenant, data)
+    requester_pk = getattr(requester_membership, "id", None)
+
+    for parent in parents:
+        if _is_manager_or_pm_role(parent):
+            return parent.id
+
+    manager_ref = data.get("manager") if isinstance(data, dict) else None
+    if manager_ref not in (None, ""):
+        try:
+            manager_pk = int(str(manager_ref).strip())
+        except (TypeError, ValueError):
+            manager_pk = None
+        if manager_pk is not None and manager_pk != requester_pk:
+            membership = (
+                TenantMembership.objects
+                .filter(tenant=tenant, id=manager_pk, is_active=True)
+                .select_related("role")
+                .first()
+            )
+            # Prefer not to treat Team Lead as the manager recipient.
+            if membership is None or not _is_team_lead_role(membership):
+                return manager_pk
+        elif manager_pk is None:
+            return manager_ref
+
+    for parent in parents:
+        if not _is_team_lead_role(parent):
+            return parent.id
+    if parents:
+        return parents[0].id
+    return data.get("team_lead") if isinstance(data, dict) else None
+
+
 def _notify_requester_when_paid(request, record, previous_status):
     """
     Send requester email when inventory / UNMANND request status transitions to PAID.
@@ -141,51 +370,13 @@ def _notify_requester_when_paid(request, record, previous_status):
     if current_status != "PAID" or old_status == "PAID":
         return
 
-    requester_email = str(data.get("requester_email") or "").strip().lower()
-    requester_name = str(data.get("requester_name") or "").strip()
-
-    # Resolve requester from membership:
-    # - requester_id might be TenantMembership.id (int) OR TenantMembership.user_id (uuid string)
-    if not requester_email:
-        requester_ref = data.get("requester_id") or data.get("created_by_id")
-        requester_ref_str = str(requester_ref).strip() if requester_ref is not None else ""
-        membership = None
-
-        if requester_ref_str:
-            try:
-                membership_id = int(requester_ref_str)
-            except (TypeError, ValueError):
-                membership_id = None
-            if membership_id is not None:
-                membership = (
-                    TenantMembership.objects
-                    .filter(tenant=tenant, id=membership_id)
-                    .only("id", "email", "name")
-                    .first()
-                )
-
-        if membership is None and requester_ref_str:
-            membership = (
-                TenantMembership.objects
-                .filter(tenant=tenant, user_id=requester_ref_str)
-                .only("id", "email", "name")
-                .first()
-            )
-
-        if membership:
-            requester_email = (membership.email or "").strip().lower()
-            if not requester_name:
-                requester_name = (membership.name or "").strip()
-
+    requester_email, requester_name = _resolve_requester_email_name(tenant, data)
     if not requester_email:
         logger.info(
             "[RequestPaidEmail] Skip: record=%s requester email not found.",
             getattr(record, "id", None),
         )
         return
-
-    if not requester_name:
-        requester_name = "Requester"
 
     subject, text_body, html_body = build_request_paid_unmannd_email(
         {
@@ -223,20 +414,10 @@ def _notify_requester_when_paid(request, record, previous_status):
 
 def _notify_team_lead_for_inventory_request(request, record):
     """
-    Send team-lead email when a new inventory / UNMANND request record is created.
+    On create: email Manager, Team Lead, and Requestor.
     Best-effort only; never raises.
     """
     if not record or record.entity_type not in REQUEST_NOTIFICATION_ENTITY_TYPES:
-        return
-
-    data = record.data if isinstance(record.data, dict) else {}
-    team_lead_value = data.get("team_lead")
-    if team_lead_value in (None, ""):
-        logger.info(
-            "Request %s email skipped: team_lead missing in payload (entity_type=%s).",
-            getattr(record, "id", None),
-            getattr(record, "entity_type", None),
-        )
         return
 
     tenant = getattr(request, "tenant", None)
@@ -247,94 +428,292 @@ def _notify_team_lead_for_inventory_request(request, record):
         )
         return
 
+    data = record.data if isinstance(record.data, dict) else {}
+
     try:
-        try:
-            team_lead_pk = int(team_lead_value)
-        except (TypeError, ValueError):
-            logger.info(
-                "Request %s email skipped: invalid team_lead value %r.",
-                record.id,
-                team_lead_value,
-            )
-            return
+        recipients = []  # (email, label)
+        seen_emails = set()
 
-        membership = TenantMembership.objects.filter(
-            tenant=tenant,
-            id=team_lead_pk,
-            is_active=True,
-        ).select_related("role").first()
+        def _add_recipient(email, label):
+            if not email or email in seen_emails:
+                return
+            seen_emails.add(email)
+            recipients.append((email, label))
 
-        team_lead_email = None
-        team_lead_name = "Team Lead"
-        if membership:
-            team_lead_email = (membership.email or "").strip().lower()
-            team_lead_name = (membership.name or membership.email or "Team Lead").strip()
-
-        if not team_lead_email:
-            logger.info(
-                "Request %s email skipped: no active team lead email for team_lead=%s",
-                record.id,
-                team_lead_value,
-            )
-            return
-
-        frontend_base = (os.environ.get("PYRO_FRONTEND_URL") or os.environ.get("FRONTEND_URL") or "").strip().rstrip("/")
-        tenant_slug = str(getattr(tenant, "slug", "") or "").strip()
-        if frontend_base and "/app/" in frontend_base:
-            redirect_url = frontend_base
-        elif frontend_base and tenant_slug:
-            redirect_url = f"{frontend_base}/app/{tenant_slug}"
-        elif frontend_base:
-            redirect_url = frontend_base
-        elif tenant_slug:
-            redirect_url = f"https://app.thepyro.ai/app/{tenant_slug}"
+        manager_ref = _resolve_manager_membership_id(tenant, data)
+        manager_email, manager_name = _membership_email_name(
+            tenant, manager_ref, default_name="Manager"
+        )
+        if manager_email:
+            _add_recipient(manager_email, "manager")
         else:
-            redirect_url = request.build_absolute_uri(f"/crm-records/records/{record.id}/")
+            logger.info(
+                "Request %s create email: manager missing/unavailable (ref=%s).",
+                getattr(record, "id", None),
+                manager_ref,
+            )
 
-        requester_name = str(data.get("requester_name") or "Requestor").strip()
+        team_lead_ref = _resolve_team_lead_membership_id(tenant, data)
+        team_lead_email, team_lead_name = _membership_email_name(
+            tenant, team_lead_ref, default_name="Team Lead"
+        )
+        if team_lead_email:
+            _add_recipient(team_lead_email, "team_lead")
+        else:
+            logger.info(
+                "Request %s create email: team_lead missing/unavailable (ref=%s).",
+                getattr(record, "id", None),
+                team_lead_ref,
+            )
+
+        requester_email, requester_name = _resolve_requester_email_name(tenant, data)
+        if requester_email:
+            _add_recipient(requester_email, "requester")
+        else:
+            logger.info(
+                "Request %s create email: requester email not found.",
+                getattr(record, "id", None),
+            )
+
+        if not recipients:
+            logger.info(
+                "Request %s email skipped: no manager/team_lead/requester recipients (entity_type=%s).",
+                getattr(record, "id", None),
+                getattr(record, "entity_type", None),
+            )
+            return
+
         subject, text_body, html_body = build_new_request_unmannd_email(
             {
                 "request_id": record.id,
                 "tenant_name": getattr(tenant, "name", "Pyro"),
-                "team_lead_name": team_lead_name,
-                "requester_name": requester_name,
+                "team_lead_name": team_lead_name or manager_name or "Team Lead",
+                "requester_name": requester_name or "Requestor",
                 "department": str(data.get("department") or "N/A").strip(),
                 "item_name": str(data.get("item_name_freeform") or data.get("item_name") or "N/A").strip(),
                 "quantity": str(data.get("quantity_required") or "N/A").strip(),
                 "urgency": str(data.get("urgency_level") or "N/A").strip(),
                 "status_text": str(data.get("status_text") or data.get("status") or "Request submitted").strip(),
-                "redirect_url": redirect_url,
+                "redirect_url": _record_app_redirect_url(request, record),
             }
         )
 
-        success, msg = send_email(
-            to_emails=team_lead_email,
-            subject=subject,
-            message=text_body,
-            html_message=html_body,
-            client_name="InventoryRequestNotification",
-            fail_silently=True,
+        for email, label in recipients:
+            success, msg = send_email(
+                to_emails=email,
+                subject=subject,
+                message=text_body,
+                html_message=html_body,
+                client_name="RequestCreateNotification",
+                fail_silently=True,
+            )
+            if not success:
+                logger.warning(
+                    "Request %s create email failed for %s=%s: %s",
+                    record.id,
+                    label,
+                    email,
+                    msg,
+                )
+            else:
+                logger.info(
+                    "Request %s create email sent to %s=%s (entity_type=%s).",
+                    record.id,
+                    label,
+                    email,
+                    record.entity_type,
+                )
+    except Exception:
+        logger.exception(
+            "Unexpected error while sending create emails for record=%s",
+            getattr(record, "id", None),
+            )
+
+
+def _notify_on_manager_approved(request, record, previous_status):
+    """
+    When manager Approve runs (status → VENDOR_IDENTIFIED or APPROVED(2/2)):
+    email Requestor and Team Lead.
+    Best-effort only; never raises.
+    """
+    if not record or record.entity_type not in REQUEST_NOTIFICATION_ENTITY_TYPES:
+        return
+
+    tenant = getattr(request, "tenant", None)
+    if not tenant:
+        return
+
+    data = record.data if isinstance(record.data, dict) else {}
+    current_status = _normalize_status_value(data.get("status"))
+    old_status = _normalize_status_value(previous_status)
+    if current_status not in MANAGER_APPROVED_STATUSES:
+        return
+    if old_status in MANAGER_APPROVED_STATUSES:
+        return
+    if old_status not in MANAGER_APPROVE_FROM_STATUSES:
+        logger.info(
+            "[RequestApprovedEmail] Skip: record=%s status %s → %s is not a manager-approve transition.",
+            getattr(record, "id", None),
+            old_status or "(empty)",
+            current_status,
         )
-        if not success:
-            logger.warning(
-                "Request %s email notification failed for team_lead=%s: %s",
-                record.id,
-                team_lead_email,
-                msg,
+        return
+
+    try:
+        recipients = []  # (email, label, recipient_name)
+
+        requester_email, requester_name = _resolve_requester_email_name(tenant, data)
+        if requester_email:
+            recipients.append((requester_email, "requester", requester_name or "Requester"))
+        else:
+            logger.info(
+                "[RequestApprovedEmail] Skip requester: record=%s email not found.",
+                getattr(record, "id", None),
+            )
+
+        team_lead_ref = _resolve_team_lead_membership_id(tenant, data)
+        team_lead_email, team_lead_name = _membership_email_name(
+            tenant, team_lead_ref, default_name="Team Lead"
+        )
+        if team_lead_email and team_lead_email not in {email for email, _, _ in recipients}:
+            recipients.append((team_lead_email, "team_lead", team_lead_name or "Team Lead"))
+        elif not team_lead_email:
+            logger.info(
+                "[RequestApprovedEmail] Skip team_lead: record=%s email not found (ref=%s).",
+                getattr(record, "id", None),
+                team_lead_ref,
             )
         else:
             logger.info(
-                "Request %s email notification sent to %s (team_lead=%s, entity_type=%s).",
-                record.id,
-                team_lead_email,
-                team_lead_value,
-                record.entity_type,
+                "[RequestApprovedEmail] Skip team_lead: record=%s same email as requester (ref=%s).",
+                getattr(record, "id", None),
+                team_lead_ref,
+            )
+
+        if not recipients:
+            logger.info(
+                "[RequestApprovedEmail] Skip: record=%s no requester/team_lead recipients.",
+                getattr(record, "id", None),
+            )
+            return
+
+        manager_ref = _resolve_manager_membership_id(tenant, data)
+        _, manager_name = _membership_email_name(tenant, manager_ref, default_name="Manager")
+        base_context = {
+            "request_id": record.id,
+            "tenant_name": getattr(tenant, "name", "Pyro"),
+            "requester_name": requester_name or "Requester",
+            "approver_name": manager_name or "Manager",
+            "item_name": str(data.get("item_name_freeform") or data.get("item_name") or "N/A").strip(),
+            "status_text": str(data.get("status_text") or data.get("status") or current_status).strip(),
+            "redirect_url": _record_app_redirect_url(request, record),
+        }
+
+        for email, label, recipient_name in recipients:
+            subject, text_body, html_body = build_request_approved_unmannd_email(
+                {**base_context, "recipient_name": recipient_name}
+            )
+            send_ok, send_msg = send_email(
+                to_emails=email,
+                subject=subject,
+                message=text_body,
+                html_message=html_body,
+                client_name="RequestApprovedNotification",
+                fail_silently=True,
+            )
+            if not send_ok:
+                logger.warning(
+                    "[RequestApprovedEmail] Failed: record=%s %s=%s msg=%s",
+                    getattr(record, "id", None),
+                    label,
+                    email,
+                    send_msg,
+                )
+            else:
+                logger.info(
+                    "[RequestApprovedEmail] Sent: record=%s %s=%s status=%s",
+                    getattr(record, "id", None),
+                    label,
+                    email,
+                    current_status,
+                )
+    except Exception:
+        logger.exception(
+            "Unexpected error while sending manager-approved emails for record=%s",
+            getattr(record, "id", None),
+        )
+
+
+def _notify_requester_when_rejected(request, record, previous_status):
+    """
+    Send requester email when status transitions to REJECTED.
+    Best-effort only; never raises.
+    """
+    if not record or record.entity_type not in REQUEST_NOTIFICATION_ENTITY_TYPES:
+        return
+
+    tenant = getattr(request, "tenant", None)
+    if not tenant:
+        return
+
+    data = record.data if isinstance(record.data, dict) else {}
+    current_status = _normalize_status_value(data.get("status"))
+    old_status = _normalize_status_value(previous_status)
+    if current_status != "REJECTED" or old_status == "REJECTED":
+        return
+
+    try:
+        requester_email, requester_name = _resolve_requester_email_name(tenant, data)
+        if not requester_email:
+            logger.info(
+                "[RequestRejectedEmail] Skip: record=%s requester email not found.",
+                getattr(record, "id", None),
+            )
+            return
+
+        subject, text_body, html_body = build_request_rejected_unmannd_email(
+            {
+                "request_id": record.id,
+                "requester_name": requester_name,
+                "tenant_name": getattr(tenant, "name", "Pyro"),
+                "item_name": str(data.get("item_name_freeform") or data.get("item_name") or "N/A").strip(),
+                "status_text": str(data.get("status_text") or data.get("status") or "REJECTED").strip(),
+                "redirect_url": _record_app_redirect_url(request, record),
+            }
+        )
+        send_ok, send_msg = send_email(
+            to_emails=requester_email,
+            subject=subject,
+            message=text_body,
+            html_message=html_body,
+            client_name="RequestRejectedNotification",
+            fail_silently=True,
+        )
+        if not send_ok:
+            logger.warning(
+                "[RequestRejectedEmail] Failed: record=%s email=%s msg=%s",
+                getattr(record, "id", None),
+                requester_email,
+                send_msg,
+            )
+        else:
+            logger.info(
+                "[RequestRejectedEmail] Sent: record=%s email=%s",
+                getattr(record, "id", None),
+                requester_email,
             )
     except Exception:
         logger.exception(
-            "Unexpected error while sending request email notification for record=%s",
+            "Unexpected error while sending rejected email for record=%s",
             getattr(record, "id", None),
         )
+
+
+def _notify_request_status_emails(request, record, previous_status):
+    """Dispatch status-transition emails (manager approve / reject / paid)."""
+    _notify_on_manager_approved(request, record, previous_status)
+    _notify_requester_when_rejected(request, record, previous_status)
+    _notify_requester_when_paid(request, record, previous_status)
 
 
 from .helper import (
@@ -805,7 +1184,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
 
         # Preserve tenant (don't allow changing tenant)
         updated_record = serializer.save(tenant=self.request.tenant)
-        _notify_requester_when_paid(self.request, updated_record, previous_status)
+        _notify_request_status_emails(self.request, updated_record, previous_status)
         
         return Response(serializer.data, status=status.HTTP_200_OK)
     
@@ -866,7 +1245,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
 
         # Preserve tenant (don't allow changing tenant)
         updated_record = serializer.save(tenant=self.request.tenant)
-        _notify_requester_when_paid(self.request, updated_record, previous_status)
+        _notify_request_status_emails(self.request, updated_record, previous_status)
         
         return Response(serializer.data, status=status.HTTP_200_OK)
     
@@ -959,7 +1338,7 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
             previous_assigned_to = instance.data.get("assigned_to")
 
         updated_record = serializer.save()
-        _notify_requester_when_paid(self.request, updated_record, previous_status)
+        _notify_request_status_emails(self.request, updated_record, previous_status)
 
         if updated_record.entity_type == "lead" and isinstance(updated_record.data, dict):
             PostAssignmentActions().run_for_manual_assignment(
