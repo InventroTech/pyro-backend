@@ -85,7 +85,7 @@ class InventoryRequestFormBackendTests(TestCase):
         payload = {
             "entity_type": "inventory_request",
             "data": {
-                "status": "DRAFT",
+                "status": "NEW_REQUEST",
                 "request_date": "2026-02-09",
                 "requester_id": str(self.user.id),
                 "requester_name": "Test Requester",
@@ -110,7 +110,7 @@ class InventoryRequestFormBackendTests(TestCase):
         self.assertEqual(response.data["entity_type"], "inventory_request")
 
         data = response.data["data"]
-        self.assertEqual(data["status"], "DRAFT")
+        self.assertEqual(data["status"], "NEW_REQUEST")
         self.assertEqual(data["request_date"], "2026-02-09")
         self.assertEqual(data["requester_id"], str(self.user.id))
         self.assertEqual(data["requester_name"], "Test Requester")
@@ -138,7 +138,7 @@ class InventoryRequestFormBackendTests(TestCase):
             tenant=self.tenant,
             entity_type="inventory_request",
             data={
-                "status": "DRAFT",
+                "status": "NEW_REQUEST",
                 "status_text": "Submitted",
                 "requester_id": str(self.user.supabase_uid),
                 "requester_name": "Test Requester",
@@ -355,7 +355,7 @@ class InventoryRequestFormBackendTests(TestCase):
         payload = {
             "entity_type": "inventory_request",
             "data": {
-                "status": "DRAFT",
+                "status": "NEW_REQUEST",
                 "request_date": "2026-02-09",
                 "requester_id": str(self.user.id),
                 "requester_name": "User",
