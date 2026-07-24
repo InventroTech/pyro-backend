@@ -131,9 +131,13 @@ class InventoryRequestFormBackendTests(TestCase):
     @patch("crm_records.views.send_email")
     def test_create_inventory_request_sends_email_to_team_lead(self, mock_send_email):
         mock_send_email.return_value = (True, "ok")
-        payload = {
-            "entity_type": "inventory_request",
-            "data": {
+        from types import SimpleNamespace
+        from crm_records.views import _notify_team_lead_for_inventory_request
+
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={
                 "status": "NEW_REQUEST",
                 "status_text": "Submitted",
                 "requester_id": str(self.user.supabase_uid),
