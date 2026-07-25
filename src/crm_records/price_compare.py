@@ -83,6 +83,13 @@ _TITLE_RE = re.compile(
     r'<title\b[^>]{0,200}?>([^<]{0,2000})</title\s*>',
     re.IGNORECASE,
 )
+# Visible currency-marked amount (matches price_compare_vendors.PRICE_NEAR_RE).
+# Last-resort for storefronts with no JSON-LD / price meta (e.g. OpenCart sites
+# like fabtolab.com, which render the price only as text like "रo 4,830.00").
+_VISIBLE_PRICE_RE = re.compile(
+    r"(?:&#8377;|₹|&rupee;|Rs\.\s*|INR\s*|रo\s*)\s*([\d,]+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
 
 
 def _html_for_regex(html: str) -> str:
@@ -631,6 +638,21 @@ def extract_price_from_html(html: str, fallback_url: str = "") -> Optional[Dict[
             "title": title,
             "price": price,
             "currency": currency,
+            "link": fallback_url,
+            "available": True,
+        }
+
+    # Last resort: first plausible visible currency-marked amount in document
+    # order. The main product price renders before related-product prices;
+    # header cart totals like "रo 0.00" are filtered by the minimum bound.
+    for m in _VISIBLE_PRICE_RE.finditer(scanned):
+        price = _parse_price_number(m.group(1))
+        if price is None or price < 10 or price > 5_000_000:
+            continue
+        return {
+            "title": _extract_html_title(scanned),
+            "price": price,
+            "currency": "INR",
             "link": fallback_url,
             "available": True,
         }
