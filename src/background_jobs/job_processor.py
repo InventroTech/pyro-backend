@@ -26,6 +26,7 @@ from .job_handlers import get_handler_registry
 from .scheduler_locks import (
     SCHEDULER_LOCK_DISPATCH_SYNC,
     SCHEDULER_LOCK_LEAD_CRON,
+    SCHEDULER_LOCK_SHIPMENT_TRACKING,
     SCHEDULER_LOCK_SNOOZED_MIDNIGHT,
     scheduler_lock,
 )
@@ -36,6 +37,9 @@ logger = logging.getLogger(__name__)
 
 # Interval (seconds) between enqueueing lead cron jobs from the worker (no external cron needed)
 LEAD_CRON_ENQUEUE_INTERVAL = 900  # 15 minutes
+
+# Inventory / unmannd shipment live-track refresh (AfterShip / scrapers)
+SHIPMENT_TRACKING_ENQUEUE_INTERVAL = 900  # 15 minutes
 
 # Support ticket dump processing (replaces Supabase process-dumped-tickets cron)
 SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL = 300  # 5 minutes
@@ -89,6 +93,8 @@ class JobProcessor:
         self._handler_registry = get_handler_registry()
         # Last time we enqueued lead cron jobs (unassign snoozed, release after 12h)
         self._last_lead_cron_enqueue_at = None
+        # Last time we enqueued inventory shipment tracking refresh
+        self._last_shipment_tracking_enqueue_at = None
         # UTC calendar date we last enqueued snoozed→NOT_CONNECTED job (see TIME_ZONE)
         self._last_snoozed_midnight_enqueue_date = None
         # Last time we enqueued purge_old_log_tables
@@ -649,6 +655,37 @@ class JobProcessor:
                 exc_info=True,
             )
 
+    def _maybe_enqueue_shipment_tracking_refresh(self):
+        """
+        Every SHIPMENT_TRACKING_ENQUEUE_INTERVAL seconds, enqueue
+        refresh_inventory_shipment_tracking for all tenants.
+        """
+        now = timezone.now()
+        if self._last_shipment_tracking_enqueue_at is not None:
+            elapsed = (now - self._last_shipment_tracking_enqueue_at).total_seconds()
+            if elapsed < SHIPMENT_TRACKING_ENQUEUE_INTERVAL:
+                return
+        self._last_shipment_tracking_enqueue_at = now
+        try:
+            with scheduler_lock(SCHEDULER_LOCK_SHIPMENT_TRACKING) as acquired:
+                if not acquired:
+                    return
+                queue = get_queue_service()
+                enqueue_for_all_tenants(
+                    queue,
+                    job_type=JobType.REFRESH_INVENTORY_SHIPMENT_TRACKING,
+                    payload={"max_per_run": 75},
+                    priority=0,
+                )
+            logger.debug(
+                f"[Worker {self.worker_id}] Enqueued refresh_inventory_shipment_tracking per tenant"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[Worker {self.worker_id}] Failed to enqueue shipment tracking refresh: {e}",
+                exc_info=True,
+            )
+
     def _maybe_enqueue_snoozed_to_not_connected_midnight(self):
         """
         Once per calendar day (in ``TIME_ZONE``), enqueue snoozed_to_not_connected_midnight
@@ -944,6 +981,8 @@ class JobProcessor:
                     self._maybe_enqueue_entity_type_discovery()
                     # Periodically enqueue lead cron jobs (unassign snoozed, release after 12h) so no external cron is needed
                     self._maybe_enqueue_lead_cron_jobs()
+                    # Every 15 min: refresh live carrier status for in-shipping inventory requests
+                    self._maybe_enqueue_shipment_tracking_refresh()
                     # Daily at 23:55 exact minute (TIME_ZONE): SNOOZED → NOT_CONNECTED
                     self._maybe_enqueue_snoozed_to_not_connected_midnight()
                     # Every 8 hours at :05 UTC (5 min after Airbyte sync): dispatch sheet → records
