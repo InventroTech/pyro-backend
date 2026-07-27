@@ -1,6 +1,6 @@
 {
   "defaults": {
-    "profile": "extended",
+    "profile": "core",
     "max_results_per_vendor": 3,
     "timeout_seconds": 10,
     "max_workers": 8

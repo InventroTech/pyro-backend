@@ -5901,7 +5901,7 @@ class PriceCompareView(APIView):
     POST /crm-records/price-compare/
     {
       "query": "arduino uno",
-      "profile": "extended",             # optional: core|extended (default: extended)
+      "profile": "core",                 # optional: core|extended (default: core)
       "sources": ["amazon", "robu"],     # optional explicit override
       "urls": ["https://robu.in/product/..."],
       "pincode": "560001"
@@ -5938,8 +5938,8 @@ class PriceCompareView(APIView):
         description=(
             "Fetches current prices from configured vendor sites for a product query, "
             "and/or extracts prices from provided product page URLs. "
-            "Default profile is `extended` (full catalog). Use `profile=core` for the "
-            "small reliable set, or pass explicit `sources` to override. "
+            "Default profile is `core` (small reliable set). Use `profile=extended` for the "
+            "full catalog, or pass explicit `sources` to override. "
             "Optional Indian PIN code improves Amazon delivery date accuracy."
         ),
         request={
