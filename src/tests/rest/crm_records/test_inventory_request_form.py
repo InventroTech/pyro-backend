@@ -322,6 +322,38 @@ class InventoryRequestFormBackendTests(TestCase):
         )
 
     @patch("crm_records.views.send_email")
+    def test_on_hold_emails_requestor(self, mock_send_email):
+        mock_send_email.return_value = (True, "ok")
+        from types import SimpleNamespace
+        from crm_records.views import _notify_requester_when_on_hold
+
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "ON_HOLD",
+                "status_text": "ON_HOLD",
+                "requester_id": str(self.user.supabase_uid),
+                "requester_name": "Test Requester",
+                "item_name_freeform": "Drone",
+                "team_lead": self.team_lead_membership.id,
+            },
+        )
+        request = SimpleNamespace(
+            tenant=self.tenant,
+            user=self.user,
+            build_absolute_uri=lambda path: f"https://example.com{path}",
+        )
+        _notify_requester_when_on_hold(request, record, previous_status="NEW_REQUEST")
+
+        self.assertEqual(mock_send_email.call_count, 1)
+        self.assertEqual(mock_send_email.call_args.kwargs.get("to_emails"), "requester@example.com")
+        self.assertEqual(
+            mock_send_email.call_args.kwargs.get("client_name"),
+            "RequestOnHoldNotification",
+        )
+
+    @patch("crm_records.views.send_email")
     def test_team_lead_order_emails_manager_requester_and_team_lead(self, mock_send_email):
         mock_send_email.return_value = (True, "ok")
         from types import SimpleNamespace
