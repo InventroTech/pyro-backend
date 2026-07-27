@@ -102,3 +102,11 @@ class PriceCompareParserTests(SimpleTestCase):
         text = _robu_default_delivery_estimate()
         self.assertIn("–", text)
         self.assertRegex(text, r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)")
+
+    def test_html_looks_bot_blocked_amazon_captcha(self):
+        from crm_records.price_compare import _html_looks_bot_blocked
+
+        captcha = "<html><title>Amazon.in</title><body>captcha</body></html>"
+        self.assertTrue(_html_looks_bot_blocked(captcha, source="amazon"))
+        product = "<html>" + ("x" * 25000) + 'a-price-whole">1,299</span></html>'
+        self.assertFalse(_html_looks_bot_blocked(product, source="amazon"))
