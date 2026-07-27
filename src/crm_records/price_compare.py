@@ -712,6 +712,30 @@ def _hosts_needing_cookie_warmup(host: str) -> Optional[str]:
     return None
 
 
+def _is_amazon_host(host: str) -> bool:
+    host = (host or "").lower()
+    return (
+        _host_matches_vendor_pattern(host, "amazon")
+        or _is_host_or_subdomain(host, "amazon.in")
+        or _is_host_or_subdomain(host, "amazon.com")
+    )
+
+
+def _html_looks_bot_blocked(html: str, *, source: str = "") -> bool:
+    """True when the response is a captcha / soft-block interstitial, not a product page."""
+    text = html or ""
+    low = text.lower()
+    if "captcha" in low or "validatecaptcha" in low or "opfcaptcha" in low:
+        return True
+    if source == "amazon":
+        # Real Amazon product HTML is large and includes price markers.
+        if "a-price-whole" in low or "product:price:amount" in low:
+            return False
+        if len(text) < 20000:
+            return True
+    return False
+
+
 def _fetch_html(url: str, headers: Optional[Dict[str, str]] = None) -> str:
     """
     Fetch HTML with requests, falling back to urllib on 403.
@@ -728,21 +752,25 @@ def _fetch_html(url: str, headers: Optional[Dict[str, str]] = None) -> str:
     last_exc: Optional[Exception] = None
     host = (urllib.parse.urlparse(safe_url).hostname or "").lower()
     home = _hosts_needing_cookie_warmup(host)
-    origin = _origin_for_host(host)
-    if origin and "Referer" not in req_headers:
-        req_headers["Referer"] = origin
-    if origin:
-        # Same-site navigation looks less bot-like than Sec-Fetch-Site: none.
-        req_headers.setdefault("Sec-Fetch-Site", "same-origin")
-        req_headers.setdefault("Origin", origin.rstrip("/"))
 
-    # Warm cookies — bare product hits are often 403 without a prior home visit.
+    # Only Cloudflare/WAF storefronts need same-origin Referer + cookie warm-up.
+    # Applying Origin / Sec-Fetch-Site:same-origin to Amazon returns a captcha page
+    # (~4KB "Amazon.in" interstitial) instead of the product HTML.
     if home:
+        if "Referer" not in req_headers:
+            req_headers["Referer"] = home
+        req_headers.setdefault("Sec-Fetch-Site", "same-origin")
         try:
             sess.get(home, timeout=min(8, DEFAULT_TIMEOUT), allow_redirects=True)
         except requests.RequestException:
             # Cookie warm-up is best-effort; continue to the product fetch.
             pass
+    elif _is_amazon_host(host):
+        # Amazon: keep default Sec-Fetch-Site: none; never send Origin/Referer on
+        # document GET. Do NOT warm the homepage first — that sequence often
+        # returns a captcha interstitial for the following product request.
+        req_headers.pop("Origin", None)
+        req_headers.pop("Referer", None)
 
     for attempt in range(2):
         try:
@@ -815,7 +843,8 @@ def fetch_url_price(url: str, session: Optional[requests.Session] = None) -> Dic
     elif source == "flipkart":
         headers["Referer"] = "https://www.flipkart.com/"
     elif source == "amazon":
-        headers["Referer"] = "https://www.amazon.in/"
+        # Do not set Referer/Origin here — Amazon serves captcha when those look wrong.
+        pass
     else:
         # Same-site Referer helps Cloudflare / Woo storefronts on Render.
         host = (urllib.parse.urlparse(url).hostname or "").lower()
@@ -836,6 +865,23 @@ def fetch_url_price(url: str, session: Optional[requests.Session] = None) -> Dic
             link=url,
             available=False,
             error="Failed to fetch product URL (vendor blocked the server request).",
+            method="url",
+        )
+
+    if _html_looks_bot_blocked(html, source=source or ""):
+        err = (
+            "Amazon blocked the request (captcha). Configure AMAZON_PAAPI_* keys for reliable results."
+            if source == "amazon"
+            else "Failed to fetch product URL (vendor blocked the server request)."
+        )
+        return _result(
+            source=source or "other",
+            title="",
+            price=None,
+            currency="INR",
+            link=url,
+            available=False,
+            error=err,
             method="url",
         )
 
