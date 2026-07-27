@@ -240,7 +240,7 @@ else:
             'OPTIONS': {
                 'sslmode': 'require',
             },
-            'CONN_MAX_AGE': 0 if IS_DEV else 60,
+            'CONN_MAX_AGE': 0,
             'CONN_HEALTH_CHECKS': True,
         }
     }
@@ -362,7 +362,7 @@ LOG_RETENTION_MAX_CHUNKS_PER_TABLE = env.int("LOG_RETENTION_MAX_CHUNKS_PER_TABLE
 
 # General background jobs (Gunicorn web service). Set EXCLUDE_JOB_TYPES when Mixpanel worker is deployed.
 BACKGROUND_JOB_WORKER_THREADS = env.int("BACKGROUND_JOB_WORKER_THREADS", default=1)
-BACKGROUND_JOB_POLL_INTERVAL = float(env("BACKGROUND_JOB_POLL_INTERVAL", default="1"))
+BACKGROUND_JOB_POLL_INTERVAL = float(env("BACKGROUND_JOB_POLL_INTERVAL", default="5"))
 BACKGROUND_JOB_BATCH_SIZE = env.int("BACKGROUND_JOB_BATCH_SIZE", default=10)
 BACKGROUND_JOB_EXCLUDE_JOB_TYPES = env(
     "BACKGROUND_JOB_EXCLUDE_JOB_TYPES",
@@ -371,7 +371,7 @@ BACKGROUND_JOB_EXCLUDE_JOB_TYPES = env(
 
 # Render Background Worker: ``python manage.py run_mixpanel_workers``
 MIXPANEL_JOB_WORKER_THREADS = env.int("MIXPANEL_JOB_WORKER_THREADS", default=1)
-MIXPANEL_JOB_POLL_INTERVAL = float(env("MIXPANEL_JOB_POLL_INTERVAL", default="1"))
+MIXPANEL_JOB_POLL_INTERVAL = float(env("MIXPANEL_JOB_POLL_INTERVAL", default="5"))
 MIXPANEL_JOB_BATCH_SIZE = env.int("MIXPANEL_JOB_BATCH_SIZE", default=10)
 
 PRAJA_API_URL = os.getenv(
