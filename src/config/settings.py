@@ -474,9 +474,9 @@ AMAZON_PAAPI_REGION = env('AMAZON_PAAPI_REGION', default='eu-west-1')
 AMAZON_PAAPI_COUNTRY = env('AMAZON_PAAPI_COUNTRY', default='IN')
 
 # Price-compare vendor fan-out:
-#   PRICE_COMPARE_PROFILE=core|extended  (default: extended)
+#   PRICE_COMPARE_PROFILE=core|extended  (default: core)
 #   PRICE_COMPARE_VENDORS=amazon,robu,robocraze   (optional explicit allow-list)
-PRICE_COMPARE_PROFILE = env('PRICE_COMPARE_PROFILE', default='extended')
+PRICE_COMPARE_PROFILE = env('PRICE_COMPARE_PROFILE', default='core')
 PRICE_COMPARE_VENDORS = env('PRICE_COMPARE_VENDORS', default='')
 
 import config.spectacular_auth
