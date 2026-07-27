@@ -8,7 +8,12 @@ from typing import Any, Dict, Literal, Mapping, Optional
 from support_ticket.constants import PRAJA_SAVE_SUPPORT_TICKET_URL, normalize_praja_ticket_status
 
 RmAssignedSendResult = Literal["success", "skipped_not_found", "failed"]
-CseAssignedSendResult = RmAssignedSendResult
+CseAssignedSendResult = Literal[
+    "success",
+    "skipped_not_found",
+    "skipped_invalid_user",
+    "failed",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -297,7 +302,9 @@ class CSEAssignedMixpanelService:
             cse_email: CSE email address
 
         Returns:
-            ``success`` on 2xx, ``skipped_not_found`` on 404 (user missing in Circle),
+            ``success`` on 2xx,
+            ``skipped_not_found`` on 404 (user missing in Circle),
+            ``skipped_invalid_user`` on 422 with ``{"error": "Invalid user"}``,
             ``failed`` for other errors.
         """
         try:
@@ -351,6 +358,7 @@ class CSEAssignedMixpanelService:
                 response_json = response.json()
                 logger.info(f"   Response Body: {json.dumps(response_json, indent=2, default=str)}")
             except Exception:
+                response_json = None
                 logger.info(
                     f"   Response Text: {response.text[:500]}"
                     f"{'...' if len(response.text) > 500 else ''}"
@@ -361,7 +369,7 @@ class CSEAssignedMixpanelService:
             if not response.ok:
                 if response.status_code == 404:
                     try:
-                        error_data = response.json()
+                        error_data = response_json if isinstance(response_json, dict) else response.json()
                         error_msg = error_data.get("message", "Unknown error")
                     except Exception:
                         error_msg = response.text[:200] if response.text else "Not found"
@@ -373,6 +381,20 @@ class CSEAssignedMixpanelService:
                         error_msg,
                     )
                     return "skipped_not_found"
+
+                if response.status_code == 422:
+                    try:
+                        error_data = response_json if isinstance(response_json, dict) else response.json()
+                    except Exception:
+                        error_data = {}
+                    if isinstance(error_data, dict) and error_data.get("error") == "Invalid user":
+                        logger.warning(
+                            "[Mixpanel] cse_assigned skipped (422 invalid user): "
+                            "user_id=%s cse_email=%s",
+                            user_id_int,
+                            cse_email,
+                        )
+                        return "skipped_invalid_user"
 
                 logger.error("=" * 80)
                 logger.error(f"❌ [Mixpanel] Failed: cse_assigned status={response.status_code}")
@@ -386,7 +408,7 @@ class CSEAssignedMixpanelService:
                 else:
                     logger.error(f"   Error: HTTP {response.status_code}")
                     try:
-                        error_data = response.json()
+                        error_data = response_json if isinstance(response_json, dict) else response.json()
                         logger.error(f"   Details: {json.dumps(error_data, indent=2, default=str)}")
                     except Exception:
                         logger.error(f"   Response: {response.text[:200]}")
