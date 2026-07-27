@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 
 from background_jobs.models import JobType
@@ -37,8 +38,8 @@ class SupportTicketEventHandlerTest(BaseAPITestCase):
             ),
         )
 
-    def test_not_connected_snoozes_then_closes_per_rules(self):
-        for expected_attempts in range(1, 6):
+    def test_not_connected_self_trial_always_snoozes_keeps_assignee(self):
+        for expected_attempts in range(1, 7):
             dispatch_support_ticket_event(
                 SUPPORT_EVENT_NOT_CONNECTED,
                 self.record,
@@ -47,43 +48,61 @@ class SupportTicketEventHandlerTest(BaseAPITestCase):
             self.record.refresh_from_db()
             self.assertEqual(self.record.data["call_attempts"], expected_attempts)
             self.assertEqual(self.record.data["resolution_status"], "Snoozed")
-            self.assertIsNone(self.record.data.get("assigned_to"))
+            self.assertEqual(self.record.data.get("assigned_to"), self.supabase_uid)
             self.assertIsNotNone(self.record.data.get("snooze_until"))
-
-        dispatch_support_ticket_event(
-            SUPPORT_EVENT_NOT_CONNECTED,
-            self.record,
-            {},
-        )
-        self.record.refresh_from_db()
-        self.assertEqual(self.record.data["call_attempts"], 6)
-        self.assertEqual(self.record.data["resolution_status"], "Closed")
 
     def test_take_break_unassigns_per_rules(self):
         self.record.data = {
             **self.record.data,
-            "resolution_status": "Resolved",
+            "resolution_status": "Open",
+            "call_status": "Call Waiting",
             "assigned_to": self.supabase_uid,
             "cse_name": self.email,
+            "first_assigned_to": self.supabase_uid,
+            "first_assigned_at": timezone.now().isoformat(),
         }
         self.record.save(update_fields=["data"])
 
         dispatch_support_ticket_event(
             SUPPORT_EVENT_TAKE_BREAK,
             self.record,
-            {"resolutionStatus": "Resolved"},
+            {"resolutionStatus": "Open"},
         )
         self.record.refresh_from_db()
         self.assertIsNone(self.record.data.get("assigned_to"))
         self.assertIsNone(self.record.data.get("cse_name"))
-        self.assertEqual(self.record.data["resolution_status"], "Resolved")
+        self.assertIsNone(self.record.data.get("first_assigned_to"))
+        self.assertIsNone(self.record.data.get("first_assigned_at"))
+
+    def test_take_break_keeps_not_connected_assigned(self):
+        self.record.data = {
+            **self.record.data,
+            "resolution_status": "Snoozed",
+            "call_status": "Not Connected",
+            "assigned_to": self.supabase_uid,
+            "cse_name": self.email,
+            "first_assigned_to": self.supabase_uid,
+            "first_assigned_at": timezone.now().isoformat(),
+        }
+        self.record.save(update_fields=["data"])
+
+        dispatch_support_ticket_event(
+            SUPPORT_EVENT_TAKE_BREAK,
+            self.record,
+            {"resolutionStatus": "Snoozed"},
+        )
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.data.get("assigned_to"), self.supabase_uid)
+        self.assertEqual(self.record.data.get("cse_name"), self.email)
+        self.assertEqual(self.record.data.get("first_assigned_to"), self.supabase_uid)
+        self.assertIsNotNone(self.record.data.get("first_assigned_at"))
 
     def test_record_event_api_dispatches_take_break(self):
         url = reverse("crm_records:record-events")
         payload = {
             "record_id": self.record.id,
             "event": SUPPORT_EVENT_TAKE_BREAK,
-            "payload": {"resolutionStatus": "Resolved"},
+            "payload": {"resolutionStatus": "Open"},
         }
         response = self.client.post(url, payload, format="json", **self.auth_headers)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -152,7 +171,17 @@ class SupportTicketEventHandlerTest(BaseAPITestCase):
 
     @patch("support_ticket.events.get_queue_service")
     def test_not_connected_close_enqueues_praja(self, mock_get_queue):
-        for _ in range(5):
+        # Non–Self Trial closes on 5th NC attempt.
+        self.record.data = {
+            **self.record.data,
+            "support_ticket_type": "in_trial",
+            "call_attempts": 0,
+            "assigned_to": self.supabase_uid,
+            "cse_name": self.email,
+        }
+        self.record.save(update_fields=["data"])
+
+        for _ in range(4):
             dispatch_support_ticket_event(
                 SUPPORT_EVENT_NOT_CONNECTED,
                 self.record,
@@ -167,6 +196,7 @@ class SupportTicketEventHandlerTest(BaseAPITestCase):
         )
         self.record.refresh_from_db()
         self.assertEqual(self.record.data["resolution_status"], "Closed")
+        self.assertEqual(self.record.data.get("assigned_to"), self.supabase_uid)
 
         praja_calls = [
             c

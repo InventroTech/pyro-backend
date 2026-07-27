@@ -146,7 +146,8 @@ class GetNextTicketAPITest(BaseAPITestCase):
         self.assertEqual(newer.data["assigned_to"], self.supabase_uid)
         self.assertEqual(newer.data["cse_name"], self.email)
 
-    def test_get_next_ticket_returns_existing_assignment_first(self):
+    def test_get_next_ticket_prefers_fresh_over_existing_open_assignment(self):
+        """Fresh Open pool is tried before assigned Open (non-NC) tickets."""
         assigned = _open_record(tenant=self.tenant, user_id="mine", name="Mine")
         assigned.data = {
             **assigned.data,
@@ -154,69 +155,63 @@ class GetNextTicketAPITest(BaseAPITestCase):
             "cse_name": self.email,
         }
         assigned.save(update_fields=["data"])
-        _open_record(tenant=self.tenant, user_id="other", name="Other")
+        fresh = _open_record(tenant=self.tenant, user_id="other", name="Other")
 
         response = self.client.get(self.url, **self.auth_headers)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["ticket"]["id"], assigned.id)
-        self.assertEqual(response.data["ticket"]["user_id"], "mine")
+        self.assertEqual(response.data["ticket"]["id"], fresh.id)
+        self.assertEqual(response.data["ticket"]["user_id"], "other")
 
-    def test_get_next_ticket_lifo_across_priority_one_types(self):
-        """All five priority-1 support_ticket_type values share one LIFO pool."""
-        self_trail = _open_record(
-            tenant=self.tenant,
-            user_id="self_user",
-            name="Self Trail",
-            support_ticket_type="Self_Trial",
-        )
-        in_trial = _open_record(
+    def test_get_next_ticket_lifo_within_fresh_pool(self):
+        """Fresh tickets share attempt-asc then LIFO (no type priority)."""
+        older = _open_record(
             tenant=self.tenant,
             user_id="trial_user",
             name="In Trial",
             support_ticket_type="in_trial",
         )
-        paid = _open_record(
+        newer = _open_record(
             tenant=self.tenant,
             user_id="paid_user",
             name="Paid",
             support_ticket_type="paid",
         )
-        self_trail.created_at = timezone.now() - timedelta(hours=3)
-        self_trail.save(update_fields=["created_at"])
-        in_trial.created_at = timezone.now() - timedelta(hours=2)
-        in_trial.save(update_fields=["created_at"])
-        paid.created_at = timezone.now() - timedelta(hours=1)
-        paid.save(update_fields=["created_at"])
+        older.created_at = timezone.now() - timedelta(hours=2)
+        older.save(update_fields=["created_at"])
+        newer.created_at = timezone.now() - timedelta(hours=1)
+        newer.save(update_fields=["created_at"])
 
         response = self.client.get(self.url, **self.auth_headers)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["ticket"]["id"], paid.id)
+        self.assertEqual(response.data["ticket"]["id"], newer.id)
         self.assertEqual(response.data["ticket"]["support_ticket_type"], "paid")
 
-    def test_get_next_ticket_defers_rest_until_priority_one_exhausted(self):
-        rest = _open_record(
+    def test_get_next_ticket_fresh_equal_weight_st_and_other(self):
+        """Self Trial and other fresh tickets compete equally (LIFO by created_at)."""
+        other = _open_record(
             tenant=self.tenant,
             user_id="rest_user",
-            name="Rest",
+            name="Other",
             support_ticket_type="free",
         )
-        in_trial = _open_record(
+        self_trial = _open_record(
             tenant=self.tenant,
-            user_id="trial_user",
-            name="In Trial",
-            support_ticket_type="in_trial",
+            user_id="st_user",
+            name="Self Trial",
+            support_ticket_type="Self_Trial",
         )
-        rest.created_at = timezone.now() - timedelta(hours=1)
-        rest.save(update_fields=["created_at"])
-        in_trial.created_at = timezone.now() - timedelta(hours=2)
-        in_trial.save(update_fields=["created_at"])
+        # Older Self Trial must not beat newer other — same pool, no ST priority.
+        other.created_at = timezone.now() - timedelta(hours=1)
+        other.save(update_fields=["created_at"])
+        self_trial.created_at = timezone.now() - timedelta(hours=2)
+        self_trial.save(update_fields=["created_at"])
 
         response = self.client.get(self.url, **self.auth_headers)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["ticket"]["id"], in_trial.id)
+        self.assertEqual(response.data["ticket"]["id"], other.id)
 
     def test_get_next_ticket_self_trail_lifo_within_bucket(self):
         older = _open_record(
@@ -263,7 +258,8 @@ class GetNextTicketAPITest(BaseAPITestCase):
         self.assertEqual(response.data["ticket"]["id"], record.id)
         self.assertEqual(response.data["ticket"]["assigned_to"], self.supabase_uid)
 
-    def test_get_next_ticket_skips_self_trail_at_max_attempts(self):
+    def test_get_next_ticket_skips_self_trail_with_higher_attempts_when_fresh_available(self):
+        """Fresh pool is attempt-asc: 0-attempt Self Trial wins over higher attempts."""
         exhausted = _open_record(
             tenant=self.tenant,
             user_id="exhausted_self",
@@ -287,7 +283,7 @@ class GetNextTicketAPITest(BaseAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["ticket"]["id"], available.id)
 
-    def test_get_next_ticket_skips_record_at_max_attempts(self):
+    def test_get_next_ticket_skips_record_with_higher_attempts_when_fresh_available(self):
         exhausted = _open_record(
             tenant=self.tenant,
             user_id="exhausted",
@@ -317,10 +313,10 @@ class GetNextTicketAPITest(BaseAPITestCase):
         )
         self.assertEqual(_record_ticket_type_key(record), "paid")
 
-    def test_get_next_ticket_returns_due_snoozed_before_fresh_open(self):
-        """Due not-connected retries must surface before new open tickets (lead parity)."""
+    def test_get_next_ticket_fresh_open_before_due_not_connected(self):
+        """Fresh Open is pulled before due Not Connected retries."""
         past = (timezone.now() - timedelta(minutes=10)).isoformat()
-        snoozed = Record.objects.create(
+        Record.objects.create(
             tenant=self.tenant,
             entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data={
@@ -334,11 +330,13 @@ class GetNextTicketAPITest(BaseAPITestCase):
                 "call_attempts": 1,
                 "snooze_until": past,
                 "next_call_at": past,
-                "assigned_to": None,
-                "cse_name": None,
+                "assigned_to": self.supabase_uid,
+                "cse_name": self.email,
+                "first_assigned_at": timezone.now().isoformat(),
+                "first_assigned_to": self.supabase_uid,
             },
         )
-        _open_record(
+        fresh = _open_record(
             tenant=self.tenant,
             user_id="fresh_user",
             name="Fresh Open",
@@ -348,8 +346,227 @@ class GetNextTicketAPITest(BaseAPITestCase):
         response = self.client.get(self.url, **self.auth_headers)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["ticket"]["id"], snoozed.id)
-        self.assertEqual(response.data["ticket"]["resolution_status"], "Snoozed")
+        self.assertEqual(response.data["ticket"]["id"], fresh.id)
+
+    def test_get_next_ticket_nc_today_before_nc_yesterday(self):
+        """When no fresh Open, due NC from today beats due NC from yesterday."""
+        past = (timezone.now() - timedelta(minutes=10)).isoformat()
+        yesterday = (timezone.now() - timedelta(days=1)).isoformat()
+        today = timezone.now().isoformat()
+        Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data={
+                **dump_data(
+                    user_id="nc_yest",
+                    name="NC Yesterday",
+                    support_ticket_type="in_trial",
+                ),
+                "resolution_status": "Snoozed",
+                "call_status": "Not Connected",
+                "call_attempts": 1,
+                "snooze_until": past,
+                "next_call_at": past,
+                "assigned_to": self.supabase_uid,
+                "cse_name": self.email,
+                "first_assigned_at": yesterday,
+                "first_assigned_to": self.supabase_uid,
+            },
+        )
+        nc_today = Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data={
+                **dump_data(
+                    user_id="nc_today",
+                    name="NC Today",
+                    support_ticket_type="in_trial",
+                ),
+                "resolution_status": "Snoozed",
+                "call_status": "Not Connected",
+                "call_attempts": 1,
+                "snooze_until": past,
+                "next_call_at": past,
+                "assigned_to": self.supabase_uid,
+                "cse_name": self.email,
+                "first_assigned_at": today,
+                "first_assigned_to": self.supabase_uid,
+            },
+        )
+
+        response = self.client.get(self.url, **self.auth_headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["ticket"]["id"], nc_today.id)
+
+    def test_get_next_ticket_pulls_due_nc_yesterday_when_no_fresh_or_today(self):
+        past = (timezone.now() - timedelta(minutes=10)).isoformat()
+        yesterday = (timezone.now() - timedelta(days=1)).isoformat()
+        nc_yest = Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data={
+                **dump_data(
+                    user_id="nc_yest_only",
+                    name="NC Yesterday Only",
+                    support_ticket_type="in_trial",
+                ),
+                "resolution_status": "Snoozed",
+                "call_status": "Not Connected",
+                "call_attempts": 1,
+                "snooze_until": past,
+                "next_call_at": past,
+                "assigned_to": self.supabase_uid,
+                "cse_name": self.email,
+                "first_assigned_at": yesterday,
+                "first_assigned_to": self.supabase_uid,
+            },
+        )
+
+        response = self.client.get(self.url, **self.auth_headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["ticket"]["id"], nc_yest.id)
+
+    def test_get_next_ticket_pulls_due_nc_older_than_yesterday(self):
+        """Due NC first-assigned before yesterday still routes (cse_nc_older bucket)."""
+        past = (timezone.now() - timedelta(minutes=10)).isoformat()
+        older = (timezone.now() - timedelta(days=3)).isoformat()
+        nc_older = Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data={
+                **dump_data(
+                    user_id="nc_older_only",
+                    name="NC Older Only",
+                    support_ticket_type="in_trial",
+                ),
+                "resolution_status": "Snoozed",
+                "call_status": "Not Connected",
+                "call_attempts": 1,
+                "snooze_until": past,
+                "next_call_at": past,
+                "assigned_to": self.supabase_uid,
+                "cse_name": self.email,
+                "first_assigned_at": older,
+                "first_assigned_to": self.supabase_uid,
+            },
+        )
+
+        response = self.client.get(self.url, **self.auth_headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["ticket"]["id"], nc_older.id)
+
+    def test_get_next_ticket_nc_today_before_due_wip_today(self):
+        """Same first-assigned day: due NC is tried before due WIP."""
+        past = (timezone.now() - timedelta(minutes=10)).isoformat()
+        today = timezone.now().isoformat()
+        Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data={
+                **dump_data(
+                    user_id="wip_today",
+                    name="WIP Today",
+                    support_ticket_type="in_trial",
+                ),
+                "resolution_status": "WIP",
+                "call_attempts": 1,
+                "snooze_until": past,
+                "next_call_at": past,
+                "assigned_to": self.supabase_uid,
+                "cse_name": self.email,
+                "first_assigned_at": today,
+                "first_assigned_to": self.supabase_uid,
+            },
+        )
+        nc_today = Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data={
+                **dump_data(
+                    user_id="nc_today_wip",
+                    name="NC Today",
+                    support_ticket_type="in_trial",
+                ),
+                "resolution_status": "Snoozed",
+                "call_status": "Not Connected",
+                "call_attempts": 1,
+                "snooze_until": past,
+                "next_call_at": past,
+                "assigned_to": self.supabase_uid,
+                "cse_name": self.email,
+                "first_assigned_at": today,
+                "first_assigned_to": self.supabase_uid,
+            },
+        )
+
+        response = self.client.get(self.url, **self.auth_headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["ticket"]["id"], nc_today.id)
+
+    def test_get_next_ticket_pulls_due_wip_when_call_ready(self):
+        past = (timezone.now() - timedelta(minutes=10)).isoformat()
+        wip = Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data={
+                **dump_data(
+                    user_id="wip_due",
+                    name="WIP Due",
+                    support_ticket_type="in_trial",
+                ),
+                "resolution_status": "WIP",
+                "call_attempts": 1,
+                "snooze_until": past,
+                "next_call_at": past,
+                "assigned_to": self.supabase_uid,
+                "cse_name": self.email,
+                "first_assigned_at": timezone.now().isoformat(),
+                "first_assigned_to": self.supabase_uid,
+            },
+        )
+
+        response = self.client.get(self.url, **self.auth_headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["ticket"]["id"], wip.id)
+        self.assertEqual(response.data["ticket"]["resolution_status"], "WIP")
+
+    def test_get_next_ticket_skips_wip_not_yet_due(self):
+        future = (timezone.now() + timedelta(hours=1)).isoformat()
+        Record.objects.create(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data={
+                **dump_data(
+                    user_id="wip_future",
+                    name="WIP Not Due",
+                    support_ticket_type="in_trial",
+                ),
+                "resolution_status": "WIP",
+                "call_attempts": 1,
+                "snooze_until": future,
+                "next_call_at": future,
+                "assigned_to": self.supabase_uid,
+                "cse_name": self.email,
+                "first_assigned_at": timezone.now().isoformat(),
+                "first_assigned_to": self.supabase_uid,
+            },
+        )
+        fresh = _open_record(
+            tenant=self.tenant,
+            user_id="fresh_vs_wip",
+            name="Fresh Open",
+            support_ticket_type="in_trial",
+        )
+
+        response = self.client.get(self.url, **self.auth_headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["ticket"]["id"], fresh.id)
 
     def test_get_next_ticket_skips_snoozed_not_yet_due(self):
         future = (timezone.now() + timedelta(hours=1)).isoformat()
@@ -365,7 +582,11 @@ class GetNextTicketAPITest(BaseAPITestCase):
                 "resolution_status": "Snoozed",
                 "snooze_until": future,
                 "next_call_at": future,
-                "assigned_to": None,
+                "assigned_to": self.supabase_uid,
+                "cse_name": self.email,
+                "call_attempts": 1,
+                "first_assigned_at": timezone.now().isoformat(),
+                "first_assigned_to": self.supabase_uid,
             },
         )
         fresh = _open_record(

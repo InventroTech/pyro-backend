@@ -24,6 +24,27 @@ SAVE_AND_CONTINUE_RESOLUTION_EVENTS = {
 # Stored on ticket/record when Praja dumps a new open support ticket.
 SUPPORT_RESOLUTION_STATUS_OPEN = "Open"
 
+# Terminal resolution statuses — ticket released from active CSE queue.
+SUPPORT_TERMINAL_RESOLUTION_STATUSES = frozenset({
+    "Resolved",
+    "Can't Resolve",
+    "Closed",
+    "Already Resolved",
+    "No Issue",
+    "Not Possible",
+    "Feature Requested",
+})
+
+# Counted as "resolved" for CSE resolve-rate progress (vs tickets taken today).
+SUPPORT_RESOLVE_RATE_SUCCESS_STATUSES = frozenset({
+    "Resolved",
+    "Already Resolved",
+    "No Issue",
+})
+
+# Default resolve-rate goal (%) when CSE KV is unset.
+SUPPORT_DEFAULT_RESOLVE_RATE_GOAL_PERCENT = 80
+
 PRAJA_SAVE_SUPPORT_TICKET_URL = "https://api.thecircleapp.in/pyro/save_support_ticket"
 
 # ``resolution_status`` values that POST to Praja ``save_support_ticket`` after rules run.

@@ -37,6 +37,10 @@ class JobType(models.TextChoices):
     SYNC_DISPATCH_TO_RECORDS = "sync_dispatch_to_records", "Sync Dispatch To Records"
     PROCESS_DUMPED_TICKETS = "process_dumped_tickets", "Process Dumped Support Tickets"
     DISCOVER_ENTITY_TYPES = "discover_entity_types", "Discover Entity Types"
+    REFRESH_INVENTORY_SHIPMENT_TRACKING = (
+        "refresh_inventory_shipment_tracking",
+        "Refresh Inventory Shipment Tracking",
+    )
     # Future job types can be added here:
     # SEND_EMAIL = "send_email", "Send Email"
     # GENERATE_REPORT = "generate_report", "Generate Report"

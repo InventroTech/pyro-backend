@@ -369,6 +369,24 @@ class CSEAssignedMixpanelJobHandler(JobHandler):
                 )
                 return True
 
+            if outcome == "skipped_invalid_user":
+                job.result = {
+                    "success": True,
+                    "skipped": True,
+                    "reason": "invalid_user_422",
+                    "user_id": user_id_int,
+                    "cse_email": cse_email,
+                    "execution_time_seconds": round(execution_time, 3),
+                    "timestamp": ts,
+                }
+                logger.warning(
+                    "CSE assigned event skipped for job %s (invalid user): user_id=%s cse_email=%s",
+                    job.id,
+                    user_id_int,
+                    cse_email,
+                )
+                return True
+
             job.result = {
                 "success": False,
                 "user_id": user_id_int,
@@ -1201,7 +1219,7 @@ class UnassignSnoozedLeadsJobHandler(JobHandler):
         return delays[min(attempt - 1, len(delays) - 1)]
 
 
-# Same CASE body as GetNextLeadView subscription_time_stamp sort SQL.
+# Kept for backwards compatibility / docs; ST stale close now uses Record.created_at.
 _CLOSE_STALE_SUBSCRIPTION_TS_CASE = """
 CASE
     WHEN (data->>'subscription_time_stamp') IS NOT NULL
@@ -1230,18 +1248,10 @@ def _close_stale_self_trial_support_tickets_queryset(
     tenant_id: Optional[Union[str, UUID]] = None,
 ):
     """
-    Base queryset: open SELF TRIAL support ticket records with ``subscription_ts`` from
-    ``subscription_time_stamp`` (same rules as the lead CASE SQL).
+    Base queryset: open SELF TRIAL support ticket records (age measured via created_at).
     """
     qs = (
-        Record.objects.annotate(
-            subscription_ts=RawSQL(
-                f"({_CLOSE_STALE_SUBSCRIPTION_TS_CASE.strip()})",
-                [],
-                output_field=DateTimeField(),
-            )
-        )
-        .filter(entity_type=SUPPORT_TICKET_ENTITY_TYPE)
+        Record.objects.filter(entity_type=SUPPORT_TICKET_ENTITY_TYPE)
         .filter(q_record_self_trial())
         .filter(
             q_record_open_or_snoozed_resolution() | Q(data__resolution_status="WIP")
@@ -1277,18 +1287,17 @@ def _close_stale_self_trial_support_tickets_for_tenant(
 ) -> Tuple[int, str]:
     if days < 1:
         raise ValueError("days must be >= 1")
-    cutoff = (timezone.now() - timedelta(days=days)).date()
+    cutoff = timezone.now() - timedelta(days=days)
     now = timezone.now()
     tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
-    stale_qs = (
-        _close_stale_self_trial_support_tickets_queryset(tid)
-        .filter(subscription_ts__date__lte=cutoff)
+    stale_qs = _close_stale_self_trial_support_tickets_queryset(tid).filter(
+        created_at__lte=cutoff
     )
     records_updated = _close_stale_self_trial_support_tickets_apply(
         stale_qs,
         now=now,
     )
-    return records_updated, cutoff.isoformat()
+    return records_updated, cutoff.date().isoformat()
 
 
 def _close_stale_self_trial_support_tickets_all_tenants(
@@ -1296,17 +1305,95 @@ def _close_stale_self_trial_support_tickets_all_tenants(
 ) -> Tuple[int, int, str]:
     if days < 1:
         raise ValueError("days must be >= 1")
-    cutoff = (timezone.now() - timedelta(days=days)).date()
+    cutoff = timezone.now() - timedelta(days=days)
     now = timezone.now()
     n_tenants = Tenant.objects.count()
     stale_qs = _close_stale_self_trial_support_tickets_queryset(None).filter(
-        subscription_ts__date__lte=cutoff
+        created_at__lte=cutoff
     )
     records_updated = _close_stale_self_trial_support_tickets_apply(
         stale_qs,
         now=now,
     )
-    return records_updated, n_tenants, cutoff.isoformat()
+    return records_updated, n_tenants, cutoff.date().isoformat()
+
+
+_FIRST_ASSIGNED_AT_TS = """
+CASE
+    WHEN (data->>'first_assigned_at') IS NOT NULL
+        AND TRIM(COALESCE(data->>'first_assigned_at', '')) != ''
+        AND LOWER(TRIM(COALESCE(data->>'first_assigned_at', ''))) NOT IN ('null', 'none')
+    THEN (data->>'first_assigned_at')::timestamptz
+    ELSE NULL
+END
+"""
+
+NON_SELF_TRIAL_MAX_DAYS_FROM_FIRST_ASSIGN = 3
+
+
+def _close_stale_non_self_trial_support_tickets_queryset(
+    tenant_id: Optional[Union[str, UUID]] = None,
+):
+    """Non–Self Trial open/snoozed/WIP support tickets."""
+    qs = (
+        Record.objects.annotate(
+            first_assigned_ts=RawSQL(
+                f"({_FIRST_ASSIGNED_AT_TS.strip()})",
+                [],
+                output_field=DateTimeField(),
+            )
+        )
+        .filter(entity_type=SUPPORT_TICKET_ENTITY_TYPE)
+        .filter(
+            q_record_open_or_snoozed_resolution() | Q(data__resolution_status="WIP")
+        )
+    )
+    if tenant_id is not None:
+        tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
+        qs = qs.filter(tenant_id=tid)
+    st_ids = set(qs.filter(q_record_self_trial()).values_list("id", flat=True))
+    if st_ids:
+        qs = qs.exclude(id__in=st_ids)
+    return qs
+
+
+def _close_stale_non_self_trial_by_first_assign_for_tenant(
+    tenant_id: Union[str, UUID],
+    *,
+    days: int = NON_SELF_TRIAL_MAX_DAYS_FROM_FIRST_ASSIGN,
+) -> Tuple[int, str]:
+    if days < 1:
+        raise ValueError("days must be >= 1")
+    cutoff = timezone.now() - timedelta(days=days)
+    now = timezone.now()
+    tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
+    stale_qs = _close_stale_non_self_trial_support_tickets_queryset(tid).filter(
+        first_assigned_ts__lte=cutoff
+    )
+    records_updated = _close_stale_self_trial_support_tickets_apply(
+        stale_qs,
+        now=now,
+    )
+    return records_updated, cutoff.date().isoformat()
+
+
+def _close_stale_non_self_trial_by_first_assign_all_tenants(
+    *,
+    days: int = NON_SELF_TRIAL_MAX_DAYS_FROM_FIRST_ASSIGN,
+) -> Tuple[int, int, str]:
+    if days < 1:
+        raise ValueError("days must be >= 1")
+    cutoff = timezone.now() - timedelta(days=days)
+    now = timezone.now()
+    n_tenants = Tenant.objects.count()
+    stale_qs = _close_stale_non_self_trial_support_tickets_queryset(None).filter(
+        first_assigned_ts__lte=cutoff
+    )
+    records_updated = _close_stale_self_trial_support_tickets_apply(
+        stale_qs,
+        now=now,
+    )
+    return records_updated, n_tenants, cutoff.date().isoformat()
 
 
 class PurgeOldLogTablesJobHandler(JobHandler):
@@ -1503,11 +1590,16 @@ class ProcessDumpedTicketsJobHandler(JobHandler):
 
 class CloseStaleSelfTrialSupportTicketsJobHandler(JobHandler):
     """
-    Set ``data.resolution_status`` to **Closed** for open **SELF TRIAL** support ticket
-    records whose ``subscription_time_stamp`` is at least ``days`` (default 15) in the past.
+    Close expired support tickets in one run:
+
+    - **Self Trial**: ``created_at`` at least ``days`` old (default 15).
+    - **Non–Self Trial**: ``first_assigned_at`` at least ``other_days`` old (default 3).
+
+    Non–Self Trial attempt terminal (5th NC) is handled by RuleSets, not this job.
 
     Payload:
-    - ``days`` (int, optional, default 15): minimum age of subscription timestamp in days.
+    - ``days`` (int, optional, default 15): Self Trial age from ticket creation.
+    - ``other_days`` (int, optional, default 3): non–Self Trial age from first assignment.
     - ``tenant_id`` (str UUID, optional): if set in payload, only that tenant; if omitted,
       uses ``job.tenant_id`` when the job row has a tenant (worker enqueues one job per tenant).
     """
@@ -1518,47 +1610,74 @@ class CloseStaleSelfTrialSupportTicketsJobHandler(JobHandler):
             days = int(payload["days"])
         else:
             days = 15
-        if days < 1:
-            raise ValueError("days must be >= 1")
+        other_days = int(
+            payload.get("other_days", NON_SELF_TRIAL_MAX_DAYS_FROM_FIRST_ASSIGN)
+        )
+        if days < 1 or other_days < 1:
+            raise ValueError("days and other_days must be >= 1")
 
         tid = job.tenant_id or payload.get("tenant_id")
         if tid:
-            records_updated, cutoff = (
-                _close_stale_self_trial_support_tickets_for_tenant(tid, days)
+            st_updated, st_cutoff = _close_stale_self_trial_support_tickets_for_tenant(
+                tid, days
             )
+            other_updated, other_cutoff = (
+                _close_stale_non_self_trial_by_first_assign_for_tenant(
+                    tid, days=other_days
+                )
+            )
+            records_updated = st_updated + other_updated
             job.result = {
                 "success": True,
                 "updated": records_updated,
                 "records_updated": records_updated,
+                "self_trial_updated": st_updated,
+                "other_updated": other_updated,
                 "days": days,
-                "cutoff": cutoff,
+                "other_days": other_days,
+                "self_trial_cutoff": st_cutoff,
+                "other_cutoff": other_cutoff,
                 "tenant_id": str(tid),
                 "tenant_scope": "single",
             }
             logger.info(
-                "[CloseStaleSelfTrialSupportTickets] tenant=%s records=%s days=%s",
+                "[CloseStaleSelfTrialSupportTickets] tenant=%s self_trial=%s other=%s "
+                "days=%s other_days=%s",
                 tid,
-                records_updated,
+                st_updated,
+                other_updated,
                 days,
+                other_days,
             )
         else:
-            records_updated, n_tenants, cutoff = (
+            st_updated, n_tenants, st_cutoff = (
                 _close_stale_self_trial_support_tickets_all_tenants(days)
             )
+            other_updated, _, other_cutoff = (
+                _close_stale_non_self_trial_by_first_assign_all_tenants(days=other_days)
+            )
+            records_updated = st_updated + other_updated
             job.result = {
                 "success": True,
                 "updated": records_updated,
                 "records_updated": records_updated,
+                "self_trial_updated": st_updated,
+                "other_updated": other_updated,
                 "days": days,
-                "cutoff": cutoff,
+                "other_days": other_days,
+                "self_trial_cutoff": st_cutoff,
+                "other_cutoff": other_cutoff,
                 "tenants_processed": n_tenants,
                 "tenant_scope": "all",
             }
             logger.info(
-                "[CloseStaleSelfTrialSupportTickets] all tenants records=%s tenants=%s days=%s",
-                records_updated,
+                "[CloseStaleSelfTrialSupportTickets] all tenants self_trial=%s other=%s "
+                "tenants=%s days=%s other_days=%s",
+                st_updated,
+                other_updated,
                 n_tenants,
                 days,
+                other_days,
             )
         return True
 
@@ -1569,13 +1688,13 @@ class CloseStaleSelfTrialSupportTicketsJobHandler(JobHandler):
     def validate_payload(self, payload: Dict[str, Any]) -> bool:
         try:
             p = payload or {}
-            if "days" in p:
-                days = int(p["days"])
-            else:
-                days = 15
+            days = int(p.get("days", 15))
+            other_days = int(
+                p.get("other_days", NON_SELF_TRIAL_MAX_DAYS_FROM_FIRST_ASSIGN)
+            )
         except (TypeError, ValueError):
             return False
-        return days >= 1
+        return days >= 1 and other_days >= 1
 
 
 class SnoozedToNotConnectedMidnightJobHandler(JobHandler):
@@ -1726,6 +1845,154 @@ class ReleaseLeadsAfter12hJobHandler(JobHandler):
         return delays[min(attempt - 1, len(delays) - 1)]
 
 
+class RefreshInventoryShipmentTrackingJobHandler(JobHandler):
+    """
+    Re-poll carrier status for in-shipping inventory / unmannd requests that still
+    have a tracking number/link and are not yet DELIVERED / EXCEPTION.
+
+    Updates ``data.shipment_status`` (and related fields) when live track returns ok.
+    """
+
+    ENTITY_TYPES = ("inventory_request", "unmannd_request")
+    TERMINAL_SHIPMENT_STATUSES = frozenset({"DELIVERED", "EXCEPTION"})
+    DEFAULT_MAX_PER_RUN = 75
+
+    def process(self, job: BackgroundJob) -> bool:
+        from crm_records.inventory_shipment_live_track import (
+            ShipmentTrackError,
+            track_shipment,
+        )
+
+        payload = job.payload or {}
+        max_per_run = int(payload.get("max_per_run") or self.DEFAULT_MAX_PER_RUN)
+        max_per_run = max(1, min(max_per_run, 200))
+
+        qs = _filter_records_by_job_tenant(
+            Record.objects.filter(entity_type__in=self.ENTITY_TYPES).extra(
+                where=[
+                    "UPPER(COALESCE(data->>'status','')) = 'IN_SHIPPING'",
+                    """
+                    (
+                      TRIM(COALESCE(data->>'tracking_number', '')) != ''
+                      OR TRIM(COALESCE(data->>'tracking_link', '')) != ''
+                    )
+                    """,
+                    """
+                    (
+                      data->>'shipment_status' IS NULL
+                      OR TRIM(COALESCE(data->>'shipment_status', '')) = ''
+                      OR UPPER(TRIM(COALESCE(data->>'shipment_status', '')))
+                         NOT IN ('DELIVERED', 'EXCEPTION')
+                    )
+                    """,
+                ],
+            ),
+            job,
+        ).order_by("updated_at")[:max_per_run]
+
+        checked = 0
+        updated = 0
+        errors = 0
+        unchanged = 0
+
+        for record in qs:
+            checked += 1
+            data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
+            number = str(data.get("tracking_number") or "").strip() or None
+            link = str(data.get("tracking_link") or "").strip() or None
+            courier = str(data.get("courier_name") or "").strip() or None
+            if not number and not link:
+                continue
+            try:
+                result = track_shipment(
+                    tracking_number=number,
+                    tracking_link=link,
+                    courier_name=courier,
+                )
+            except ShipmentTrackError as exc:
+                errors += 1
+                logger.info(
+                    "[RefreshShipmentTracking] skip record_id=%s validation=%s",
+                    record.id,
+                    exc,
+                )
+                continue
+            except Exception:
+                errors += 1
+                logger.exception(
+                    "[RefreshShipmentTracking] track failed record_id=%s",
+                    record.id,
+                )
+                continue
+
+            if not result.get("ok"):
+                unchanged += 1
+                continue
+
+            changed = False
+            new_status = str(result.get("shipment_status") or "").strip().upper().replace(" ", "_")
+            if new_status and new_status != str(data.get("shipment_status") or "").strip().upper().replace(" ", "_"):
+                data["shipment_status"] = new_status
+                changed = True
+
+            new_number = str(result.get("tracking_number") or "").strip()
+            if new_number and new_number != str(data.get("tracking_number") or "").strip():
+                data["tracking_number"] = new_number
+                changed = True
+
+            new_link = str(result.get("tracking_link") or "").strip()
+            if new_link and new_link != str(data.get("tracking_link") or "").strip():
+                data["tracking_link"] = new_link
+                changed = True
+
+            new_courier = str(result.get("courier_name") or "").strip()
+            if new_courier and new_courier != str(data.get("courier_name") or "").strip():
+                data["courier_name"] = new_courier
+                changed = True
+
+            eta_raw = result.get("eta")
+            if eta_raw:
+                new_eta = str(eta_raw).strip()[:10]
+                if new_eta and new_eta != str(data.get("eta") or "").strip()[:10]:
+                    data["eta"] = new_eta
+                    changed = True
+
+            if not changed:
+                unchanged += 1
+                continue
+
+            data["tracking_updated_at"] = timezone.now().isoformat()
+            record.data = data
+            record.save(update_fields=["data", "updated_at"])
+            updated += 1
+            logger.info(
+                "[RefreshShipmentTracking] updated record_id=%s shipment_status=%s",
+                record.id,
+                data.get("shipment_status"),
+            )
+
+        job.result = {
+            "success": True,
+            "checked": checked,
+            "updated": updated,
+            "unchanged": unchanged,
+            "errors": errors,
+            "timestamp": timezone.now().isoformat(),
+        }
+        logger.info(
+            "[RefreshShipmentTracking] Completed checked=%s updated=%s unchanged=%s errors=%s",
+            checked,
+            updated,
+            unchanged,
+            errors,
+        )
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+
 class DiscoverEntityTypesJobHandler(JobHandler):
     """
     Incrementally discover tenant entity types and data fields from records.
@@ -1822,6 +2089,10 @@ class JobHandlerRegistry:
         self.register_handler(
             JobType.DISCOVER_ENTITY_TYPES,
             DiscoverEntityTypesJobHandler(),
+        )
+        self.register_handler(
+            JobType.REFRESH_INVENTORY_SHIPMENT_TRACKING,
+            RefreshInventoryShipmentTrackingJobHandler(),
         )
         # Praja handler removed - now using MixpanelService instead
         self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())

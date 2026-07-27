@@ -91,6 +91,38 @@ class LeadTypeAssignmentSerializer(serializers.Serializer):
         return value
 
 
+class UserCoreKVSettingsPatchSerializer(serializers.Serializer):
+    """PATCH body for CSE support daily limits / resolve-rate goal on core-kv-settings."""
+
+    support_daily_limit_self_trial = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        min_value=0,
+        help_text="Max fresh Self Trial tickets per day; null clears the cap",
+    )
+    support_daily_limit_other = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        min_value=0,
+        help_text="Max fresh non–Self Trial tickets per day; null clears the cap",
+    )
+    support_resolve_rate_goal = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        min_value=0,
+        max_value=100,
+        help_text="Overall resolve-rate goal percent (0–100); null clears",
+    )
+
+    def validate(self, attrs):
+        if not attrs:
+            raise serializers.ValidationError(
+                "Provide at least one of support_daily_limit_self_trial, "
+                "support_daily_limit_other, support_resolve_rate_goal"
+            )
+        return attrs
+
+
 class GroupSerializer(serializers.ModelSerializer):
     """Serializer for tenant groups."""
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 from django.core.cache import cache
 
@@ -18,23 +18,46 @@ class BucketAssignmentView:
     filter_conditions: dict
 
 
+def _matches_entity_type(filter_conditions: dict, entity_type: Optional[str]) -> bool:
+    """
+    When ``entity_type`` is None, include all buckets.
+    For ``lead``: include buckets with no entity_type (legacy sales) or entity_type=lead.
+    For other types: require an exact match on filter_conditions.entity_type.
+    """
+    if entity_type is None:
+        return True
+    fc_type = (filter_conditions or {}).get("entity_type")
+    if entity_type == "lead":
+        return fc_type in (None, "", "lead")
+    return fc_type == entity_type
+
+
 class BucketResolver:
     """
     Loads bucket assignments ordered by priority.
 
     Prefers **tenant-wide** rows (``user`` is NULL). If none exist, falls back to
     per-``TenantMembership`` rows (legacy).
+
+    Optional ``entity_type`` filters which buckets apply (sales vs support).
     """
 
     CACHE_TTL_SECONDS = 300
 
-    def resolve(self, tenant, user: ResolvedUser) -> List[BucketAssignmentView]:
+    def resolve(
+        self,
+        tenant,
+        user: ResolvedUser,
+        *,
+        entity_type: Optional[str] = None,
+    ) -> List[BucketAssignmentView]:
         membership = user.membership
         if not membership:
             return []
 
-        tenant_key = f"bucket_assignments_tenant:{tenant.id}:v4"
-        legacy_key = f"bucket_assignments:{tenant.id}:{membership.id}:v2"
+        entity_suffix = entity_type or "all"
+        tenant_key = f"bucket_assignments_tenant:{tenant.id}:v5:{entity_suffix}"
+        legacy_key = f"bucket_assignments:{tenant.id}:{membership.id}:v3:{entity_suffix}"
 
         cached = cache.get(tenant_key)
         if cached is not None:
@@ -52,7 +75,7 @@ class BucketResolver:
         )
 
         if tenant_qs.exists():
-            result = self._to_views(tenant_qs)
+            result = self._to_views(tenant_qs, entity_type=entity_type)
             cache.set(tenant_key, result, self.CACHE_TTL_SECONDS)
             return result
 
@@ -70,20 +93,24 @@ class BucketResolver:
             .select_related("bucket")
             .order_by("priority")
         )
-        result = self._to_views(legacy_qs)
+        result = self._to_views(legacy_qs, entity_type=entity_type)
         cache.set(legacy_key, result, self.CACHE_TTL_SECONDS)
         return result
 
     @staticmethod
-    def _to_views(assignments) -> List[BucketAssignmentView]:
-        return [
-            BucketAssignmentView(
-                pk=a.pk,
-                bucket_slug=a.bucket.slug,
-                priority=a.priority,
-                pull_strategy=dict(a.pull_strategy or {}),
-                filter_conditions=dict(a.bucket.filter_conditions or {}),
+    def _to_views(assignments, *, entity_type: Optional[str] = None) -> List[BucketAssignmentView]:
+        views: List[BucketAssignmentView] = []
+        for a in assignments:
+            fc = dict(a.bucket.filter_conditions or {})
+            if not _matches_entity_type(fc, entity_type):
+                continue
+            views.append(
+                BucketAssignmentView(
+                    pk=a.pk,
+                    bucket_slug=a.bucket.slug,
+                    priority=a.priority,
+                    pull_strategy=dict(a.pull_strategy or {}),
+                    filter_conditions=fc,
+                )
             )
-            for a in assignments
-        ]
-
+        return views

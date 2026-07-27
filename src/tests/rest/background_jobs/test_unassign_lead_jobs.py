@@ -338,7 +338,7 @@ class SnoozedToNotConnectedMidnightJobHandlerTests(TestCase):
 
 
 class CloseStaleSelfTrialSupportTicketsJobHandlerTests(TestCase):
-    """Close stale open SELF TRIAL support ticket records past subscription_time_stamp cutoff."""
+    """Close stale open SELF TRIAL support ticket records past created_at cutoff."""
 
     def setUp(self):
         super().setUp()
@@ -352,16 +352,17 @@ class CloseStaleSelfTrialSupportTicketsJobHandlerTests(TestCase):
             payload=payload if payload is not None else {},
         )
 
-    def test_closes_when_self_trial_subscription_stale(self):
-        sub_ts = (timezone.now() - timedelta(days=20)).isoformat()
+    def test_closes_when_self_trial_created_at_stale(self):
         record = RecordFactory(
             tenant=self.tenant,
             entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data={
                 "user_id": "stale_user",
                 "support_ticket_type": "SELF TRIAL",
-                "subscription_time_stamp": sub_ts,
             },
+        )
+        Record.objects.filter(pk=record.pk).update(
+            created_at=timezone.now() - timedelta(days=20)
         )
         job = self._make_job()
         self.assertTrue(self.handler.process(job))
@@ -372,15 +373,16 @@ class CloseStaleSelfTrialSupportTicketsJobHandlerTests(TestCase):
         self.assertEqual(job.result["records_updated"], 1)
         self.assertEqual(job.result["tenant_scope"], "single")
 
-    def test_skips_when_subscription_not_old_enough(self):
-        sub_ts = (timezone.now() - timedelta(days=10)).isoformat()
+    def test_skips_when_created_at_not_old_enough(self):
         record = RecordFactory(
             tenant=self.tenant,
             entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data={
                 "support_ticket_type": "SELF TRIAL",
-                "subscription_time_stamp": sub_ts,
             },
+        )
+        Record.objects.filter(pk=record.pk).update(
+            created_at=timezone.now() - timedelta(days=10)
         )
         job = self._make_job({"days": 15})
         self.assertTrue(self.handler.process(job))
@@ -389,14 +391,15 @@ class CloseStaleSelfTrialSupportTicketsJobHandlerTests(TestCase):
         self.assertEqual(job.result["updated"], 0)
 
     def test_skips_when_ticket_type_not_self_trial(self):
-        sub_ts = (timezone.now() - timedelta(days=20)).isoformat()
         record = RecordFactory(
             tenant=self.tenant,
             entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data={
                 "support_ticket_type": "in_trial",
-                "subscription_time_stamp": sub_ts,
             },
+        )
+        Record.objects.filter(pk=record.pk).update(
+            created_at=timezone.now() - timedelta(days=20)
         )
         job = self._make_job()
         self.assertTrue(self.handler.process(job))
@@ -405,15 +408,16 @@ class CloseStaleSelfTrialSupportTicketsJobHandlerTests(TestCase):
         self.assertEqual(job.result["updated"], 0)
 
     def test_skips_when_already_closed(self):
-        sub_ts = (timezone.now() - timedelta(days=20)).isoformat()
         record = RecordFactory(
             tenant=self.tenant,
             entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data={
                 "support_ticket_type": "SELF TRIAL",
                 "resolution_status": "Closed",
-                "subscription_time_stamp": sub_ts,
             },
+        )
+        Record.objects.filter(pk=record.pk).update(
+            created_at=timezone.now() - timedelta(days=20)
         )
         job = self._make_job()
         self.assertTrue(self.handler.process(job))
@@ -423,13 +427,11 @@ class CloseStaleSelfTrialSupportTicketsJobHandlerTests(TestCase):
 
     def test_single_tenant_payload_only_updates_that_tenant(self):
         other = TenantFactory()
-        old_sub = (timezone.now() - timedelta(days=20)).isoformat()
         ours = RecordFactory(
             tenant=self.tenant,
             entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data={
                 "support_ticket_type": "SELF TRIAL",
-                "subscription_time_stamp": old_sub,
             },
         )
         theirs = RecordFactory(
@@ -437,8 +439,10 @@ class CloseStaleSelfTrialSupportTicketsJobHandlerTests(TestCase):
             entity_type=SUPPORT_TICKET_ENTITY_TYPE,
             data={
                 "support_ticket_type": "SELF TRIAL",
-                "subscription_time_stamp": old_sub,
             },
+        )
+        Record.objects.filter(pk__in=[ours.pk, theirs.pk]).update(
+            created_at=timezone.now() - timedelta(days=20)
         )
         job = self._make_job({"tenant_id": str(self.tenant.id), "days": 15})
         self.assertTrue(self.handler.process(job))
@@ -448,11 +452,45 @@ class CloseStaleSelfTrialSupportTicketsJobHandlerTests(TestCase):
         self.assertIsNone(theirs.data.get("resolution_status"))
         self.assertEqual(job.result["updated"], 1)
 
+    def test_closes_non_self_trial_when_first_assigned_older_than_3_days(self):
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data={
+                "support_ticket_type": "in_trial",
+                "resolution_status": "Snoozed",
+                "call_attempts": 1,
+                "first_assigned_at": (timezone.now() - timedelta(days=4)).isoformat(),
+            },
+        )
+        job = self._make_job({"other_days": 3})
+        self.assertTrue(self.handler.process(job))
+        record.refresh_from_db()
+        self.assertEqual(record.data.get("resolution_status"), "Closed")
+        self.assertEqual(job.result["other_updated"], 1)
+
+    def test_skips_non_self_trial_when_only_attempts_high(self):
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type=SUPPORT_TICKET_ENTITY_TYPE,
+            data={
+                "support_ticket_type": "in_trial",
+                "resolution_status": "Open",
+                "call_attempts": 5,
+                "first_assigned_at": timezone.now().isoformat(),
+            },
+        )
+        job = self._make_job()
+        self.assertTrue(self.handler.process(job))
+        record.refresh_from_db()
+        self.assertEqual(record.data.get("resolution_status"), "Open")
+        self.assertEqual(job.result["other_updated"], 0)
+
     def test_validate_payload_rejects_non_positive_days(self):
         self.assertFalse(self.handler.validate_payload({"days": 0}))
+        self.assertFalse(self.handler.validate_payload({"other_days": 0}))
         self.assertTrue(self.handler.validate_payload({"days": 1}))
         self.assertTrue(self.handler.validate_payload({}))
-
 
 class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
     """Tests for ReleaseLeadsAfter12hJobHandler: NOT_CONNECTED + 12h since first_assigned_today_at."""

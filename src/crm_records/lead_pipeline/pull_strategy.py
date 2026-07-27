@@ -19,7 +19,10 @@ _JSON_TS = """
     END
 """
 _NEXT_CALL_AT_TS = _JSON_TS.format(key="next_call_at")
-_DAY_FIELDS = frozenset({"created_at"})
+# Model columns or JSON timestamptz keys usable with day(...)
+_DAY_MODEL_FIELDS = frozenset({"created_at"})
+_DAY_JSON_FIELDS = frozenset({"first_assigned_at"})
+_DAY_FIELDS = _DAY_MODEL_FIELDS | _DAY_JSON_FIELDS
 
 
 def _parse_order_token(token: str) -> tuple[bool, str, str] | None:
@@ -55,7 +58,8 @@ class PullStrategyApplier:
     """
     Applies next-call filter and ORDER BY from ``pull_strategy``.
 
-    ``order``: sort keys (``-`` prefix = descending). Day bucketing: ``day(created_at)`` only.
+    ``order``: sort keys (``-`` prefix = descending). Day bucketing: ``day(created_at)``
+    or ``day(first_assigned_at)`` (JSON timestamptz).
     ``include_snoozed_due``: when true, due SNOOZED rows sort first (prepends ``is_expired_snoozed`` unless already in ``order``).
     """
 
@@ -71,8 +75,16 @@ class PullStrategyApplier:
         )
     """
 
-    def apply(self, *, qs: QuerySet, strategy: dict, now_iso: str) -> QuerySet:
-        qs = qs.extra(where=[self._NEXT_CALL_READY_WHERE])
+    def apply(
+        self,
+        *,
+        qs: QuerySet,
+        strategy: dict,
+        now_iso: str,
+        require_next_call_ready: bool = True,
+    ) -> QuerySet:
+        if require_next_call_ready:
+            qs = qs.extra(where=[self._NEXT_CALL_READY_WHERE])
         tokens = _resolve_order_tokens(strategy)
         return self._apply_order_list(
             qs,
@@ -177,6 +189,20 @@ def _day_timezone(strategy: dict) -> str:
 
 def _day_sql(field: str, tz: str) -> str:
     if field not in _DAY_FIELDS:
-        raise ValueError(f"day() only supports created_at, got: {field}")
+        raise ValueError(
+            f"day() only supports created_at or first_assigned_at, got: {field}"
+        )
     safe_tz = tz.replace("'", "''")
-    return f"(timezone('{safe_tz}', created_at))::date"
+    if field in _DAY_MODEL_FIELDS:
+        return f"(timezone('{safe_tz}', created_at))::date"
+    # JSON timestamptz (e.g. first_assigned_at)
+    return (
+        f"(timezone('{safe_tz}', "
+        f"CASE "
+        f"WHEN (data->>'{field}') IS NOT NULL "
+        f"AND TRIM(COALESCE(data->>'{field}', '')) != '' "
+        f"AND LOWER(TRIM(COALESCE(data->>'{field}', ''))) NOT IN ('null', 'none') "
+        f"THEN (data->>'{field}')::timestamptz "
+        f"ELSE NULL END"
+        f"))::date"
+    )

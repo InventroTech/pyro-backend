@@ -621,16 +621,48 @@ def test_pull_strategy_created_at_day_beats_older_day_higher_score():
 
 
 @pytest.mark.django_db
-def test_pull_strategy_day_rejects_non_created_at_field():
+def test_pull_strategy_day_rejects_unsupported_field():
     tenant = TenantFactory()
     qs = Record.objects.filter(tenant=tenant, entity_type="lead")
     applier = PullStrategyApplier()
-    with pytest.raises(ValueError, match="day\\(\\) only supports created_at"):
+    with pytest.raises(ValueError, match="day\\(\\) only supports"):
         applier.apply(
             qs=qs,
             strategy={"order": ["-day(subscription_time_stamp)"], "ignore_score_for_sources": []},
             now_iso=timezone.now().isoformat(),
         )
+
+
+@pytest.mark.django_db
+def test_pull_strategy_order_day_first_assigned_at():
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    older_assign = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data={"first_assigned_at": (now - timedelta(days=2)).isoformat(), "call_attempts": 0},
+    )
+    newer_assign = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data={"first_assigned_at": (now - timedelta(hours=1)).isoformat(), "call_attempts": 0},
+    )
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[older_assign.id, newer_assign.id]
+    )
+    applier = PullStrategyApplier()
+    ordered = applier.apply(
+        qs=qs,
+        strategy={
+            "order": ["-day(first_assigned_at)", "call_attempts", "-created_at"],
+            "day_timezone": "UTC",
+            "ignore_score_for_sources": [],
+        },
+        now_iso=now.isoformat(),
+    )
+    assert ordered.first().id == newer_assign.id
 
 
 # ===================================================================
