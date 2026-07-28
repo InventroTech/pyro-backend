@@ -2129,6 +2129,10 @@ class JobHandlerRegistry:
         """Check if a handler exists for a job type"""
         return job_type in self._handlers
 
+    def list_handlers(self) -> list:
+        """Return registered job type keys."""
+        return list(self._handlers.keys())
+
 
 # Global registry instance
 _handler_registry = JobHandlerRegistry()
