@@ -17,6 +17,7 @@ from .serializers import (
 )
 from .services import (
     coerce_kv_int,
+    count_available_fresh_leads_for_group,
     fresh_leads_counts_for_groups,
     get_lead_filter_options,
     upsert_user_kv_settings,
@@ -587,8 +588,7 @@ class MyLeadGroupSummaryView(APIView):
         if group_id is not None:
             group = Group.objects.filter(tenant=tenant, id=group_id).first()
             if group:
-                fresh_counts = fresh_leads_counts_for_groups(tenant, [group])
-                fresh_leads_count = fresh_counts.get(group.id)
+                fresh_leads_count = count_available_fresh_leads_for_group(tenant, group)
 
         return Response(
             {
