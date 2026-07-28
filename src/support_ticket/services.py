@@ -397,6 +397,22 @@ class CSEAssignedMixpanelService:
                     )
                     return "skipped_not_found"
 
+                if response.status_code == 422:
+                    try:
+                        error_data = (
+                            response_json if isinstance(response_json, dict) else response.json()
+                        )
+                    except Exception:
+                        error_data = {}
+                    if isinstance(error_data, dict) and error_data.get("error") == "Invalid user":
+                        logger.warning(
+                            "[Mixpanel] cse_assigned skipped (422 invalid user): "
+                            "user_id=%s cse_email=%s",
+                            user_id_int,
+                            cse_email,
+                        )
+                        return "skipped_invalid_user"
+
                 if response.status_code == 401:
                     logger.error(
                         "[Mixpanel] Failed: cse_assigned status=401 Unauthorized (check MIXPANEL_TOKEN)"
@@ -408,7 +424,10 @@ class CSEAssignedMixpanelService:
                     )
                 else:
                     try:
-                        details = json.dumps(response.json(), default=str)
+                        details = json.dumps(
+                            response_json if isinstance(response_json, dict) else response.json(),
+                            default=str,
+                        )
                     except Exception:
                         details = response.text[:200]
                     logger.error(
