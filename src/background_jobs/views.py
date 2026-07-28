@@ -3,25 +3,148 @@ API views for background job management.
 
 Provides endpoints for monitoring and managing background jobs.
 """
+import logging
+from datetime import timedelta
+
+from django.utils import timezone
+from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse
 from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from django.utils import timezone
-from datetime import timedelta
-from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample
+
 from authz.permissions import IsTenantAuthenticated
+from config.supabase_auth import SupabaseJWTAuthentication
+from core.models import Tenant
 from core.pagination import MetaPageNumberPagination
-from .models import BackgroundJob, JobStatus
+
+from .models import BackgroundJob, JobStatus, JobType
 from .queue_service import get_queue_service
 
 
-class JobQueueStatusView(APIView):
+# Manual enqueue must not accept arbitrary pickled callables.
+_MANUAL_ENQUEUE_BLOCKED_TYPES = frozenset({JobType.EXECUTE_FUNCTION})
+_CROSS_TENANT_ROLE_KEYS = frozenset({"PYRO_ADMIN", "GM", "ASM", "OWNER", "ADMIN"})
+logger = logging.getLogger(__name__)
+
+
+class _TenantJobAPIView(APIView):
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated]
+
+
+def _current_tenant_id(request):
+    if hasattr(request, "tenant") and request.tenant:
+        return str(request.tenant.id)
+    return None
+
+
+def _can_override_tenant(request):
+    role_key = str(getattr(request.user, "role_key", "") or "").strip().upper()
+    if role_key in _CROSS_TENANT_ROLE_KEYS:
+        return True
+
+    # Fallback: permissions may have authenticated via membership without
+    # populating role_key on the user object.
+    tenant = getattr(request, "tenant", None)
+    user = getattr(request, "user", None)
+    supabase_uid = getattr(user, "supabase_uid", None) if user else None
+    if not tenant or not supabase_uid:
+        return False
+
+    from authz.models import TenantMembership
+
+    membership = (
+        TenantMembership.objects.filter(
+            tenant=tenant,
+            user_id=supabase_uid,
+            is_active=True,
+        )
+        .select_related("role")
+        .first()
+    )
+    if not membership or not membership.role:
+        return False
+    role_key = str(membership.role.key or "").strip().upper()
+    if hasattr(request, "user") and request.user is not None:
+        request.user.role_key = membership.role.key
+    return role_key in _CROSS_TENANT_ROLE_KEYS
+
+
+def _resolve_requested_tenant_id(request):
+    tenant_id = request.query_params.get("tenant_id")
+    if tenant_id is None and hasattr(request, "data"):
+        tenant_id = request.data.get("tenant_id")
+    if tenant_id in (None, ""):
+        return None, None
+
+    tenant_id = str(tenant_id).strip()
+    try:
+        tenant = Tenant.objects.only("id", "slug", "name").get(id=tenant_id)
+    except Tenant.DoesNotExist:
+        return None, Response(
+            {"error": f"Tenant with id {tenant_id} not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    except (TypeError, ValueError):
+        return None, Response(
+            {"error": f"Invalid tenant_id format: {tenant_id}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return tenant, None
+
+
+def _get_job_for_manual_control(request, job_id, requested_tenant=None):
+    """
+    Resolve a background job for detail/rerun.
+
+    Privileged roles can look up by job ID across tenants when no explicit
+    tenant_id is provided. Non-privileged users remain scoped to request.tenant.
+    """
+    if requested_tenant and not _can_override_tenant(request):
+        return None, Response(
+            {"error": "You do not have permission to access jobs for another tenant"},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    if requested_tenant:
+        try:
+            job = BackgroundJob.objects.get(pk=job_id, tenant_id=requested_tenant.id)
+            return job, None
+        except BackgroundJob.DoesNotExist:
+            return None, Response(
+                {"error": "Job not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+    if _can_override_tenant(request):
+        try:
+            job = BackgroundJob.objects.get(pk=job_id)
+            return job, None
+        except BackgroundJob.DoesNotExist:
+            return None, Response(
+                {"error": "Job not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+    tenant_id = _current_tenant_id(request)
+    queryset = BackgroundJob.objects.all()
+    if tenant_id:
+        queryset = queryset.filter(tenant_id=tenant_id)
+    try:
+        job = queryset.get(pk=job_id)
+        return job, None
+    except BackgroundJob.DoesNotExist:
+        return None, Response(
+            {"error": "Job not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+
+class JobQueueStatusView(_TenantJobAPIView):
     """
     API endpoint for checking job queue status.
     GET /jobs/status/ - Get queue statistics
     """
-    permission_classes = [IsTenantAuthenticated]
-
     @extend_schema(
         summary="Get job queue status",
         description="Returns statistics about the job queue including pending, "
@@ -66,13 +189,11 @@ class JobQueueStatusView(APIView):
         return Response(stats)
 
 
-class JobDetailView(APIView):
+class JobDetailView(_TenantJobAPIView):
     """
     API endpoint for viewing job details.
     GET /jobs/<job_id>/ - Get job details
     """
-    permission_classes = [IsTenantAuthenticated]
-
     @extend_schema(
         summary="Get job details",
         description="Returns detailed information about a specific job including "
@@ -104,34 +225,34 @@ class JobDetailView(APIView):
         tags=["Background Jobs"]
     )
     def get(self, request, job_id):
-        tenant_id = None
-        if hasattr(request, 'tenant') and request.tenant:
-            tenant_id = str(request.tenant.id)
-        
-        try:
-            queryset = BackgroundJob.objects.all()
-            if tenant_id:
-                queryset = queryset.filter(tenant_id=tenant_id)
-            
-            job = queryset.get(pk=job_id)
-            queue_service = get_queue_service()
-            job_status = queue_service.get_job_status(job.id)
-            
-            return Response(job_status)
-        except BackgroundJob.DoesNotExist:
-            return Response(
-                {"error": "Job not found"},
-                status=status.HTTP_404_NOT_FOUND
-            )
+        tenant_id = _current_tenant_id(request)
+        requested_tenant, tenant_error = _resolve_requested_tenant_id(request)
+        if tenant_error:
+            return tenant_error
+
+        job, error = _get_job_for_manual_control(request, job_id, requested_tenant)
+        if error:
+            return error
+
+        logger.info(
+            "Job detail lookup job_id=%s resolved_job_tenant=%s request_tenant=%s role=%s can_override=%s",
+            job_id,
+            job.tenant_id,
+            tenant_id,
+            getattr(request.user, "role_key", None),
+            _can_override_tenant(request),
+        )
+
+        queue_service = get_queue_service()
+        job_status = queue_service.get_job_status(job.id)
+        return Response(job_status)
 
 
-class RetryJobView(APIView):
+class RetryJobView(_TenantJobAPIView):
     """
     API endpoint for manually retrying failed jobs.
     POST /jobs/<job_id>/retry/ - Retry a failed job
     """
-    permission_classes = [IsTenantAuthenticated]
-
     @extend_schema(
         summary="Retry a failed job",
         description="Manually retry a failed or retrying job by resetting it to pending status.",
@@ -191,6 +312,7 @@ class FailedJobsView(generics.ListAPIView):
     API endpoint for listing failed jobs.
     GET /jobs/failed/ - List failed jobs with pagination
     """
+    authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
     pagination_class = MetaPageNumberPagination
 
@@ -296,13 +418,11 @@ class FailedJobsView(generics.ListAPIView):
         return Response(jobs_data)
 
 
-class BulkRetryJobsView(APIView):
+class BulkRetryJobsView(_TenantJobAPIView):
     """
     API endpoint for bulk retrying failed jobs.
     POST /jobs/bulk-retry/ - Retry multiple failed jobs
     """
-    permission_classes = [IsTenantAuthenticated]
-
     @extend_schema(
         summary="Bulk retry failed jobs",
         description="Manually retry multiple failed or retrying jobs by resetting them to pending status.",
@@ -381,3 +501,212 @@ class BulkRetryJobsView(APIView):
         })
 
 
+class JobTypesView(_TenantJobAPIView):
+    """
+    List registered job types that can be manually enqueued.
+    GET /jobs/types/
+    """
+    @extend_schema(
+        summary="List runnable job types",
+        description="Returns registered background job types available for manual enqueue.",
+        responses={200: OpenApiResponse(description="Job type list")},
+        tags=["Background Jobs"],
+    )
+    def get(self, request):
+        queue_service = get_queue_service()
+        job_types = [
+            jt
+            for jt in queue_service.list_job_types()
+            if jt not in _MANUAL_ENQUEUE_BLOCKED_TYPES
+        ]
+        return Response({"job_types": job_types})
+
+
+class EnqueueJobView(_TenantJobAPIView):
+    """
+    Manually enqueue a new background job.
+    POST /jobs/enqueue/
+    """
+    @extend_schema(
+        summary="Manually enqueue a background job",
+        description=(
+            "Create a PENDING job of any registered type with a custom payload. "
+            "Workers pick it up like a normal job. "
+            "Example: send_cse_assigned_event or send_to_praja / save_resolved_ticket."
+        ),
+        request={
+            "application/json": {
+                "type": "object",
+                "properties": {
+                    "job_type": {"type": "string", "example": "send_cse_assigned_event"},
+                    "payload": {
+                        "type": "object",
+                        "example": {
+                            "user_id": 3181247,
+                            "cse_email": "cse@example.com",
+                        },
+                    },
+                    "priority": {"type": "integer", "default": 0},
+                    "max_attempts": {"type": "integer", "default": 3},
+                },
+                "required": ["job_type", "payload"],
+            }
+        },
+        responses={
+            201: OpenApiResponse(description="Job enqueued"),
+            400: OpenApiResponse(description="Invalid job type or payload"),
+        },
+        tags=["Background Jobs"],
+    )
+    def post(self, request):
+        job_type = request.data.get("job_type")
+        payload = request.data.get("payload")
+        priority = request.data.get("priority", 0)
+        max_attempts = request.data.get("max_attempts", 3)
+        requested_tenant, tenant_error = _resolve_requested_tenant_id(request)
+        if tenant_error:
+            return tenant_error
+
+        if not job_type or not isinstance(job_type, str):
+            return Response(
+                {"error": "job_type is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not isinstance(payload, dict):
+            return Response(
+                {"error": "payload must be a JSON object"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if job_type in _MANUAL_ENQUEUE_BLOCKED_TYPES:
+            return Response(
+                {"error": f"Manual enqueue of job type '{job_type}' is not allowed"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            priority = int(priority)
+            max_attempts = int(max_attempts)
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "priority and max_attempts must be integers"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if max_attempts < 1:
+            return Response(
+                {"error": "max_attempts must be >= 1"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        tenant_id = _current_tenant_id(request)
+        if requested_tenant:
+            if not _can_override_tenant(request):
+                return Response(
+                    {"error": "You do not have permission to enqueue jobs for another tenant"},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            tenant_id = str(requested_tenant.id)
+
+        queue_service = get_queue_service()
+        try:
+            job = queue_service.enqueue_job(
+                job_type=job_type,
+                payload=payload,
+                priority=priority,
+                tenant_id=tenant_id,
+                max_attempts=max_attempts,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        logger.info(
+            "Manual enqueue created job_id=%s tenant_id=%s request_tenant=%s role=%s",
+            job.id,
+            job.tenant_id,
+            _current_tenant_id(request),
+            getattr(request.user, "role_key", None),
+        )
+
+        return Response(
+            {
+                "id": job.id,
+                "job_type": job.job_type,
+                "status": job.status,
+                "priority": job.priority,
+                "payload": job.payload,
+                "tenant_id": str(job.tenant_id) if job.tenant_id else None,
+                "message": "Job enqueued",
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class RerunJobView(_TenantJobAPIView):
+    """
+    Clone any existing job (including COMPLETED) as a new PENDING job.
+    POST /jobs/<job_id>/rerun/
+    """
+    @extend_schema(
+        summary="Re-run an existing background job",
+        description=(
+            "Creates a new PENDING job with the same type and payload as the source job. "
+            "Works for COMPLETED, FAILED, or any other status. Original job is unchanged."
+        ),
+        responses={
+            201: OpenApiResponse(description="Job requeued"),
+            400: OpenApiResponse(description="Cannot requeue"),
+            404: OpenApiResponse(description="Job not found"),
+        },
+        tags=["Background Jobs"],
+    )
+    def post(self, request, job_id):
+        tenant_id = _current_tenant_id(request)
+        requested_tenant, tenant_error = _resolve_requested_tenant_id(request)
+        if tenant_error:
+            return tenant_error
+
+        source, error = _get_job_for_manual_control(request, job_id, requested_tenant)
+        if error:
+            return error
+
+        if source.job_type in _MANUAL_ENQUEUE_BLOCKED_TYPES:
+            return Response(
+                {
+                    "error": (
+                        f"Manual re-run of job type '{source.job_type}' is not allowed"
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        queue_service = get_queue_service()
+        try:
+            job = queue_service.requeue_job(source.id)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except BackgroundJob.DoesNotExist:
+            return Response(
+                {"error": "Job not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        logger.info(
+            "Manual rerun source_job_id=%s new_job_id=%s source_tenant=%s request_tenant=%s role=%s",
+            source.id,
+            job.id,
+            source.tenant_id,
+            tenant_id,
+            getattr(request.user, "role_key", None),
+        )
+
+        return Response(
+            {
+                "id": job.id,
+                "source_job_id": source.id,
+                "job_type": job.job_type,
+                "status": job.status,
+                "payload": job.payload,
+                "tenant_id": str(job.tenant_id) if job.tenant_id else None,
+                "message": "Job requeued",
+            },
+            status=status.HTTP_201_CREATED,
+        )

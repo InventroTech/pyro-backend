@@ -98,6 +98,7 @@ class QueueService:
             "id": job.id,
             "job_type": job.job_type,
             "status": job.status,
+            "tenant_id": str(job.tenant_id) if job.tenant_id else None,
             "priority": job.priority,
             "attempts": job.attempts,
             "max_attempts": job.max_attempts,
@@ -106,6 +107,7 @@ class QueueService:
             "scheduled_at": job.scheduled_at.isoformat() if job.scheduled_at else None,
             "last_error": job.last_error,
             "result": job.result,
+            "payload": job.payload,
             "locked_by": job.locked_by,
             "locked_at": job.locked_at.isoformat() if job.locked_at else None,
         }
@@ -147,6 +149,51 @@ class QueueService:
         logger.info(f"Manually retrying job {job_id}")
         
         return job
+
+    def requeue_job(
+        self,
+        job_id: int,
+        *,
+        priority: Optional[int] = None,
+        max_attempts: Optional[int] = None,
+    ) -> BackgroundJob:
+        """
+        Clone an existing job (any status) as a new PENDING job with the same
+        type/payload. Use this to manually re-run completed or failed jobs
+        without mutating the original row.
+        """
+        source = BackgroundJob.objects.get(pk=job_id)
+        if not self._handler_registry.has_handler(source.job_type):
+            raise ValueError(
+                f"Cannot requeue job {job_id}: no handler for type {source.job_type}"
+            )
+
+        handler = self._handler_registry.get_handler(source.job_type)
+        payload = dict(source.payload or {})
+        if hasattr(handler, "validate_payload") and not handler.validate_payload(payload):
+            raise ValueError(
+                f"Cannot requeue job {job_id}: payload invalid for type {source.job_type}"
+            )
+
+        job = BackgroundJob.objects.create(
+            job_type=source.job_type,
+            status=JobStatus.PENDING,
+            priority=source.priority if priority is None else priority,
+            payload=payload,
+            tenant_id=source.tenant_id,
+            max_attempts=max_attempts or source.max_attempts or 3,
+        )
+        logger.info(
+            "Manually requeued job %s as new job %s (type=%s)",
+            job_id,
+            job.id,
+            source.job_type,
+        )
+        return job
+
+    def list_job_types(self) -> list:
+        """Return registered job types available for manual enqueue."""
+        return sorted(self._handler_registry.list_handlers())
     
     def queue_function(
         self,
