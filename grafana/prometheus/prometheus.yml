@@ -1,0 +1,16 @@
+# Scrape pyro-backend /metrics (local Django on the host).
+# For staging/prod, add a job in prometheus.remote.yml.example or edit this file.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: pyro-backend
+    metrics_path: /metrics
+    scrape_interval: 10s
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          env: local
+          service: pyro-backend
