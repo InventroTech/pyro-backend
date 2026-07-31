@@ -45,7 +45,8 @@ urlpatterns = [
     path('openai/', include('openai_api.urls')),
     path('email/', include('email_protocol.urls')),
     path('whatsapp/', include('whatsapp.urls')),
-    
+    path('chat/', include('chatbot.urls')),
+
     # Top-level entity endpoint (from crm_records)
     path('entity/', PrajaLeadsAPIView.as_view(), name='entity-api'),
     path('entity/support_ticket/', SupportTicketEntityAPIView.as_view(), name='entity-support-ticket-api'),

@@ -75,6 +75,7 @@ INSTALLED_APPS = [
     'whatsapp',
     'pages',
     'pyro_jobs',
+    'chatbot',
     'channels',
     'realtime',
 ]
