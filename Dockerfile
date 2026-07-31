@@ -18,7 +18,8 @@ RUN pip install --upgrade pip setuptools wheel && \
 # Copy app code ./src code to container's /app
 COPY ./src /app
 
-ENV DJANGO_SETTINGS_MODULE=config.settings
+ENV DJANGO_SETTINGS_MODULE=config.settings \
+    PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc
 
 # Placeholders only for image build; Render injects real secrets at runtime.
 RUN DJANGO_SECRET_KEY=collectstatic-build-placeholder \

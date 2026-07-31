@@ -24,12 +24,14 @@ from drf_spectacular.views import (
 )
 from crm_records.views import PrajaLeadsAPIView, PrajaLeadEntityBackfillAPIView
 from support_ticket.views import SupportTicketEntityAPIView
+from middleware.prometheus_metrics import metrics_view
 
 def trigger_error(request):
     division_by_zero = 1 / 0
 
 
 urlpatterns = [
+    path('metrics', metrics_view, name='prometheus-metrics'),
     path('admin/', admin.site.urls),
     path('analytics/', include('analytics.urls')),
     path('auth/', include('authentication.urls')),

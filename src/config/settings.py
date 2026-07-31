@@ -80,6 +80,8 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # First so process_request starts the timer early and process_response finishes last.
+    'middleware.prometheus_metrics.PrometheusMetricsMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.middleware.security.SecurityMiddleware',
@@ -447,6 +449,12 @@ DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default=EMAIL_HOST_USER)
 # SSL Certificate verification (set to False for development if having SSL issues)
 # WARNING: Only disable in development, never in production!
 EMAIL_SSL_VERIFY = env.bool('EMAIL_SSL_VERIFY', default=not IS_DEV)  # Disable in dev by default
+
+# Prometheus /metrics scrape endpoint.
+# Set METRICS_AUTH_TOKEN and scrape with Authorization: Bearer <token> (or X-Metrics-Token).
+# In non-dev, an empty token returns 404 for /metrics.
+# Gunicorn sets PROMETHEUS_MULTIPROC_DIR so worker metrics aggregate correctly.
+METRICS_AUTH_TOKEN = env('METRICS_AUTH_TOKEN', default='')
 
 # Render metrics polling — reads from Render REST API to trigger email alerts
 # Get API key: Render Dashboard → Account Settings → API Keys → Create API Key
