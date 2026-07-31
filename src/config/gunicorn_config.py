@@ -4,7 +4,9 @@ Gunicorn configuration file for background job worker startup.
 This ensures background job worker threads start in each Gunicorn worker process,
 not in the master process (important when using --preload flag).
 
-Also configures Prometheus multiprocess metrics aggregation across workers.
+Optional Prometheus multiprocess support:
+  If PROMETHEUS_MULTIPROC_DIR is set in the environment, prepare the directory
+  and mark workers dead on exit so scrapes can aggregate across workers.
 """
 
 import logging
@@ -20,9 +22,11 @@ keepalive = int(os.environ.get("GUNICORN_KEEPALIVE", "2"))
 
 
 def on_starting(server):
-    """Prepare Prometheus multiprocess directory before workers fork."""
-    multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR") or "/tmp/prometheus_multiproc"
-    os.environ["PROMETHEUS_MULTIPROC_DIR"] = multiproc_dir
+    """Prepare Prometheus multiprocess directory when explicitly enabled."""
+    multiproc_dir = (os.environ.get("PROMETHEUS_MULTIPROC_DIR") or "").strip()
+    if not multiproc_dir:
+        return
+
     os.makedirs(multiproc_dir, exist_ok=True)
     for name in os.listdir(multiproc_dir):
         path = os.path.join(multiproc_dir, name)
@@ -35,6 +39,8 @@ def on_starting(server):
 
 def child_exit(server, worker):
     """Mark dead worker so Prometheus multiprocess registry drops its samples."""
+    if not (os.environ.get("PROMETHEUS_MULTIPROC_DIR") or "").strip():
+        return
     try:
         from prometheus_client import multiprocess
 

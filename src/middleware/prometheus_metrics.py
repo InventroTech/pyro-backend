@@ -10,9 +10,15 @@ are normalized as a fallback.
 
 Auth: set METRICS_AUTH_TOKEN and scrape with Authorization: Bearer <token>
       or X-Metrics-Token: <token>. In non-dev, an empty token hides the endpoint (404).
+
+Multiprocess note:
+  PROMETHEUS_MULTIPROC_DIR is optional. When unset (default), metrics live in-process
+  and /metrics reads the default REGISTRY. That is the reliable mode on Render.
+  When set, scrapes use MultiProcessCollector, with a REGISTRY fallback if empty.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
@@ -31,6 +37,8 @@ from prometheus_client import (
     REGISTRY,
 )
 
+logger = logging.getLogger(__name__)
+
 SKIP_METRIC_PREFIXES = (
     "/metrics",
     "/health",
@@ -46,6 +54,11 @@ _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 _NUMERIC_RE = re.compile(r"^\d+$")
+
+# If multiproc is enabled, ensure the directory exists before metric objects are created.
+_MULTIPROC_DIR = (os.environ.get("PROMETHEUS_MULTIPROC_DIR") or "").strip()
+if _MULTIPROC_DIR:
+    os.makedirs(_MULTIPROC_DIR, exist_ok=True)
 
 REQUEST_LATENCY = Histogram(
     "http_request_duration_seconds",
@@ -115,6 +128,31 @@ def _metrics_authorized(request: HttpRequest) -> bool:
     return bool(provided) and provided == expected
 
 
+def _collect_metrics_payload() -> bytes:
+    """
+    Prefer multiprocess aggregation when configured and files exist; otherwise use
+    the in-process REGISTRY. This avoids returning an empty 200 when multiproc
+    is enabled but no files were written.
+    """
+    multiproc_dir = (os.environ.get("PROMETHEUS_MULTIPROC_DIR") or "").strip()
+    if multiproc_dir and os.path.isdir(multiproc_dir):
+        try:
+            has_files = any(
+                name.endswith(".db") for name in os.listdir(multiproc_dir)
+            )
+        except OSError:
+            has_files = False
+
+        if has_files:
+            registry = CollectorRegistry()
+            multiprocess.MultiProcessCollector(registry)
+            payload = generate_latest(registry)
+            if payload.strip():
+                return payload
+
+    return generate_latest(REGISTRY)
+
+
 def metrics_view(request: HttpRequest) -> HttpResponse:
     """Prometheus scrape endpoint (GET /metrics)."""
     expected = _expected_token()
@@ -124,14 +162,7 @@ def metrics_view(request: HttpRequest) -> HttpResponse:
     if not _metrics_authorized(request):
         return HttpResponseForbidden("Forbidden")
 
-    multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR", "")
-    if multiproc_dir:
-        registry = CollectorRegistry()
-        multiprocess.MultiProcessCollector(registry)
-    else:
-        registry = REGISTRY
-
-    payload = generate_latest(registry)
+    payload = _collect_metrics_payload()
     return HttpResponse(payload, content_type=CONTENT_TYPE_LATEST)
 
 
@@ -154,6 +185,9 @@ class PrometheusMetricsMiddleware(MiddlewareMixin):
         endpoint = _endpoint_label(request)
         status = str(getattr(response, "status_code", 0))
 
-        REQUEST_LATENCY.labels(method=method, endpoint=endpoint, status=status).observe(duration)
-        REQUEST_COUNT.labels(method=method, endpoint=endpoint, status=status).inc()
+        try:
+            REQUEST_LATENCY.labels(method=method, endpoint=endpoint, status=status).observe(duration)
+            REQUEST_COUNT.labels(method=method, endpoint=endpoint, status=status).inc()
+        except Exception:
+            logger.exception("Failed to record Prometheus HTTP metrics")
         return response

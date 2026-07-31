@@ -86,6 +86,15 @@ def test_middleware_records_request(rf):
 
     scrape = metrics_view(rf.get("/metrics"))
     body = scrape.content.decode("utf-8")
+    assert body.strip(), "expected non-empty /metrics payload"
     assert "http_requests_total" in body
     assert 'method="GET"' in body
     assert "/crm-records/leads" in body
+
+
+@override_settings(IS_DEV=True, METRICS_AUTH_TOKEN="")
+def test_metrics_payload_not_empty_without_traffic(rf):
+    # Default REGISTRY still exports process collectors even with no HTTP samples.
+    response = metrics_view(rf.get("/metrics"))
+    assert response.status_code == 200
+    assert response.content.strip(), "expected non-empty /metrics payload"

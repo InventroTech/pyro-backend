@@ -18,8 +18,9 @@ RUN pip install --upgrade pip setuptools wheel && \
 # Copy app code ./src code to container's /app
 COPY ./src /app
 
-ENV DJANGO_SETTINGS_MODULE=config.settings \
-    PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc
+ENV DJANGO_SETTINGS_MODULE=config.settings
+# Do not set PROMETHEUS_MULTIPROC_DIR by default on Render.
+# In-process REGISTRY export is reliable; enable multiproc later only if needed.
 
 # Placeholders only for image build; Render injects real secrets at runtime.
 RUN DJANGO_SECRET_KEY=collectstatic-build-placeholder \
