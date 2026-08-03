@@ -23,6 +23,7 @@ DJANGO_ENV = os.getenv("DJANGO_ENV", "development").lower()
 
 IS_DEV = DJANGO_ENV == "development"
 IS_STAGING = DJANGO_ENV == "staging"
+IS_PREPROD = DJANGO_ENV == "preprod"
 IS_PROD = DJANGO_ENV == "production"
 
 if os.environ.get("RUN_MAIN") == "true":
@@ -34,14 +35,19 @@ if os.environ.get("RUN_MAIN") == "true":
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = env("DJANGO_SECRET_KEY")
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = IS_DEV or IS_STAGING
+DEBUG = IS_DEV or IS_STAGING or IS_PREPROD
 
-ALLOWED_HOSTS = (
-    ["*"] if IS_DEV else  # local convenience
-    ["pyro-backend-1.onrender.com"] if IS_STAGING else
-    ["pyro-prod-backend.onrender.com",
-    "api.thepyro.ai"]
-)
+if IS_DEV:
+    ALLOWED_HOSTS = ["*"]  # local convenience
+elif IS_STAGING:
+    ALLOWED_HOSTS = ["pyro-backend-1.onrender.com"]
+elif IS_PREPROD:
+    ALLOWED_HOSTS = ["pyro-backend-ea2j.onrender.com"]
+else:
+    ALLOWED_HOSTS = [
+        "pyro-prod-backend.onrender.com",
+        "api.thepyro.ai",
+    ]
 # Application definition
 
 INSTALLED_APPS = [
@@ -406,19 +412,24 @@ if IS_DEV:
     CORS_ALLOW_ALL_ORIGINS = True
     CORS_ALLOWED_ORIGINS = []
 else:
-    # Staging / Production: strict origins
+    # Staging / Preprod / Production: strict origins
     CORS_ALLOW_ALL_ORIGINS = False
-    CORS_ALLOWED_ORIGINS = env.list(
-        "CORS_ALLOWED_ORIGINS",
-        default=[
-            # Staging frontend
+    if IS_STAGING:
+        _default_cors_origins = [
             "https://staging.thepyro.ai",
-            # Prod frontend
-            "https://app.thepyro.ai",
-        ] if IS_STAGING else [
-            # Only production frontend
             "https://app.thepyro.ai",
         ]
+    elif IS_PREPROD:
+        _default_cors_origins = [
+            "https://pyro-dev.vercel.app",
+        ]
+    else:
+        _default_cors_origins = [
+            "https://app.thepyro.ai",
+        ]
+    CORS_ALLOWED_ORIGINS = env.list(
+        "CORS_ALLOWED_ORIGINS",
+        default=_default_cors_origins,
     )
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
