@@ -29,8 +29,32 @@ logger = logging.getLogger(__name__)
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+# Full Chrome-like request headers. Several storefronts (notably robu.in) run a
+# WAF that returns 403 for bare User-Agent-only requests; sending the same
+# client hints / fetch-metadata a real browser sends gets a 200. Keep
+# Accept-Encoding as identity so the raw urllib fallback never receives a
+# gzip/br body it cannot transparently decode.
+BROWSER_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-IN,en;q=0.9",
+    "Accept-Encoding": "identity",
+    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"macOS"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "Connection": "keep-alive",
+}
 
 DEFAULT_TIMEOUT = 18
 MAX_RESULTS_PER_SOURCE = 5
@@ -57,6 +81,13 @@ _OG_CURRENCY_RE_ALT = re.compile(
 # Titles rarely contain tags; reject '<' inside to keep matching linear.
 _TITLE_RE = re.compile(
     r'<title\b[^>]{0,200}?>([^<]{0,2000})</title\s*>',
+    re.IGNORECASE,
+)
+# Visible currency-marked amount (matches price_compare_vendors.PRICE_NEAR_RE).
+# Last-resort for storefronts with no JSON-LD / price meta (e.g. OpenCart sites
+# like fabtolab.com, which render the price only as text like "रo 4,830.00").
+_VISIBLE_PRICE_RE = re.compile(
+    r"(?:&#8377;|₹|&rupee;|Rs\.\s*|INR\s*|रo\s*)\s*([\d,]+(?:\.\d+)?)",
     re.IGNORECASE,
 )
 
@@ -206,15 +237,7 @@ def _assert_safe_outbound_url(url: str) -> str:
 
 def _session() -> requests.Session:
     s = requests.Session()
-    s.headers.update(
-        {
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-IN,en;q=0.9",
-            "Accept-Encoding": "identity",
-            "Connection": "keep-alive",
-        }
-    )
+    s.headers.update(BROWSER_HEADERS)
     return s
 
 
@@ -618,31 +641,136 @@ def extract_price_from_html(html: str, fallback_url: str = "") -> Optional[Dict[
             "link": fallback_url,
             "available": True,
         }
+
+    # Last resort: first plausible visible currency-marked amount in document
+    # order. The main product price renders before related-product prices;
+    # header cart totals like "रo 0.00" are filtered by the minimum bound.
+    for m in _VISIBLE_PRICE_RE.finditer(scanned):
+        price = _parse_price_number(m.group(1))
+        if price is None or price < 10 or price > 5_000_000:
+            continue
+        return {
+            "title": _extract_html_title(scanned),
+            "price": price,
+            "currency": "INR",
+            "link": fallback_url,
+            "available": True,
+        }
     return None
+
+
+# Tracking / ads query keys that do not affect product pages and sometimes trip WAFs.
+_STRIP_QUERY_KEYS = {
+    "srsltid",
+    "gclid",
+    "fbclid",
+    "mc_cid",
+    "mc_eid",
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+}
+
+
+def _strip_tracking_query(url: str) -> str:
+    """Drop Google/ads tracking params (e.g. srsltid) from product URLs."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return url
+    if not parsed.query:
+        return url
+    pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    kept = [(k, v) for (k, v) in pairs if k.lower() not in _STRIP_QUERY_KEYS]
+    query = urllib.parse.urlencode(kept, doseq=True)
+    return urllib.parse.urlunparse(parsed._replace(query=query))
+
+
+def _origin_for_host(host: str) -> Optional[str]:
+    """Return https origin for a host, preferring the vendor catalog base URL."""
+    host = (host or "").lower().strip(".")
+    if not host:
+        return None
+    vendor = detect_source(f"https://{host}/")
+    base = _trusted_base_url_for_vendor(vendor) if vendor else None
+    if base:
+        return base.rstrip("/") + "/"
+    return f"https://{host}/"
+
+
+def _hosts_needing_cookie_warmup(host: str) -> Optional[str]:
+    """
+    Cloudflare / WAF storefronts that often 403 bare product hits from datacenter IPs
+    unless we first hit the homepage and send a same-site Referer.
+    """
+    host = (host or "").lower()
+    for domain in ("robu.in", "zbotic.in", "drkstore.in", "uavgarage.com"):
+        if _is_host_or_subdomain(host, domain):
+            return f"https://{domain}/"
+    return None
+
+
+def _is_amazon_host(host: str) -> bool:
+    host = (host or "").lower()
+    return (
+        _host_matches_vendor_pattern(host, "amazon")
+        or _is_host_or_subdomain(host, "amazon.in")
+        or _is_host_or_subdomain(host, "amazon.com")
+    )
+
+
+def _html_looks_bot_blocked(html: str, *, source: str = "") -> bool:
+    """True when the response is a captcha / soft-block interstitial, not a product page."""
+    text = html or ""
+    low = text.lower()
+    if "captcha" in low or "validatecaptcha" in low or "opfcaptcha" in low:
+        return True
+    if source == "amazon":
+        # Real Amazon product HTML is large and includes price markers.
+        if "a-price-whole" in low or "product:price:amount" in low:
+            return False
+        if len(text) < 20000:
+            return True
+    return False
 
 
 def _fetch_html(url: str, headers: Optional[Dict[str, str]] = None) -> str:
     """
     Fetch HTML with requests, falling back to urllib on 403.
-    Some storefronts (notably Robu) intermittently block the requests client.
+    Some storefronts (notably Robu / Zbotic behind Cloudflare) intermittently
+    block bare product hits from datacenter IPs.
     """
     import urllib.request
     import ssl
     import time
 
-    safe_url = _assert_safe_outbound_url(url)
+    safe_url = _assert_safe_outbound_url(_strip_tracking_query(url))
     sess = _session()
     req_headers = dict(headers or {})
     last_exc: Optional[Exception] = None
     host = (urllib.parse.urlparse(safe_url).hostname or "").lower()
+    home = _hosts_needing_cookie_warmup(host)
 
-    # Warm cookies for Robu — bare product hits are often 403 without a prior home visit.
-    if _is_host_or_subdomain(host, "robu.in"):
+    # Only Cloudflare/WAF storefronts need same-origin Referer + cookie warm-up.
+    # Applying Origin / Sec-Fetch-Site:same-origin to Amazon returns a captcha page
+    # (~4KB "Amazon.in" interstitial) instead of the product HTML.
+    if home:
+        if "Referer" not in req_headers:
+            req_headers["Referer"] = home
+        req_headers.setdefault("Sec-Fetch-Site", "same-origin")
         try:
-            sess.get("https://robu.in/", timeout=min(8, DEFAULT_TIMEOUT), allow_redirects=True)
+            sess.get(home, timeout=min(8, DEFAULT_TIMEOUT), allow_redirects=True)
         except requests.RequestException:
             # Cookie warm-up is best-effort; continue to the product fetch.
             pass
+    elif _is_amazon_host(host):
+        # Amazon: keep default Sec-Fetch-Site: none; never send Origin/Referer on
+        # document GET. Do NOT warm the homepage first — that sequence often
+        # returns a captcha interstitial for the following product request.
+        req_headers.pop("Origin", None)
+        req_headers.pop("Referer", None)
 
     for attempt in range(2):
         try:
@@ -657,13 +785,10 @@ def _fetch_html(url: str, headers: Optional[Dict[str, str]] = None) -> str:
             time.sleep(0.35)
 
     ua_headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-IN,en;q=0.9",
-        "Accept-Encoding": "identity",
+        **BROWSER_HEADERS,
         **req_headers,
     }
-    # Prefer cookie-aware urllib opener for Robu.
+    # Prefer cookie-aware urllib opener for WAF storefronts.
     try:
         import http.cookiejar
 
@@ -673,8 +798,8 @@ def _fetch_html(url: str, headers: Optional[Dict[str, str]] = None) -> str:
             urllib.request.HTTPCookieProcessor(cj),
             urllib.request.HTTPSHandler(context=ctx),
         )
-        if _is_host_or_subdomain(host, "robu.in"):
-            home_req = urllib.request.Request("https://robu.in/", headers=ua_headers)
+        if home:
+            home_req = urllib.request.Request(home, headers=ua_headers)
             try:
                 opener.open(home_req, timeout=DEFAULT_TIMEOUT).read()
             except Exception:
@@ -693,7 +818,7 @@ def _fetch_html(url: str, headers: Optional[Dict[str, str]] = None) -> str:
 def fetch_url_price(url: str, session: Optional[requests.Session] = None) -> Dict[str, Any]:
     """Fetch a single product URL and return a normalized price result."""
     try:
-        url = _assert_safe_outbound_url(url)
+        url = _assert_safe_outbound_url(_strip_tracking_query(url))
     except PriceCompareError as exc:
         logger.warning("Rejected product URL: %s", exc)
         return _result(
@@ -713,10 +838,19 @@ def fetch_url_price(url: str, session: Optional[requests.Session] = None) -> Dic
         headers["Referer"] = "https://robu.in/"
         if not url.rstrip("/").endswith(".html") and "?" not in url:
             url = url.rstrip("/") + "/"
+    elif source == "zbotic":
+        headers["Referer"] = "https://zbotic.in/"
     elif source == "flipkart":
         headers["Referer"] = "https://www.flipkart.com/"
     elif source == "amazon":
-        headers["Referer"] = "https://www.amazon.in/"
+        # Do not set Referer/Origin here — Amazon serves captcha when those look wrong.
+        pass
+    else:
+        # Same-site Referer helps Cloudflare / Woo storefronts on Render.
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+        origin = _origin_for_host(host)
+        if origin:
+            headers["Referer"] = origin
 
     try:
         html = _fetch_html(url, headers=headers)
@@ -730,7 +864,24 @@ def fetch_url_price(url: str, session: Optional[requests.Session] = None) -> Dic
             currency="INR",
             link=url,
             available=False,
-            error="Failed to fetch product URL.",
+            error="Failed to fetch product URL (vendor blocked the server request).",
+            method="url",
+        )
+
+    if _html_looks_bot_blocked(html, source=source or ""):
+        err = (
+            "Amazon blocked the request (captcha). Configure AMAZON_PAAPI_* keys for reliable results."
+            if source == "amazon"
+            else "Failed to fetch product URL (vendor blocked the server request)."
+        )
+        return _result(
+            source=source or "other",
+            title="",
+            price=None,
+            currency="INR",
+            link=url,
+            available=False,
+            error=err,
             method="url",
         )
 

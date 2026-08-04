@@ -24,12 +24,14 @@ from drf_spectacular.views import (
 )
 from crm_records.views import PrajaLeadsAPIView, PrajaLeadEntityBackfillAPIView
 from support_ticket.views import SupportTicketEntityAPIView
+from middleware.prometheus_metrics import metrics_view
 
 def trigger_error(request):
     division_by_zero = 1 / 0
 
 
 urlpatterns = [
+    path('metrics', metrics_view, name='prometheus-metrics'),
     path('admin/', admin.site.urls),
     path('analytics/', include('analytics.urls')),
     path('auth/', include('authentication.urls')),
@@ -37,6 +39,7 @@ urlpatterns = [
     path('cron-jobs/',include('cron_jobs.urls')),
     path('crm-records/', include('crm_records.urls')),
     path('jobs/', include('background_jobs.urls')),
+    path('pyro-jobs/', include('pyro_jobs.urls')),
     path('accounts/', include('accounts.urls')),
     path('support-ticket/', include('support_ticket.urls')),
     path('user-settings/', include('user_settings.urls')),
@@ -44,7 +47,8 @@ urlpatterns = [
     path('openai/', include('openai_api.urls')),
     path('email/', include('email_protocol.urls')),
     path('whatsapp/', include('whatsapp.urls')),
-    
+    path('chat/', include('chatbot.urls')),
+
     # Top-level entity endpoint (from crm_records)
     path('entity/', PrajaLeadsAPIView.as_view(), name='entity-api'),
     path('entity/support_ticket/', SupportTicketEntityAPIView.as_view(), name='entity-support-ticket-api'),

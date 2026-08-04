@@ -91,7 +91,7 @@ def _load_config() -> Dict[str, Any]:
         logger.exception("Failed to load price compare vendor config: %s", exc)
         return {
             "defaults": {
-                "profile": "extended",
+                "profile": "core",
                 "max_results_per_vendor": 3,
                 "timeout_seconds": 10,
                 "max_workers": 8,
@@ -123,7 +123,7 @@ def _load_config() -> Dict[str, Any]:
 
 def get_runtime_defaults() -> Dict[str, Any]:
     cfg = _load_config().get("defaults") or {}
-    profile = (cfg.get("profile") or "extended")
+    profile = (cfg.get("profile") or "core")
     try:
         from django.conf import settings as dj_settings
 
@@ -131,9 +131,9 @@ def get_runtime_defaults() -> Dict[str, Any]:
     except Exception:
         # Django settings may be unavailable outside a configured app context.
         pass
-    profile = (os.getenv("PRICE_COMPARE_PROFILE") or profile or "extended").strip().lower()
+    profile = (os.getenv("PRICE_COMPARE_PROFILE") or profile or "core").strip().lower()
     if profile not in {"core", "extended"}:
-        profile = "extended"
+        profile = "core"
     return {
         "profile": profile,
         "max_results_per_vendor": int(cfg.get("max_results_per_vendor") or 3),
@@ -234,7 +234,7 @@ def resolve_vendors(
 
     selected_profile = (profile or get_runtime_defaults()["profile"]).strip().lower()
     if selected_profile not in {"core", "extended"}:
-        selected_profile = "extended"
+        selected_profile = "core"
     if selected_profile == "extended":
         return enabled
     return [v for v in enabled if v.profile == "core"]
@@ -501,11 +501,14 @@ def _is_product_href(href: str) -> bool:
         return False
     if "/product/" in low or "/products/" in low or "route=product/product" in low:
         return True
+    # WooCommerce themes that put products under /shop/<slug>/ (e.g. UAV Garage).
     path = urllib.parse.urlparse(href).path
-    if path.endswith(".html") and len(path.strip("/").split("/")) <= 2 and len(path) > 12:
-        return True
-    # Root-level product slugs (UAV Store, Fab.to.Lab, etc.)
     parts = [p for p in path.strip("/").split("/") if p]
+    if len(parts) == 2 and parts[0] == "shop" and "-" in parts[1] and len(parts[1]) >= 6:
+        return True
+    if path.endswith(".html") and len(parts) <= 2 and len(path) > 12:
+        return True
+    # Root-level product slugs (UAV Store, Fab.to.Lab, DRK Store, etc.)
     if len(parts) == 1:
         slug = parts[0]
         if len(slug) >= 8 and "-" in slug and not slug.startswith("page"):
@@ -585,7 +588,6 @@ def _search_html(spec: VendorSpec, query: str, session: Optional[requests.Sessio
             urls.append(u)
 
     last_err = "No priced results found"
-    best: List[Dict[str, Any]] = []
     for url in urls[:4]:
         try:
             html = _get_text(url, session=session, headers={"Referer": base + "/"})
@@ -597,13 +599,13 @@ def _search_html(spec: VendorSpec, query: str, session: Optional[requests.Sessio
         if len(html) < 2000 and ("access denied" in low or "just a moment" in low):
             last_err = f"{spec.label} blocked the request"
             continue
+        # Candidates are ordered by preference (vendor search_url first).
+        # Return the first that yields products — a later generic fallback can
+        # hit a homepage full of unrelated featured products and outvote the
+        # real (smaller) search result set.
         products = _extract_html_products(html, base, spec.id)
-        if len(products) > len(best):
-            best = products
-        if len(best) >= MAX_RESULTS_PER_VENDOR:
-            return best[:MAX_RESULTS_PER_VENDOR]
-    if best:
-        return best[:MAX_RESULTS_PER_VENDOR]
+        if products:
+            return products[:MAX_RESULTS_PER_VENDOR]
     return _empty(spec, urls[0], last_err if last_err else f"No priced {spec.label} results found")
 
 

@@ -35,10 +35,12 @@ jsonschema==4.25.1
 jsonschema-specifications==2025.4.1
 numpy==2.2.6
 openai==1.98.0
+anthropic>=0.49.0
 packaging==25.0
 pandas==2.3.3
 parameterized==0.9.0
 pluggy==1.6.0
+prometheus-client==0.26.0
 psycopg2-binary==2.9.10
 pycparser==2.22
 pydantic==2.11.7

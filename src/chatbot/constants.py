@@ -1,0 +1,59 @@
+"""Shared chatbot constants for CRM + ERP domains."""
+
+DOMAIN_CRM = "crm"
+DOMAIN_ERP = "erp"
+DOMAIN_GENERAL = "general"
+
+# Entity types the chatbot tools may touch (tenant-scoped Record rows).
+CRM_ENTITY_TYPES = (
+    "lead",
+    "support_ticket",
+    "job",
+    "application",
+)
+
+ERP_ENTITY_TYPES = (
+    "inventory_item",
+    "inventory_request",
+)
+
+ALLOWED_ENTITY_TYPES = CRM_ENTITY_TYPES + ERP_ENTITY_TYPES
+
+ENTITY_DOMAIN = {
+    **{e: DOMAIN_CRM for e in CRM_ENTITY_TYPES},
+    **{e: DOMAIN_ERP for e in ERP_ENTITY_TYPES},
+}
+
+INTENT_HELP = "help"
+INTENT_DATA = "data"
+INTENT_HYBRID = "hybrid"
+INTENT_CLARIFY = "clarify"
+
+MODE_RAG = "rag"
+MODE_TOOLS = "tools"
+MODE_HYBRID = "hybrid"
+MODE_CLARIFY = "clarify"
+
+CHAT_MODEL_ENV = "CHATBOT_MODEL"
+CHAT_MODEL_DEFAULT = "gpt-4.1-mini"
+CLASSIFY_MODEL_ENV = "CHATBOT_CLASSIFY_MODEL"
+CLASSIFY_MODEL_DEFAULT = "gpt-4o-mini"
+EMBEDDING_MODEL_ENV = "CHATBOT_EMBEDDING_MODEL"
+EMBEDDING_MODEL_DEFAULT = "text-embedding-3-small"
+
+PROVIDER_ENV = "CHATBOT_PROVIDER"
+PROVIDER_AUTO = "auto"
+PROVIDER_BOTH = "both"
+PROVIDER_OPENAI = "openai"
+PROVIDER_ANTHROPIC = "anthropic"
+
+# Optional per-provider model overrides (used when CHATBOT_PROVIDER=both/auto)
+CHAT_MODEL_OPENAI_ENV = "CHATBOT_MODEL_OPENAI"
+CHAT_MODEL_ANTHROPIC_ENV = "CHATBOT_MODEL_ANTHROPIC"
+CLASSIFY_MODEL_OPENAI_ENV = "CHATBOT_CLASSIFY_MODEL_OPENAI"
+CLASSIFY_MODEL_ANTHROPIC_ENV = "CHATBOT_CLASSIFY_MODEL_ANTHROPIC"
+
+MAX_TOOL_ROUNDS = 3
+MAX_HISTORY_MESSAGES = 12
+RAG_TOP_K = 5
+SEARCH_RESULT_LIMIT = 10
