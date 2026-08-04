@@ -250,7 +250,8 @@ class InventoryRequestFormBackendTests(TestCase):
         _notify_on_manager_approved(request, record, previous_status="NEW_REQUEST")
 
         emails = [c.kwargs.get("to_emails") for c in mock_send_email.call_args_list]
-        self.assertIn("requester@example.com", emails)
+        # Requester is emailed by _notify_requester_on_status_change; approve helper pings TL only.
+        self.assertNotIn("requester@example.com", emails)
         self.assertIn("teamlead@example.com", emails)
         self.assertNotIn("manager@example.com", emails)
         self.assertTrue(
@@ -285,9 +286,9 @@ class InventoryRequestFormBackendTests(TestCase):
         _notify_on_manager_approved(request, record, previous_status="NEW_REQUEST")
 
         emails = [c.kwargs.get("to_emails") for c in mock_send_email.call_args_list]
-        self.assertIn("requester@example.com", emails)
+        self.assertNotIn("requester@example.com", emails)
         self.assertIn("teamlead@example.com", emails)
-        self.assertEqual(len(emails), 2)
+        self.assertEqual(len(emails), 1)
 
     @patch("crm_records.views.send_email")
     def test_reject_emails_requestor(self, mock_send_email):
@@ -354,7 +355,7 @@ class InventoryRequestFormBackendTests(TestCase):
         )
 
     @patch("crm_records.views.send_email")
-    def test_team_lead_order_emails_manager_requester_and_team_lead(self, mock_send_email):
+    def test_team_lead_order_emails_manager_and_team_lead(self, mock_send_email):
         mock_send_email.return_value = (True, "ok")
         from types import SimpleNamespace
         from crm_records.views import _notify_on_team_lead_ordered
@@ -403,11 +404,46 @@ class InventoryRequestFormBackendTests(TestCase):
 
         emails = [c.kwargs.get("to_emails") for c in mock_send_email.call_args_list]
         self.assertIn("pm@example.com", emails)
-        self.assertIn("requester@example.com", emails)
+        self.assertNotIn("requester@example.com", emails)
         self.assertIn("teamlead@example.com", emails)
         self.assertTrue(
             all(c.kwargs.get("client_name") == "RequestOrderedNotification" for c in mock_send_email.call_args_list)
         )
+
+    @patch("crm_records.views.send_email")
+    def test_any_status_change_emails_requestor(self, mock_send_email):
+        """Requester gets an email for every status change, including previously uncovered ones."""
+        mock_send_email.return_value = (True, "ok")
+        from types import SimpleNamespace
+        from crm_records.views import _notify_request_status_emails
+
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "REQ_TO_VERIFY",
+                "status_text": "REQ_TO_VERIFY",
+                "requester_id": str(self.user.supabase_uid),
+                "requester_name": "Test Requester",
+                "item_name_freeform": "Drone",
+                "team_lead": self.team_lead_membership.id,
+            },
+        )
+        request = SimpleNamespace(
+            tenant=self.tenant,
+            user=self.user,
+            build_absolute_uri=lambda path: f"https://example.com{path}",
+        )
+        _notify_request_status_emails(request, record, previous_status="IN_SHIPPING")
+
+        self.assertEqual(mock_send_email.call_count, 1)
+        self.assertEqual(mock_send_email.call_args.kwargs.get("to_emails"), "requester@example.com")
+        self.assertEqual(
+            mock_send_email.call_args.kwargs.get("client_name"),
+            "RequestStatusChangedNotification",
+        )
+        subject = mock_send_email.call_args.kwargs.get("subject", "")
+        self.assertIn("REQ_TO_VERIFY", subject)
 
     @patch.dict(os.environ, {"PYRO_FRONTEND_URL": "https://app.thepyro.ai"}, clear=False)
     @patch("crm_records.views.send_email")
