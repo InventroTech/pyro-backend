@@ -383,7 +383,7 @@ class JobProcessor:
         job.last_error = error[:1000]  # Truncate long errors
         
         # Check if we should retry
-        if job.attempts < job.max_attempts:
+        if job.attempts < job.max_attempts and self._handler_registry.has_handler(job.job_type):
             # Schedule for retry
             handler = self._handler_registry.get_handler(job.job_type)
             retry_delay = handler.get_retry_delay(job.attempts)

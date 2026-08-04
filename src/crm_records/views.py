@@ -1206,14 +1206,12 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
         
         if entity_type == 'lead':
             try:
-                from support_ticket.services import MixpanelService
-                from background_jobs.queue_service import get_queue_service
-                from background_jobs.models import JobType
-                
+                from pyro_jobs.enqueue import enqueue_now
+
                 lead_data = record.data or {}
                 user_id = lead_data.get('praja_id') or lead_data.get('user_id') or str(record.id)
                 event_name = 'pyro_crm_lead_created'
-                
+
                 logger.info("=" * 80)
                 logger.info(f"🚀 [Mixpanel] Creating lead {record.id}, sending to Mixpanel")
                 logger.info(f"   Lead ID: {record.id}")
@@ -1226,7 +1224,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 logger.info(f"   Lead Score: {lead_data.get('lead_score', 'N/A')}")
                 logger.info(f"   Properties Count: {len(lead_data) + 5}")  # +5 for base properties
                 logger.info("=" * 80)
-                
+
                 properties = {
                     'lead_id': record.id,
                     'tenant_id': str(record.tenant.id) if record.tenant else None,
@@ -1237,20 +1235,12 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 properties.update(lead_data)
                 if record.pyro_data:
                     properties.update(record.pyro_data)
-                
-                # Enqueue background job (single send; do not also send sync to avoid duplicate Mixpanel events)
-                queue_service = get_queue_service()
-                queue_service.enqueue_job(
-                    job_type=JobType.SEND_MIXPANEL_EVENT,
-                    payload={
-                        "user_id": str(user_id),
-                        "event_name": event_name,
-                        "properties": properties
-                    },
-                    priority=0,
-                    tenant_id=str(record.tenant.id) if record.tenant else None,
-                    max_attempts=3
-                )
+
+                enqueue_now("send_mixpanel_event", {
+                    "user_id": str(user_id),
+                    "event_name": event_name,
+                    "properties": properties,
+                })
             except Exception as e:
                 logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
 
@@ -1621,14 +1611,12 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
         
         if self.entity_type == 'lead':
             try:
-                from support_ticket.services import MixpanelService
-                from background_jobs.queue_service import get_queue_service
-                from background_jobs.models import JobType
-                
+                from pyro_jobs.enqueue import enqueue_now
+
                 lead_data = record.data or {}
                 user_id = lead_data.get('praja_id') or lead_data.get('user_id') or str(record.id)
                 event_name = 'pyro_crm_lead_created'
-                
+
                 logger.info("=" * 80)
                 logger.info(f"🚀 [Mixpanel] Creating lead {record.id} via EntityProxyView, sending to Mixpanel")
                 logger.info(f"   Lead ID: {record.id}")
@@ -1640,7 +1628,7 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
                 logger.info(f"   Lead Stage: {lead_data.get('lead_stage', 'N/A')}")
                 logger.info(f"   Lead Score: {lead_data.get('lead_score', 'N/A')}")
                 logger.info("=" * 80)
-                
+
                 properties = {
                     'lead_id': record.id,
                     'tenant_id': str(record.tenant.id) if record.tenant else None,
@@ -1651,20 +1639,12 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
                 properties.update(lead_data)
                 if record.pyro_data:
                     properties.update(record.pyro_data)
-                
-                # Enqueue background job (single send; do not also send sync to avoid duplicate Mixpanel events)
-                queue_service = get_queue_service()
-                job = queue_service.enqueue_job(
-                    job_type=JobType.SEND_MIXPANEL_EVENT,
-                    payload={
-                        "user_id": str(user_id),
-                        "event_name": event_name,
-                        "properties": properties
-                    },
-                    priority=0,
-                    tenant_id=str(record.tenant.id) if record.tenant else None,
-                    max_attempts=3
-                )
+
+                enqueue_now("send_mixpanel_event", {
+                    "user_id": str(user_id),
+                    "event_name": event_name,
+                    "properties": properties,
+                })
             except Exception as e:
                 logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
 
@@ -4113,8 +4093,7 @@ class PrajaLeadsAPIView(APIView):
 
             if entity_type == 'lead':
                 try:
-                    from background_jobs.queue_service import get_queue_service
-                    from background_jobs.models import JobType
+                    from pyro_jobs.enqueue import enqueue_now
 
                     lead_data = record.data or {}
                     user_id = lead_data.get('praja_id') or lead_data.get('user_id') or str(record.id)
@@ -4143,18 +4122,11 @@ class PrajaLeadsAPIView(APIView):
                     if record.pyro_data:
                         properties.update(record.pyro_data)
 
-                    queue_service = get_queue_service()
-                    queue_service.enqueue_job(
-                        job_type=JobType.SEND_MIXPANEL_EVENT,
-                        payload={
-                            "user_id": str(user_id),
-                            "event_name": event_name,
-                            "properties": properties
-                        },
-                        priority=0,
-                        tenant_id=str(record.tenant.id) if record.tenant else None,
-                        max_attempts=3
-                    )
+                    enqueue_now("send_mixpanel_event", {
+                        "user_id": str(user_id),
+                        "event_name": event_name,
+                        "properties": properties,
+                    })
                 except Exception as e:
                     logger.error(f"❌ [Mixpanel] Error sending lead {record.id}: {e}")
 

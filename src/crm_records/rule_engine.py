@@ -18,8 +18,7 @@ from django.db.models import Q
 
 from .models import RuleSet, RuleExecutionLog, Record
 from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
-from background_jobs.queue_service import get_queue_service
-from background_jobs.models import JobType
+from pyro_jobs.enqueue import enqueue_now
 from object_history.engine import get_request_context
 
 logger = logging.getLogger(__name__)
@@ -475,17 +474,11 @@ def action_send_mixpanel_event(
         logger.info(f"[rm_email] No actor_label found in request context for record {record.id} (actor_user={request_context.get('actor_user')})")
 
     try:
-        # Enqueue job for async processing - send ALL data (complete mixpanel_properties)
-        queue_service = get_queue_service()
-        job = queue_service.enqueue_job(
-            job_type=JobType.SEND_MIXPANEL_EVENT,
-            payload={
-                "user_id": str(resolved_user_id),
-                "event_name": str(resolved_event_name),
-                "properties": mixpanel_properties,  # Send ALL data, not just resolved_properties
-            },
-            tenant_id=str(tenant_id) if tenant_id else None,
-        )
+        job = enqueue_now("send_mixpanel_event", {
+            "user_id": str(resolved_user_id),
+            "event_name": str(resolved_event_name),
+            "properties": mixpanel_properties,
+        })
         
         logger.info(
             f"Mixpanel event queued for record {record.id}: job_id={job.id}, "

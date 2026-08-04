@@ -6,8 +6,7 @@ from uuid import UUID
 
 from accounts.models import SupabaseAuthUser
 from authz.models import TenantMembership
-from background_jobs.queue_service import get_queue_service
-from background_jobs.models import JobType
+from pyro_jobs.enqueue import enqueue_now
 from django.utils import timezone
 
 from crm_records.models import EventLog, Record
@@ -164,8 +163,6 @@ class PostAssignmentActions:
     ) -> None:
         try:
             lead_name = lead_data.get("name", "") if isinstance(lead_data, dict) else ""
-            queue_service = get_queue_service()
-            tenant_id = str(tenant.id) if tenant else None
 
             praja_id = lead_data.get("praja_id")
             if praja_id:
@@ -193,15 +190,11 @@ class PostAssignmentActions:
                     }
                     mixpanel_properties.update(lead_data)
 
-                    job = queue_service.enqueue_job(
-                        job_type=JobType.SEND_MIXPANEL_EVENT,
-                        payload={
-                            "user_id": mixpanel_user_id,
-                            "event_name": "pyro_crm_rm_assigned_backend",
-                            "properties": mixpanel_properties,
-                        },
-                        tenant_id=tenant_id,
-                    )
+                    job = enqueue_now("send_mixpanel_event", {
+                        "user_id": mixpanel_user_id,
+                        "event_name": "pyro_crm_rm_assigned_backend",
+                        "properties": mixpanel_properties,
+                    })
                     logger.info("[PostAssignment] Enqueued Mixpanel job_id=%s lead_id=%s", job.id, record.id)
                 else:
                     logger.warning("[PostAssignment] Skipping Mixpanel job - no mixpanel_user_id from praja_id=%s", praja_id)
@@ -211,11 +204,7 @@ class PostAssignmentActions:
             if praja_id and rm_email:
                 try:
                     praja_id_int = int(praja_id)
-                    job2 = queue_service.enqueue_job(
-                        job_type=JobType.SEND_RM_ASSIGNED_EVENT,
-                        payload={"praja_id": praja_id_int, "rm_email": rm_email},
-                        tenant_id=tenant_id,
-                    )
+                    job2 = enqueue_now("send_rm_assigned_event", {"praja_id": praja_id_int, "rm_email": rm_email})
                     logger.info("[PostAssignment] Enqueued rm_assigned job_id=%s lead_id=%s praja_id=%s", job2.id, record.id, praja_id_int)
                 except (ValueError, TypeError) as e:
                     logger.error("[PostAssignment] Could not enqueue RM assigned job - praja_id=%s error=%s", praja_id, e)

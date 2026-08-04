@@ -26,6 +26,7 @@ from .serializers import SaveAndContinueSerializer, GetNextTicketResponseSeriali
 from .services import MixpanelService, TicketTimeService
 from background_jobs.queue_service import get_queue_service
 from background_jobs.models import BackgroundJob, JobStatus, JobType
+from pyro_jobs.enqueue import enqueue_now
 from core.models import Tenant
 from crm_records.models import Record
 from crm_records.permissions import HasAPISecret
@@ -201,18 +202,11 @@ def _enqueue_mixpanel_event(
         logger.warning("Skipping Mixpanel enqueue for event=%s due to missing user_id", event_name)
         return
     try:
-        queue_service = get_queue_service()
-        queue_service.enqueue_job(
-            job_type=JobType.SEND_MIXPANEL_EVENT,
-            payload={
-                "user_id": str(user_id),
-                "event_name": event_name,
-                "properties": properties or {},
-            },
-            tenant_id=str(tenant_id) if tenant_id else None,
-            priority=0,
-            max_attempts=3,
-        )
+        enqueue_now("send_mixpanel_event", {
+            "user_id": str(user_id),
+            "event_name": event_name,
+            "properties": properties or {},
+        })
     except Exception as e:
         logger.error("Failed to enqueue Mixpanel event=%s user_id=%s error=%s", event_name, user_id, e, exc_info=True)
 
@@ -240,14 +234,7 @@ def _enqueue_cse_assigned_event(
         )
         return
     try:
-        queue_service = get_queue_service()
-        queue_service.enqueue_job(
-            job_type=JobType.SEND_CSE_ASSIGNED_EVENT,
-            payload={"user_id": user_id_int, "cse_email": cse_email},
-            tenant_id=str(tenant_id) if tenant_id else None,
-            priority=0,
-            max_attempts=3,
-        )
+        enqueue_now("send_cse_assigned_event", {"user_id": user_id_int, "cse_email": cse_email})
     except Exception as e:
         logger.error(
             "Failed to enqueue cse_assigned event user_id=%s cse_email=%s error=%s",
@@ -367,16 +354,11 @@ def enqueue_ticket_created_mixpanel(
     record_data = record.data or {}
     user_id = record_data.get("user_id") or str(record.id)
     properties = support_ticket_mixpanel_properties(record)
-    get_queue_service().enqueue_job(
-        job_type=JobType.SEND_MIXPANEL_EVENT,
-        payload={
-            "user_id": str(user_id),
-            "event_name": "pyro_st_ticket_created",
-            "properties": properties,
-        },
-        tenant_id=str(record.tenant_id) if record.tenant_id else None,
-        priority=0,
-    )
+    enqueue_now("send_mixpanel_event", {
+        "user_id": str(user_id),
+        "event_name": "pyro_st_ticket_created",
+        "properties": properties,
+    })
 
 
 def enqueue_ticket_created_praja(

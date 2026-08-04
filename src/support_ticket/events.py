@@ -17,6 +17,7 @@ from django.utils import timezone
 
 from background_jobs.models import JobType
 from background_jobs.queue_service import get_queue_service
+from pyro_jobs.enqueue import enqueue_now
 from crm_records.models import EventLog, Record
 from support_ticket.constants import (
     SUPPORT_EVENT_CALL_LATER,
@@ -135,17 +136,11 @@ def _enqueue_mixpanel_event(
     if not user_id:
         return
     try:
-        get_queue_service().enqueue_job(
-            job_type=JobType.SEND_MIXPANEL_EVENT,
-            payload={
-                "user_id": str(user_id),
-                "event_name": event_name,
-                "properties": properties or {},
-            },
-            tenant_id=str(tenant_id) if tenant_id else None,
-            priority=0,
-            max_attempts=3,
-        )
+        enqueue_now("send_mixpanel_event", {
+            "user_id": str(user_id),
+            "event_name": event_name,
+            "properties": properties or {},
+        })
     except Exception as exc:
         logger.error(
             "Failed to enqueue Mixpanel event=%s user_id=%s: %s",
