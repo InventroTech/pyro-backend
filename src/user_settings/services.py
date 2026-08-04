@@ -295,6 +295,8 @@ USER_KV_LEAD_ASSIGNMENT_KEY = "LEAD_TYPE_ASSIGNMENT"
 USER_KV_SUPPORT_DAILY_LIMIT_SELF_TRIAL_KEY = "SUPPORT_DAILY_LIMIT_SELF_TRIAL"
 USER_KV_SUPPORT_DAILY_LIMIT_OTHER_KEY = "SUPPORT_DAILY_LIMIT_OTHER"
 USER_KV_SUPPORT_RESOLVE_RATE_GOAL_KEY = "SUPPORT_RESOLVE_RATE_GOAL"
+USER_KV_STATE_KEY = "STATE"
+USER_KV_DISTRICT_KEY = "DISTRICT"
 
 
 def coerce_kv_int(value) -> Optional[int]:
@@ -347,6 +349,10 @@ def upsert_user_kv_settings(
     group_id: Optional[int],
     daily_target: Optional[int],
     daily_limit: Optional[int],
+    state: Optional[str] = None,
+    district: Optional[str] = None,
+    update_state: bool = False,
+    update_district: bool = False,
 ) -> None:
     """Persist core per-user settings in TenantMemberSetting KV rows."""
 
@@ -368,6 +374,20 @@ def upsert_user_kv_settings(
         key=USER_KV_DAILY_LIMIT_KEY,
         defaults={"value": daily_limit},
     )
+    if update_state:
+        TenantMemberSetting.objects.update_or_create(
+            tenant=tenant,
+            tenant_membership=tenant_membership,
+            key=USER_KV_STATE_KEY,
+            defaults={"value": (state or "").strip() or None},
+        )
+    if update_district:
+        TenantMemberSetting.objects.update_or_create(
+            tenant=tenant,
+            tenant_membership=tenant_membership,
+            key=USER_KV_DISTRICT_KEY,
+            defaults={"value": (district or "").strip() or None},
+        )
 
 
 def upsert_user_lead_assignment_kv(
@@ -443,4 +463,65 @@ def upsert_support_daily_limit_kv(
             key=USER_KV_SUPPORT_RESOLVE_RATE_GOAL_KEY,
             value=resolve_rate_goal,
         )
+
+
+USER_KV_RESERVED_KEYS = frozenset(
+    {
+        USER_KV_GROUP_ID_KEY,
+        USER_KV_DAILY_TARGET_KEY,
+        USER_KV_DAILY_LIMIT_KEY,
+        USER_KV_LEAD_ASSIGNMENT_KEY,
+        USER_KV_SUPPORT_DAILY_LIMIT_SELF_TRIAL_KEY,
+        USER_KV_SUPPORT_DAILY_LIMIT_OTHER_KEY,
+        USER_KV_SUPPORT_RESOLVE_RATE_GOAL_KEY,
+        USER_KV_STATE_KEY,
+        USER_KV_DISTRICT_KEY,
+    }
+)
+
+
+def is_user_management_kv_key(key: str) -> bool:
+    """
+    True for free-form User Management custom field keys stored as bare uppercase
+    names (e.g. EMPLOYEE_CODE) — not reserved system keys like GROUP / STATE.
+    """
+    if not isinstance(key, str) or not key:
+        return False
+    if key != key.upper() or len(key) > 100:
+        return False
+    if key in USER_KV_RESERVED_KEYS:
+        return False
+    if not key[0].isalpha():
+        return False
+    return all(c.isalnum() or c == "_" for c in key)
+
+
+def upsert_custom_field_kv(
+    *,
+    tenant,
+    tenant_membership,
+    fields: dict,
+) -> None:
+    """
+    Persist User Management custom fields into user_kv_settings.
+
+    ``fields`` maps bare uppercase keys (e.g. STATE) to JSON-serializable values.
+    ``None`` / empty string clears (deletes) the row.
+    """
+    for key, value in fields.items():
+        if not is_user_management_kv_key(key):
+            continue
+        if value is None or value == "":
+            TenantMemberSetting.objects.filter(
+                tenant=tenant,
+                tenant_membership=tenant_membership,
+                key=key,
+            ).delete()
+        else:
+            TenantMemberSetting.objects.update_or_create(
+                tenant=tenant,
+                tenant_membership=tenant_membership,
+                key=key,
+                defaults={"value": value},
+            )
 

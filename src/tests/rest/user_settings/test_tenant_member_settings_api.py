@@ -134,3 +134,93 @@ class UserCoreKVSettingsAPITests(BaseAPITestCase):
         )
         self.assertEqual(response.status_code, 400, response.data)
         self.assertIn("CSE", response.data["error"])
+
+    def test_patch_custom_fields_allowed_for_non_cse(self):
+        rm_role = RoleFactory(tenant=self.tenant, key="RM", name="RM")
+        self.membership.role = rm_role
+        self.membership.save(update_fields=["role"])
+        response = self.client.patch(
+            self._url(),
+            {
+                "EMPLOYEE_CODE": "E-101",
+                "REGION": "South",
+            },
+            format="json",
+            **self.auth_headers,
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        keys = {row["key"]: row["value"] for row in response.data}
+        self.assertEqual(keys["EMPLOYEE_CODE"], "E-101")
+        self.assertEqual(keys["REGION"], "South")
+        self.assertTrue(
+            TenantMemberSetting.objects.filter(
+                tenant=self.tenant,
+                tenant_membership=self.membership,
+                key="EMPLOYEE_CODE",
+                value="E-101",
+            ).exists()
+        )
+
+    def test_get_includes_custom_fields(self):
+        TenantMemberSetting.objects.update_or_create(
+            tenant=self.tenant,
+            tenant_membership=self.membership,
+            key="EMPLOYEE_CODE",
+            defaults={"value": "E-202"},
+        )
+        response = self.client.get(self._url(), **self.auth_headers)
+        self.assertEqual(response.status_code, 200, response.data)
+        keys = {row["key"]: row["value"] for row in response.data}
+        self.assertEqual(keys.get("EMPLOYEE_CODE"), "E-202")
+
+    def test_patch_null_clears_custom_field(self):
+        TenantMemberSetting.objects.update_or_create(
+            tenant=self.tenant,
+            tenant_membership=self.membership,
+            key="EMPLOYEE_CODE",
+            defaults={"value": "E-303"},
+        )
+        response = self.client.patch(
+            self._url(),
+            {"EMPLOYEE_CODE": None},
+            format="json",
+            **self.auth_headers,
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        keys = {row["key"]: row["value"] for row in response.data}
+        self.assertNotIn("EMPLOYEE_CODE", keys)
+        self.assertFalse(
+            TenantMemberSetting.objects.filter(
+                tenant=self.tenant,
+                tenant_membership=self.membership,
+                key="EMPLOYEE_CODE",
+            ).exists()
+        )
+
+    def test_get_includes_state_district_core_keys(self):
+        TenantMemberSetting.objects.update_or_create(
+            tenant=self.tenant,
+            tenant_membership=self.membership,
+            key="STATE",
+            defaults={"value": "Karnataka"},
+        )
+        TenantMemberSetting.objects.update_or_create(
+            tenant=self.tenant,
+            tenant_membership=self.membership,
+            key="DISTRICT",
+            defaults={"value": "Bengaluru"},
+        )
+        response = self.client.get(self._url(), **self.auth_headers)
+        self.assertEqual(response.status_code, 200, response.data)
+        keys = {row["key"]: row["value"] for row in response.data}
+        self.assertEqual(keys.get("STATE"), "Karnataka")
+        self.assertEqual(keys.get("DISTRICT"), "Bengaluru")
+
+    def test_patch_rejects_reserved_state_key(self):
+        response = self.client.patch(
+            self._url(),
+            {"STATE": "Karnataka"},
+            format="json",
+            **self.auth_headers,
+        )
+        self.assertEqual(response.status_code, 400, response.data)

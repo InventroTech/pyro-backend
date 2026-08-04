@@ -15,6 +15,7 @@ from authz.models import TenantMembership
 from user_settings.models import Group, TenantMemberSetting
 from user_settings.services import (
     USER_KV_DAILY_LIMIT_KEY,
+    USER_KV_DISTRICT_KEY,
     USER_KV_GROUP_ID_KEY,
 )
 
@@ -30,6 +31,7 @@ class LeadFilters:
     eligible_lead_statuses: List[str]
     eligible_states: List[str]
     daily_limit: Optional[int]
+    district: Optional[str]  # RM DISTRICT from user_kv_settings; blank → no fresh pulls
     user_uuid: Optional[uuid_module.UUID]
     tenant_membership: Optional[TenantMembership]
 
@@ -37,13 +39,15 @@ class LeadFilters:
 def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
     """
     Load lead filters for the given user from the database only (no frontend params).
-    Group/KV settings: eligible_lead_types, eligible_lead_sources, eligible_lead_statuses, states, daily_limit, user_uuid.
+    Group/KV settings: eligible_lead_types, eligible_lead_sources, eligible_lead_statuses,
+    states, daily_limit, district, user_uuid.
     """
     eligible_lead_types: List[str] = []
     eligible_lead_sources: List[str] = []
     eligible_lead_statuses: List[str] = []
     eligible_states: List[str] = []
     daily_limit: Optional[int] = None
+    district: Optional[str] = None
     user_uuid = None
     tenant_membership = None
 
@@ -54,6 +58,7 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
             eligible_lead_statuses=eligible_lead_statuses,
             eligible_states=eligible_states,
             daily_limit=daily_limit,
+            district=district,
             user_uuid=user_uuid,
             tenant_membership=tenant_membership,
         )
@@ -81,7 +86,7 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
             kv_settings = TenantMemberSetting.objects.filter(
                 tenant=tenant,
                 tenant_membership=tenant_membership,
-                key__in=[USER_KV_DAILY_LIMIT_KEY, USER_KV_GROUP_ID_KEY],
+                key__in=[USER_KV_DAILY_LIMIT_KEY, USER_KV_GROUP_ID_KEY, USER_KV_DISTRICT_KEY],
             )
             kv_map = {row.key: row.value for row in kv_settings}
             _dl = kv_map.get(USER_KV_DAILY_LIMIT_KEY)
@@ -90,6 +95,12 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
                     daily_limit = int(_dl)
                 except (TypeError, ValueError):
                     pass
+
+            _district = kv_map.get(USER_KV_DISTRICT_KEY)
+            if isinstance(_district, str):
+                district = _district.strip() or None
+            elif _district is not None and not isinstance(_district, bool):
+                district = str(_district).strip() or None
 
             group = None
             group_id = kv_map.get(USER_KV_GROUP_ID_KEY)
@@ -102,18 +113,21 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
                 eligible_lead_statuses = group_data.get("lead_statuses") if isinstance(group_data.get("lead_statuses"), list) else []
                 eligible_states = group_data.get("states") if isinstance(group_data.get("states"), list) else []
                 logger.info(
-                    "[LeadFilters] From Group(%s): lead_types=%s lead_sources=%s lead_statuses=%s states=%s daily_limit=%s",
+                    "[LeadFilters] From Group(%s): lead_types=%s lead_sources=%s lead_statuses=%s "
+                    "states=%s daily_limit=%s district=%s",
                     group.name,
                     eligible_lead_types,
                     eligible_lead_sources or "(none)",
                     eligible_lead_statuses or "(none)",
                     eligible_states or "(none)",
                     daily_limit,
+                    district or "(blank)",
                 )
             else:
                 logger.info(
-                    "[LeadFilters] No GROUP KV for user %s - all queueable leads eligible",
+                    "[LeadFilters] No GROUP KV for user %s - all queueable leads eligible district=%s",
                     user_identifier,
+                    district or "(blank)",
                 )
         else:
             logger.warning("[LeadFilters] No TenantMembership for user_identifier=%s", user_identifier)
@@ -126,6 +140,7 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
         eligible_lead_statuses=eligible_lead_statuses,
         eligible_states=eligible_states,
         daily_limit=daily_limit,
+        district=district,
         user_uuid=user_uuid,
         tenant_membership=tenant_membership,
     )

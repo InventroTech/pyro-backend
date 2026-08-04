@@ -38,7 +38,7 @@ from crm_records.lead_pipeline.pipeline import LeadPipeline
 from crm_records.lead_pipeline.pull_strategy import PullStrategyApplier
 from crm_records.models import Bucket, Record, UserBucketAssignment
 from user_settings.models import Group, TenantMemberSetting
-from user_settings.services import USER_KV_DAILY_LIMIT_KEY, USER_KV_GROUP_ID_KEY
+from user_settings.services import USER_KV_DAILY_LIMIT_KEY, USER_KV_DISTRICT_KEY, USER_KV_GROUP_ID_KEY
 
 from tests.factories import (
     RecordFactory,
@@ -67,6 +67,7 @@ def _make_rm_user(
     lead_sources: list | None = None,
     lead_statuses: list | None = None,
     daily_limit: int | None = None,
+    district: str | None = "TestDistrict",
 ):
     """RM user + membership + Group/KV filter settings."""
     uid = str(uuid.uuid4())
@@ -104,6 +105,13 @@ def _make_rm_user(
         key=USER_KV_DAILY_LIMIT_KEY,
         defaults={"value": daily_limit},
     )
+    if district:
+        TenantMemberSetting.objects.update_or_create(
+            tenant=tenant,
+            tenant_membership=membership,
+            key=USER_KV_DISTRICT_KEY,
+            defaults={"value": district},
+        )
     return user, membership, uid
 
 
@@ -668,6 +676,240 @@ def test_pull_strategy_order_day_first_assigned_at():
 # ===================================================================
 # INTEGRATION — LeadPipeline
 # ===================================================================
+
+
+@pytest.mark.django_db
+def test_pull_strategy_district_priority_order():
+    """Matching RM district sorts before other district, which sorts before blank."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    blank = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="Blank", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    other = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="Other", lead_stage="IN_QUEUE", lead_score=50, district="Mysuru"
+        ),
+    )
+    match = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="Match", lead_stage="IN_QUEUE", lead_score=50, district="Bengaluru"
+        ),
+    )
+    Record.objects.filter(pk__in=[blank.pk, other.pk, match.pk]).update(created_at=now)
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[blank.id, other.id, match.id]
+    )
+    ordered = list(
+        PullStrategyApplier()
+        .apply(
+            qs=qs,
+            strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
+            now_iso=now.isoformat(),
+            rm_district="Bengaluru",
+        )
+    )
+    assert [r.id for r in ordered] == [match.id, other.id, blank.id]
+
+
+@pytest.mark.django_db
+def test_pull_strategy_lead_creator_priority_for_referral():
+    """Referral creator match → other creator → blank creator."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    blank = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="BlankCreator",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            lead_source="PREMIUM_REFERRAL",
+        ),
+    )
+    other = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="OtherCreator",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            lead_source="REFERRAL_TO_RM",
+            lead_creator="Other RM",
+        ),
+    )
+    match = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="MyCreator",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="Priya Sharma",
+        ),
+    )
+    Record.objects.filter(pk__in=[blank.pk, other.pk, match.pk]).update(created_at=now)
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[blank.id, other.id, match.id]
+    )
+    ordered = list(
+        PullStrategyApplier()
+        .apply(
+            qs=qs,
+            strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
+            now_iso=now.isoformat(),
+            rm_name="Priya Sharma",
+        )
+    )
+    assert [r.id for r in ordered] == [match.id, other.id, blank.id]
+
+
+@pytest.mark.django_db
+def test_pull_strategy_district_then_lead_creator():
+    """District wins over creator; within same district, creator match wins."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    # Better creator, worse district
+    other_district_mine = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="OtherDistMine",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district="Mysuru",
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="Priya Sharma",
+        ),
+    )
+    # Matching district, other creator
+    same_dist_other = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="SameDistOther",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district="Bengaluru",
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="Other RM",
+        ),
+    )
+    # Matching district + matching creator
+    same_dist_mine = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="SameDistMine",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district="Bengaluru",
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="priya sharma",
+        ),
+    )
+    Record.objects.filter(
+        pk__in=[other_district_mine.pk, same_dist_other.pk, same_dist_mine.pk]
+    ).update(created_at=now)
+
+    qs = Record.objects.filter(
+        tenant=tenant,
+        entity_type="lead",
+        id__in=[other_district_mine.id, same_dist_other.id, same_dist_mine.id],
+    )
+    ordered = list(
+        PullStrategyApplier()
+        .apply(
+            qs=qs,
+            strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
+            now_iso=now.isoformat(),
+            rm_district="Bengaluru",
+            rm_name="Priya Sharma",
+        )
+    )
+    assert [r.id for r in ordered] == [
+        same_dist_mine.id,
+        same_dist_other.id,
+        other_district_mine.id,
+    ]
+
+
+@pytest.mark.django_db
+def test_pull_strategy_lead_creator_ignores_non_referral():
+    """Non-referral leads stay on district/score order; creator tiers only shuffle referrals."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    # Non-referral, lower score — must still beat blank-creator referral mid-shuffle
+    # when competing: non-referral is neutral (0), blank referral is 2.
+    non_referral = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="NonReferral",
+            lead_stage="IN_QUEUE",
+            lead_score=10,
+            lead_source="COLD_CALL",
+        ),
+    )
+    blank_referral = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="BlankReferral",
+            lead_stage="IN_QUEUE",
+            lead_score=900,
+            lead_source="PREMIUM_REFERRAL",
+        ),
+    )
+    other_referral = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="OtherReferral",
+            lead_stage="IN_QUEUE",
+            lead_score=500,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="Other RM",
+        ),
+    )
+    Record.objects.filter(
+        pk__in=[non_referral.pk, blank_referral.pk, other_referral.pk]
+    ).update(created_at=now)
+
+    qs = Record.objects.filter(
+        tenant=tenant,
+        entity_type="lead",
+        id__in=[non_referral.id, blank_referral.id, other_referral.id],
+    )
+    ordered = list(
+        PullStrategyApplier()
+        .apply(
+            qs=qs,
+            strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
+            now_iso=now.isoformat(),
+            rm_name="Priya Sharma",
+        )
+    )
+    # Non-referral (neutral 0) before other-creator (1) before blank referral (2),
+    # even though blank/other have higher scores.
+    assert [r.id for r in ordered] == [
+        non_referral.id,
+        other_referral.id,
+        blank_referral.id,
+    ]
 
 
 @pytest.mark.django_db

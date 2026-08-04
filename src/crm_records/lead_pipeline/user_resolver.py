@@ -24,6 +24,8 @@ class ResolvedUser:
     eligible_lead_statuses: List[str]
     eligible_states: List[str]
     daily_limit: Optional[int]
+    district: Optional[str]
+    name: Optional[str]  # TenantMembership.name — Lead Creator matching
 
 
 class UserResolver:
@@ -36,15 +38,24 @@ class UserResolver:
         email = getattr(request_user, "email", None)
 
         filters = get_lead_filters_for_user(tenant, identifier)
+        membership = filters.tenant_membership
+        name = None
+        if membership is not None:
+            raw_name = getattr(membership, "name", None)
+            if isinstance(raw_name, str):
+                name = raw_name.strip() or None
+
         return ResolvedUser(
             identifier=identifier,
             uuid=filters.user_uuid,
-            membership=filters.tenant_membership,
+            membership=membership,
             email=email,
             eligible_lead_types=filters.eligible_lead_types,
             eligible_lead_sources=filters.eligible_lead_sources,
             eligible_lead_statuses=filters.eligible_lead_statuses,
             eligible_states=filters.eligible_states,
             daily_limit=filters.daily_limit,
+            district=filters.district,
+            name=name,
         )
 
