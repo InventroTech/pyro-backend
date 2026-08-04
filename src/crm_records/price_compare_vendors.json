@@ -1,6 +1,6 @@
 {
   "defaults": {
-    "profile": "extended",
+    "profile": "core",
     "max_results_per_vendor": 3,
     "timeout_seconds": 10,
     "max_workers": 8
@@ -195,9 +195,9 @@
       "label": "DRK Store",
       "vendor_name": "DRKSTORE",
       "hosts": ["drkstore.in"],
-      "strategy": "html",
-      "base_url": "https://drkstore.in",
-      "search_url": "https://drkstore.in/?s={q}&post_type=product",
+      "strategy": "wc_store",
+      "base_url": "https://www.drkstore.in",
+      "search_url": "https://www.drkstore.in/?s={q}&post_type=product",
       "enabled": true,
       "profile": "extended"
     },
@@ -206,7 +206,7 @@
       "label": "UAV Garage",
       "vendor_name": "UAVGARAGE",
       "hosts": ["uavgarage.com"],
-      "strategy": "html",
+      "strategy": "wc_store",
       "base_url": "https://uavgarage.com",
       "search_url": "https://uavgarage.com/?s={q}&post_type=product",
       "enabled": true,
@@ -219,7 +219,7 @@
       "hosts": ["fabtolab.com"],
       "strategy": "html",
       "base_url": "https://www.fabtolab.com",
-      "search_url": "https://www.fabtolab.com/?s={q}&post_type=product",
+      "search_url": "https://www.fabtolab.com/index.php?route=product/search&search={q}",
       "enabled": true,
       "profile": "extended"
     }

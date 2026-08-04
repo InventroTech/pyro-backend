@@ -70,6 +70,7 @@ from email_protocol.templates.newRequestUnmannd import build_new_request_unmannd
 from email_protocol.templates.requestPaidUnmannd import build_request_paid_unmannd_email
 from email_protocol.templates.requestApprovedUnmannd import build_request_approved_unmannd_email
 from email_protocol.templates.requestRejectedUnmannd import build_request_rejected_unmannd_email
+from email_protocol.templates.requestOnHoldUnmannd import build_request_on_hold_unmannd_email
 from email_protocol.templates.requestOrderedUnmannd import build_request_ordered_unmannd_email
 
 from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
@@ -712,6 +713,71 @@ def _notify_requester_when_rejected(request, record, previous_status):
         )
 
 
+def _notify_requester_when_on_hold(request, record, previous_status):
+    """
+    Send requester email when status transitions to ON_HOLD.
+    Best-effort only; never raises.
+    """
+    if not record or record.entity_type not in REQUEST_NOTIFICATION_ENTITY_TYPES:
+        return
+
+    tenant = getattr(request, "tenant", None)
+    if not tenant:
+        return
+
+    data = record.data if isinstance(record.data, dict) else {}
+    current_status = _normalize_status_value(data.get("status"))
+    old_status = _normalize_status_value(previous_status)
+    if current_status != "ON_HOLD" or old_status == "ON_HOLD":
+        return
+
+    try:
+        requester_email, requester_name = _resolve_requester_email_name(tenant, data)
+        if not requester_email:
+            logger.info(
+                "[RequestOnHoldEmail] Skip: record=%s requester email not found.",
+                getattr(record, "id", None),
+            )
+            return
+
+        subject, text_body, html_body = build_request_on_hold_unmannd_email(
+            {
+                "request_id": record.id,
+                "requester_name": requester_name,
+                "tenant_name": getattr(tenant, "name", "Pyro"),
+                "item_name": str(data.get("item_name_freeform") or data.get("item_name") or "N/A").strip(),
+                "status_text": str(data.get("status_text") or data.get("status") or "ON_HOLD").strip(),
+                "redirect_url": _record_app_redirect_url(request, record),
+            }
+        )
+        send_ok, send_msg = send_email(
+            to_emails=requester_email,
+            subject=subject,
+            message=text_body,
+            html_message=html_body,
+            client_name="RequestOnHoldNotification",
+            fail_silently=True,
+        )
+        if not send_ok:
+            logger.warning(
+                "[RequestOnHoldEmail] Failed: record=%s email=%s msg=%s",
+                getattr(record, "id", None),
+                requester_email,
+                send_msg,
+            )
+        else:
+            logger.info(
+                "[RequestOnHoldEmail] Sent: record=%s email=%s",
+                getattr(record, "id", None),
+                requester_email,
+            )
+    except Exception:
+        logger.exception(
+            "Unexpected error while sending on-hold email for record=%s",
+            getattr(record, "id", None),
+        )
+
+
 def _notify_on_team_lead_ordered(request, record, previous_status):
     """
     When team lead Order runs (status → IN_SHIPPING from VENDOR_IDENTIFIED/PAYMENT_PENDING):
@@ -839,10 +905,11 @@ def _notify_on_team_lead_ordered(request, record, previous_status):
 
 
 def _notify_request_status_emails(request, record, previous_status):
-    """Dispatch status-transition emails (approve / order / reject / paid)."""
+    """Dispatch status-transition emails (approve / order / reject / on-hold / paid)."""
     _notify_on_manager_approved(request, record, previous_status)
     _notify_on_team_lead_ordered(request, record, previous_status)
     _notify_requester_when_rejected(request, record, previous_status)
+    _notify_requester_when_on_hold(request, record, previous_status)
     _notify_requester_when_paid(request, record, previous_status)
 
 
@@ -5873,7 +5940,7 @@ class PriceCompareView(APIView):
     POST /crm-records/price-compare/
     {
       "query": "arduino uno",
-      "profile": "extended",             # optional: core|extended (default: extended)
+      "profile": "core",                 # optional: core|extended (default: core)
       "sources": ["amazon", "robu"],     # optional explicit override
       "urls": ["https://robu.in/product/..."],
       "pincode": "560001"
@@ -5910,8 +5977,8 @@ class PriceCompareView(APIView):
         description=(
             "Fetches current prices from configured vendor sites for a product query, "
             "and/or extracts prices from provided product page URLs. "
-            "Default profile is `extended` (full catalog). Use `profile=core` for the "
-            "small reliable set, or pass explicit `sources` to override. "
+            "Default profile is `core` (small reliable set). Use `profile=extended` for the "
+            "full catalog, or pass explicit `sources` to override. "
             "Optional Indian PIN code improves Amazon delivery date accuracy."
         ),
         request={

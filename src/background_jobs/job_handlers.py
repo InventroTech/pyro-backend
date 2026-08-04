@@ -1519,6 +1519,154 @@ class ReleaseLeadsAfter12hJobHandler(JobHandler):
         return delays[min(attempt - 1, len(delays) - 1)]
 
 
+class RefreshInventoryShipmentTrackingJobHandler(JobHandler):
+    """
+    Re-poll carrier status for in-shipping inventory / unmannd requests that still
+    have a tracking number/link and are not yet DELIVERED / EXCEPTION.
+
+    Updates ``data.shipment_status`` (and related fields) when live track returns ok.
+    """
+
+    ENTITY_TYPES = ("inventory_request", "unmannd_request")
+    TERMINAL_SHIPMENT_STATUSES = frozenset({"DELIVERED", "EXCEPTION"})
+    DEFAULT_MAX_PER_RUN = 75
+
+    def process(self, job: BackgroundJob) -> bool:
+        from crm_records.inventory_shipment_live_track import (
+            ShipmentTrackError,
+            track_shipment,
+        )
+
+        payload = job.payload or {}
+        max_per_run = int(payload.get("max_per_run") or self.DEFAULT_MAX_PER_RUN)
+        max_per_run = max(1, min(max_per_run, 200))
+
+        qs = _filter_records_by_job_tenant(
+            Record.objects.filter(entity_type__in=self.ENTITY_TYPES).extra(
+                where=[
+                    "UPPER(COALESCE(data->>'status','')) = 'IN_SHIPPING'",
+                    """
+                    (
+                      TRIM(COALESCE(data->>'tracking_number', '')) != ''
+                      OR TRIM(COALESCE(data->>'tracking_link', '')) != ''
+                    )
+                    """,
+                    """
+                    (
+                      data->>'shipment_status' IS NULL
+                      OR TRIM(COALESCE(data->>'shipment_status', '')) = ''
+                      OR UPPER(TRIM(COALESCE(data->>'shipment_status', '')))
+                         NOT IN ('DELIVERED', 'EXCEPTION')
+                    )
+                    """,
+                ],
+            ),
+            job,
+        ).order_by("updated_at")[:max_per_run]
+
+        checked = 0
+        updated = 0
+        errors = 0
+        unchanged = 0
+
+        for record in qs:
+            checked += 1
+            data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
+            number = str(data.get("tracking_number") or "").strip() or None
+            link = str(data.get("tracking_link") or "").strip() or None
+            courier = str(data.get("courier_name") or "").strip() or None
+            if not number and not link:
+                continue
+            try:
+                result = track_shipment(
+                    tracking_number=number,
+                    tracking_link=link,
+                    courier_name=courier,
+                )
+            except ShipmentTrackError as exc:
+                errors += 1
+                logger.info(
+                    "[RefreshShipmentTracking] skip record_id=%s validation=%s",
+                    record.id,
+                    exc,
+                )
+                continue
+            except Exception:
+                errors += 1
+                logger.exception(
+                    "[RefreshShipmentTracking] track failed record_id=%s",
+                    record.id,
+                )
+                continue
+
+            if not result.get("ok"):
+                unchanged += 1
+                continue
+
+            changed = False
+            new_status = str(result.get("shipment_status") or "").strip().upper().replace(" ", "_")
+            if new_status and new_status != str(data.get("shipment_status") or "").strip().upper().replace(" ", "_"):
+                data["shipment_status"] = new_status
+                changed = True
+
+            new_number = str(result.get("tracking_number") or "").strip()
+            if new_number and new_number != str(data.get("tracking_number") or "").strip():
+                data["tracking_number"] = new_number
+                changed = True
+
+            new_link = str(result.get("tracking_link") or "").strip()
+            if new_link and new_link != str(data.get("tracking_link") or "").strip():
+                data["tracking_link"] = new_link
+                changed = True
+
+            new_courier = str(result.get("courier_name") or "").strip()
+            if new_courier and new_courier != str(data.get("courier_name") or "").strip():
+                data["courier_name"] = new_courier
+                changed = True
+
+            eta_raw = result.get("eta")
+            if eta_raw:
+                new_eta = str(eta_raw).strip()[:10]
+                if new_eta and new_eta != str(data.get("eta") or "").strip()[:10]:
+                    data["eta"] = new_eta
+                    changed = True
+
+            if not changed:
+                unchanged += 1
+                continue
+
+            data["tracking_updated_at"] = timezone.now().isoformat()
+            record.data = data
+            record.save(update_fields=["data", "updated_at"])
+            updated += 1
+            logger.info(
+                "[RefreshShipmentTracking] updated record_id=%s shipment_status=%s",
+                record.id,
+                data.get("shipment_status"),
+            )
+
+        job.result = {
+            "success": True,
+            "checked": checked,
+            "updated": updated,
+            "unchanged": unchanged,
+            "errors": errors,
+            "timestamp": timezone.now().isoformat(),
+        }
+        logger.info(
+            "[RefreshShipmentTracking] Completed checked=%s updated=%s unchanged=%s errors=%s",
+            checked,
+            updated,
+            unchanged,
+            errors,
+        )
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+
 class DiscoverEntityTypesJobHandler(JobHandler):
     """
     Incrementally discover tenant entity types and data fields from records.
@@ -1613,6 +1761,10 @@ class JobHandlerRegistry:
             JobType.DISCOVER_ENTITY_TYPES,
             DiscoverEntityTypesJobHandler(),
         )
+        self.register_handler(
+            JobType.REFRESH_INVENTORY_SHIPMENT_TRACKING,
+            RefreshInventoryShipmentTrackingJobHandler(),
+        )
         # Praja handler removed - now using MixpanelService instead
         self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
     
@@ -1647,6 +1799,10 @@ class JobHandlerRegistry:
     def has_handler(self, job_type: str) -> bool:
         """Check if a handler exists for a job type"""
         return job_type in self._handlers
+
+    def list_handlers(self) -> list:
+        """Return registered job type keys."""
+        return list(self._handlers.keys())
 
 
 # Global registry instance

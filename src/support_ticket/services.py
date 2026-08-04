@@ -8,7 +8,12 @@ from typing import Any, Dict, Literal, Mapping, Optional
 from support_ticket.constants import PRAJA_SAVE_SUPPORT_TICKET_URL, normalize_praja_ticket_status
 
 RmAssignedSendResult = Literal["success", "skipped_not_found", "failed"]
-CseAssignedSendResult = RmAssignedSendResult
+CseAssignedSendResult = Literal[
+    "success",
+    "skipped_not_found",
+    "skipped_invalid_user",
+    "failed",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -114,43 +119,54 @@ class MixpanelService:
             logger.info("=" * 80)
             
             if not response.ok:
-                logger.error("=" * 80)
-                logger.error(f"❌ [Mixpanel] Failed: {event_name} status={response.status_code}")
-                
                 # Detailed error handling
                 if response.status_code == 401:
-                    logger.error(f"   Error: Unauthorized - Check MIXPANEL_TOKEN in .env file")
-                    logger.error(f"   Token Preview: {self.mixpanel_token[:20]}...")
+                    logger.error(
+                        "[Mixpanel] Failed: %s status=401 Unauthorized (check MIXPANEL_TOKEN)",
+                        event_name,
+                    )
                 elif response.status_code == 404:
                     try:
                         error_data = response.json()
                         error_msg = error_data.get('message', 'Unknown error')
-                        logger.error(f"   Error: User Not Found (404)")
-                        logger.error(f"   Message: {error_msg}")
-                        logger.error(f"   User ID Sent: {user_id_for_api} ({type(user_id_for_api).__name__})")
-                        logger.error(f"   Note: This may be expected for new leads/users that don't exist in Mixpanel yet")
-                    except:
-                        logger.error(f"   Error: 404 Not Found - {response.text[:200]}")
+                    except Exception:
+                        error_msg = response.text[:200]
+                    # Expected for users not yet in Mixpanel — don't spam Sentry
+                    logger.warning(
+                        "[Mixpanel] Failed: %s status=404 user not found: user_id=%s message=%s",
+                        event_name,
+                        user_id_for_api,
+                        error_msg,
+                    )
                 elif response.status_code >= 500:
-                    logger.error(f"   Error: Server Error ({response.status_code})")
-                    logger.error(f"   This is a server-side issue with the Mixpanel API")
+                    logger.error(
+                        "[Mixpanel] Failed: %s status=%s Mixpanel server error",
+                        event_name,
+                        response.status_code,
+                    )
                 else:
-                    logger.error(f"   Error: HTTP {response.status_code}")
                     try:
-                        error_data = response.json()
-                        logger.error(f"   Details: {json.dumps(error_data, indent=2, default=str)}")
-                    except:
-                        logger.error(f"   Response: {response.text[:200]}")
-                
-                logger.error("=" * 80)
+                        details = json.dumps(response.json(), default=str)
+                    except Exception:
+                        details = response.text[:200]
+                    logger.error(
+                        "[Mixpanel] Failed: %s status=%s details=%s",
+                        event_name,
+                        response.status_code,
+                        details,
+                    )
                 return False
             
             logger.info(f"✅ [Mixpanel] Success: {event_name} for user_id={user_id_for_api}")
             return True
             
         except Exception as error:
-            logger.error(f'❌ [Mixpanel] Error: {event_name} - {error}')
-            logger.error(f"   Error Type: {type(error).__name__}")
+            logger.error(
+                "[Mixpanel] Error: %s - %s (%s)",
+                event_name,
+                error,
+                type(error).__name__,
+            )
             return False
     
 
@@ -250,32 +266,36 @@ class RMAssignedMixpanelService:
                     )
                     return "skipped_not_found"
 
-                logger.error("=" * 80)
-                logger.error(f"❌ [Mixpanel] Failed: rm_assigned status={response.status_code}")
-
                 if response.status_code == 401:
-                    logger.error(f"   Error: Unauthorized - Check MIXPANEL_TOKEN in .env file")
-                    logger.error(f"   Token Preview: {self.mixpanel_token[:20]}...")
+                    logger.error(
+                        "[Mixpanel] Failed: rm_assigned status=401 Unauthorized (check MIXPANEL_TOKEN)"
+                    )
                 elif response.status_code >= 500:
-                    logger.error(f"   Error: Server Error ({response.status_code})")
-                    logger.error(f"   This is a server-side issue with the Mixpanel API")
+                    logger.error(
+                        "[Mixpanel] Failed: rm_assigned status=%s Mixpanel server error",
+                        response.status_code,
+                    )
                 else:
-                    logger.error(f"   Error: HTTP {response.status_code}")
                     try:
-                        error_data = response.json()
-                        logger.error(f"   Details: {json.dumps(error_data, indent=2, default=str)}")
+                        details = json.dumps(response.json(), default=str)
                     except Exception:
-                        logger.error(f"   Response: {response.text[:200]}")
-
-                logger.error("=" * 80)
+                        details = response.text[:200]
+                    logger.error(
+                        "[Mixpanel] Failed: rm_assigned status=%s details=%s",
+                        response.status_code,
+                        details,
+                    )
                 return "failed"
 
             logger.info(f"✅ [Mixpanel] Success: rm_assigned for praja_id={praja_id_int}")
             return "success"
 
         except Exception as error:
-            logger.error(f'❌ [Mixpanel] Error: rm_assigned - {error}')
-            logger.error(f"   Error Type: {type(error).__name__}")
+            logger.error(
+                "[Mixpanel] Error: rm_assigned - %s (%s)",
+                error,
+                type(error).__name__,
+            )
             return "failed"
 
 
@@ -297,7 +317,9 @@ class CSEAssignedMixpanelService:
             cse_email: CSE email address
 
         Returns:
-            ``success`` on 2xx, ``skipped_not_found`` on 404 (user missing in Circle),
+            ``success`` on 2xx,
+            ``skipped_not_found`` on 404 (user missing in Circle),
+            ``skipped_invalid_user`` on 422 with ``{"error": "Invalid user"}``,
             ``failed`` for other errors.
         """
         try:
@@ -351,6 +373,7 @@ class CSEAssignedMixpanelService:
                 response_json = response.json()
                 logger.info(f"   Response Body: {json.dumps(response_json, indent=2, default=str)}")
             except Exception:
+                response_json = None
                 logger.info(
                     f"   Response Text: {response.text[:500]}"
                     f"{'...' if len(response.text) > 500 else ''}"
@@ -361,7 +384,7 @@ class CSEAssignedMixpanelService:
             if not response.ok:
                 if response.status_code == 404:
                     try:
-                        error_data = response.json()
+                        error_data = response_json if isinstance(response_json, dict) else response.json()
                         error_msg = error_data.get("message", "Unknown error")
                     except Exception:
                         error_msg = response.text[:200] if response.text else "Not found"
@@ -374,32 +397,55 @@ class CSEAssignedMixpanelService:
                     )
                     return "skipped_not_found"
 
-                logger.error("=" * 80)
-                logger.error(f"❌ [Mixpanel] Failed: cse_assigned status={response.status_code}")
+                if response.status_code == 422:
+                    try:
+                        error_data = (
+                            response_json if isinstance(response_json, dict) else response.json()
+                        )
+                    except Exception:
+                        error_data = {}
+                    if isinstance(error_data, dict) and error_data.get("error") == "Invalid user":
+                        logger.warning(
+                            "[Mixpanel] cse_assigned skipped (422 invalid user): "
+                            "user_id=%s cse_email=%s",
+                            user_id_int,
+                            cse_email,
+                        )
+                        return "skipped_invalid_user"
 
                 if response.status_code == 401:
-                    logger.error("   Error: Unauthorized - Check MIXPANEL_TOKEN in .env file")
-                    logger.error(f"   Token Preview: {self.mixpanel_token[:20]}...")
+                    logger.error(
+                        "[Mixpanel] Failed: cse_assigned status=401 Unauthorized (check MIXPANEL_TOKEN)"
+                    )
                 elif response.status_code >= 500:
-                    logger.error(f"   Error: Server Error ({response.status_code})")
-                    logger.error("   This is a server-side issue with the Mixpanel API")
+                    logger.error(
+                        "[Mixpanel] Failed: cse_assigned status=%s Mixpanel server error",
+                        response.status_code,
+                    )
                 else:
-                    logger.error(f"   Error: HTTP {response.status_code}")
                     try:
-                        error_data = response.json()
-                        logger.error(f"   Details: {json.dumps(error_data, indent=2, default=str)}")
+                        details = json.dumps(
+                            response_json if isinstance(response_json, dict) else response.json(),
+                            default=str,
+                        )
                     except Exception:
-                        logger.error(f"   Response: {response.text[:200]}")
-
-                logger.error("=" * 80)
+                        details = response.text[:200]
+                    logger.error(
+                        "[Mixpanel] Failed: cse_assigned status=%s details=%s",
+                        response.status_code,
+                        details,
+                    )
                 return "failed"
 
             logger.info(f"✅ [Mixpanel] Success: cse_assigned for user_id={user_id_int}")
             return "success"
 
         except Exception as error:
-            logger.error(f"❌ [Mixpanel] Error: cse_assigned - {error}")
-            logger.error(f"   Error Type: {type(error).__name__}")
+            logger.error(
+                "[Mixpanel] Error: cse_assigned - %s (%s)",
+                error,
+                type(error).__name__,
+            )
             return "failed"
 
 
