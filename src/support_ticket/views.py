@@ -392,7 +392,7 @@ def enqueue_process_dumped_tickets_job(tenant_id: Union[str, UUID]):
     already pending/running for that tenant.
     """
     from django.utils import timezone
-    from pyro_jobs.brahma import schedule_once
+    from pyro_jobs.pyro_job_creator import schedule_once
     from pyro_jobs.models import PyroJob
 
     tid = str(tenant_id)

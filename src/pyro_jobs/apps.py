@@ -11,7 +11,7 @@ class PyroJobsConfig(AppConfig):
         if "pytest" in sys.modules or "test" in sys.argv:
             return
         if os.environ.get("RUN_MAIN") == "true" or os.environ.get("DJANGO_ENV") != "development":
-            from pyro_jobs.brahma import start_brahma
-            from pyro_jobs.vishnu import start_vishnu
-            start_brahma()
-            start_vishnu()
+            from pyro_jobs.pyro_job_creator import start_pyro_job_creator
+            from pyro_jobs.pyro_job_executor import start_pyro_job_executor
+            start_pyro_job_creator()
+            start_pyro_job_executor()
