@@ -7,12 +7,11 @@ Two layers:
    transformers and ``_transform_row``. No DB required, so they run fast and
    pinpoint regressions in date/decimal/bool parsing without touching anything.
 
-2. ``DispatchSyncEndToEndTests`` / ``SyncDispatchToRecordsJobHandlerTests`` —
+2. ``DispatchSyncEndToEndTests`` —
    exercise ``run_dispatch_sync`` end-to-end against a real test database
    with ``_fetch_header_and_data_rows`` patched (the Airbyte ``dispatch_dataDispatchData``
    table is not in our schema and is owned by Airbyte). They verify upsert,
-   revival of soft-deleted rows, soft-delete of disappeared rows, and the
-   handler's job.result payload.
+   revival of soft-deleted rows, and soft-delete of disappeared rows.
 
 Run (from pyro-backend/):
 
@@ -46,11 +45,9 @@ from background_jobs.dispatch_sync import (
     _transform_row,
     run_dispatch_sync,
 )
-from background_jobs.job_handlers import SyncDispatchToRecordsJobHandler
-from background_jobs.models import JobType
 from crm_records.models import Record
 
-from tests.factories import BackgroundJobFactory, TenantFactory
+from tests.factories import TenantFactory
 
 
 # =====================================================================
@@ -501,36 +498,3 @@ class DispatchSyncEndToEndTests(_DispatchTenantPatchMixin, TestCase):
         with patch.object(ds, "_fetch_header_and_data_rows", side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
                 run_dispatch_sync()
-
-
-class SyncDispatchToRecordsJobHandlerTests(_DispatchTenantPatchMixin, TestCase):
-    """Wrapper around the JobHandler — confirms job.result is populated."""
-
-    def test_handler_populates_job_result_with_counts(self):
-        handler = SyncDispatchToRecordsJobHandler()
-        job = BackgroundJobFactory(
-            tenant=self.tenant,
-            job_type=JobType.SYNC_DISPATCH_TO_RECORDS,
-            payload={},
-        )
-        rows = [_source_row(column_B="DC-J1"), _source_row(column_B="DC-J2")]
-        with self._patch_source_rows(rows):
-            ok = handler.process(job)
-        self.assertTrue(ok)
-        self.assertTrue(job.result["success"])
-        self.assertEqual(job.result["fetched"], 2)
-        self.assertEqual(job.result["upserted"], 2)
-        self.assertEqual(job.result["soft_deleted"], 0)
-        self.assertIn("timestamp", job.result)
-
-    def test_handler_get_retry_delay_matches_lead_cron_handlers(self):
-        handler = SyncDispatchToRecordsJobHandler()
-        self.assertEqual(handler.get_retry_delay(1), 60)
-        self.assertEqual(handler.get_retry_delay(2), 300)
-        self.assertEqual(handler.get_retry_delay(3), 900)
-        self.assertEqual(handler.get_retry_delay(99), 900)
-
-    def test_handler_validate_payload_accepts_anything(self):
-        handler = SyncDispatchToRecordsJobHandler()
-        self.assertTrue(handler.validate_payload({}))
-        self.assertTrue(handler.validate_payload({"unused": "value"}))

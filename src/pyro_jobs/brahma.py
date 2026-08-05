@@ -10,9 +10,12 @@ from django.db.utils import InterfaceError
 logger = logging.getLogger(__name__)
 
 SCHEDULE = {
-    "dispatch_data_sync":                {"every_minutes": 480},
-    "purge_old_log_tables":              {"every_minutes": 1440},
-    "snoozed_to_not_connected_midnight": {"daily_at_utc": "17:30"},
+    "close_stale_self_trial_support_tickets": {"every_minutes": 15},
+    "discover_entity_types":                  {"every_minutes": 5},
+    "dispatch_data_sync":                     {"every_minutes": 480},
+    "process_dumped_tickets":                 {"every_minutes": 5},
+    "purge_old_log_tables":                   {"every_minutes": 1440},
+    "snoozed_to_not_connected_midnight":      {"daily_at_utc": "17:30"},
 }
 
 
@@ -139,5 +142,6 @@ def start_brahma():
 
 def schedule_once(job_name, payload, run_at):
     from pyro_jobs.models import PyroJob
-    PyroJob.objects.create(job_name=job_name, payload=payload, run_at=run_at)
+    job = PyroJob.objects.create(job_name=job_name, payload=payload, run_at=run_at)
     logger.info("[Brahma] One-off scheduled: %s → %s", job_name, run_at)
+    return job
