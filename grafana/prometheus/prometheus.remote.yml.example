@@ -1,0 +1,27 @@
+# Optional remote scrape job — merge into prometheus.yml (or replace the local job).
+#
+# Example:
+#   metrics_path: /metrics
+#   scheme: https
+#   authorization:
+#     type: Bearer
+#     credentials: <METRICS_AUTH_TOKEN>
+#   static_configs:
+#     - targets: ["api.thepyro.ai"]   # or pyro-backend-1.onrender.com
+#       labels:
+#         env: production
+#         service: pyro-backend
+
+scrape_configs:
+  - job_name: pyro-backend-remote
+    metrics_path: /metrics
+    scrape_interval: 15s
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials: REPLACE_WITH_METRICS_AUTH_TOKEN
+    static_configs:
+      - targets: ["api.thepyro.ai"]
+        labels:
+          env: production
+          service: pyro-backend
