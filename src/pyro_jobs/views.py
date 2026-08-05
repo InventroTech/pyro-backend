@@ -50,7 +50,7 @@ class PyroEnqueueJobView(_TenantPyroJobAPIView):
         summary="Manually enqueue a pyro job",
         description=(
             "Create a PENDING pyro_job row for any registered job name. "
-            "Vishnu picks it up when run_at is due."
+            "PyroJobExecutor picks it up when run_at is due."
         ),
         request={
             "application/json": {

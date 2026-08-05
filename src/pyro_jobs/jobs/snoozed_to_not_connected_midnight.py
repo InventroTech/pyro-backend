@@ -5,7 +5,7 @@ For SALES LEAD leads in SNOOZED stage belonging to tenant d6db1158-2212-4d94-bb0
 sets lead_stage to NOT_CONNECTED, clears assigned_to, removes snooze_unassign_at.
 
 Only processes leads whose next_call_at falls on today's calendar date (UTC).
-Runs once per UTC calendar day at 17:30 UTC (11 PM IST) via Brahma.
+Runs once per UTC calendar day at 17:30 UTC (11 PM IST) via PyroJobCreator.
 """
 from __future__ import annotations
 

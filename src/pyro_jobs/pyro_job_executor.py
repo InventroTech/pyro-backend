@@ -52,7 +52,7 @@ def recover_stale_jobs(PyroJob):
     """
     Reset jobs stuck in RUNNING for longer than STALE_RUNNING_MINUTES.
     Happens when a worker process dies mid-job — status stays RUNNING forever
-    because Vishnu only updates it on completion or caught exception.
+    because the executor only updates it on completion or caught exception.
     """
     cutoff = timezone.now() - timedelta(minutes=STALE_RUNNING_MINUTES)
     stale = PyroJob.objects.filter(
@@ -67,21 +67,21 @@ def recover_stale_jobs(PyroJob):
             job.run_at = timezone.now() + timedelta(seconds=delay)
             job.save(update_fields=["status", "run_at"])
             logger.warning(
-                "[Vishnu] Stale RUNNING job recovered → PENDING: %s (id=%s, stuck since %s)",
+                "[PyroJobExecutor] Stale RUNNING job recovered → PENDING: %s (id=%s, stuck since %s)",
                 job.job_name, job.id, job.started_at,
             )
         else:
             job.status = PyroJob.STATUS_FAILED
             job.is_deleted = True
-            job.error = (job.error or "") + "\n[auto-failed: stale RUNNING job recovered by Vishnu]"
+            job.error = (job.error or "") + "\n[auto-failed: stale RUNNING job recovered by PyroJobExecutor]"
             job.save(update_fields=["status", "is_deleted", "error"])
             logger.error(
-                "[Vishnu] Stale RUNNING job auto-failed: %s (id=%s, attempts=%s/%s)",
+                "[PyroJobExecutor] Stale RUNNING job auto-failed: %s (id=%s, attempts=%s/%s)",
                 job.job_name, job.id, job.attempts, job.max_attempts,
             )
 
 
-def run_vishnu_loop():
+def run_pyro_job_executor_loop():
     time.sleep(10)
 
     while True:
@@ -105,7 +105,7 @@ def run_vishnu_loop():
 
                     if handler:
                         logger.info(
-                            "[Vishnu] Running: %s (attempt %s/%s)",
+                            "[PyroJobExecutor] Running: %s (attempt %s/%s)",
                             job.job_name, job.attempts, job.max_attempts
                         )
                         result = handler(job.payload)
@@ -115,10 +115,10 @@ def run_vishnu_loop():
                         job.is_deleted   = True
                         job.result       = result if isinstance(result, dict) else None
                         job.save(update_fields=["status", "completed_at", "is_deleted", "result"])
-                        logger.info("[Vishnu] Completed: %s", job.job_name)
+                        logger.info("[PyroJobExecutor] Completed: %s", job.job_name)
 
                     else:
-                        logger.error("[Vishnu] No handler found for: %s", job.job_name)
+                        logger.error("[PyroJobExecutor] No handler found for: %s", job.job_name)
                         job.status     = PyroJob.STATUS_FAILED
                         job.error      = f"No handler registered for: {job.job_name}"
                         job.is_deleted = True
@@ -126,7 +126,7 @@ def run_vishnu_loop():
 
                 except Exception as e:
                     logger.error(
-                        "[Vishnu] Job failed: %s → %s (attempt %s/%s)",
+                        "[PyroJobExecutor] Job failed: %s → %s (attempt %s/%s)",
                         job.job_name, e, job.attempts, job.max_attempts
                     )
                     job.error = str(e)
@@ -137,7 +137,7 @@ def run_vishnu_loop():
                         job.run_at = timezone.now() + timedelta(seconds=delay)
                         job.save(update_fields=["status", "error", "run_at", "attempts"])
                         logger.info(
-                            "[Vishnu] Retry in %ss: %s (attempt %s/%s)",
+                            "[PyroJobExecutor] Retry in %ss: %s (attempt %s/%s)",
                             delay, job.job_name, job.attempts, job.max_attempts
                         )
                     else:
@@ -145,31 +145,31 @@ def run_vishnu_loop():
                         job.is_deleted = True
                         job.save(update_fields=["status", "error", "is_deleted", "attempts"])
                         logger.error(
-                            "[Vishnu] Permanent failure: %s after %s attempts",
+                            "[PyroJobExecutor] Permanent failure: %s after %s attempts",
                             job.job_name, job.attempts
                         )
 
         except ProgrammingError as e:
             if "pyro_job" in str(e):
-                logger.warning("[Vishnu] pyro_job table not ready yet, waiting for migrations...")
+                logger.warning("[PyroJobExecutor] pyro_job table not ready yet, waiting for migrations...")
                 time.sleep(30)
                 continue
-            logger.error("[Vishnu] Loop error: %s", e)
+            logger.error("[PyroJobExecutor] Loop error: %s", e)
         except (InterfaceError, OperationalError) as e:
-            logger.warning("[Vishnu] Database connection error, reconnecting: %s", e)
+            logger.warning("[PyroJobExecutor] Database connection error, reconnecting: %s", e)
         except Exception as e:
-            logger.error("[Vishnu] Loop error: %s", e)
+            logger.error("[PyroJobExecutor] Loop error: %s", e)
         finally:
             close_old_connections()
 
         time.sleep(5)
 
 
-def start_vishnu():
+def start_pyro_job_executor():
     thread = threading.Thread(
-        target=run_vishnu_loop,
+        target=run_pyro_job_executor_loop,
         daemon=True,
-        name="vishnu"
+        name="pyro_job_executor"
     )
     thread.start()
-    logger.info("[Vishnu] Thread started")
+    logger.info("[PyroJobExecutor] Thread started")

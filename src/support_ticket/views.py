@@ -10,7 +10,7 @@ from rest_framework import status
 from uuid import UUID
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
-from django.db import connection, models, transaction
+from django.db import models, transaction
 from django.db.models import Q, QuerySet
 from django.db import IntegrityError
 from django.utils.dateparse import parse_datetime
@@ -25,7 +25,7 @@ from .models import SupportTicketDump
 from .serializers import SaveAndContinueSerializer, GetNextTicketResponseSerializer, SupportTicketUpdateSerializer, TakeBreakSerializer,UpdateCallStatusRequestSerializer
 from .services import MixpanelService, TicketTimeService
 from background_jobs.queue_service import get_queue_service
-from background_jobs.models import BackgroundJob, JobStatus, JobType
+from background_jobs.models import JobType
 from core.models import Tenant
 from crm_records.models import Record
 from crm_records.permissions import HasAPISecret
@@ -70,18 +70,6 @@ from .pipeline import SupportTicketPipeline
 
 logger = logging.getLogger(__name__)
 DUMP_BATCH_LIMIT = 5000
-# Per-tenant advisory lock so only one process_dumped_tickets job is enqueued at a time.
-_PROCESS_DUMPED_TICKETS_LOCK_BASE = 874216000
-_INCOMPLETE_DUMP_JOB_STATUSES = (
-    JobStatus.PENDING,
-    JobStatus.PROCESSING,
-    JobStatus.RETRYING,
-)
-
-
-def _process_dumped_tickets_lock_key(tenant_id: Union[str, UUID]) -> int:
-    uid = UUID(str(tenant_id))
-    return _PROCESS_DUMPED_TICKETS_LOCK_BASE + (uid.int % 1_000_000)
 
 _DUMP_RESERVED_KEYS = frozenset({
     "tenant_id",
@@ -397,40 +385,33 @@ def on_ticket_created_after_dump(
     enqueue_ticket_created_praja(record, dump_data)
 
 
-@transaction.atomic
-def enqueue_process_dumped_tickets_job(
-    tenant_id: Union[str, UUID],
-    *,
-    priority: int = 0,
-) -> Optional[BackgroundJob]:
-    tid = str(tenant_id)
-    if connection.vendor == "postgresql":
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT pg_advisory_xact_lock(%s)",
-                [_process_dumped_tickets_lock_key(tid)],
-            )
+def enqueue_process_dumped_tickets_job(tenant_id: Union[str, UUID]):
+    """
+    Schedule an immediate ``process_dumped_tickets`` PyroJob scoped to ``tenant_id``.
+    Returns the created PyroJob or ``None`` if one is already pending/running for that tenant.
+    """
+    from django.utils import timezone
+    from pyro_jobs.pyro_job_creator import schedule_once
+    from pyro_jobs.models import PyroJob
 
-    if BackgroundJob.objects.filter(
-        job_type=JobType.PROCESS_DUMPED_TICKETS,
-        tenant_id=tid,
-        status__in=_INCOMPLETE_DUMP_JOB_STATUSES,
-    ).exists():
+    tid = str(tenant_id)
+    already_active = PyroJob.objects.filter(
+        job_name="process_dumped_tickets",
+        is_deleted=False,
+        status__in=[PyroJob.STATUS_PENDING, PyroJob.STATUS_RUNNING],
+        payload__tenant_id=tid,
+    ).exists()
+    if already_active:
         logger.info(
-            "enqueue_process_dumped_tickets_job: skipped — incomplete job exists for tenant=%s",
+            "enqueue_process_dumped_tickets_job: skipped — active PyroJob exists for tenant=%s",
             tid,
         )
         return None
 
-    job = get_queue_service().enqueue_job(
-        job_type=JobType.PROCESS_DUMPED_TICKETS,
-        payload={},
-        tenant_id=tid,
-        priority=priority,
-    )
+    job = schedule_once("process_dumped_tickets", {"tenant_id": tid}, run_at=timezone.now())
     logger.info(
-        "enqueue_process_dumped_tickets_job: enqueued job_id=%s tenant=%s",
-        job.id,
+        "enqueue_process_dumped_tickets_job: scheduled pyro job_id=%s tenant=%s",
+        job.id if job else "?",
         tid,
     )
     return job
@@ -438,8 +419,9 @@ def enqueue_process_dumped_tickets_job(
 
 def enqueue_process_dumped_tickets_for_pending_dumps() -> Dict[str, Any]:
     """
-    Enqueue one ``process_dumped_tickets`` job per tenant with unprocessed dump rows.
-    Called by the background worker on a DB-backed 5-minute scheduler tick.
+    Schedule immediate ``process_dumped_tickets`` PyroJobs for all tenants with
+    unprocessed dump rows. (Kept for API compatibility; PyroJobCreator schedules
+    this automatically every 5 minutes.)
     """
     tenant_ids = (
         SupportTicketDump.objects.filter(

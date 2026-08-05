@@ -20,7 +20,7 @@ class PyroQueueService:
 
     def _execute_job_now(self, job: PyroJob) -> Dict[str, Any]:
         """
-        Run one pending/running pyro job synchronously (same outcome as Vishnu).
+        Run one pending/running pyro job synchronously (same outcome as PyroJobExecutor).
         """
         now = timezone.now()
         if job.status == PyroJob.STATUS_PENDING:

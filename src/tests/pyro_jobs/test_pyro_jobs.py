@@ -1,10 +1,10 @@
 """
-Extreme test cases for the pyro_jobs Brahma + Vishnu system.
+Extreme test cases for the pyro_jobs PyroJobCreator + PyroJobExecutor system.
 
 What we test:
   - Model: field defaults, status transitions
-  - Brahma: scheduling, no duplicates, drift prevention, downtime recovery
-  - Vishnu: job execution, retry logic, permanent failure, locking
+  - PyroJobCreator: scheduling, no duplicates, drift prevention, downtime recovery
+  - PyroJobExecutor: job execution, retry logic, permanent failure, locking
   - Concurrency: multiple workers don't double-run or double-schedule
   - Edge cases: missing handler, handler crash, empty payload, huge payload
 """
@@ -96,14 +96,14 @@ class TestPyroJobModel:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# BRAHMA TESTS
+# PYRO JOB CREATOR TESTS
 # ══════════════════════════════════════════════════════════════════════
 
 @pytest.mark.django_db
-class TestBrahmaScheduling:
+class TestPyroJobCreatorScheduling:
 
-    def _run_brahma_tick(self, schedule):
-        """Run one tick of Brahma loop logic with given schedule."""
+    def _run_creator_tick(self, schedule):
+        """Run one tick of PyroJobCreator loop logic with given schedule."""
         from pyro_jobs.models import PyroJob
         from django.db import transaction
 
@@ -141,32 +141,32 @@ class TestBrahmaScheduling:
     def test_first_run_schedules_immediately(self):
         """First time a job is seen it should run right now (run_at <= now)."""
         from pyro_jobs.models import PyroJob
-        self._run_brahma_tick({"test_job": {"every_minutes": 60}})
+        self._run_creator_tick({"test_job": {"every_minutes": 60}})
         job = PyroJob.objects.get(job_name="test_job")
         assert job.run_at <= timezone.now()
 
     def test_no_duplicate_when_pending_exists(self):
-        """Brahma must not create a second row when one is already pending."""
+        """PyroJobCreator must not create a second row when one is already pending."""
         from pyro_jobs.models import PyroJob
         make_job(job_name="test_job", run_at=timezone.now() + timedelta(hours=1))
-        self._run_brahma_tick({"test_job": {"every_minutes": 60}})
+        self._run_creator_tick({"test_job": {"every_minutes": 60}})
         assert PyroJob.objects.filter(job_name="test_job").count() == 1
 
     def test_no_duplicate_when_running(self):
-        """Brahma must not create a second row when one is RUNNING."""
+        """PyroJobCreator must not create a second row when one is RUNNING."""
         from pyro_jobs.models import PyroJob
         make_job(
             job_name="test_job",
             status="RUNNING",
             run_at=timezone.now() + timedelta(hours=1)
         )
-        self._run_brahma_tick({"test_job": {"every_minutes": 60}})
+        self._run_creator_tick({"test_job": {"every_minutes": 60}})
         assert PyroJob.objects.filter(job_name="test_job").count() == 1
 
     def test_no_duplicate_when_running_with_past_run_at(self):
         """
-        Vishnu sets run_at in the past when it picks up a job.
-        A second Brahma worker must still not create a duplicate.
+        PyroJobExecutor sets run_at in the past when it picks up a job.
+        A second PyroJobCreator worker must still not create a duplicate.
         This was the production bug: run_at__gt=now() excluded RUNNING jobs.
         """
         from pyro_jobs.models import PyroJob
@@ -175,7 +175,7 @@ class TestBrahmaScheduling:
             status="RUNNING",
             run_at=timezone.now() - timedelta(seconds=5),
         )
-        self._run_brahma_tick({"test_job": {"every_minutes": 60}})
+        self._run_creator_tick({"test_job": {"every_minutes": 60}})
         assert PyroJob.objects.filter(job_name="test_job").count() == 1
 
     def test_next_run_anchored_to_last_run_at(self):
@@ -188,7 +188,7 @@ class TestBrahmaScheduling:
             is_deleted=True,
             run_at=last_run_at,
         )
-        self._run_brahma_tick({"test_job": {"every_minutes": 60}})
+        self._run_creator_tick({"test_job": {"every_minutes": 60}})
         new_job = PyroJob.objects.filter(job_name="test_job", status="PENDING").first()
         assert new_job is not None
         expected = last_run_at + timedelta(minutes=60)
@@ -204,7 +204,7 @@ class TestBrahmaScheduling:
             is_deleted=True,
             run_at=timezone.now() - timedelta(hours=3),
         )
-        self._run_brahma_tick({"test_job": {"every_minutes": 60}})
+        self._run_creator_tick({"test_job": {"every_minutes": 60}})
         new_job = PyroJob.objects.filter(job_name="test_job", status="PENDING").first()
         assert new_job is not None
         assert new_job.run_at <= timezone.now()
@@ -217,15 +217,15 @@ class TestBrahmaScheduling:
             "job_b": {"every_minutes": 60},
             "job_c": {"every_minutes": 480},
         }
-        self._run_brahma_tick(schedule)
+        self._run_creator_tick(schedule)
         for job_name in schedule:
             assert PyroJob.objects.filter(job_name=job_name, status="PENDING").exists()
 
     def test_failed_job_gets_rescheduled(self):
-        """After a FAILED job, Brahma should create a fresh PENDING row."""
+        """After a FAILED job, PyroJobCreator should create a fresh PENDING row."""
         from pyro_jobs.models import PyroJob
         make_job(job_name="test_job", status="FAILED", is_deleted=True)
-        self._run_brahma_tick({"test_job": {"every_minutes": 60}})
+        self._run_creator_tick({"test_job": {"every_minutes": 60}})
         assert PyroJob.objects.filter(job_name="test_job", status="PENDING").exists()
 
 
@@ -234,12 +234,12 @@ class TestBrahmaScheduling:
 # ══════════════════════════════════════════════════════════════════════
 
 @pytest.mark.django_db
-class TestVishnuExecution:
+class TestPyroJobExecutorExecution:
 
-    def _run_vishnu_tick(self, handlers):
-        """Run one tick of Vishnu logic with given handlers dict."""
+    def _run_executor_tick(self, handlers):
+        """Run one tick of PyroJobExecutor logic with given handlers dict."""
         from pyro_jobs.models import PyroJob
-        from pyro_jobs.vishnu import fetch_and_lock_job
+        from pyro_jobs.pyro_job_executor import fetch_and_lock_job
         from datetime import timedelta
 
         RETRY_DELAYS = [60, 300]
@@ -277,7 +277,7 @@ class TestVishnuExecution:
     def test_successful_job_marked_completed(self):
         from pyro_jobs.models import PyroJob
         job = make_job()
-        self._run_vishnu_tick({"test_job": lambda p: None})
+        self._run_executor_tick({"test_job": lambda p: None})
         job.refresh_from_db()
         assert job.status == PyroJob.STATUS_COMPLETED
         assert job.is_deleted is True
@@ -286,14 +286,14 @@ class TestVishnuExecution:
     def test_successful_job_handler_receives_payload(self):
         received = []
         make_job(payload={"user_id": 42, "event": "login"})
-        self._run_vishnu_tick({"test_job": lambda p: received.append(p)})
+        self._run_executor_tick({"test_job": lambda p: received.append(p)})
         assert received == [{"user_id": 42, "event": "login"}]
 
     def test_future_job_not_picked_up(self):
         """Jobs with run_at in the future must be ignored."""
         from pyro_jobs.models import PyroJob
         job = make_job(run_at=timezone.now() + timedelta(hours=1))
-        self._run_vishnu_tick({"test_job": lambda p: None})
+        self._run_executor_tick({"test_job": lambda p: None})
         job.refresh_from_db()
         assert job.status == PyroJob.STATUS_PENDING
 
@@ -301,7 +301,7 @@ class TestVishnuExecution:
         """Soft-deleted jobs must never be executed."""
         from pyro_jobs.models import PyroJob
         job = make_job(is_deleted=True)
-        self._run_vishnu_tick({"test_job": lambda p: None})
+        self._run_executor_tick({"test_job": lambda p: None})
         job.refresh_from_db()
         assert job.status == PyroJob.STATUS_PENDING
 
@@ -309,7 +309,7 @@ class TestVishnuExecution:
         """A job already in RUNNING state must not be picked up."""
         from pyro_jobs.models import PyroJob
         job = make_job(status="RUNNING")
-        self._run_vishnu_tick({"test_job": lambda p: None})
+        self._run_executor_tick({"test_job": lambda p: None})
         job.refresh_from_db()
         assert job.status == PyroJob.STATUS_RUNNING
 
@@ -317,7 +317,7 @@ class TestVishnuExecution:
         """Job with no registered handler → FAILED immediately."""
         from pyro_jobs.models import PyroJob
         job = make_job(job_name="unknown_job")
-        self._run_vishnu_tick({})
+        self._run_executor_tick({})
         job.refresh_from_db()
         assert job.status == PyroJob.STATUS_FAILED
         assert "No handler" in job.error
@@ -330,7 +330,7 @@ class TestVishnuExecution:
         def crash(p):
             raise ValueError("something broke")
 
-        self._run_vishnu_tick({"test_job": crash})
+        self._run_executor_tick({"test_job": crash})
         job.refresh_from_db()
         assert job.status == PyroJob.STATUS_PENDING
         assert job.run_at > timezone.now()
@@ -346,7 +346,7 @@ class TestVishnuExecution:
             raise ValueError("fail again")
 
         before = timezone.now()
-        self._run_vishnu_tick({"test_job": crash})
+        self._run_executor_tick({"test_job": crash})
         job.refresh_from_db()
         assert job.status == PyroJob.STATUS_PENDING
         # delay should be ~300s for attempt 2
@@ -360,14 +360,14 @@ class TestVishnuExecution:
         def crash(p):
             raise RuntimeError("final crash")
 
-        self._run_vishnu_tick({"test_job": crash})
+        self._run_executor_tick({"test_job": crash})
         job.refresh_from_db()
         assert job.status == PyroJob.STATUS_FAILED
         assert job.is_deleted is True
         assert job.attempts == 3
 
     def test_job_marked_running_before_execution(self):
-        """Vishnu must set status=RUNNING before calling the handler."""
+        """PyroJobExecutor must set status=RUNNING before calling the handler."""
         from pyro_jobs.models import PyroJob
         statuses_during_run = []
         job = make_job()
@@ -377,7 +377,7 @@ class TestVishnuExecution:
             j = PJ.objects.get(id=job.id)
             statuses_during_run.append(j.status)
 
-        self._run_vishnu_tick({"test_job": check_status})
+        self._run_executor_tick({"test_job": check_status})
         assert statuses_during_run == [PyroJob.STATUS_RUNNING]
 
     def test_attempts_incremented_on_each_run(self):
@@ -395,7 +395,7 @@ class TestVishnuExecution:
         for _ in range(3):
             job.refresh_from_db()
             if job.status == PyroJob.STATUS_PENDING and job.run_at <= timezone.now():
-                self._run_vishnu_tick({"test_job": sometimes_fail})
+                self._run_executor_tick({"test_job": sometimes_fail})
 
         job.refresh_from_db()
         assert job.attempts >= 1
@@ -407,7 +407,7 @@ class TestVishnuExecution:
             make_job(job_name="test_job", payload={"i": i})
 
         executed = []
-        self._run_vishnu_tick({"test_job": lambda p: executed.append(p["i"])})
+        self._run_executor_tick({"test_job": lambda p: executed.append(p["i"])})
         assert len(executed) == 5
 
     def test_handler_exception_does_not_kill_other_jobs(self):
@@ -417,7 +417,7 @@ class TestVishnuExecution:
         make_job(job_name="good_job")
         executed = []
 
-        self._run_vishnu_tick({
+        self._run_executor_tick({
             "bad_job":  lambda p: (_ for _ in ()).throw(RuntimeError("crash")),
             "good_job": lambda p: executed.append("good"),
         })
@@ -425,29 +425,29 @@ class TestVishnuExecution:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# INTEGRATION TESTS — full Brahma → Vishnu cycle
+# INTEGRATION TESTS — full PyroJobCreator → PyroJobExecutor cycle
 # ══════════════════════════════════════════════════════════════════════
 
 @pytest.mark.django_db
-class TestBrahmaVishnuIntegration:
+class TestPyroJobCreatorExecutorIntegration:
 
     def test_full_cycle_once(self):
         """
         Full cycle:
-        Brahma schedules → Vishnu runs → job is COMPLETED.
+        PyroJobCreator schedules → PyroJobExecutor runs → job is COMPLETED.
         """
         from pyro_jobs.models import PyroJob
 
-        # Brahma tick
+        # PyroJobCreator tick
         PyroJob.objects.create(
             job_name="test_job",
             payload={},
             run_at=timezone.now(),
         )
 
-        # Vishnu tick
+        # PyroJobExecutor tick
         executed = []
-        from pyro_jobs.vishnu import fetch_and_lock_job
+        from pyro_jobs.pyro_job_executor import fetch_and_lock_job
         job = fetch_and_lock_job(PyroJob)
         assert job is not None
         executed.append(job.job_name)
@@ -475,7 +475,7 @@ class TestBrahmaVishnuIntegration:
         job = make_job(max_attempts=3)
 
         # first run — fails, retry scheduled
-        from pyro_jobs.vishnu import fetch_and_lock_job
+        from pyro_jobs.pyro_job_executor import fetch_and_lock_job
         from datetime import timedelta
 
         def run_one():
@@ -509,10 +509,10 @@ class TestBrahmaVishnuIntegration:
         assert call_count[0] == 2
 
     def test_schedule_once_runs_immediately(self):
-        """schedule_once with run_at=now is picked up by Vishnu immediately."""
+        """schedule_once with run_at=now is picked up by PyroJobExecutor immediately."""
         from pyro_jobs.models import PyroJob
-        from pyro_jobs.brahma import schedule_once
-        from pyro_jobs.vishnu import fetch_and_lock_job
+        from pyro_jobs.pyro_job_creator import schedule_once
+        from pyro_jobs.pyro_job_executor import fetch_and_lock_job
 
         schedule_once("test_job", {"key": "value"}, timezone.now())
 
@@ -524,8 +524,8 @@ class TestBrahmaVishnuIntegration:
     def test_schedule_once_future_not_picked_up_yet(self):
         """schedule_once with future run_at is not picked up until that time."""
         from pyro_jobs.models import PyroJob
-        from pyro_jobs.brahma import schedule_once
-        from pyro_jobs.vishnu import fetch_and_lock_job
+        from pyro_jobs.pyro_job_creator import schedule_once
+        from pyro_jobs.pyro_job_executor import fetch_and_lock_job
 
         schedule_once("test_job", {}, timezone.now() + timedelta(hours=1))
         job = fetch_and_lock_job(PyroJob)
@@ -539,9 +539,9 @@ class TestBrahmaVishnuIntegration:
 @pytest.mark.django_db
 class TestEdgeCases:
 
-    def test_empty_queue_vishnu_returns_none(self):
+    def test_empty_queue_executor_returns_none(self):
         from pyro_jobs.models import PyroJob
-        from pyro_jobs.vishnu import fetch_and_lock_job
+        from pyro_jobs.pyro_job_executor import fetch_and_lock_job
         job = fetch_and_lock_job(PyroJob)
         assert job is None
 
@@ -550,7 +550,7 @@ class TestEdgeCases:
         from pyro_jobs.models import PyroJob
         received = []
         make_job(payload={})
-        from pyro_jobs.vishnu import fetch_and_lock_job
+        from pyro_jobs.pyro_job_executor import fetch_and_lock_job
         j = fetch_and_lock_job(PyroJob)
         received.append(j.payload)
         j.status       = PyroJob.STATUS_COMPLETED
@@ -579,7 +579,7 @@ class TestEdgeCases:
         from pyro_jobs.models import PyroJob
         job = make_job(max_attempts=0, attempts=0)
 
-        from pyro_jobs.vishnu import fetch_and_lock_job
+        from pyro_jobs.pyro_job_executor import fetch_and_lock_job
         from datetime import timedelta
 
         j = fetch_and_lock_job(PyroJob)
@@ -594,10 +594,10 @@ class TestEdgeCases:
         job.refresh_from_db()
         assert job.status == PyroJob.STATUS_FAILED
 
-    def test_vishnu_started_at_set_correctly(self):
-        """started_at must be set when Vishnu picks up the job."""
+    def test_executor_started_at_set_correctly(self):
+        """started_at must be set when PyroJobExecutor picks up the job."""
         from pyro_jobs.models import PyroJob
-        from pyro_jobs.vishnu import fetch_and_lock_job
+        from pyro_jobs.pyro_job_executor import fetch_and_lock_job
         before = timezone.now()
         make_job()
         job = fetch_and_lock_job(PyroJob)
@@ -605,11 +605,11 @@ class TestEdgeCases:
         assert job.started_at is not None
         assert job.started_at >= before
 
-    def test_brahma_schedule_once_with_past_run_at(self):
+    def test_creator_schedule_once_with_past_run_at(self):
         """schedule_once with a past run_at is immediately due."""
         from pyro_jobs.models import PyroJob
-        from pyro_jobs.brahma import schedule_once
-        from pyro_jobs.vishnu import fetch_and_lock_job
+        from pyro_jobs.pyro_job_creator import schedule_once
+        from pyro_jobs.pyro_job_executor import fetch_and_lock_job
 
         schedule_once("test_job", {}, timezone.now() - timedelta(days=1))
         job = fetch_and_lock_job(PyroJob)
@@ -625,8 +625,8 @@ class TestEdgeCases:
 @pytest.mark.django_db(transaction=True)
 class TestConcurrency:
 
-    def _brahma_tick(self, schedule):
-        """One Brahma scheduling pass."""
+    def _creator_tick(self, schedule):
+        """One PyroJobCreator scheduling pass."""
         from pyro_jobs.models import PyroJob
         from django.db import transaction
         from django.core.exceptions import MultipleObjectsReturned
@@ -661,13 +661,13 @@ class TestConcurrency:
                         defaults={"run_at": next_run, "payload": {}}
                     )
                 except MultipleObjectsReturned:
-                    # Expected in concurrent Brahma races when duplicate pending rows
+                    # Expected in concurrent PyroJobCreator races when duplicate pending rows
                     # are created without a DB-level unique constraint.
                     continue
 
-    def test_concurrent_brahma_workers_dont_duplicate(self):
+    def test_concurrent_creator_workers_dont_duplicate(self):
         """
-        3 Brahma threads race to schedule the same job.
+        3 PyroJobCreator threads race to schedule the same job.
 
         The get_or_create lookup is (job_name, status=PENDING, is_deleted=False)
         with run_at in defaults, so sequential workers never double-create.
@@ -676,18 +676,18 @@ class TestConcurrency:
         of workers) because there is no DB-level unique constraint — that would
         break legitimate multi-instance jobs created via schedule_once.
         What we assert: no errors, and at least 1 row was created.
-        Vishnu handles any duplicates safely via select_for_update(skip_locked).
+        PyroJobExecutor handles any duplicates safely via select_for_update(skip_locked).
         """
         from pyro_jobs.models import PyroJob
         errors = []
 
-        def brahma_tick():
+        def creator_tick():
             try:
-                self._brahma_tick({"test_job": {"every_minutes": 60}})
+                self._creator_tick({"test_job": {"every_minutes": 60}})
             except Exception as e:
                 errors.append(e)
 
-        threads = [threading.Thread(target=brahma_tick) for _ in range(3)]
+        threads = [threading.Thread(target=creator_tick) for _ in range(3)]
         for t in threads:
             t.start()
         for t in threads:
@@ -695,12 +695,12 @@ class TestConcurrency:
 
         assert not errors
         count = PyroJob.objects.filter(job_name="test_job", status="PENDING").count()
-        assert 1 <= count <= 3  # at least 1 created; Vishnu handles any extras safely
+        assert 1 <= count <= 3  # at least 1 created; PyroJobExecutor handles any extras safely
 
-    def test_concurrent_vishnu_workers_each_run_different_job(self):
-        """3 Vishnu workers running simultaneously — each picks a DIFFERENT job."""
+    def test_concurrent_executor_workers_each_run_different_job(self):
+        """3 PyroJobExecutor workers running simultaneously — each picks a DIFFERENT job."""
         from pyro_jobs.models import PyroJob
-        from pyro_jobs.vishnu import fetch_and_lock_job
+        from pyro_jobs.pyro_job_executor import fetch_and_lock_job
 
         for i in range(3):
             make_job(job_name="test_job", payload={"i": i})
@@ -729,7 +729,7 @@ class TestConcurrency:
     def test_same_job_not_run_twice_by_concurrent_workers(self):
         """1 job + 3 workers — exactly 1 worker runs it."""
         from pyro_jobs.models import PyroJob
-        from pyro_jobs.vishnu import fetch_and_lock_job
+        from pyro_jobs.pyro_job_executor import fetch_and_lock_job
 
         make_job(job_name="test_job")
         run_count = [0]
@@ -755,7 +755,7 @@ class TestConcurrency:
     def test_10_concurrent_workers_on_10_jobs(self):
         """10 jobs + 10 concurrent workers — each job run exactly once."""
         from pyro_jobs.models import PyroJob
-        from pyro_jobs.vishnu import fetch_and_lock_job
+        from pyro_jobs.pyro_job_executor import fetch_and_lock_job
 
         for i in range(10):
             make_job(job_name="test_job", payload={"i": i})
