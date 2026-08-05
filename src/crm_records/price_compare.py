@@ -329,6 +329,7 @@ def _result(
     error: Optional[str] = None,
     method: str = "live",
     delivery_date: Optional[str] = None,
+    image: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {
         "source": source,
@@ -336,11 +337,59 @@ def _result(
         "price": price,
         "currency": currency or "INR",
         "link": link,
+        "image": (image or "").strip() or None,
         "delivery_date": (delivery_date or "").strip() or None,
         "available": bool(available and price is not None and error is None),
         "error": error,
         "method": method,
     }
+
+
+def _first_image_url(value: Any) -> Optional[str]:
+    """Normalize JSON-LD / OpenGraph image fields to a single http(s) URL."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        url = value.strip()
+        if url.startswith("//"):
+            url = "https:" + url
+        if url.startswith("http://") or url.startswith("https://"):
+            return url
+        return None
+    if isinstance(value, list):
+        for item in value:
+            found = _first_image_url(item)
+            if found:
+                return found
+        return None
+    if isinstance(value, dict):
+        for key in ("url", "contentUrl", "@id", "src"):
+            found = _first_image_url(value.get(key))
+            if found:
+                return found
+    return None
+
+
+def _extract_product_image(html: str, json_ld_image: Optional[str] = None) -> Optional[str]:
+    """Prefer JSON-LD product image, then og:image / twitter:image meta tags."""
+    if json_ld_image:
+        return json_ld_image
+    scanned = _html_for_regex(html)
+    patterns = (
+        r'<meta[^>]{1,500}?property=["\']og:image(?::secure_url)?["\'][^>]{1,500}?content=["\']([^"\']{1,2000})["\']',
+        r'<meta[^>]{1,500}?content=["\']([^"\']{1,2000})["\'][^>]{1,500}?property=["\']og:image(?::secure_url)?["\']',
+        r'<meta[^>]{1,500}?name=["\']twitter:image(?::src)?["\'][^>]{1,500}?content=["\']([^"\']{1,2000})["\']',
+        r'<meta[^>]{1,500}?content=["\']([^"\']{1,2000})["\'][^>]{1,500}?name=["\']twitter:image(?::src)?["\']',
+        r'<meta[^>]{1,500}?itemprop=["\']image["\'][^>]{1,500}?content=["\']([^"\']{1,2000})["\']',
+    )
+    for pat in patterns:
+        m = re.search(pat, scanned, re.I)
+        if not m:
+            continue
+        found = _first_image_url(html_lib.unescape(m.group(1).strip()))
+        if found:
+            return found
+    return None
 
 
 def _clean_delivery_text(raw: str) -> Optional[str]:
@@ -596,12 +645,14 @@ def _product_from_json_ld(blocks: List[Any]) -> Optional[Dict[str, Any]]:
                 availability = str(offer.get("availability") or "")
                 available = "OutOfStock" not in availability
                 if price is not None:
+                    image = _first_image_url(node.get("image") or node.get("thumbnailUrl"))
                     return {
                         "title": title,
                         "price": price,
                         "currency": currency,
                         "link": link,
                         "available": available,
+                        "image": image,
                     }
     return None
 
@@ -612,6 +663,8 @@ def extract_price_from_html(html: str, fallback_url: str = "") -> Optional[Dict[
     if product:
         if not product.get("link") and fallback_url:
             product["link"] = fallback_url
+        if not product.get("image"):
+            product["image"] = _extract_product_image(html)
         return product
 
     scanned = _html_for_regex(html)
@@ -640,6 +693,7 @@ def extract_price_from_html(html: str, fallback_url: str = "") -> Optional[Dict[
             "currency": currency,
             "link": fallback_url,
             "available": True,
+            "image": _extract_product_image(html),
         }
 
     # Last resort: first plausible visible currency-marked amount in document
@@ -655,6 +709,7 @@ def extract_price_from_html(html: str, fallback_url: str = "") -> Optional[Dict[
             "currency": "INR",
             "link": fallback_url,
             "available": True,
+            "image": _extract_product_image(html),
         }
     return None
 
@@ -902,17 +957,22 @@ def fetch_url_price(url: str, session: Optional[requests.Session] = None) -> Dic
                 "currency": "INR",
                 "link": final_url,
                 "available": True,
+                "image": _extract_product_image(html),
             }
 
     if not extracted or extracted.get("price") is None:
+        image_only = _extract_product_image(
+            html, (extracted or {}).get("image") if isinstance(extracted, dict) else None
+        )
         return _result(
             source=source or "other",
-            title="",
+            title=str((extracted or {}).get("title") or _extract_html_title(html) or ""),
             price=None,
             currency="INR",
             link=url,
             available=False,
             error="Could not extract price from page",
+            image=image_only,
             method="url",
         )
 
@@ -926,6 +986,12 @@ def fetch_url_price(url: str, session: Optional[requests.Session] = None) -> Dic
             next(iter(re.findall(r"(Delivery by[^<.]{0,40})", html, re.I)), "")
         )
 
+    product_image = (
+        str(extracted.get("image") or "").strip()
+        or _extract_product_image(html)
+        or None
+    )
+
     return _result(
         source=source or "other",
         title=str(extracted.get("title") or ""),
@@ -934,6 +1000,7 @@ def fetch_url_price(url: str, session: Optional[requests.Session] = None) -> Dic
         link=str(extracted.get("link") or url),
         available=bool(extracted.get("available", True)),
         delivery_date=delivery,
+        image=product_image,
         method="url",
     )
 
