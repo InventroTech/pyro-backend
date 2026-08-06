@@ -1,8 +1,8 @@
 """
-Tests for log retention and :class:`~background_jobs.job_handlers.PurgeOldLogTablesJobHandler`.
+Tests for log retention.
 
 Covers :func:`core.log_retention.purge_old_log_rows`, tenant persistent object history
-(TenantSettings), and the purge job handler payload/result behavior.
+(TenantSettings), and :class:`~background_jobs.job_processor.JobProcessor` cleanup behavior.
 
 Run (from repo root):
 
@@ -19,8 +19,6 @@ from django.contrib.contenttypes.models import ContentType
 from django.db.models import F
 from django.utils import timezone
 
-from background_jobs.purge_scheduler import tenant_should_enqueue_purge
-from background_jobs.job_handlers import PurgeOldLogTablesJobHandler
 from background_jobs.job_processor import JobProcessor
 from background_jobs.models import BackgroundJob, JobStatus, JobType
 from core.log_retention import get_log_retention_days, purge_old_log_rows
@@ -237,169 +235,9 @@ class TestTenantSettingsPersistentHistory:
         assert TenantSettings.object_history_should_persist(tenant) is True
 
 
-@pytest.mark.django_db(transaction=True)
-class TestPurgeOldLogTablesJobHandler:
-    def test_process_calls_purge_and_sets_result(self):
-        handler = PurgeOldLogTablesJobHandler()
-        job = BackgroundJobFactory(
-            job_type=JobType.PURGE_OLD_LOG_TABLES,
-            payload={"days": 30},
-            status=JobStatus.PENDING,
-        )
-        with patch(
-            "core.log_retention.purge_old_log_rows",
-            return_value={
-                "cutoff": "2020-01-01T00:00:00+00:00",
-                "days": 30,
-                "object_history": 1,
-                "event_logs": 2,
-                "rule_exec_logs": 0,
-                "background_jobs": 0,
-                "has_more": False,
-            },
-        ) as mock_purge:
-            ok = handler.process(job)
-
-        assert ok is True
-        mock_purge.assert_called_once_with(
-            days=30,
-            tenant_id=str(job.tenant_id),
-            chunk_size=500,
-            max_chunks_per_table=20,
-        )
-        assert job.result["success"] is True
-        assert job.result["tenant_id"] == str(job.tenant_id)
-        assert job.result["object_history"] == 1
-        assert job.result["event_logs"] == 2
-
-    def test_process_enqueues_follow_up_when_has_more(self):
-        handler = PurgeOldLogTablesJobHandler()
-        job = BackgroundJobFactory(
-            job_type=JobType.PURGE_OLD_LOG_TABLES,
-            payload={"days": 30, "chunk_size": 100, "max_chunks_per_table": 1},
-            status=JobStatus.PENDING,
-        )
-        with patch(
-            "core.log_retention.purge_old_log_rows",
-            return_value={
-                "cutoff": "2020-01-01T00:00:00+00:00",
-                "days": 30,
-                "object_history": 100,
-                "event_logs": 0,
-                "rule_exec_logs": 0,
-                "background_jobs": 0,
-                "has_more": True,
-            },
-        ), patch("background_jobs.queue_service.get_queue_service") as mock_queue_service:
-            ok = handler.process(job)
-
-        assert ok is True
-        mock_queue_service.return_value.enqueue_job.assert_called_once_with(
-            job_type=JobType.PURGE_OLD_LOG_TABLES,
-            payload={"days": 30, "chunk_size": 100, "max_chunks_per_table": 1},
-            tenant_id=str(job.tenant_id),
-            priority=0,
-        )
-
-    def test_validate_payload_accepts_missing_days(self):
-        handler = PurgeOldLogTablesJobHandler()
-        with patch("core.log_retention.get_log_retention_days", return_value=30):
-            assert handler.validate_payload({}) is True
-
-    def test_validate_payload_rejects_bad_days(self):
-        handler = PurgeOldLogTablesJobHandler()
-        assert handler.validate_payload({"days": 0}) is False
-        assert handler.validate_payload({"days": "nope"}) is False
-
-    def test_validate_payload_rejects_bad_chunk_settings(self):
-        handler = PurgeOldLogTablesJobHandler()
-        assert handler.validate_payload({"chunk_size": 0}) is False
-        assert handler.validate_payload({"chunk_size": "nope"}) is False
-        assert handler.validate_payload({"max_chunks_per_table": 0}) is False
-        assert handler.validate_payload({"max_chunks_per_table": "nope"}) is False
-
-    def test_validate_payload_accepts_explicit_chunk_settings(self):
-        handler = PurgeOldLogTablesJobHandler()
-        assert handler.validate_payload(
-            {"days": 30, "chunk_size": 500, "max_chunks_per_table": 20}
-        ) is True
-
-
 def test_get_log_retention_days_uses_settings(settings):
     settings.LOG_RETENTION_DAYS = 45
     assert get_log_retention_days() == 45
-
-
-@pytest.mark.django_db(transaction=True)
-class TestPurgeSchedulerDedup:
-    def test_skips_tenant_with_recent_completed_purge(self):
-        tenant = TenantFactory()
-        tid = str(tenant.id)
-        job = BackgroundJobFactory(
-            tenant=tenant,
-            job_type=JobType.PURGE_OLD_LOG_TABLES,
-            status=JobStatus.COMPLETED,
-            result={"success": True, "has_more": False},
-        )
-        BackgroundJob.objects.filter(pk=job.pk).update(
-            completed_at=timezone.now() - timedelta(hours=1)
-        )
-        assert tenant_should_enqueue_purge(
-            tid,
-            interval_seconds=86400,
-        ) is False
-
-    def test_allows_tenant_when_last_completed_had_has_more(self):
-        tenant = TenantFactory()
-        tid = str(tenant.id)
-        job = BackgroundJobFactory(
-            tenant=tenant,
-            job_type=JobType.PURGE_OLD_LOG_TABLES,
-            status=JobStatus.COMPLETED,
-            result={"success": True, "has_more": True},
-        )
-        BackgroundJob.objects.filter(pk=job.pk).update(
-            completed_at=timezone.now() - timedelta(hours=1)
-        )
-        assert tenant_should_enqueue_purge(
-            tid,
-            interval_seconds=86400,
-        ) is True
-
-    def test_skips_tenant_with_active_purge_job(self):
-        tenant = TenantFactory()
-        tid = str(tenant.id)
-        BackgroundJobFactory(
-            tenant=tenant,
-            job_type=JobType.PURGE_OLD_LOG_TABLES,
-            status=JobStatus.PENDING,
-            attempts=1,
-            max_attempts=3,
-        )
-        assert tenant_should_enqueue_purge(
-            tid,
-            interval_seconds=86400,
-        ) is False
-
-    def test_allows_enqueue_when_only_exhausted_pending_purge_exists(self):
-        tenant = TenantFactory()
-        tid = str(tenant.id)
-        BackgroundJob.objects.filter(
-            job_type=JobType.PURGE_OLD_LOG_TABLES,
-            tenant_id=tid,
-        ).delete()
-        BackgroundJobFactory(
-            tenant=tenant,
-            job_type=JobType.PURGE_OLD_LOG_TABLES,
-            status=JobStatus.PENDING,
-            attempts=3,
-            max_attempts=3,
-            last_error="canceling statement due to statement timeout\n",
-        )
-        assert tenant_should_enqueue_purge(
-            tid,
-            interval_seconds=86400,
-        ) is True
 
 
 @pytest.mark.django_db(transaction=True)
@@ -410,7 +248,7 @@ class TestExhaustedJobCleanup:
             attempts__gte=F("max_attempts"),
         ).delete()
         job = BackgroundJobFactory(
-            job_type=JobType.PURGE_OLD_LOG_TABLES,
+            job_type=JobType.UNASSIGN_SNOOZED_LEADS,
             status=JobStatus.PENDING,
             attempts=3,
             max_attempts=3,
@@ -423,7 +261,7 @@ class TestExhaustedJobCleanup:
 
     def test_cleanup_stale_locks_marks_exhausted_processing_as_failed(self):
         job = BackgroundJobFactory(
-            job_type=JobType.PURGE_OLD_LOG_TABLES,
+            job_type=JobType.UNASSIGN_SNOOZED_LEADS,
             status=JobStatus.PROCESSING,
             attempts=3,
             max_attempts=3,

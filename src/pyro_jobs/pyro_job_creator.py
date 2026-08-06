@@ -10,9 +10,12 @@ from django.db.utils import InterfaceError
 logger = logging.getLogger(__name__)
 
 SCHEDULE = {
-    "dispatch_data_sync":                {"every_minutes": 480},
-    "purge_old_log_tables":              {"every_minutes": 1440},
-    "snoozed_to_not_connected_midnight": {"daily_at_utc": "17:30"},
+    "close_stale_self_trial_support_tickets": {"every_minutes": 15},
+    "discover_entity_types":                  {"every_minutes": 5},
+    "dispatch_data_sync":                     {"every_minutes": 480},
+    "process_dumped_tickets":                 {"every_minutes": 5},
+    "purge_old_log_tables":                   {"every_minutes": 1440},
+    "snoozed_to_not_connected_midnight":      {"daily_at_utc": "17:30"},
 }
 
 
@@ -25,7 +28,7 @@ def _next_occurrence_utc(time_str: str, now):
     return candidate
 
 
-def run_brahma_loop():
+def run_pyro_job_creator_loop():
     time.sleep(15)
 
     while True:
@@ -50,7 +53,7 @@ def run_brahma_loop():
 
                     # check if any pending/running job already exists (regardless of run_at)
                     # run_at is intentionally excluded: a RUNNING job has a past run_at but
-                    # must still block Brahma from scheduling a duplicate
+                    # must still block the creator from scheduling a duplicate
                     already_scheduled = PyroJob.objects.filter(
                         job_name=job_name,
                         is_deleted=False,
@@ -104,40 +107,41 @@ def run_brahma_loop():
                             defaults={"run_at": next_run, "payload": {}}
                         )
                         if created:
-                            logger.info("[Brahma] Scheduled: %s → %s", job_name, next_run)
+                            logger.info("[PyroJobCreator] Scheduled: %s → %s", job_name, next_run)
                     except MultipleObjectsReturned:
                         logger.debug(
-                            "[Brahma] Multiple pending rows detected for %s due to race; treating as already scheduled.",
+                            "[PyroJobCreator] Multiple pending rows detected for %s due to race; treating as already scheduled.",
                             job_name,
                         )
 
         except ProgrammingError as e:
             if "pyro_job" in str(e):
-                logger.warning("[Brahma] pyro_job table not ready yet, waiting for migrations...")
+                logger.warning("[PyroJobCreator] pyro_job table not ready yet, waiting for migrations...")
                 time.sleep(30)
                 continue
-            logger.error("[Brahma] Loop error: %s", e)
+            logger.error("[PyroJobCreator] Loop error: %s", e)
         except (InterfaceError, OperationalError) as e:
-            logger.warning("[Brahma] Database connection error, reconnecting: %s", e)
+            logger.warning("[PyroJobCreator] Database connection error, reconnecting: %s", e)
         except Exception as e:
-            logger.error("[Brahma] Loop error: %s", e)
+            logger.error("[PyroJobCreator] Loop error: %s", e)
         finally:
             close_old_connections()
 
         time.sleep(60)
 
 
-def start_brahma():
+def start_pyro_job_creator():
     thread = threading.Thread(
-        target=run_brahma_loop,
+        target=run_pyro_job_creator_loop,
         daemon=True,
-        name="brahma"
+        name="pyro_job_creator"
     )
     thread.start()
-    logger.info("[Brahma] Thread started")
+    logger.info("[PyroJobCreator] Thread started")
 
 
 def schedule_once(job_name, payload, run_at):
     from pyro_jobs.models import PyroJob
-    PyroJob.objects.create(job_name=job_name, payload=payload, run_at=run_at)
-    logger.info("[Brahma] One-off scheduled: %s → %s", job_name, run_at)
+    job = PyroJob.objects.create(job_name=job_name, payload=payload, run_at=run_at)
+    logger.info("[PyroJobCreator] One-off scheduled: %s → %s", job_name, run_at)
+    return job
