@@ -1,5 +1,7 @@
 from typing import Any, Dict, Tuple
 
+from .open_request_link import build_open_request_url
+
 
 def build_new_request_unmannd_email(context: Dict[str, Any]) -> Tuple[str, str, str]:
     """
@@ -13,6 +15,7 @@ def build_new_request_unmannd_email(context: Dict[str, Any]) -> Tuple[str, str, 
     urgency = context.get("urgency", "N/A")
     status_text = context.get("status_text", "Request submitted")
     redirect_url = context.get("redirect_url", "#")
+    open_request_url = build_open_request_url(redirect_url, request_id)
     tenant_name = context.get("tenant_name", "Pyro")
 
     subject = f"[Pyro] New UNMANND Request #{request_id} - {requester_name}"
@@ -26,7 +29,7 @@ def build_new_request_unmannd_email(context: Dict[str, Any]) -> Tuple[str, str, 
         f"Quantity: {quantity}\n"
         f"Priority: {urgency}\n"
         f"Status: {status_text}\n\n"
-        f"Open request: {redirect_url}\n"
+        f"Open request: {open_request_url}\n"
     )
 
     html_body = f"""
@@ -67,7 +70,7 @@ def build_new_request_unmannd_email(context: Dict[str, Any]) -> Tuple[str, str, 
 
                 <div style="margin-top:20px;">
                   <a
-                    href="{redirect_url}"
+                    href="{open_request_url}"
                     style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:11px 16px;border-radius:10px;"
                   >
                     Open Request

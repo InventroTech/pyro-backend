@@ -125,10 +125,51 @@ def _normalize_status_value(raw_status):
     return str(raw_status).strip().upper()
 
 
-def _record_app_redirect_url(request, record):
+# Unmannd Page Builder pages used by Open Request email buttons.
+_UNMANND_OPEN_REQUEST_PAGES = {
+    # Team lead all-requests table
+    "team_lead_all_requests": "cca4ebe2-58b8-489c-a686-65559f2a58aa",
+    # Requester My Requests / requestor inbox
+    "my_requests": "0f28de54-a4b3-44c4-95d4-933b3ecac9e4",
+    # PM / manager all-requests table
+    "pm_all_requests": "d5bc8615-4962-4124-82f4-c16dd56819a0",
+}
+
+
+def _frontend_origin(frontend_base: str) -> str:
+    """Strip any /app/... suffix so we can append tenant page paths cleanly."""
+    base = (frontend_base or "").strip().rstrip("/")
+    if "/app/" in base:
+        base = base.split("/app/", 1)[0].rstrip("/")
+    return base or "https://app.thepyro.ai"
+
+
+def _record_app_redirect_url(request, record, *, open_page: str | None = None):
+    """
+    Base URL for Open Request email buttons.
+
+    For Unmannd (slug ``unmannd`` or entity ``unmannd_request``), ``open_page``
+    selects a fixed Page Builder page:
+    - ``team_lead_all_requests`` — team lead all-requests table
+    - ``pm_all_requests`` — PM / manager all-requests table
+    - ``my_requests`` — requestor My Requests
+
+    Templates then append ``?record_id=`` / ``&record_id=`` via ``build_open_request_url``.
+    """
     tenant = getattr(request, "tenant", None)
     frontend_base = (os.environ.get("PYRO_FRONTEND_URL") or os.environ.get("FRONTEND_URL") or "").strip().rstrip("/")
     tenant_slug = str(getattr(tenant, "slug", "") or "").strip() if tenant else ""
+    entity_type = str(getattr(record, "entity_type", "") or "").strip()
+    is_unmannd = tenant_slug.lower() == "unmannd" or entity_type == "unmannd_request"
+
+    if is_unmannd and open_page:
+        page_id = _UNMANND_OPEN_REQUEST_PAGES.get(open_page)
+        if page_id:
+            origin = _frontend_origin(frontend_base)
+            return (
+                f"{origin}/app/unmannd/pages/{page_id}"
+                f"?entity_type=unmannd_request&page=1&page_size=10"
+            )
 
     if frontend_base and "/app/" in frontend_base:
         return frontend_base
@@ -391,7 +432,7 @@ def _notify_requester_when_paid(request, record, previous_status):
             "tenant_name": getattr(tenant, "name", "Pyro"),
             "item_name": str(data.get("item_name_freeform") or data.get("item_name") or "N/A").strip(),
             "status_text": str(data.get("status_text") or data.get("status") or "PAID").strip(),
-            "redirect_url": _record_app_redirect_url(request, record),
+            "redirect_url": _record_app_redirect_url(request, record, open_page="my_requests"),
         }
     )
 
@@ -420,7 +461,7 @@ def _notify_requester_when_paid(request, record, previous_status):
 
 def _notify_team_lead_for_inventory_request(request, record):
     """
-    On create: email Manager, Team Lead, and Requestor.
+    On create: email Team Lead only (All Requests page for Unmannd).
     Best-effort only; never raises.
     """
     if not record or record.entity_type not in REQUEST_NOTIFICATION_ENTITY_TYPES:
@@ -437,211 +478,73 @@ def _notify_team_lead_for_inventory_request(request, record):
     data = record.data if isinstance(record.data, dict) else {}
 
     try:
-        recipients = []  # (email, label)
-        seen_emails = set()
-
-        def _add_recipient(email, label):
-            if not email or email in seen_emails:
-                return
-            seen_emails.add(email)
-            recipients.append((email, label))
-
-        manager_ref = _resolve_manager_membership_id(tenant, data)
-        manager_email, manager_name = _membership_email_name(
-            tenant, manager_ref, default_name="Manager"
-        )
-        if manager_email:
-            _add_recipient(manager_email, "manager")
-        else:
-            logger.info(
-                "Request %s create email: manager missing/unavailable (ref=%s).",
-                getattr(record, "id", None),
-                manager_ref,
-            )
-
         team_lead_ref = _resolve_team_lead_membership_id(tenant, data)
         team_lead_email, team_lead_name = _membership_email_name(
             tenant, team_lead_ref, default_name="Team Lead"
         )
-        if team_lead_email:
-            _add_recipient(team_lead_email, "team_lead")
-        else:
+        _, requester_name = _resolve_requester_email_name(tenant, data)
+
+        if not team_lead_email:
             logger.info(
-                "Request %s create email: team_lead missing/unavailable (ref=%s).",
+                "Request %s email skipped: team_lead missing/unavailable (ref=%s).",
                 getattr(record, "id", None),
                 team_lead_ref,
             )
-
-        requester_email, requester_name = _resolve_requester_email_name(tenant, data)
-        if requester_email:
-            _add_recipient(requester_email, "requester")
-        else:
-            logger.info(
-                "Request %s create email: requester email not found.",
-                getattr(record, "id", None),
-            )
-
-        if not recipients:
-            logger.info(
-                "Request %s email skipped: no manager/team_lead/requester recipients (entity_type=%s).",
-                getattr(record, "id", None),
-                getattr(record, "entity_type", None),
-            )
             return
 
+        redirect_url = _record_app_redirect_url(
+            request, record, open_page="team_lead_all_requests"
+        )
         subject, text_body, html_body = build_new_request_unmannd_email(
             {
                 "request_id": record.id,
                 "tenant_name": getattr(tenant, "name", "Pyro"),
-                "team_lead_name": team_lead_name or manager_name or "Team Lead",
+                "team_lead_name": team_lead_name or "Team Lead",
                 "requester_name": requester_name or "Requestor",
                 "department": str(data.get("department") or "N/A").strip(),
                 "item_name": str(data.get("item_name_freeform") or data.get("item_name") or "N/A").strip(),
                 "quantity": str(data.get("quantity_required") or "N/A").strip(),
                 "urgency": str(data.get("urgency_level") or "N/A").strip(),
                 "status_text": str(data.get("status_text") or data.get("status") or "Request submitted").strip(),
-                "redirect_url": _record_app_redirect_url(request, record),
+                "redirect_url": redirect_url,
             }
         )
-
-        for email, label in recipients:
-            success, msg = send_email(
-                to_emails=email,
-                subject=subject,
-                message=text_body,
-                html_message=html_body,
-                client_name="RequestCreateNotification",
-                fail_silently=True,
+        success, msg = send_email(
+            to_emails=team_lead_email,
+            subject=subject,
+            message=text_body,
+            html_message=html_body,
+            client_name="RequestCreateNotification",
+            fail_silently=True,
+        )
+        if not success:
+            logger.warning(
+                "Request %s create email failed for team_lead=%s: %s",
+                record.id,
+                team_lead_email,
+                msg,
             )
-            if not success:
-                logger.warning(
-                    "Request %s create email failed for %s=%s: %s",
-                    record.id,
-                    label,
-                    email,
-                    msg,
-                )
-            else:
-                logger.info(
-                    "Request %s create email sent to %s=%s (entity_type=%s).",
-                    record.id,
-                    label,
-                    email,
-                    record.entity_type,
-                )
+        else:
+            logger.info(
+                "Request %s create email sent to team_lead=%s (entity_type=%s redirect=%s).",
+                record.id,
+                team_lead_email,
+                record.entity_type,
+                redirect_url,
+            )
     except Exception:
         logger.exception(
             "Unexpected error while sending create emails for record=%s",
             getattr(record, "id", None),
-            )
+        )
 
 
 def _notify_on_manager_approved(request, record, previous_status):
     """
-    When manager Approve runs (status → VENDOR_IDENTIFIED from NEW_REQUEST/ON_HOLD):
-    email Team Lead (requester is covered by the generic status-change email).
-    Best-effort only; never raises.
+    Approve (VENDOR_IDENTIFIED) emails go to the requestor only via
+    ``_notify_requester_on_status_change`` — Team Lead / approver are not emailed.
     """
-    if not record or record.entity_type not in REQUEST_NOTIFICATION_ENTITY_TYPES:
-        return
-
-    tenant = getattr(request, "tenant", None)
-    if not tenant:
-        return
-
-    data = record.data if isinstance(record.data, dict) else {}
-    current_status = _normalize_status_value(data.get("status"))
-    old_status = _normalize_status_value(previous_status)
-    if current_status not in MANAGER_APPROVED_STATUSES:
-        return
-    if old_status in MANAGER_APPROVED_STATUSES:
-        return
-    if old_status not in MANAGER_APPROVE_FROM_STATUSES:
-        logger.info(
-            "[RequestApprovedEmail] Skip: record=%s status %s → %s is not a manager-approve transition.",
-            getattr(record, "id", None),
-            old_status or "(empty)",
-            current_status,
-        )
-        return
-
-    try:
-        recipients = []  # (email, label, recipient_name)
-
-        requester_email, requester_name = _resolve_requester_email_name(tenant, data)
-
-        team_lead_ref = _resolve_team_lead_membership_id(tenant, data)
-        team_lead_email, team_lead_name = _membership_email_name(
-            tenant, team_lead_ref, default_name="Team Lead"
-        )
-        # Requester gets the status-change email separately; only ping team lead here.
-        if team_lead_email and team_lead_email != requester_email:
-            recipients.append((team_lead_email, "team_lead", team_lead_name or "Team Lead"))
-        elif not team_lead_email:
-            logger.info(
-                "[RequestApprovedEmail] Skip team_lead: record=%s email not found (ref=%s).",
-                getattr(record, "id", None),
-                team_lead_ref,
-            )
-        else:
-            logger.info(
-                "[RequestApprovedEmail] Skip team_lead: record=%s same email as requester (ref=%s).",
-                getattr(record, "id", None),
-                team_lead_ref,
-            )
-
-        if not recipients:
-            logger.info(
-                "[RequestApprovedEmail] Skip: record=%s no team_lead recipient.",
-                getattr(record, "id", None),
-            )
-            return
-
-        manager_ref = _resolve_manager_membership_id(tenant, data)
-        _, manager_name = _membership_email_name(tenant, manager_ref, default_name="Manager")
-        base_context = {
-            "request_id": record.id,
-            "tenant_name": getattr(tenant, "name", "Pyro"),
-            "requester_name": requester_name or "Requester",
-            "approver_name": manager_name or "Manager",
-            "item_name": str(data.get("item_name_freeform") or data.get("item_name") or "N/A").strip(),
-            "status_text": str(data.get("status_text") or data.get("status") or current_status).strip(),
-            "redirect_url": _record_app_redirect_url(request, record),
-        }
-
-        for email, label, recipient_name in recipients:
-            subject, text_body, html_body = build_request_approved_unmannd_email(
-                {**base_context, "recipient_name": recipient_name}
-            )
-            send_ok, send_msg = send_email(
-                to_emails=email,
-                subject=subject,
-                message=text_body,
-                html_message=html_body,
-                client_name="RequestApprovedNotification",
-                fail_silently=True,
-            )
-            if not send_ok:
-                logger.warning(
-                    "[RequestApprovedEmail] Failed: record=%s %s=%s msg=%s",
-                    getattr(record, "id", None),
-                    label,
-                    email,
-                    send_msg,
-                )
-            else:
-                logger.info(
-                    "[RequestApprovedEmail] Sent: record=%s %s=%s status=%s",
-                    getattr(record, "id", None),
-                    label,
-                    email,
-                    current_status,
-                )
-    except Exception:
-        logger.exception(
-            "Unexpected error while sending manager-approved emails for record=%s",
-            getattr(record, "id", None),
-        )
+    return
 
 
 def _notify_requester_when_rejected(request, record, previous_status):
@@ -678,7 +581,7 @@ def _notify_requester_when_rejected(request, record, previous_status):
                 "tenant_name": getattr(tenant, "name", "Pyro"),
                 "item_name": str(data.get("item_name_freeform") or data.get("item_name") or "N/A").strip(),
                 "status_text": str(data.get("status_text") or data.get("status") or "REJECTED").strip(),
-                "redirect_url": _record_app_redirect_url(request, record),
+                "redirect_url": _record_app_redirect_url(request, record, open_page="my_requests"),
             }
         )
         send_ok, send_msg = send_email(
@@ -743,7 +646,7 @@ def _notify_requester_when_on_hold(request, record, previous_status):
                 "tenant_name": getattr(tenant, "name", "Pyro"),
                 "item_name": str(data.get("item_name_freeform") or data.get("item_name") or "N/A").strip(),
                 "status_text": str(data.get("status_text") or data.get("status") or "ON_HOLD").strip(),
-                "redirect_url": _record_app_redirect_url(request, record),
+                "redirect_url": _record_app_redirect_url(request, record, open_page="my_requests"),
             }
         )
         send_ok, send_msg = send_email(
@@ -776,8 +679,50 @@ def _notify_requester_when_on_hold(request, record, previous_status):
 
 def _notify_on_team_lead_ordered(request, record, previous_status):
     """
-    When team lead Order runs (status → IN_SHIPPING from VENDOR_IDENTIFIED/PAYMENT_PENDING):
-    email Manager and Team Lead (requester is covered by the generic status-change email).
+    Ordered (IN_SHIPPING) emails go to the requestor only via
+    ``_notify_requester_on_status_change`` — no extra TL/PM recipients.
+    """
+    return
+
+
+def _requester_status_email_content(context, current_status, old_status):
+    """Pick the best requester email template for a status transition."""
+    if current_status == "REJECTED":
+        return build_request_rejected_unmannd_email(context), "RequestRejectedNotification"
+    if current_status == "ON_HOLD":
+        return build_request_on_hold_unmannd_email(context), "RequestOnHoldNotification"
+    if current_status == "PAID":
+        return build_request_paid_unmannd_email(context), "RequestPaidNotification"
+    if (
+        current_status in MANAGER_APPROVED_STATUSES
+        and old_status in MANAGER_APPROVE_FROM_STATUSES
+    ):
+        return (
+            build_request_approved_unmannd_email(
+                {**context, "recipient_name": context.get("requester_name") or "Requester"}
+            ),
+            "RequestApprovedNotification",
+        )
+    if (
+        current_status in TEAM_LEAD_ORDERED_STATUSES
+        and old_status in TEAM_LEAD_ORDER_FROM_STATUSES
+    ):
+        return (
+            build_request_ordered_unmannd_email(
+                {**context, "recipient_name": context.get("requester_name") or "Requester"}
+            ),
+            "RequestOrderedNotification",
+        )
+    return (
+        build_request_status_changed_unmannd_email(context),
+        "RequestStatusChangedNotification",
+    )
+
+
+def _notify_requester_on_status_change(request, record, previous_status):
+    """
+    Email the requester whenever inventory / UNMANND request status changes.
+    Uses dedicated templates for known transitions; generic otherwise.
     Best-effort only; never raises.
     """
     if not record or record.entity_type not in REQUEST_NOTIFICATION_ENTITY_TYPES:
@@ -790,105 +735,71 @@ def _notify_on_team_lead_ordered(request, record, previous_status):
     data = record.data if isinstance(record.data, dict) else {}
     current_status = _normalize_status_value(data.get("status"))
     old_status = _normalize_status_value(previous_status)
-    if current_status not in TEAM_LEAD_ORDERED_STATUSES:
-        return
-    if old_status in TEAM_LEAD_ORDERED_STATUSES:
-        return
-    if old_status not in TEAM_LEAD_ORDER_FROM_STATUSES:
-        logger.info(
-            "[RequestOrderedEmail] Skip: record=%s status %s → %s is not a team-lead-order transition.",
-            getattr(record, "id", None),
-            old_status or "(empty)",
-            current_status,
-        )
+    if not current_status or current_status == old_status:
         return
 
     try:
-        recipients = []  # (email, label, recipient_name)
-        seen_emails = set()
-
-        def _add_recipient(email, label, name):
-            if not email or email in seen_emails:
-                return
-            seen_emails.add(email)
-            recipients.append((email, label, name))
-
         requester_email, requester_name = _resolve_requester_email_name(tenant, data)
-
-        manager_ref = _resolve_manager_membership_id(tenant, data)
-        manager_email, manager_name = _membership_email_name(
-            tenant, manager_ref, default_name="Manager"
-        )
-        if manager_email and manager_email != requester_email:
-            _add_recipient(manager_email, "manager", manager_name or "Manager")
-        elif not manager_email:
+        if not requester_email:
             logger.info(
-                "[RequestOrderedEmail] Skip manager: record=%s email not found (ref=%s).",
-                getattr(record, "id", None),
-                manager_ref,
-            )
-
-        team_lead_ref = _resolve_team_lead_membership_id(tenant, data)
-        team_lead_email, team_lead_name = _membership_email_name(
-            tenant, team_lead_ref, default_name="Team Lead"
-        )
-        if team_lead_email and team_lead_email != requester_email:
-            _add_recipient(team_lead_email, "team_lead", team_lead_name or "Team Lead")
-        elif not team_lead_email:
-            logger.info(
-                "[RequestOrderedEmail] Skip team_lead: record=%s email not found (ref=%s).",
-                getattr(record, "id", None),
-                team_lead_ref,
-            )
-
-        if not recipients:
-            logger.info(
-                "[RequestOrderedEmail] Skip: record=%s no manager/team_lead recipients.",
+                "[RequestStatusChangedEmail] Skip: record=%s requester email not found.",
                 getattr(record, "id", None),
             )
             return
 
-        base_context = {
-            "request_id": record.id,
-            "tenant_name": getattr(tenant, "name", "Pyro"),
-            "requester_name": requester_name or "Requester",
-            "ordered_by_name": team_lead_name or "Team Lead",
-            "item_name": str(data.get("item_name_freeform") or data.get("item_name") or "N/A").strip(),
-            "status_text": str(data.get("status_text") or data.get("status") or current_status).strip(),
-            "redirect_url": _record_app_redirect_url(request, record),
-        }
+        manager_ref = _resolve_manager_membership_id(tenant, data)
+        _, manager_name = _membership_email_name(
+            tenant, manager_ref, default_name="Procurement Manager"
+        )
+        team_lead_ref = _resolve_team_lead_membership_id(tenant, data)
+        _, team_lead_name = _membership_email_name(
+            tenant, team_lead_ref, default_name="Team Lead"
+        )
 
-        for email, label, recipient_name in recipients:
-            subject, text_body, html_body = build_request_ordered_unmannd_email(
-                {**base_context, "recipient_name": recipient_name}
+        context = {
+            "request_id": record.id,
+            "requester_name": requester_name or "Requester",
+            "tenant_name": getattr(tenant, "name", "Pyro"),
+            "item_name": str(data.get("item_name_freeform") or data.get("item_name") or "N/A").strip(),
+            "previous_status": old_status or "N/A",
+            "current_status": current_status,
+            "status_text": str(data.get("status_text") or data.get("status") or current_status).strip(),
+            "approver_name": team_lead_name or "Team Lead",
+            "ordered_by_name": manager_name or "Procurement Manager",
+            "redirect_url": _record_app_redirect_url(request, record, open_page="my_requests"),
+        }
+        (subject, text_body, html_body), client_name = _requester_status_email_content(
+            context, current_status, old_status
+        )
+        send_ok, send_msg = send_email(
+            to_emails=requester_email,
+            subject=subject,
+            message=text_body,
+            html_message=html_body,
+            client_name=client_name,
+            fail_silently=True,
+        )
+        if not send_ok:
+            logger.warning(
+                "[RequestStatusChangedEmail] Failed: record=%s email=%s status=%s→%s msg=%s",
+                getattr(record, "id", None),
+                requester_email,
+                old_status or "(empty)",
+                current_status,
+                send_msg,
             )
-            send_ok, send_msg = send_email(
-                to_emails=email,
-                subject=subject,
-                message=text_body,
-                html_message=html_body,
-                client_name="RequestOrderedNotification",
-                fail_silently=True,
+        else:
+            logger.info(
+                "[RequestStatusChangedEmail] Sent: record=%s email=%s status=%s→%s client=%s",
+                getattr(record, "id", None),
+                requester_email,
+                old_status or "(empty)",
+                current_status,
+                client_name,
             )
-            if not send_ok:
-                logger.warning(
-                    "[RequestOrderedEmail] Failed: record=%s %s=%s msg=%s",
-                    getattr(record, "id", None),
-                    label,
-                    email,
-                    send_msg,
-                )
-            else:
-                logger.info(
-                    "[RequestOrderedEmail] Sent: record=%s %s=%s status=%s",
-                    getattr(record, "id", None),
-                    label,
-                    email,
-                    current_status,
-                )
     except Exception:
         logger.exception(
-            "Unexpected error while sending team-lead-ordered emails for record=%s",
+            "Unexpected error while sending status-change email for record=%s",
             getattr(record, "id", None),
         )
 
