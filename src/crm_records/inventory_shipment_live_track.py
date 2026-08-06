@@ -465,6 +465,46 @@ def _assert_safe_track_url(url: str, *, allow_vendor_pages: bool = True) -> Tupl
     return safe, courier
 
 
+_INVALID_AWB_WORDS = frozenset(
+    {
+        "shipment",
+        "tracking",
+        "delivered",
+        "delivery",
+        "exception",
+        "shipping",
+        "aftership",
+        "bluedart",
+        "delhivery",
+        "shiprocket",
+        "package",
+        "courier",
+        "status",
+        "transit",
+        "ordered",
+        "number",
+        "waybill",
+    }
+)
+
+
+def _looks_like_valid_awb(value: Optional[str]) -> bool:
+    """Reject marketing-page junk (e.g. AWB extracted as \"Shipment\")."""
+    awb = _norm_str(value)
+    if not awb:
+        return False
+    if len(awb) < 8 or len(awb) > 40:
+        return False
+    if awb.lower() in _INVALID_AWB_WORDS:
+        return False
+    # Must look like a real tracking code (has a digit).
+    if not any(ch.isdigit() for ch in awb):
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9._-]{8,40}", awb):
+        return False
+    return True
+
+
 def _extract_awb_from_text(text: str) -> Optional[str]:
     patterns = (
         r"(?:AWB|waybill|tracking\s*(?:no|number|#)?)\s*[:#]?\s*([A-Za-z0-9]{8,})",
@@ -475,7 +515,9 @@ def _extract_awb_from_text(text: str) -> Optional[str]:
     for pat in patterns:
         m = re.search(pat, text, re.I)
         if m:
-            return m.group(1).strip()
+            candidate = m.group(1).strip()
+            if _looks_like_valid_awb(candidate):
+                return candidate
     return None
 
 
@@ -1495,8 +1537,37 @@ def _track_aftership_api(
     }
 
 
+def _is_aftership_track_url(url: str) -> bool:
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return "aftership." in host
+
+
 def _track_allowlisted_link(url: str) -> Dict[str, Any]:
     safe_url, courier = _assert_safe_track_url(url, allow_vendor_pages=True)
+    # Public AfterShip HTML is a marketing/SPA shell — scraping it invents
+    # fake AWBs ("Shipment") and EXCEPTION. Require the API instead.
+    if _is_aftership_track_url(safe_url):
+        awb = extract_tracking_number_from_url(safe_url) or _extract_order_id_from_url(safe_url)
+        return {
+            "ok": False,
+            "courier": courier if courier != "vendor" else "aftership",
+            "courier_name": None,
+            "shipment_status": None,
+            "status_detail": None,
+            "eta": None,
+            "tracking_number": awb if _looks_like_valid_awb(awb) else None,
+            "tracking_link": safe_url,
+            "method": "aftership_page_blocked",
+            "tracked_at": datetime.now(timezone.utc).isoformat(),
+            "error": (
+                "AfterShip page scrape is disabled. Set AFTERSHIP_API_KEY "
+                "for live scan history, or paste a carrier track link."
+            ),
+            "events": [],
+        }
     sess = _session()
     if courier == "delhivery":
         sess.headers["Origin"] = "https://www.delhivery.com"
@@ -1524,6 +1595,7 @@ def _track_allowlisted_link(url: str) -> Dict[str, Any]:
     candidates: List[str] = []
     eta = None
     parsed_vendor: Dict[str, Optional[str]] = {}
+    url_awb = extract_tracking_number_from_url(safe_url) or _extract_order_id_from_url(safe_url)
 
     if "json" in content_type:
         try:
@@ -1536,11 +1608,11 @@ def _track_allowlisted_link(url: str) -> Dict[str, Any]:
         parsed_vendor = _parse_vendor_tracking_html(text)
         if parsed_vendor.get("shipment_status"):
             status = parsed_vendor["shipment_status"]
-            awb = (
-                parsed_vendor.get("tracking_number")
-                or extract_tracking_number_from_url(safe_url)
-                or _extract_order_id_from_url(safe_url)
-            )
+            html_awb = parsed_vendor.get("tracking_number")
+            # Prefer AWB from the URL over HTML marketing text.
+            awb = url_awb if _looks_like_valid_awb(url_awb) else None
+            if not awb and _looks_like_valid_awb(html_awb):
+                awb = html_awb
             courier_name = parsed_vendor.get("courier_name")
             if courier == "vendor" and courier_name:
                 detected = detect_courier(courier_name=courier_name)
@@ -1583,12 +1655,10 @@ def _track_allowlisted_link(url: str) -> Dict[str, Any]:
             pass
 
     status = _pick_best_status(candidates)
-    awb = (
-        (parsed_vendor or {}).get("tracking_number")
-        or extract_tracking_number_from_url(safe_url)
-        or _extract_awb_from_text(text)
-        or _extract_order_id_from_url(safe_url)
-    )
+    html_awb = (parsed_vendor or {}).get("tracking_number") or _extract_awb_from_text(text)
+    awb = url_awb if _looks_like_valid_awb(url_awb) else None
+    if not awb and _looks_like_valid_awb(html_awb):
+        awb = html_awb
     courier_name = (parsed_vendor or {}).get("courier_name") or (
         None if courier == "vendor" else courier.replace("_", " ").title()
     )
