@@ -1,9 +1,11 @@
 from typing import Any, Dict, Tuple
 
+from .open_request_link import build_open_request_url
+
 
 def build_request_approved_unmannd_email(context: Dict[str, Any]) -> Tuple[str, str, str]:
     """
-    Returns (subject, text_body, html_body) when a manager approves a request.
+    Returns (subject, text_body, html_body) when a team lead approves a request.
     """
     request_id = context.get("request_id", "N/A")
     recipient_name = context.get("recipient_name", "there")
@@ -11,10 +13,11 @@ def build_request_approved_unmannd_email(context: Dict[str, Any]) -> Tuple[str, 
     item_name = context.get("item_name", "N/A")
     status_text = context.get("status_text", "VENDOR_IDENTIFIED")
     redirect_url = context.get("redirect_url", "#")
+    open_request_url = build_open_request_url(redirect_url, request_id)
     tenant_name = context.get("tenant_name", "Pyro")
-    approver_name = context.get("approver_name", "Manager")
+    approver_name = context.get("approver_name", "Team Lead")
 
-    subject = f"[Pyro] Request #{request_id} approved by manager"
+    subject = f"[Pyro] Request #{request_id} approved by team lead"
 
     text_body = (
         f"Hi {recipient_name},\n\n"
@@ -23,7 +26,7 @@ def build_request_approved_unmannd_email(context: Dict[str, Any]) -> Tuple[str, 
         f"Requester: {requester_name}\n"
         f"Item: {item_name}\n"
         f"Status: {status_text}\n\n"
-        f"Open request: {redirect_url}\n"
+        f"Open request: {open_request_url}\n"
     )
 
     html_body = f"""
@@ -43,7 +46,7 @@ def build_request_approved_unmannd_email(context: Dict[str, Any]) -> Tuple[str, 
               <td style="padding:18px 22px;background:linear-gradient(135deg,#1e3a8a 0%,#2563eb 100%);">
                 <div style="font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:#bfdbfe;">Pyro Notifications</div>
                 <div style="margin-top:8px;font-size:22px;line-height:1.3;color:#ffffff;font-weight:700;">
-                  Request Approved by Manager
+                  Request Approved by Team Lead
                 </div>
               </td>
             </tr>
@@ -60,7 +63,7 @@ def build_request_approved_unmannd_email(context: Dict[str, Any]) -> Tuple[str, 
                 </table>
                 <div style="margin-top:20px;">
                   <a
-                    href="{redirect_url}"
+                    href="{open_request_url}"
                     style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:11px 16px;border-radius:10px;"
                   >
                     Open Request

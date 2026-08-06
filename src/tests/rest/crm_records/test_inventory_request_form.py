@@ -153,13 +153,12 @@ class InventoryRequestFormBackendTests(TestCase):
         )
         _notify_team_lead_for_inventory_request(request, record)
         emails = [c.kwargs.get("to_emails") for c in mock_send_email.call_args_list]
-        # No separate manager → team_lead used for both manager + team_lead slots (deduped) + requester
-        self.assertIn("teamlead@example.com", emails)
-        self.assertIn("requester@example.com", emails)
+        # Create notification goes to Team Lead only.
+        self.assertEqual(emails, ["teamlead@example.com"])
 
     @patch("crm_records.views.send_email")
-    def test_create_emails_include_pm_manager_and_team_lead(self, mock_send_email):
-        """Create emails go to PM (manager role), Team Lead role, and requestor."""
+    def test_create_emails_team_lead_only_not_pm_or_requestor(self, mock_send_email):
+        """Create emails go to Team Lead only (not PM and not requestor)."""
         mock_send_email.return_value = (True, "ok")
         from types import SimpleNamespace
         from crm_records.views import _notify_team_lead_for_inventory_request
@@ -194,7 +193,7 @@ class InventoryRequestFormBackendTests(TestCase):
                 "requester_id": str(self.user.supabase_uid),
                 "requester_name": "Test Requester",
                 "item_name_freeform": "Drone",
-                # Intentionally inverted stored fields — backend should still find PM by role.
+                # Intentionally inverted stored fields — backend should still find TL by role.
                 "team_lead": pm_membership.id,
                 "manager": self.team_lead_membership.id,
             },
@@ -206,15 +205,16 @@ class InventoryRequestFormBackendTests(TestCase):
         )
         _notify_team_lead_for_inventory_request(request, record)
         emails = [c.kwargs.get("to_emails") for c in mock_send_email.call_args_list]
-        self.assertIn("pm@example.com", emails)
-        self.assertIn("teamlead@example.com", emails)
-        self.assertIn("requester@example.com", emails)
+        self.assertEqual(emails, ["teamlead@example.com"])
+        self.assertNotIn("pm@example.com", emails)
+        self.assertNotIn("requester@example.com", emails)
 
     @patch("crm_records.views.send_email")
-    def test_manager_approve_emails_requestor_and_team_lead(self, mock_send_email):
+    def test_approve_status_emails_requestor_only(self, mock_send_email):
+        """On Approve (VENDOR_IDENTIFIED), only the requestor is emailed — not Team Lead."""
         mock_send_email.return_value = (True, "ok")
         from types import SimpleNamespace
-        from crm_records.views import _notify_on_manager_approved
+        from crm_records.views import _notify_request_status_emails
 
         manager_user = User.objects.create_user(
             email="manager@example.com",
@@ -247,20 +247,18 @@ class InventoryRequestFormBackendTests(TestCase):
             user=manager_user,
             build_absolute_uri=lambda path: f"https://example.com{path}",
         )
-        _notify_on_manager_approved(request, record, previous_status="NEW_REQUEST")
+        _notify_request_status_emails(request, record, previous_status="NEW_REQUEST")
 
         emails = [c.kwargs.get("to_emails") for c in mock_send_email.call_args_list]
-        # Requester is emailed by _notify_requester_on_status_change; approve helper pings TL only.
-        self.assertNotIn("requester@example.com", emails)
-        self.assertIn("teamlead@example.com", emails)
-        self.assertNotIn("manager@example.com", emails)
-        self.assertTrue(
-            all(c.kwargs.get("client_name") == "RequestApprovedNotification" for c in mock_send_email.call_args_list)
+        self.assertEqual(emails, ["requester@example.com"])
+        self.assertEqual(
+            mock_send_email.call_args.kwargs.get("client_name"),
+            "RequestApprovedNotification",
         )
 
     @patch("crm_records.views.send_email")
-    def test_manager_approve_emails_team_lead_when_field_is_requestor(self, mock_send_email):
-        """If data.team_lead was wrongly saved as the requestor, still email real Team Lead."""
+    def test_approve_does_not_email_team_lead_helper(self, mock_send_email):
+        """Legacy approve helper no longer sends TL-only emails."""
         mock_send_email.return_value = (True, "ok")
         from types import SimpleNamespace
         from crm_records.views import _notify_on_manager_approved
@@ -274,7 +272,6 @@ class InventoryRequestFormBackendTests(TestCase):
                 "requester_id": str(self.user.supabase_uid),
                 "requester_name": "Test Requester",
                 "item_name_freeform": "Drone",
-                # Bug case seen in prod: team_lead saved as requestor's own membership id.
                 "team_lead": self.requester_membership.id,
             },
         )
@@ -285,10 +282,7 @@ class InventoryRequestFormBackendTests(TestCase):
         )
         _notify_on_manager_approved(request, record, previous_status="NEW_REQUEST")
 
-        emails = [c.kwargs.get("to_emails") for c in mock_send_email.call_args_list]
-        self.assertNotIn("requester@example.com", emails)
-        self.assertIn("teamlead@example.com", emails)
-        self.assertEqual(len(emails), 1)
+        self.assertEqual(mock_send_email.call_count, 0)
 
     @patch("crm_records.views.send_email")
     def test_reject_emails_requestor(self, mock_send_email):
@@ -355,10 +349,11 @@ class InventoryRequestFormBackendTests(TestCase):
         )
 
     @patch("crm_records.views.send_email")
-    def test_team_lead_order_emails_manager_and_team_lead(self, mock_send_email):
+    def test_order_status_emails_requestor_only(self, mock_send_email):
+        """On Order (IN_SHIPPING), only the requestor is emailed — not PM or Team Lead."""
         mock_send_email.return_value = (True, "ok")
         from types import SimpleNamespace
-        from crm_records.views import _notify_on_team_lead_ordered
+        from crm_records.views import _notify_request_status_emails
 
         pm_role = Role.objects.create(
             tenant=self.tenant,
@@ -400,14 +395,13 @@ class InventoryRequestFormBackendTests(TestCase):
             user=self.team_lead_user,
             build_absolute_uri=lambda path: f"https://example.com{path}",
         )
-        _notify_on_team_lead_ordered(request, record, previous_status="VENDOR_IDENTIFIED")
+        _notify_request_status_emails(request, record, previous_status="VENDOR_IDENTIFIED")
 
         emails = [c.kwargs.get("to_emails") for c in mock_send_email.call_args_list]
-        self.assertIn("pm@example.com", emails)
-        self.assertNotIn("requester@example.com", emails)
-        self.assertIn("teamlead@example.com", emails)
-        self.assertTrue(
-            all(c.kwargs.get("client_name") == "RequestOrderedNotification" for c in mock_send_email.call_args_list)
+        self.assertEqual(emails, ["requester@example.com"])
+        self.assertEqual(
+            mock_send_email.call_args.kwargs.get("client_name"),
+            "RequestOrderedNotification",
         )
 
     @patch("crm_records.views.send_email")
@@ -471,8 +465,19 @@ class InventoryRequestFormBackendTests(TestCase):
             **self._auth_headers(),
         )
         self.assertEqual(response.status_code, 201, response.data)
-        html_message = mock_send_email.call_args_list[0].kwargs.get("html_message", "")
-        self.assertIn(f"https://app.thepyro.ai/app/{self.tenant.slug}", html_message)
+        created_id = response.data["id"]
+        self.assertEqual(mock_send_email.call_count, 1)
+        self.assertEqual(
+            mock_send_email.call_args.kwargs.get("to_emails"),
+            "teamlead@example.com",
+        )
+        team_lead_href = (
+            "https://app.thepyro.ai/app/unmannd/pages/"
+            "cca4ebe2-58b8-489c-a686-65559f2a58aa"
+            f"?entity_type=unmannd_request&page=1&page_size=10&record_id={created_id}"
+        )
+        html_message = mock_send_email.call_args.kwargs.get("html_message", "")
+        self.assertIn(team_lead_href, html_message)
 
     def test_create_inventory_request_with_empty_optional_fields(self):
         """Optional fields can be empty string; record still created."""

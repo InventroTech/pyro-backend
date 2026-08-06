@@ -1,9 +1,11 @@
 from typing import Any, Dict, Tuple
 
+from .open_request_link import build_open_request_url
+
 
 def build_request_ordered_unmannd_email(context: Dict[str, Any]) -> Tuple[str, str, str]:
     """
-    Returns (subject, text_body, html_body) when a team lead orders a request.
+    Returns (subject, text_body, html_body) when a procurement manager orders a request.
     """
     request_id = context.get("request_id", "N/A")
     recipient_name = context.get("recipient_name", "there")
@@ -11,10 +13,11 @@ def build_request_ordered_unmannd_email(context: Dict[str, Any]) -> Tuple[str, s
     item_name = context.get("item_name", "N/A")
     status_text = context.get("status_text", "IN_SHIPPING")
     redirect_url = context.get("redirect_url", "#")
+    open_request_url = build_open_request_url(redirect_url, request_id)
     tenant_name = context.get("tenant_name", "Pyro")
-    ordered_by_name = context.get("ordered_by_name", "Team Lead")
+    ordered_by_name = context.get("ordered_by_name", "Procurement Manager")
 
-    subject = f"[Pyro] Request #{request_id} ordered by team lead"
+    subject = f"[Pyro] Request #{request_id} ordered by procurement manager"
 
     text_body = (
         f"Hi {recipient_name},\n\n"
@@ -23,7 +26,7 @@ def build_request_ordered_unmannd_email(context: Dict[str, Any]) -> Tuple[str, s
         f"Requester: {requester_name}\n"
         f"Item: {item_name}\n"
         f"Status: {status_text}\n\n"
-        f"Open request: {redirect_url}\n"
+        f"Open request: {open_request_url}\n"
     )
 
     html_body = f"""
@@ -43,7 +46,7 @@ def build_request_ordered_unmannd_email(context: Dict[str, Any]) -> Tuple[str, s
               <td style="padding:18px 22px;background:linear-gradient(135deg,#0f766e 0%,#14b8a6 100%);">
                 <div style="font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:#99f6e4;">Pyro Notifications</div>
                 <div style="margin-top:8px;font-size:22px;line-height:1.3;color:#ffffff;font-weight:700;">
-                  Request Ordered by Team Lead
+                  Request Ordered by Procurement Manager
                 </div>
               </td>
             </tr>
@@ -60,7 +63,7 @@ def build_request_ordered_unmannd_email(context: Dict[str, Any]) -> Tuple[str, s
                 </table>
                 <div style="margin-top:20px;">
                   <a
-                    href="{redirect_url}"
+                    href="{open_request_url}"
                     style="display:inline-block;background:#0f766e;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:11px 16px;border-radius:10px;"
                   >
                     Open Request

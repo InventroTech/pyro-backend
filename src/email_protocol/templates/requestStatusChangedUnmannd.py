@@ -1,5 +1,7 @@
 from typing import Any, Dict, Tuple
 
+from .open_request_link import build_open_request_url
+
 
 def build_request_status_changed_unmannd_email(context: Dict[str, Any]) -> Tuple[str, str, str]:
     """
@@ -13,6 +15,7 @@ def build_request_status_changed_unmannd_email(context: Dict[str, Any]) -> Tuple
     current_status = context.get("current_status") or context.get("status_text") or "UPDATED"
     status_text = context.get("status_text") or current_status
     redirect_url = context.get("redirect_url", "#")
+    open_request_url = build_open_request_url(redirect_url, request_id)
     tenant_name = context.get("tenant_name", "Pyro")
 
     subject = f"[Pyro] Request #{request_id} status updated to {current_status}"
@@ -24,7 +27,7 @@ def build_request_status_changed_unmannd_email(context: Dict[str, Any]) -> Tuple
         f"Item: {item_name}\n"
         f"Previous status: {previous_status}\n"
         f"New status: {status_text}\n\n"
-        f"Open request: {redirect_url}\n"
+        f"Open request: {open_request_url}\n"
     )
 
     html_body = f"""
@@ -61,7 +64,7 @@ def build_request_status_changed_unmannd_email(context: Dict[str, Any]) -> Tuple
                 </table>
                 <div style="margin-top:20px;">
                   <a
-                    href="{redirect_url}"
+                    href="{open_request_url}"
                     style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:11px 16px;border-radius:10px;"
                   >
                     Open Request
