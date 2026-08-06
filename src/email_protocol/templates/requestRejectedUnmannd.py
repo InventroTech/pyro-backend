@@ -1,5 +1,7 @@
 from typing import Any, Dict, Tuple
 
+from .open_request_link import build_open_request_url
+
 
 def build_request_rejected_unmannd_email(context: Dict[str, Any]) -> Tuple[str, str, str]:
     """
@@ -10,6 +12,7 @@ def build_request_rejected_unmannd_email(context: Dict[str, Any]) -> Tuple[str, 
     item_name = context.get("item_name", "N/A")
     status_text = context.get("status_text", "REJECTED")
     redirect_url = context.get("redirect_url", "#")
+    open_request_url = build_open_request_url(redirect_url, request_id)
     tenant_name = context.get("tenant_name", "Pyro")
 
     subject = f"[Pyro] Your request #{request_id} was rejected"
@@ -20,7 +23,7 @@ def build_request_rejected_unmannd_email(context: Dict[str, Any]) -> Tuple[str, 
         f"Request ID: #{request_id}\n"
         f"Item: {item_name}\n"
         f"Status: {status_text}\n\n"
-        f"Open request: {redirect_url}\n"
+        f"Open request: {open_request_url}\n"
     )
 
     html_body = f"""
@@ -56,7 +59,7 @@ def build_request_rejected_unmannd_email(context: Dict[str, Any]) -> Tuple[str, 
                 </table>
                 <div style="margin-top:20px;">
                   <a
-                    href="{redirect_url}"
+                    href="{open_request_url}"
                     style="display:inline-block;background:#e11d48;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:11px 16px;border-radius:10px;"
                   >
                     Open Request
