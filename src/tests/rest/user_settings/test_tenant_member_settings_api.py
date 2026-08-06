@@ -202,25 +202,62 @@ class UserCoreKVSettingsAPITests(BaseAPITestCase):
             tenant=self.tenant,
             tenant_membership=self.membership,
             key="STATE",
-            defaults={"value": "Karnataka"},
+            defaults={"value": 95829},
         )
         TenantMemberSetting.objects.update_or_create(
             tenant=self.tenant,
             tenant_membership=self.membership,
             key="DISTRICT",
-            defaults={"value": "Bengaluru"},
+            defaults={"value": 97869},
         )
         response = self.client.get(self._url(), **self.auth_headers)
         self.assertEqual(response.status_code, 200, response.data)
         keys = {row["key"]: row["value"] for row in response.data}
-        self.assertEqual(keys.get("STATE"), "Karnataka")
-        self.assertEqual(keys.get("DISTRICT"), "Bengaluru")
+        self.assertEqual(keys.get("STATE"), 95829)
+        self.assertEqual(keys.get("DISTRICT"), 97869)
 
     def test_patch_rejects_reserved_state_key(self):
         response = self.client.patch(
             self._url(),
-            {"STATE": "Karnataka"},
+            {"STATE": 95829},
             format="json",
             **self.auth_headers,
         )
         self.assertEqual(response.status_code, 400, response.data)
+
+
+class GeoPartyCatalogAPITests(BaseAPITestCase):
+    """GET /user-settings/geo-party-catalog/"""
+
+    def setUp(self):
+        super().setUp()
+        authz_service._CACHE.clear()
+        self.client.force_authenticate(user=self.user)
+
+    def test_catalog_returns_states_and_districts(self):
+        response = self.client.get(
+            reverse("geo-party-catalog"),
+            **self.auth_headers,
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertIn("states", response.data)
+        self.assertIn("districts", response.data)
+        states = response.data["states"]
+        self.assertGreaterEqual(len(states), 1)
+        self.assertIsInstance(states[0]["value"], int)
+        self.assertIn("label", states[0])
+        self.assertRegex(states[0]["label"], r".+ \(\d+\)$")
+
+    def test_catalog_filters_districts_by_state_id(self):
+        all_resp = self.client.get(reverse("geo-party-catalog"), **self.auth_headers)
+        self.assertEqual(all_resp.status_code, 200, all_resp.data)
+        state_id = all_resp.data["states"][0]["value"]
+        response = self.client.get(
+            reverse("geo-party-catalog"),
+            {"state_id": state_id},
+            **self.auth_headers,
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        for opt in response.data["districts"]:
+            self.assertEqual(opt["state_id"], state_id)
+            self.assertIsInstance(opt["value"], int)

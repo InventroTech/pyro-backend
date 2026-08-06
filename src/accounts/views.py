@@ -31,10 +31,12 @@ def _apply_group_and_assignment(
     lead_group_name: Optional[str],
     daily_target,
     daily_limit,
-    state: Optional[str] = None,
-    district: Optional[str] = None,
+    state: Optional[int] = None,
+    district: Optional[int] = None,
+    party: Optional[int] = None,
     update_state: bool = False,
     update_district: bool = False,
+    update_party: bool = False,
 ):
     """Bind user to a group and sync core TenantMemberSetting KV rows."""
     group = None
@@ -52,8 +54,10 @@ def _apply_group_and_assignment(
         daily_limit=daily_limit,
         state=state,
         district=district,
+        party=party,
         update_state=update_state,
         update_district=update_district,
+        update_party=update_party,
     )
 
     return group
@@ -80,8 +84,9 @@ class TenantMembershipCreateView(APIView):
         lead_group_name = ser.validated_data.get("lead_group_name")
         daily_target = ser.validated_data.get("daily_target")
         daily_limit = ser.validated_data.get("daily_limit")
-        state = (ser.validated_data.get("state") or "").strip() or None
-        district = (ser.validated_data.get("district") or "").strip() or None
+        state = ser.validated_data.get("state")
+        district = ser.validated_data.get("district")
+        party = ser.validated_data.get("party")
 
         if not role_id:
             return Response({
@@ -139,8 +144,10 @@ class TenantMembershipCreateView(APIView):
                     daily_limit=daily_limit,
                     state=state,
                     district=district,
+                    party=party,
                     update_state=True,
                     update_district=True,
+                    update_party=True,
                 )
                 
                 # Invalidate permissions cache so newly updated role (e.g. GM) is seen immediately
@@ -162,6 +169,7 @@ class TenantMembershipCreateView(APIView):
                     'lead_group_name': group.name if group else None,
                     'state': state,
                     'district': district,
+                    'party': party,
                     'created': created
                 }, status=status.HTTP_201_CREATED)
                         
@@ -192,8 +200,9 @@ class TenantMembershipUpdateView(APIView):
         lead_group_name = ser.validated_data.get("lead_group_name")
         daily_target = ser.validated_data.get("daily_target")
         daily_limit = ser.validated_data.get("daily_limit")
-        state = (ser.validated_data.get("state") or "").strip() or None
-        district = (ser.validated_data.get("district") or "").strip() or None
+        state = ser.validated_data.get("state")
+        district = ser.validated_data.get("district")
+        party = ser.validated_data.get("party")
 
         with transaction.atomic():
             try:
@@ -222,8 +231,10 @@ class TenantMembershipUpdateView(APIView):
                     daily_limit=daily_limit,
                     state=state,
                     district=district,
+                    party=party,
                     update_state=True,
                     update_district=True,
+                    update_party=True,
                 )
 
                 if membership.user_id:
@@ -242,6 +253,7 @@ class TenantMembershipUpdateView(APIView):
                     "lead_group_name": group.name if group else None,
                     "state": state,
                     "district": district,
+                    "party": party,
                     "updated": True
                 }, status=status.HTTP_200_OK)
             except Exception as e:

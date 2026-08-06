@@ -76,37 +76,24 @@ def _district_priority_sql(rm_district: str) -> str:
     """
 
 
-def _lead_creator_priority_sql(rm_name: str) -> str:
+def _party_priority_sql(rm_party: str) -> str:
     """
-    Soft-rank for referral Lead Creator accountability (``data.lead_creator`` only).
-
-    Applies **only** when ``lead_source`` contains ``REFERRAL`` (case-insensitive),
-    e.g. PREMIUM_REFERRAL, REFERRAL_TO_RM. Non-referral leads get a neutral ``0``
-    so this ranking does not move them relative to district/score — only referral
-    leads are ordered by creator:
-
-      0 = referral + creator matches RM name  (also non-referral — neutral)
-      1 = referral + creator present but different RM
-      2 = referral + creator blank / missing
+    Soft-rank for RM party matching on ``data.affiliated_party`` (name):
+      0 = matches RM party
+      1 = lead has a (different) non-blank affiliated_party
+      2 = lead affiliated_party blank / missing
     """
-    safe = rm_name.strip().replace("'", "''").lower()
-    # Escape % for Django .extra() (it treats % as param placeholders).
-    is_referral = "UPPER(TRIM(COALESCE(data->>'lead_source', ''))) LIKE '%%REFERRAL%%'"
-    creator_raw = "TRIM(COALESCE(data->>'lead_creator', ''))"
-    creator_blank = f"""(
-        {creator_raw} = ''
-        OR LOWER({creator_raw}) IN ('null', 'none')
-    )"""
-    creator_matches = f"""(
-        NOT ({creator_blank})
-        AND LOWER({creator_raw}) = '{safe}'
-    )"""
+    safe = rm_party.strip().replace("'", "''").lower()
     return f"""
         CASE
-            WHEN NOT ({is_referral}) THEN 0
-            WHEN {creator_matches} THEN 0
-            WHEN {creator_blank} THEN 2
-            ELSE 1
+            WHEN TRIM(COALESCE(data->>'affiliated_party', '')) != ''
+                 AND LOWER(TRIM(data->>'affiliated_party')) NOT IN ('null', 'none')
+                 AND LOWER(TRIM(data->>'affiliated_party')) = '{safe}'
+            THEN 0
+            WHEN TRIM(COALESCE(data->>'affiliated_party', '')) != ''
+                 AND LOWER(TRIM(data->>'affiliated_party')) NOT IN ('null', 'none')
+            THEN 1
+            ELSE 2
         END
     """
 
@@ -118,8 +105,9 @@ class PullStrategyApplier:
     ``order``: sort keys (``-`` prefix = descending). Day bucketing: ``day(created_at)``
     or ``day(first_assigned_at)`` (JSON timestamptz).
     ``include_snoozed_due``: when true, due SNOOZED rows sort first (prepends ``is_expired_snoozed`` unless already in ``order``).
-    ``rm_district``: when set, soft-ranks matching ``data.district`` before other order keys.
-    ``rm_name``: when set, soft-ranks referral ``data.lead_creator`` match after district.
+    ``rm_district``: when set, soft-ranks matching ``data.district`` after normal order keys.
+    ``rm_party``: when set, soft-ranks matching ``data.affiliated_party`` after district
+    (so district wins when both are present). Soft-rank is always after ``pull_strategy.order``.
     """
 
     _NEXT_CALL_READY_WHERE = """
@@ -142,7 +130,7 @@ class PullStrategyApplier:
         now_iso: str,
         require_next_call_ready: bool = True,
         rm_district: Optional[str] = None,
-        rm_name: Optional[str] = None,
+        rm_party: Optional[str] = None,
     ) -> QuerySet:
         if require_next_call_ready:
             qs = qs.extra(where=[self._NEXT_CALL_READY_WHERE])
@@ -154,7 +142,7 @@ class PullStrategyApplier:
             call_attempts_expr="COALESCE((data->>'call_attempts')::int, 0)",
             score_expr=self._build_score_expr(strategy.get("ignore_score_for_sources") or []),
             rm_district=(rm_district or "").strip() or None,
-            rm_name=(rm_name or "").strip() or None,
+            rm_party=(rm_party or "").strip() or None,
         )
 
     def _apply_order_list(
@@ -166,21 +154,13 @@ class PullStrategyApplier:
         call_attempts_expr: str,
         score_expr: str,
         rm_district: Optional[str] = None,
-        rm_name: Optional[str] = None,
+        rm_party: Optional[str] = None,
     ) -> QuerySet:
         tz = _day_timezone(strategy)
         select: dict[str, str] = {}
         order_parts: list[Any] = []
 
-        if rm_district:
-            select["district_priority"] = _district_priority_sql(rm_district)
-            # String alias (not F()) — Django resolves F() before extra(select=...).
-            order_parts.append("district_priority")
-
-        if rm_name:
-            select["lead_creator_priority"] = _lead_creator_priority_sql(rm_name)
-            order_parts.append("lead_creator_priority")
-
+        # Normal pull_strategy order first; district/party soft-rank only as tiebreakers.
         for raw in tokens:
             parsed = _parse_order_token(raw) if isinstance(raw, str) else None
             if not parsed:
@@ -204,6 +184,16 @@ class PullStrategyApplier:
             order_parts.append(
                 expr.desc(nulls_last=True) if descending else expr.asc(nulls_last=True)
             )
+
+        # District before party when both are set.
+        if rm_district:
+            select["district_priority"] = _district_priority_sql(rm_district)
+            # String alias (not F()) — Django resolves F() before extra(select=...).
+            order_parts.append("district_priority")
+
+        if rm_party:
+            select["party_priority"] = _party_priority_sql(rm_party)
+            order_parts.append("party_priority")
 
         order_parts.append("id")
         return qs.extra(select=select).order_by(*order_parts)

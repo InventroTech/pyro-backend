@@ -297,6 +297,7 @@ USER_KV_SUPPORT_DAILY_LIMIT_OTHER_KEY = "SUPPORT_DAILY_LIMIT_OTHER"
 USER_KV_SUPPORT_RESOLVE_RATE_GOAL_KEY = "SUPPORT_RESOLVE_RATE_GOAL"
 USER_KV_STATE_KEY = "STATE"
 USER_KV_DISTRICT_KEY = "DISTRICT"
+USER_KV_PARTY_KEY = "PARTY"
 
 
 def coerce_kv_int(value) -> Optional[int]:
@@ -309,6 +310,32 @@ def coerce_kv_int(value) -> Optional[int]:
         return int(value)
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
+    return None
+
+
+def resolve_party_match_name(raw) -> Optional[str]:
+    """
+    Resolve RM PARTY KV to the string matched against lead ``affiliated_party``.
+
+    Catalog IDs map to English party names; plain strings are used as-is.
+    """
+    party_id = coerce_kv_int(raw)
+    if party_id is not None:
+        from user_settings.geo_party_catalog import load_geo_party_catalog
+
+        for item in load_geo_party_catalog().get("parties") or []:
+            try:
+                if int(item.get("id")) == party_id:
+                    name = str(item.get("name") or "").strip()
+                    return name or None
+            except (TypeError, ValueError):
+                continue
+        return None
+    if isinstance(raw, str):
+        return raw.strip() or None
+    if raw is not None and not isinstance(raw, bool):
+        text = str(raw).strip()
+        return text or None
     return None
 
 
@@ -349,10 +376,12 @@ def upsert_user_kv_settings(
     group_id: Optional[int],
     daily_target: Optional[int],
     daily_limit: Optional[int],
-    state: Optional[str] = None,
-    district: Optional[str] = None,
+    state: Optional[int] = None,
+    district: Optional[int] = None,
+    party: Optional[int] = None,
     update_state: bool = False,
     update_district: bool = False,
+    update_party: bool = False,
 ) -> None:
     """Persist core per-user settings in TenantMemberSetting KV rows."""
 
@@ -379,14 +408,28 @@ def upsert_user_kv_settings(
             tenant=tenant,
             tenant_membership=tenant_membership,
             key=USER_KV_STATE_KEY,
-            defaults={"value": (state or "").strip() or None},
+            defaults={"value": coerce_kv_int(state)},
         )
     if update_district:
         TenantMemberSetting.objects.update_or_create(
             tenant=tenant,
             tenant_membership=tenant_membership,
             key=USER_KV_DISTRICT_KEY,
-            defaults={"value": (district or "").strip() or None},
+            defaults={"value": coerce_kv_int(district)},
+        )
+    if update_party:
+        party_id = coerce_kv_int(party)
+        if party_id is not None:
+            party_value = party_id
+        elif isinstance(party, str):
+            party_value = party.strip() or None
+        else:
+            party_value = None
+        TenantMemberSetting.objects.update_or_create(
+            tenant=tenant,
+            tenant_membership=tenant_membership,
+            key=USER_KV_PARTY_KEY,
+            defaults={"value": party_value},
         )
 
 
@@ -476,6 +519,7 @@ USER_KV_RESERVED_KEYS = frozenset(
         USER_KV_SUPPORT_RESOLVE_RATE_GOAL_KEY,
         USER_KV_STATE_KEY,
         USER_KV_DISTRICT_KEY,
+        USER_KV_PARTY_KEY,
     }
 )
 

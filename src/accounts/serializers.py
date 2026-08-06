@@ -11,8 +11,9 @@ class TenantMembershipCreateSerializer(serializers.Serializer):
     lead_group_name = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)
     daily_target = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     daily_limit = serializers.IntegerField(required=False, allow_null=True, min_value=0)
-    state = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)
-    district = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)
+    state = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    district = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    party = serializers.IntegerField(required=False, allow_null=True, min_value=0)
 
     def validate(self, attrs):
         req = self.context['request']
@@ -60,8 +61,9 @@ class TenantMembershipUpdateSerializer(serializers.Serializer):
     lead_group_name = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)
     daily_target = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     daily_limit = serializers.IntegerField(required=False, allow_null=True, min_value=0)
-    state = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)
-    district = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)
+    state = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    district = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    party = serializers.IntegerField(required=False, allow_null=True, min_value=0)
 
     def validate(self, attrs):
         req = self.context["request"]

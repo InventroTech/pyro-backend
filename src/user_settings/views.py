@@ -33,10 +33,12 @@ from .services import (
     USER_KV_SUPPORT_RESOLVE_RATE_GOAL_KEY,
     USER_KV_STATE_KEY,
     USER_KV_DISTRICT_KEY,
+    USER_KV_PARTY_KEY,
     USER_KV_RESERVED_KEYS,
 )
 from crm_records.models import Record
 from django.db.models import Q
+from .geo_party_catalog import catalog_options, load_geo_party_catalog
 
 
 def get_tenant_membership_by_user_id(tenant, user_id, user=None):
@@ -346,6 +348,7 @@ _CORE_KV_SETTING_KEYS = (
     USER_KV_SUPPORT_RESOLVE_RATE_GOAL_KEY,
     USER_KV_STATE_KEY,
     USER_KV_DISTRICT_KEY,
+    USER_KV_PARTY_KEY,
 )
 
 _SUPPORT_PATCH_KEYS = (
@@ -561,6 +564,30 @@ class LeadStatesListView(APIView):
     def get(self, request):
         options = get_lead_filter_options(request.tenant)
         return Response({"lead_states": options["lead_states"]}, status=status.HTTP_200_OK)
+
+
+class GeoPartyCatalogView(APIView):
+    """
+    Circle state / district / party ID→name catalog for User Management dropdowns.
+
+    Labels are ``Name (id)``; values are Circle IDs. Optional ``?state_id=`` filters
+    districts (and parties) to that state.
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        state_id = (request.query_params.get("state_id") or "").strip() or None
+        catalog = load_geo_party_catalog()
+        return Response(
+            {
+                "version": catalog.get("version"),
+                "states": catalog_options("states"),
+                "districts": catalog_options("districts", state_id=state_id),
+                "parties": catalog_options("parties", state_id=state_id),
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class LeadFilterOptionsView(APIView):

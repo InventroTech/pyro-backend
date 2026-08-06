@@ -54,11 +54,11 @@ class LeadPipeline:
 
         mem_id = getattr(resolved_user.membership, "id", None) if resolved_user.membership else None
         rm_district = (resolved_user.district or "").strip() or None
-        rm_name = (resolved_user.name or "").strip() or None
+        rm_party = (resolved_user.party or "").strip() or None
         logger.info(
             "[LeadPipeline] start tenant=%s user=%s membership_id=%s user_uuid=%s "
             "filters: affiliated_party=%s lead_source=%s lead_status=%s lead_state=%s "
-            "daily_limit=%s district=%s rm_name=%s debug=%s",
+            "daily_limit=%s district=%s party=%s debug=%s",
             _tenant_label(tenant),
             user_identifier,
             mem_id,
@@ -69,9 +69,18 @@ class LeadPipeline:
             resolved_user.eligible_states or "(none)",
             resolved_user.daily_limit,
             rm_district or "(blank)",
-            rm_name or "(blank)",
+            rm_party or "(blank)",
             debug,
         )
+
+        # District required for any next-lead pull; missing party only skips party soft-rank.
+        if not rm_district and not debug:
+            logger.info(
+                "[LeadPipeline] abort: RM district blank — no leads user=%s tenant=%s",
+                user_identifier,
+                _tenant_label(tenant),
+            )
+            return None
 
         limit_status = None
         if resolved_user.daily_limit is not None:
@@ -148,21 +157,6 @@ class LeadPipeline:
                 )
 
             for scope in scopes:
-                # Blank RM district: no fresh/unassigned pulls; follow-ups (me) still allowed.
-                if (
-                    str(scope).lower() == "unassigned"
-                    and not rm_district
-                    and not debug
-                ):
-                    logger.info(
-                        "[LeadPipeline] skip unassigned scope (RM district blank) "
-                        "bucket_slug=%s priority=%s user=%s",
-                        assignment.bucket_slug,
-                        assignment.priority,
-                        user_identifier,
-                    )
-                    continue
-
                 fc_copy = {**fc, "assigned_scope": scope}
                 qs = self.queryset_builder.build(
                     tenant=tenant,
@@ -189,7 +183,7 @@ class LeadPipeline:
                     strategy=assignment.pull_strategy,
                     now_iso=now_iso,
                     rm_district=rm_district,
-                    rm_name=rm_name,
+                    rm_party=rm_party,
                 )
 
                 # Full COUNT(*) on JSON-heavy lead querysets is slow at scale; only run when debug=1.
