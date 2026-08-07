@@ -249,6 +249,10 @@ else:
             'OPTIONS': {
                 'sslmode': 'require',
             },
+            # Transaction-mode poolers (Supabase :6543 / PgBouncer) can swap
+            # backends between statements, which breaks Django named server-side
+            # cursors ("cursor _django_curs_… does not exist").
+            'DISABLE_SERVER_SIDE_CURSORS': True,
             'CONN_MAX_AGE': 0 if IS_DEV else 60,
             'CONN_HEALTH_CHECKS': True,
         }

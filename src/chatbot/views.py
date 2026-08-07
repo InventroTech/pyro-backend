@@ -52,7 +52,12 @@ def _append_exchange(tenant, conv, text, page_context, user_id=None):
         page_context=page_context or {},
     )
     history = [
-        {"role": m.role, "content": m.content}
+        {
+            "role": m.role,
+            "content": m.content,
+            # Needed so confirm→create can re-use the prior create_page preview.
+            "tool_calls": m.tool_calls or [],
+        }
         for m in conv.messages.exclude(id=user_msg.id).order_by("created_at")
         if m.role in (Message.ROLE_USER, Message.ROLE_ASSISTANT)
     ]

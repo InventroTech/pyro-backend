@@ -35,7 +35,10 @@ DATA_KEYWORDS = re.compile(
     r"breakdown|assigned|unassigned|available quantity|allocated|"
     r"cse|sla|resolution time|show me|summary|overview|"
     r"billing|invoice|enqueue|background job|pyro job|run job|jobs?|"
-    r"create page|my pages|new page|pages?"
+    # Page actions — match "create a page", "create page", "my pages", etc.
+    r"create (a )?page|new page|list (my )?pages|my pages|update (the )?page|"
+    r"delete (the |a )?page|remove (the |a )?page|"
+    r"add (a )?(lead )?table|lead table|widgets?|\bpages?\b"
     r")\b",
     re.I,
 )
@@ -48,6 +51,29 @@ HELP_KEYWORDS = re.compile(
 )
 CLARIFY_ONLY = re.compile(
     r"^\s*(hi|hello|hey|yo|sup|thanks|thank you|ok|okay|\?+)\s*$",
+    re.I,
+)
+# Short affirmations after the assistant asked to confirm a mutating tool.
+CONFIRM_REPLY = re.compile(
+    r"^\s*(yes|yep|yeah|y|confirm|confirmed|go ahead|do it|proceed|sure|please do|"
+    r"ok(ay)?(,?\s*(create|confirm|do it|go ahead|proceed))?)\s*[.!]*\s*$",
+    re.I,
+)
+PENDING_ACTION_HINT = re.compile(
+    r"confirm|shall i create|page preview|create.{0,24}page|update.{0,24}page|"
+    r"delete.{0,24}page|remove.{0,24}page|"
+    r"add.{0,24}(widget|table)|enqueue|run (the )?job",
+    re.I,
+)
+ROLE_HINT = re.compile(
+    r"\b(?:visibility|visible)\s*(?:for|to|=|:)\s*([A-Za-z0-9_-]{1,40})"
+    r"|\bonly\s+([A-Za-z0-9_-]{1,40})\s+users?\b"
+    r"|\bfor\s+([A-Za-z0-9_-]{1,40})\s+role\b"
+    r"|\brole\s*(?:for|to|=|:)\s*([A-Za-z0-9_-]{1,40})\b",
+    re.I,
+)
+KNOWN_ROLE_TOKEN = re.compile(
+    r"\b(GM|RM|CSE|PM|EM|ASM|COO|CTO|HM|Manager)\b",
     re.I,
 )
 
@@ -70,17 +96,374 @@ def _heuristic_intent(question: str) -> str:
     return INTENT_HELP
 
 
+def _is_confirm_followup(
+    question: str, history: Optional[list[dict[str, Any]]] = None
+) -> bool:
+    """True when user is affirming a pending create/enqueue confirm from the last turn."""
+    if not CONFIRM_REPLY.match(question or ""):
+        return False
+    if not history:
+        return False
+    for item in reversed(history):
+        if item.get("role") == "assistant" and item.get("content"):
+            return bool(PENDING_ACTION_HINT.search(item["content"]))
+        if item.get("role") == "assistant":
+            for tc in item.get("tool_calls") or []:
+                result = tc.get("result") or {}
+                if tc.get("name") == "create_page" and result.get("error") == "confirm_required":
+                    return True
+    return False
+
+
+def _extract_role_hint(text: str) -> str:
+    text = text or ""
+    known = KNOWN_ROLE_TOKEN.search(text)
+    if known:
+        return known.group(1)
+    m = ROLE_HINT.search(text)
+    if not m:
+        return ""
+    for g in m.groups():
+        if g and g.strip().lower() not in {"only", "all", "none", "users", "user", "role"}:
+            return g.strip()
+    return ""
+
+
+def _pending_create_page_preview(
+    history: Optional[list[dict[str, Any]]] = None,
+) -> Optional[dict[str, Any]]:
+    """
+    Find the latest create_page confirm_required preview from history tool_calls,
+    with a light fallback to Page Preview text in the last assistant message.
+    """
+    if not history:
+        return None
+    for item in reversed(history):
+        if item.get("role") != "assistant":
+            continue
+        for tc in reversed(item.get("tool_calls") or []):
+            if tc.get("name") != "create_page":
+                continue
+            result = tc.get("result") or {}
+            if result.get("created"):
+                return None
+            if result.get("error") == "confirm_required" and isinstance(
+                result.get("preview"), dict
+            ):
+                preview = dict(result["preview"])
+                # Enrich null role from later chat wording if present in this message.
+                if not preview.get("role"):
+                    preview["role"] = _extract_role_hint(item.get("content") or "") or None
+                return preview
+        content = item.get("content") or ""
+        if "Page Preview" in content or "Shall I create" in content:
+            name_m = re.search(r"Name:\*?\*?\s*(.+?)(?:\n|$)", content, re.I)
+            if name_m:
+                name = name_m.group(1).strip().strip("*").strip()
+                role = ""
+                vis = re.search(
+                    r"Visibility:\*?\*?\s*(.+?)(?:\n|$)", content, re.I
+                )
+                if vis:
+                    vis_text = vis.group(1)
+                    if re.search(r"no role|all users", vis_text, re.I):
+                        role = ""
+                    else:
+                        role = _extract_role_hint(vis_text)
+                return {
+                    "name": name,
+                    "header_title": name,
+                    "icon_name": "Sparkles",
+                    "display_order": 0,
+                    "role": role or None,
+                }
+    return None
+
+
+def _pending_delete_page_preview(
+    history: Optional[list[dict[str, Any]]] = None,
+) -> Optional[dict[str, Any]]:
+    if not history:
+        return None
+    for item in reversed(history):
+        if item.get("role") != "assistant":
+            continue
+        for tc in reversed(item.get("tool_calls") or []):
+            if tc.get("name") != "delete_page":
+                continue
+            result = tc.get("result") or {}
+            if result.get("deleted"):
+                return None
+            if result.get("error") == "confirm_required" and isinstance(
+                result.get("preview"), dict
+            ):
+                return dict(result["preview"])
+    return None
+
+
+def _format_delete_page_answer(result: dict[str, Any]) -> str:
+    if result.get("error") == "confirm_required":
+        preview = result.get("preview") or {}
+        return (
+            "Ready to delete this page:\n"
+            f"- Page: {preview.get('page_name')} (`{preview.get('page_id')}`)\n"
+            f"- Owner: {preview.get('page_owner_email')}\n\n"
+            "Reply **yes** to permanently remove it from My Pages."
+        )
+    if result.get("error"):
+        return f"Couldn't delete the page: {result.get('error')}"
+    if result.get("deleted"):
+        return (
+            f'Page **{result.get("name")}** deleted.\n'
+            f"- Id: `{result.get('id')}`\n\n"
+            "Refresh My Pages / the app nav to see it gone."
+        )
+    return json.dumps(result, default=str)
+
+
+def _pending_delete_matches_question(
+    question: str, preview: Optional[dict[str, Any]]
+) -> bool:
+    """True when user re-asks to delete/remove the same pending page (not just 'yes')."""
+    if not preview:
+        return False
+    name = (preview.get("page_name") or "").strip().lower()
+    q = (question or "").strip().lower()
+    if not name or name not in q:
+        return False
+    return bool(re.search(r"\b(delete|remove)\b", q, re.I))
+
+
+def _maybe_finalize_delete_page(
+    question: str,
+    *,
+    tenant,
+    user_id=None,
+    history: Optional[list[dict[str, Any]]] = None,
+) -> Optional[dict[str, Any]]:
+    preview = _pending_delete_page_preview(history)
+    if not preview or not preview.get("page_id"):
+        return None
+    if not (
+        _is_confirm_followup(question, history)
+        or _pending_delete_matches_question(question, preview)
+    ):
+        return None
+
+    result = run_tool(
+        "delete_page",
+        tenant,
+        {
+            "page_id": preview.get("page_id") or "",
+            "page_name": preview.get("page_name") or "",
+            "confirm": True,
+        },
+        user_id=user_id,
+    )
+    return {
+        "answer": _format_delete_page_answer(result),
+        "sources": [{"type": "tools", "title": "delete_page"}],
+        "tool_calls": [
+            {
+                "name": "delete_page",
+                "arguments": {
+                    "page_id": preview.get("page_id"),
+                    "page_name": preview.get("page_name"),
+                    "confirm": True,
+                },
+                "result": result,
+            }
+        ],
+        "mode": MODE_TOOLS,
+        "intent": INTENT_DATA,
+    }
+
+
+def _pending_update_page_preview(
+    history: Optional[list[dict[str, Any]]] = None,
+) -> Optional[dict[str, Any]]:
+    if not history:
+        return None
+    for item in reversed(history):
+        if item.get("role") != "assistant":
+            continue
+        for tc in reversed(item.get("tool_calls") or []):
+            if tc.get("name") != "update_page":
+                continue
+            result = tc.get("result") or {}
+            if result.get("updated"):
+                return None
+            if result.get("error") == "confirm_required" and isinstance(
+                result.get("preview"), dict
+            ):
+                return dict(result["preview"])
+    return None
+
+
+def _format_update_page_answer(result: dict[str, Any]) -> str:
+    if result.get("error") == "confirm_required":
+        preview = result.get("preview") or {}
+        return (
+            "Ready to update this page:\n"
+            f"- Page: {preview.get('page_name')} (`{preview.get('page_id')}`)\n"
+            f"- Change: {preview.get('change')}\n"
+            f"- Widgets: {preview.get('current_widget_count')} → "
+            f"{preview.get('next_widget_count')}\n\n"
+            "Reply **yes** to confirm."
+        )
+    if result.get("error"):
+        return f"Couldn't update the page: {result.get('error')}"
+    if result.get("updated"):
+        return (
+            f'Page **{result.get("name")}** updated successfully.\n'
+            f"- Id: `{result.get('id')}`\n"
+            f"- Widgets now: {result.get('widget_count')}\n"
+            f"- Added: {result.get('widget_type') or 'n/a'}\n\n"
+            "Refresh the page in the builder / app to see the change."
+        )
+    return json.dumps(result, default=str)
+
+
+def _maybe_finalize_update_page(
+    question: str,
+    *,
+    tenant,
+    user_id=None,
+    history: Optional[list[dict[str, Any]]] = None,
+) -> Optional[dict[str, Any]]:
+    preview = _pending_update_page_preview(history)
+    if not preview or not preview.get("page_id"):
+        return None
+    if not _is_confirm_followup(question, history):
+        return None
+
+    result = run_tool(
+        "update_page",
+        tenant,
+        {
+            "page_id": preview.get("page_id") or "",
+            "page_name": preview.get("page_name") or "",
+            "action": preview.get("action") or "add_widget",
+            "widget_type": preview.get("widget_type") or "",
+            "confirm": True,
+        },
+        user_id=user_id,
+    )
+    return {
+        "answer": _format_update_page_answer(result),
+        "sources": [{"type": "tools", "title": "update_page"}],
+        "tool_calls": [
+            {
+                "name": "update_page",
+                "arguments": {
+                    "page_id": preview.get("page_id"),
+                    "action": preview.get("action"),
+                    "widget_type": preview.get("widget_type"),
+                    "confirm": True,
+                },
+                "result": result,
+            }
+        ],
+        "mode": MODE_TOOLS,
+        "intent": INTENT_DATA,
+    }
+
+
+def _format_create_page_answer(result: dict[str, Any]) -> str:
+    if result.get("error"):
+        if result.get("error") == "confirm_required":
+            preview = result.get("preview") or {}
+            return (
+                "Ready to create this page:\n"
+                f"- Name: {preview.get('name')}\n"
+                f"- Owner: {preview.get('page_owner_email')}\n"
+                f"- Role: {preview.get('role') or 'none (My Pages only)'}\n\n"
+                "Reply **yes** to confirm."
+            )
+        return f"Couldn't create the page: {result.get('error')}"
+    if result.get("created"):
+        return (
+            f'Page **{result.get("name")}** created successfully.\n'
+            f"- Id: `{result.get('id')}`\n"
+            f"- Owner: {result.get('page_owner_email')}\n"
+            f"- Role: {result.get('role_id') or 'none'}\n\n"
+            "Open **My Pages** (as that owner) and refresh to see it. "
+            "If a role was set, it also appears in that role's app nav."
+        )
+    return json.dumps(result, default=str)
+
+
+def _maybe_finalize_create_page(
+    question: str,
+    *,
+    tenant,
+    user_id=None,
+    history: Optional[list[dict[str, Any]]] = None,
+) -> Optional[dict[str, Any]]:
+    """
+    If the user confirmed a pending create_page preview, create it without
+    relying on the LLM to call the tool again (avoids hallucinated success).
+    """
+    preview = _pending_create_page_preview(history)
+    if not preview or not preview.get("name"):
+        return None
+    if not _is_confirm_followup(question, history):
+        return None
+
+    role = _extract_role_hint(question) or (preview.get("role") or "") or ""
+    if not role:
+        for item in reversed(history or []):
+            hinted = _extract_role_hint(item.get("content") or "")
+            if hinted:
+                role = hinted
+                break
+
+    result = run_tool(
+        "create_page",
+        tenant,
+        {
+            "name": preview.get("name") or "",
+            "header_title": preview.get("header_title") or preview.get("name") or "",
+            "icon_name": preview.get("icon_name") or "Sparkles",
+            "display_order": int(preview.get("display_order") or 0),
+            "role": role,
+            "confirm": True,
+        },
+        user_id=user_id,
+    )
+    return {
+        "answer": _format_create_page_answer(result),
+        "sources": [{"type": "tools", "title": "create_page"}],
+        "tool_calls": [
+            {
+                "name": "create_page",
+                "arguments": {
+                    "name": preview.get("name"),
+                    "role": role or None,
+                    "confirm": True,
+                },
+                "result": result,
+            }
+        ],
+        "mode": MODE_TOOLS,
+        "intent": INTENT_DATA,
+    }
+
+
 def classify_intent(question: str) -> str:
     """Classify intent; never over-clarify domain words like analytics."""
     heuristic = _heuristic_intent(question)
     prompt = (
         "Classify the user question for a Pyro CRM+ERP+analytics assistant.\n"
         "Return ONLY one word: help | data | hybrid | clarify\n"
-        "- help: product how-to / feature explanation\n"
-        "- data: live counts, analytics, dashboard, records, inventory, tickets, leads, reports\n"
+        "- help: product how-to / feature explanation (NOT create/list actions)\n"
+        "- data: live counts, analytics, dashboard, records, inventory, tickets, leads, "
+        "reports, billing, jobs, AND actions like create page / list pages / enqueue job\n"
         "- hybrid: needs both explanation and live data\n"
         "- clarify: ONLY pure greetings or empty noise (hi/hello/thanks), NOT product words\n"
-        "Important: 'analytics', 'show analytics', 'dashboard', 'ticket stats' are ALWAYS data.\n\n"
+        "Important: 'analytics', 'show analytics', 'dashboard', 'ticket stats', "
+        "'create a page named X', 'list my pages', 'add lead table to Ops Home', "
+        "'delete page Ops Home' are ALWAYS data.\n\n"
         f"Question: {question}"
     )
     try:
@@ -94,6 +477,9 @@ def classify_intent(question: str) -> str:
             return heuristic
         # Don't let the model clarify when heuristics already know it's data/help
         if label == INTENT_CLARIFY and heuristic != INTENT_CLARIFY:
+            return heuristic
+        # Don't let the model send action/live-data requests into RAG-only help
+        if label == INTENT_HELP and heuristic in {INTENT_DATA, INTENT_HYBRID}:
             return heuristic
         return label
     except Exception:
@@ -122,13 +508,25 @@ def _run_tools_loop(
     rag_context: Optional[str] = None,
 ) -> dict[str, Any]:
     system = (
-        "You are Pyro's CRM + ERP + ops assistant for this tenant. "
+        "You are Sparky, Pyro's friendly CRM + ERP + ops assistant for this tenant. "
         "Use tools for live data and bob actions (billing, background jobs, pyro jobs, pages). "
         "Never invent counts or job ids. "
-        "For enqueue_background_job / enqueue_pyro_job / create_page: ALWAYS ask the user to confirm "
-        "before calling with confirm=true. If a tool returns confirm_required, ask them. "
+        "For enqueue_background_job / enqueue_pyro_job / create_page / update_page / delete_page: "
+        "ALWAYS ask the user to confirm before calling with confirm=true. "
+        "If a tool returns confirm_required, ask them. "
         "Prefer get_billing_report for billing questions. "
-        "Use create_page / list_my_pages for dashboard pages. "
+        "When the user asks to create / list / update / delete pages or add widgets, "
+        "ALWAYS call create_page / list_my_pages / update_page / delete_page — "
+        "do not say you lack a tool or documentation. "
+        "For create_page, call once without confirm to preview, then after yes call again with confirm=true. "
+        "To add a lead table to an existing page (e.g. Ops Home), call update_page with "
+        "action=add_widget, widget_type=leadTable, page_id or page_name, then confirm=true after yes. "
+        "To delete/remove a page, call delete_page with page_name set to the exact name "
+        "(page_id optional only for disambiguation). Never delete a different page than named. "
+        "Then confirm=true after yes. "
+        "NEVER say a page was created/updated/deleted unless the tool result has "
+        "created=true, updated=true, or deleted=true for that same page name. "
+        "If the user asks for role visibility (e.g. GM), pass role on create_page. "
         "List job types before enqueueing if the user is unsure of the name. "
         "Be concise."
     )
@@ -252,12 +650,47 @@ def handle_message(
             "intent": INTENT_CLARIFY,
         }
 
-    intent = classify_intent(question)
+    # Deterministic confirm → mutate (LLM previously hallucinated success here).
+    finalized = _maybe_finalize_delete_page(
+        question, tenant=tenant, user_id=user_id, history=history
+    )
+    if finalized:
+        return finalized
+    finalized = _maybe_finalize_update_page(
+        question, tenant=tenant, user_id=user_id, history=history
+    )
+    if finalized:
+        return finalized
+    finalized = _maybe_finalize_create_page(
+        question, tenant=tenant, user_id=user_id, history=history
+    )
+    if finalized:
+        return finalized
+
+    pending_create = _pending_create_page_preview(history)
+    pending_update = _pending_update_page_preview(history)
+    pending_delete = _pending_delete_page_preview(history)
+    # Affirmations / page-create tweaks after a preview must stay on the tools path.
+    if _is_confirm_followup(question, history) or (
+        (pending_create or pending_update or pending_delete)
+        and (
+            DATA_KEYWORDS.search(question)
+            or _extract_role_hint(question)
+            or re.search(
+                r"\b(visibility|role|create|update|delete|remove|widget|table)\b",
+                question,
+                re.I,
+            )
+        )
+    ):
+        intent = INTENT_DATA
+    else:
+        intent = classify_intent(question)
 
     if intent == INTENT_CLARIFY:
         return {
             "answer": (
-                "Hi! Ask me things like:\n"
+                "Hey — I'm Sparky! Ask me things like:\n"
                 "- \"Show analytics\"\n"
                 "- \"Show billing for this month\"\n"
                 "- \"Create a page named Ops Home\"\n"
