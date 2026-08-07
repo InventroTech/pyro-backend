@@ -60,20 +60,22 @@ CONFIRM_REPLY = re.compile(
     re.I,
 )
 PENDING_ACTION_HINT = re.compile(
-    r"confirm|shall i create|page preview|create.{0,24}page|update.{0,24}page|"
-    r"delete.{0,24}page|remove.{0,24}page|"
-    r"add.{0,24}(widget|table)|enqueue|run (the )?job",
+    r"confirm|shall i create|page preview|ready to (create|update|delete)|"
+    r"create.{0,24}page|update.{0,24}page|"
+    r"delete.{0,24}page|remove.{0,40}(page|from)|"
+    r"permanently remove|add.{0,24}(widget|table)|enqueue|run (the )?job",
     re.I,
 )
 ROLE_HINT = re.compile(
-    r"\b(?:visibility|visible)\s*(?:for|to|=|:)\s*([A-Za-z0-9_-]{1,40})"
-    r"|\bonly\s+([A-Za-z0-9_-]{1,40})\s+users?\b"
-    r"|\bfor\s+([A-Za-z0-9_-]{1,40})\s+role\b"
-    r"|\brole\s*(?:for|to|=|:)\s*([A-Za-z0-9_-]{1,40})\b",
+    r"\b(?:visibility|visible)\s*(?:for|to|=|:)\s*"
+    r"(team\s*lead|[A-Za-z0-9_][A-Za-z0-9_\- ]{0,39})"
+    r"|\bonly\s+(team\s*lead|[A-Za-z0-9_][A-Za-z0-9_\- ]{0,39})\s+users?\b"
+    r"|\bfor\s+(team\s*lead|[A-Za-z0-9_][A-Za-z0-9_\- ]{0,39})\s+role\b"
+    r"|\brole\s*(?:for|to|=|:)\s*(team\s*lead|[A-Za-z0-9_][A-Za-z0-9_\- ]{0,39})\b",
     re.I,
 )
 KNOWN_ROLE_TOKEN = re.compile(
-    r"\b(GM|RM|CSE|PM|EM|ASM|COO|CTO|HM|Manager)\b",
+    r"\b(team\s*lead|GM|RM|CSE|PM|EM|ASM|COO|CTO|HM|Manager)\b",
     re.I,
 )
 
@@ -96,22 +98,48 @@ def _heuristic_intent(question: str) -> str:
     return INTENT_HELP
 
 
+def _has_pending_confirm_tool(history: Optional[list[dict[str, Any]]] = None) -> bool:
+    """True when recent assistant tool_calls include a confirm_required preview."""
+    if not history:
+        return False
+    for item in reversed(history):
+        if item.get("role") != "assistant":
+            continue
+        for tc in item.get("tool_calls") or []:
+            result = tc.get("result") or {}
+            if result.get("error") == "confirm_required":
+                return True
+            # Successful mutate ends the pending confirm chain for that tool.
+            if result.get("created") or result.get("updated") or result.get("deleted"):
+                return False
+        # Only inspect the latest assistant turn that had tools or content.
+        if item.get("tool_calls") or item.get("content"):
+            break
+    return False
+
+
 def _is_confirm_followup(
     question: str, history: Optional[list[dict[str, Any]]] = None
 ) -> bool:
-    """True when user is affirming a pending create/enqueue confirm from the last turn."""
+    """True when user is affirming a pending create/update/delete/enqueue confirm."""
     if not CONFIRM_REPLY.match(question or ""):
         return False
     if not history:
         return False
+    # Prefer structured tool previews — LLM wording is unreliable here.
+    if (
+        _pending_delete_page_preview(history)
+        or _pending_update_page_preview(history)
+        or _pending_create_page_preview(history)
+        or _has_pending_confirm_tool(history)
+    ):
+        return True
     for item in reversed(history):
-        if item.get("role") == "assistant" and item.get("content"):
-            return bool(PENDING_ACTION_HINT.search(item["content"]))
-        if item.get("role") == "assistant":
-            for tc in item.get("tool_calls") or []:
-                result = tc.get("result") or {}
-                if tc.get("name") == "create_page" and result.get("error") == "confirm_required":
-                    return True
+        if item.get("role") != "assistant":
+            continue
+        if item.get("content") and PENDING_ACTION_HINT.search(item["content"]):
+            return True
+        break
     return False
 
 
@@ -119,13 +147,23 @@ def _extract_role_hint(text: str) -> str:
     text = text or ""
     known = KNOWN_ROLE_TOKEN.search(text)
     if known:
-        return known.group(1)
+        return re.sub(r"\s+", " ", known.group(1).strip())
     m = ROLE_HINT.search(text)
     if not m:
         return ""
     for g in m.groups():
-        if g and g.strip().lower() not in {"only", "all", "none", "users", "user", "role"}:
-            return g.strip()
+        if not g:
+            continue
+        val = re.sub(r"\s+", " ", g.strip().strip(".,;:"))
+        if val.lower() not in {"only", "all", "none", "users", "user", "role"}:
+            # Keep multi-word roles; drop trailing junk words from broad capture.
+            val = re.sub(
+                r"\s+\b(users?|role|visibility|page|pages)\b.*$",
+                "",
+                val,
+                flags=re.I,
+            ).strip()
+            return val
     return ""
 
 
@@ -219,6 +257,42 @@ def _format_delete_page_answer(result: dict[str, Any]) -> str:
             "Refresh My Pages / the app nav to see it gone."
         )
     return json.dumps(result, default=str)
+
+
+def _deterministic_page_tool_answer(
+    tool_trace: list[dict[str, Any]],
+) -> Optional[str]:
+    """
+    Prefer verified tool payloads over LLM paraphrases for page mutations.
+    Prevents "deleted successfully" when confirm_required / error actually returned.
+    """
+    for tc in reversed(tool_trace or []):
+        name = tc.get("name")
+        result = tc.get("result") or {}
+        if not isinstance(result, dict):
+            continue
+        if name == "delete_page":
+            if (
+                result.get("deleted")
+                or result.get("error") == "confirm_required"
+                or result.get("error")
+            ):
+                return _format_delete_page_answer(result)
+        if name == "create_page":
+            if (
+                result.get("created")
+                or result.get("error") == "confirm_required"
+                or result.get("error")
+            ):
+                return _format_create_page_answer(result)
+        if name == "update_page":
+            if (
+                result.get("updated")
+                or result.get("error") == "confirm_required"
+                or result.get("error")
+            ):
+                return _format_update_page_answer(result)
+    return None
 
 
 def _pending_delete_matches_question(
@@ -557,8 +631,11 @@ def _run_tools_loop(
             tool_calls = result.tool_calls or []
 
             if not tool_calls:
+                deterministic = _deterministic_page_tool_answer(tool_trace)
                 return {
-                    "answer": result.content or "No answer generated.",
+                    "answer": deterministic
+                    or result.content
+                    or "No answer generated.",
                     "sources": [{"type": "tools", "title": "Live CRM/ERP data"}],
                     "tool_calls": tool_trace,
                     "mode": MODE_HYBRID if rag_context else MODE_TOOLS,
@@ -598,8 +675,10 @@ def _run_tools_loop(
                 )
 
         final = chat_completion(messages, temperature=0.1)
+        deterministic = _deterministic_page_tool_answer(tool_trace)
         return {
-            "answer": message_text(final)
+            "answer": deterministic
+            or message_text(final)
             or "I reached the tool call limit. Please narrow your question.",
             "sources": [{"type": "tools", "title": "Live CRM/ERP data"}],
             "tool_calls": tool_trace,

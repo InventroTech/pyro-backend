@@ -7,6 +7,7 @@ Mutating job enqueues require confirm=true.
 from __future__ import annotations
 
 import json
+import re
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Optional
 
@@ -174,7 +175,8 @@ ACTION_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "(TenantSettings.chatbot_page_owner_email). Any GM/user can trigger create; "
                 "ownership is always that configured account, not the requester. "
                 "REQUIRES confirm=true. config defaults to []. "
-                "role may be a role UUID or role key (e.g. RM, CSE) for visibility; optional."
+                "role may be a role UUID, key, or loose name "
+                "(e.g. RM, CSE, team lead, team_lead_unmannd); optional."
             ),
             "parameters": {
                 "type": "object",
@@ -188,7 +190,10 @@ ACTION_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "display_order": {"type": "integer", "default": 0},
                     "role": {
                         "type": "string",
-                        "description": "Optional role UUID or role key for page visibility",
+                        "description": (
+                            "Optional role UUID, key, or name for page visibility "
+                            "(e.g. 'team lead', 'team_lead_unmannd', 'GM')"
+                        ),
                     },
                     "config": {
                         "type": "array",
@@ -540,8 +545,15 @@ def tool_get_pyro_job_status(tenant, job_id: int) -> dict[str, Any]:
         return {"error": str(exc)}
 
 
+def _normalize_role_token(value: str) -> str:
+    """Collapse role labels for fuzzy matching (Team Lead ≈ team_lead ≈ teamlead)."""
+    raw = (value or "").strip().lower()
+    raw = re.sub(r"[\s_\-]+", "", raw)
+    return raw
+
+
 def _resolve_role_id(tenant, role_value: str):
-    """Accept role UUID or role key; return role UUID or None."""
+    """Accept role UUID, key, or loose name (e.g. 'team lead' → team_lead_unmannd)."""
     from authz.models import Role
     from uuid import UUID
 
@@ -555,11 +567,58 @@ def _resolve_role_id(tenant, role_value: str):
         return None
     except (ValueError, TypeError):
         pass
+
     role = (
         Role.objects.filter(tenant=tenant, key__iexact=raw).first()
         or Role.objects.filter(tenant=tenant, name__iexact=raw).first()
     )
-    return role.id if role else None
+    if role:
+        return role.id
+
+    wanted = _normalize_role_token(raw)
+    if not wanted or len(wanted) < 2:
+        return None
+
+    candidates = list(Role.objects.filter(tenant=tenant).only("id", "key", "name"))
+    if not candidates:
+        return None
+
+    exact_norm = [
+        r
+        for r in candidates
+        if _normalize_role_token(r.key) == wanted
+        or _normalize_role_token(r.name) == wanted
+    ]
+    if len(exact_norm) == 1:
+        return exact_norm[0].id
+    if len(exact_norm) > 1:
+        # Prefer shortest key (team_lead over team_lead_copy).
+        exact_norm.sort(key=lambda r: (len(r.key or ""), r.key or ""))
+        return exact_norm[0].id
+
+    # Prefix / contains: "team lead" → key team_lead_unmannd, name "Team Lead"
+    loose = [
+        r
+        for r in candidates
+        if wanted in _normalize_role_token(r.key)
+        or wanted in _normalize_role_token(r.name)
+        or _normalize_role_token(r.key).startswith(wanted)
+        or _normalize_role_token(r.name).startswith(wanted)
+    ]
+    if not loose:
+        return None
+    # Prefer matches where the role label starts with the query, then shorter keys.
+    loose.sort(
+        key=lambda r: (
+            0
+            if _normalize_role_token(r.name).startswith(wanted)
+            or _normalize_role_token(r.key).startswith(wanted)
+            else 1,
+            len(r.key or ""),
+            r.key or "",
+        )
+    )
+    return loose[0].id
 
 
 def resolve_chatbot_page_owner(tenant) -> tuple[Any, Optional[str], Optional[str]]:
@@ -1052,7 +1111,47 @@ def tool_delete_page(
 
     deleted_id = str(page.id)
     deleted_name = page.name
-    page.delete()
+    from django.utils import timezone
+    from pages.models import Page
+
+    # Soft-delete explicitly and verify — don't trust LLM/history side-effects.
+    now = timezone.now()
+    updated = Page.all_objects.filter(pk=page.pk, is_deleted=False).update(
+        is_deleted=True,
+        deleted_at=now,
+        updated_at=now,
+    )
+    if not updated:
+        # Already gone, or row vanished between resolve and delete.
+        still = Page.all_objects.filter(pk=page.pk).first()
+        if still and still.is_deleted:
+            return {
+                "deleted": True,
+                "id": deleted_id,
+                "name": deleted_name,
+                "page_owner_email": owner_email,
+                "page_owner_user_id": str(owner_id),
+                "requested_by_user_id": str(user_id) if user_id else None,
+                "message": (
+                    f'Page "{deleted_name}" was already deleted. '
+                    "Refresh My Pages / the app nav."
+                ),
+            }
+        return {
+            "error": (
+                f'Failed to delete page "{deleted_name}" ({deleted_id}). '
+                "Please try again or delete it from My Pages."
+            )
+        }
+
+    verified = Page.all_objects.filter(pk=page.pk, is_deleted=True).exists()
+    if not verified:
+        return {
+            "error": (
+                f'Delete did not persist for page "{deleted_name}" ({deleted_id}).'
+            )
+        }
+
     return {
         "deleted": True,
         "id": deleted_id,
