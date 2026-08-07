@@ -17,7 +17,7 @@ def reverse_drop_tenant_users_and_party(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("core", "0009_drop_cards_and_card_sets"),
+        ("core", "0010_drop_cards_and_card_sets"),
     ]
 
     operations = [

@@ -62,6 +62,15 @@ class TenantSettings(HistoryTrackedModel, models.Model):
         db_index=True,
         help_text="If True, object history for this tenant is not purged by retention.",
     )
+    chatbot_page_owner_email = models.EmailField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Email of the membership that owns pages created via the AI chatbot. "
+            "Must match an active tenant membership with a linked user_id. "
+            "Falls back to env CHATBOT_PAGE_OWNER_EMAIL if empty."
+        ),
+    )
 
     class Meta:
         db_table = "core_tenant_settings"
