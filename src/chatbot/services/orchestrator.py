@@ -67,14 +67,15 @@ PENDING_ACTION_HINT = re.compile(
     re.I,
 )
 ROLE_HINT = re.compile(
-    r"\b(?:visibility|visible)\s*(?:for|to|=|:)\s*([A-Za-z0-9_-]{1,40})"
-    r"|\bonly\s+([A-Za-z0-9_-]{1,40})\s+users?\b"
-    r"|\bfor\s+([A-Za-z0-9_-]{1,40})\s+role\b"
-    r"|\brole\s*(?:for|to|=|:)\s*([A-Za-z0-9_-]{1,40})\b",
+    r"\b(?:visibility|visible)\s*(?:for|to|=|:)\s*"
+    r"(team\s*lead|[A-Za-z0-9_][A-Za-z0-9_\- ]{0,39})"
+    r"|\bonly\s+(team\s*lead|[A-Za-z0-9_][A-Za-z0-9_\- ]{0,39})\s+users?\b"
+    r"|\bfor\s+(team\s*lead|[A-Za-z0-9_][A-Za-z0-9_\- ]{0,39})\s+role\b"
+    r"|\brole\s*(?:for|to|=|:)\s*(team\s*lead|[A-Za-z0-9_][A-Za-z0-9_\- ]{0,39})\b",
     re.I,
 )
 KNOWN_ROLE_TOKEN = re.compile(
-    r"\b(GM|RM|CSE|PM|EM|ASM|COO|CTO|HM|Manager)\b",
+    r"\b(team\s*lead|GM|RM|CSE|PM|EM|ASM|COO|CTO|HM|Manager)\b",
     re.I,
 )
 
@@ -146,13 +147,23 @@ def _extract_role_hint(text: str) -> str:
     text = text or ""
     known = KNOWN_ROLE_TOKEN.search(text)
     if known:
-        return known.group(1)
+        return re.sub(r"\s+", " ", known.group(1).strip())
     m = ROLE_HINT.search(text)
     if not m:
         return ""
     for g in m.groups():
-        if g and g.strip().lower() not in {"only", "all", "none", "users", "user", "role"}:
-            return g.strip()
+        if not g:
+            continue
+        val = re.sub(r"\s+", " ", g.strip().strip(".,;:"))
+        if val.lower() not in {"only", "all", "none", "users", "user", "role"}:
+            # Keep multi-word roles; drop trailing junk words from broad capture.
+            val = re.sub(
+                r"\s+\b(users?|role|visibility|page|pages)\b.*$",
+                "",
+                val,
+                flags=re.I,
+            ).strip()
+            return val
     return ""
 
 
