@@ -203,6 +203,92 @@ ACTION_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_page",
+            "description": (
+                "Update an existing dashboard page owned by the configured chatbot page owner. "
+                "Use this to add widgets (e.g. lead table) to a page like Ops Home. "
+                "Identify the page with page_id and/or page_name. "
+                "action=add_widget with widget_type=leadTable (or lead_table) appends a lead table. "
+                "action=set_config replaces the full widget config list. "
+                "REQUIRES confirm=true."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "page_id": {
+                        "type": "string",
+                        "description": "Page UUID if known",
+                    },
+                    "page_name": {
+                        "type": "string",
+                        "description": "Page name lookup (e.g. Ops Home) when page_id omitted",
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["add_widget", "set_config"],
+                        "description": "add_widget appends a template widget; set_config replaces config",
+                    },
+                    "widget_type": {
+                        "type": "string",
+                        "description": (
+                            "For add_widget: leadTable / lead_table / ticketTable / "
+                            "inventoryTable (templates supported)"
+                        ),
+                    },
+                    "api_endpoint": {
+                        "type": "string",
+                        "description": (
+                            "Optional override for table API endpoint. "
+                            "Default for leadTable: /crm-records/records/?entity_type=lead"
+                        ),
+                    },
+                    "config": {
+                        "type": "array",
+                        "description": "Required for action=set_config: full widget list",
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Must be true to apply the update",
+                    },
+                },
+                "required": ["action", "confirm"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_page",
+            "description": (
+                "Delete (soft-delete) an existing dashboard page owned by the configured "
+                "chatbot page owner. page_name is REQUIRED and must match the page exactly. "
+                "Optional page_id helps when multiple pages share a name. "
+                "Never delete a different page than the name the user asked for. "
+                "REQUIRES confirm=true."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "page_id": {
+                        "type": "string",
+                        "description": "Optional page UUID (must match page_name if both set)",
+                    },
+                    "page_name": {
+                        "type": "string",
+                        "description": "Exact page name to delete (required), e.g. Ops Home",
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Must be true to delete the page",
+                    },
+                },
+                "required": ["page_name", "confirm"],
+            },
+        },
+    },
 ]
 
 
@@ -638,6 +724,348 @@ def tool_create_page(
     }
 
 
+def _default_lead_table_widget(api_endpoint: str = "") -> dict[str, Any]:
+    import time
+
+    endpoint = (api_endpoint or "").strip() or (
+        "/crm-records/records/?entity_type=lead"
+    )
+    return {
+        "id": f"leadTable-{int(time.time() * 1000)}",
+        "type": "leadTable",
+        "props": {},
+        "config": {
+            "columns": [
+                {"key": "name", "type": "text", "label": "Name"},
+                {"key": "praja_id", "type": "text", "label": "Praja ID"},
+                {"key": "phone_number", "type": "number", "label": "Phone No"},
+                {"key": "lead_stage", "type": "chip", "label": "Stage"},
+                {"key": "affiliated_party", "type": "text", "label": "Party"},
+                {"key": "lead_score", "type": "number", "label": "Lead Score"},
+                {
+                    "key": "assigned_to_display",
+                    "type": "text",
+                    "label": "Assigned To",
+                },
+                {
+                    "key": "",
+                    "type": "action",
+                    "label": "View Profile",
+                    "openCard": "true",
+                },
+            ],
+            "filters": [
+                {
+                    "key": "lead_stage",
+                    "type": "select",
+                    "label": "Stage",
+                    "options": [
+                        {"label": "Trial Activated", "value": "TRIAL_ACTIVATED"},
+                        {"label": "Closed", "value": "CLOSED"},
+                        {"label": "Not Interested", "value": "NOT_INTERESTED"},
+                        {"label": "Not Connected", "value": "NOT_CONNECTED"},
+                        {"label": "Call Later", "value": "SNOOZED"},
+                        {"label": "Assigned", "value": "ASSIGNED"},
+                        {"label": "Fresh", "value": "FRESH"},
+                    ],
+                    "accessor": "lead_stage",
+                },
+                {
+                    "key": "assigned_to",
+                    "type": "select",
+                    "label": "Assigned To",
+                    "options": [],
+                    "accessor": "assigned_to",
+                    "optionsApiUrl": "/membership/users",
+                    "optionsValueKey": "user_id",
+                    "optionsNullLabel": "NULL",
+                    "optionsNullValue": "null",
+                    "optionsDisplayKey": "name",
+                    "optionsIncludeNull": True,
+                },
+            ],
+            "apiEndpoint": endpoint,
+        },
+    }
+
+
+def _default_ticket_table_widget(api_endpoint: str = "") -> dict[str, Any]:
+    import time
+
+    endpoint = (api_endpoint or "").strip() or (
+        "/crm-records/records/?entity_type=support_ticket"
+    )
+    return {
+        "id": f"ticketTable-{int(time.time() * 1000)}",
+        "type": "ticketTable",
+        "props": {},
+        "config": {
+            "columns": [
+                {"key": "ticket_id", "type": "text", "label": "Ticket"},
+                {"key": "status", "type": "chip", "label": "Status"},
+                {"key": "priority", "type": "text", "label": "Priority"},
+                {"key": "assigned_to_display", "type": "text", "label": "Assigned To"},
+            ],
+            "apiEndpoint": endpoint,
+        },
+    }
+
+
+def _default_inventory_table_widget(api_endpoint: str = "") -> dict[str, Any]:
+    import time
+
+    endpoint = (api_endpoint or "").strip() or (
+        "/crm-records/records/?entity_type=inventory_item"
+    )
+    return {
+        "id": f"inventoryTable-{int(time.time() * 1000)}",
+        "type": "inventoryTable",
+        "props": {},
+        "config": {
+            "columns": [
+                {"key": "sku", "type": "text", "label": "SKU"},
+                {"key": "name", "type": "text", "label": "Name"},
+                {"key": "available_quantity", "type": "number", "label": "Available"},
+            ],
+            "apiEndpoint": endpoint,
+        },
+    }
+
+
+WIDGET_BUILDERS = {
+    "leadtable": _default_lead_table_widget,
+    "lead_table": _default_lead_table_widget,
+    "lead": _default_lead_table_widget,
+    "tickettable": _default_ticket_table_widget,
+    "ticket_table": _default_ticket_table_widget,
+    "inventorytable": _default_inventory_table_widget,
+    "inventory_table": _default_inventory_table_widget,
+}
+
+
+def _resolve_owner_page(tenant, page_id: str = "", page_name: str = ""):
+    """Resolve a page under the configured chatbot owner. Returns (page, error)."""
+    from pages.models import Page
+    from uuid import UUID
+
+    owner_id, owner_email, err = resolve_chatbot_page_owner(tenant)
+    if err:
+        return None, err
+
+    qs = Page.objects.filter(tenant=tenant, user_id=owner_id)
+    raw_id = (page_id or "").strip()
+    raw_name = (page_name or "").strip()
+
+    if raw_id:
+        try:
+            pid = UUID(raw_id)
+        except (ValueError, TypeError):
+            return None, f"Invalid page_id: {raw_id}"
+        page = qs.filter(id=pid).first()
+        if not page:
+            return (
+                None,
+                f"Page {raw_id} not found under chatbot owner {owner_email}.",
+            )
+        return page, None
+
+    if raw_name:
+        matches = list(qs.filter(name__iexact=raw_name).order_by("-updated_at")[:5])
+        if not matches:
+            return (
+                None,
+                f'No page named "{raw_name}" under chatbot owner {owner_email}.',
+            )
+        if len(matches) > 1:
+            return {
+                "error": "ambiguous_page",
+                "message": f'Multiple pages named "{raw_name}". Pass page_id.',
+                "matches": [
+                    {"id": str(p.id), "name": p.name, "updated_at": p.updated_at.isoformat() if p.updated_at else None}
+                    for p in matches
+                ],
+            }, "ambiguous"
+        return matches[0], None
+
+    return None, "Provide page_id or page_name"
+
+
+def tool_update_page(
+    tenant,
+    page_id: str = "",
+    page_name: str = "",
+    action: str = "add_widget",
+    widget_type: str = "",
+    api_endpoint: str = "",
+    config=None,
+    confirm: bool = False,
+    user_id=None,
+) -> dict[str, Any]:
+    """
+    Update page widgets for a page owned by the configured chatbot page owner.
+    """
+    action = (action or "add_widget").strip().lower()
+    if action not in {"add_widget", "set_config"}:
+        return {"error": f"Unsupported action: {action}. Use add_widget or set_config."}
+
+    page, err = _resolve_owner_page(tenant, page_id=page_id, page_name=page_name)
+    if err == "ambiguous":
+        return page  # page holds the error payload dict
+    if err:
+        return {"error": err}
+
+    owner_id, owner_email, _ = resolve_chatbot_page_owner(tenant)
+    current_config = list(page.config or []) if isinstance(page.config, list) else []
+
+    new_widget = None
+    next_config = current_config
+    if action == "add_widget":
+        key = (widget_type or "").strip().lower().replace(" ", "")
+        builder = WIDGET_BUILDERS.get(key)
+        if not builder:
+            return {
+                "error": (
+                    f"Unknown widget_type: {widget_type}. "
+                    "Supported: leadTable, ticketTable, inventoryTable"
+                )
+            }
+        new_widget = builder(api_endpoint=api_endpoint)
+        # Avoid duplicate identical type spam unless user wants another
+        already = [w for w in current_config if isinstance(w, dict) and w.get("type") == new_widget["type"]]
+        next_config = current_config + [new_widget]
+        preview_note = (
+            f"Append {new_widget['type']} widget"
+            + (f" (page already has {len(already)})" if already else "")
+        )
+    else:
+        if config is None:
+            return {"error": "config array is required for action=set_config"}
+        if not isinstance(config, list):
+            return {"error": "config must be a list of widget configs"}
+        next_config = config
+        preview_note = f"Replace config with {len(next_config)} widget(s)"
+
+    if not confirm:
+        return {
+            "error": "confirm_required",
+            "message": (
+                f'Refusing to update page "{page.name}" without confirm=true. '
+                "Ask the user to confirm, then call again with confirm=true."
+            ),
+            "preview": {
+                "page_id": str(page.id),
+                "page_name": page.name,
+                "action": action,
+                "widget_type": (new_widget or {}).get("type") if new_widget else None,
+                "change": preview_note,
+                "current_widget_count": len(current_config),
+                "next_widget_count": len(next_config),
+                "page_owner_email": owner_email,
+                "page_owner_user_id": str(owner_id),
+                "requested_by_user_id": str(user_id) if user_id else None,
+            },
+        }
+
+    page.config = next_config
+    page.save(update_fields=["config", "updated_at"])
+    return {
+        "updated": True,
+        "id": str(page.id),
+        "name": page.name,
+        "action": action,
+        "widget_type": (new_widget or {}).get("type") if new_widget else None,
+        "widget_count": len(next_config),
+        "added_widget_id": (new_widget or {}).get("id") if new_widget else None,
+        "page_owner_email": owner_email,
+        "page_owner_user_id": str(page.user_id),
+        "requested_by_user_id": str(user_id) if user_id else None,
+        "message": (
+            f'Updated page "{page.name}". Refresh the page builder / My Pages to see widgets.'
+        ),
+    }
+
+
+def tool_delete_page(
+    tenant,
+    page_id: str = "",
+    page_name: str = "",
+    confirm: bool = False,
+    user_id=None,
+) -> dict[str, Any]:
+    """Soft-delete a page owned by the configured chatbot page owner."""
+    wanted_name = (page_name or "").strip()
+    if not wanted_name:
+        return {
+            "error": "page_name is required so the correct page is deleted (never delete by id alone)."
+        }
+
+    raw_id = (page_id or "").strip()
+
+    # Resolve by name first (avoids LLM picking an unrelated page_id).
+    page, err = _resolve_owner_page(tenant, page_id="", page_name=wanted_name)
+    if err == "ambiguous":
+        payload = page if isinstance(page, dict) else {}
+        matches = payload.get("matches") or []
+        if raw_id and any(str(m.get("id")) == raw_id for m in matches):
+            page, err = _resolve_owner_page(tenant, page_id=raw_id, page_name="")
+        else:
+            return payload
+    if err:
+        return {"error": err}
+
+    if page.name.strip().lower() != wanted_name.lower():
+        return {
+            "error": (
+                f'Refusing delete: resolved page is "{page.name}", '
+                f'but requested page_name is "{wanted_name}".'
+            )
+        }
+
+    # Extra guard if the model also sent a page_id.
+    if raw_id and str(page.id) != raw_id:
+        return {
+            "error": (
+                f'Refusing delete: page_id {raw_id} does not match '
+                f'"{page.name}" ({page.id}). Use the id for "{wanted_name}" only.'
+            )
+        }
+
+    owner_id, owner_email, _ = resolve_chatbot_page_owner(tenant)
+
+    if not confirm:
+        return {
+            "error": "confirm_required",
+            "message": (
+                f'Refusing to delete page "{page.name}" without confirm=true. '
+                "Ask the user to confirm, then call again with confirm=true and the same page_name."
+            ),
+            "preview": {
+                "page_id": str(page.id),
+                "page_name": page.name,
+                "action": "delete",
+                "change": f'Delete page "{page.name}"',
+                "page_owner_email": owner_email,
+                "page_owner_user_id": str(owner_id),
+                "requested_by_user_id": str(user_id) if user_id else None,
+            },
+        }
+
+    deleted_id = str(page.id)
+    deleted_name = page.name
+    page.delete()
+    return {
+        "deleted": True,
+        "id": deleted_id,
+        "name": deleted_name,
+        "page_owner_email": owner_email,
+        "page_owner_user_id": str(owner_id),
+        "requested_by_user_id": str(user_id) if user_id else None,
+        "message": (
+            f'Page "{deleted_name}" deleted. Refresh My Pages / the app nav to see it gone.'
+        ),
+    }
+
+
 ACTION_TOOL_HANDLERS = {
     "get_billing_report": lambda tenant, args, user_id=None: tool_get_billing_report(
         tenant,
@@ -682,6 +1110,24 @@ ACTION_TOOL_HANDLERS = {
         config=args.get("config"),
         confirm=bool(args.get("confirm", False)),
         # Never trust LLM/tool args for ownership — only request auth user_id.
+        user_id=user_id,
+    ),
+    "update_page": lambda tenant, args, user_id=None: tool_update_page(
+        tenant,
+        page_id=args.get("page_id", ""),
+        page_name=args.get("page_name", ""),
+        action=args.get("action", "add_widget"),
+        widget_type=args.get("widget_type", ""),
+        api_endpoint=args.get("api_endpoint", ""),
+        config=args.get("config"),
+        confirm=bool(args.get("confirm", False)),
+        user_id=user_id,
+    ),
+    "delete_page": lambda tenant, args, user_id=None: tool_delete_page(
+        tenant,
+        page_id=args.get("page_id", ""),
+        page_name=args.get("page_name", ""),
+        confirm=bool(args.get("confirm", False)),
         user_id=user_id,
     ),
 }
