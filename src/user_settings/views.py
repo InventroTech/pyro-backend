@@ -23,15 +23,22 @@ from .services import (
     upsert_user_kv_settings,
     upsert_user_lead_assignment_kv,
     upsert_support_daily_limit_kv,
+    upsert_custom_field_kv,
+    is_user_management_kv_key,
     USER_KV_GROUP_ID_KEY,
     USER_KV_DAILY_LIMIT_KEY,
     USER_KV_DAILY_TARGET_KEY,
     USER_KV_SUPPORT_DAILY_LIMIT_SELF_TRIAL_KEY,
     USER_KV_SUPPORT_DAILY_LIMIT_OTHER_KEY,
     USER_KV_SUPPORT_RESOLVE_RATE_GOAL_KEY,
+    USER_KV_STATE_KEY,
+    USER_KV_DISTRICT_KEY,
+    USER_KV_PARTY_KEY,
+    USER_KV_RESERVED_KEYS,
 )
 from crm_records.models import Record
 from django.db.models import Q
+from .geo_party_catalog import catalog_options, load_geo_party_catalog
 
 
 def get_tenant_membership_by_user_id(tenant, user_id, user=None):
@@ -339,7 +346,28 @@ _CORE_KV_SETTING_KEYS = (
     USER_KV_SUPPORT_DAILY_LIMIT_SELF_TRIAL_KEY,
     USER_KV_SUPPORT_DAILY_LIMIT_OTHER_KEY,
     USER_KV_SUPPORT_RESOLVE_RATE_GOAL_KEY,
+    USER_KV_STATE_KEY,
+    USER_KV_DISTRICT_KEY,
+    USER_KV_PARTY_KEY,
 )
+
+_SUPPORT_PATCH_KEYS = (
+    "support_daily_limit_self_trial",
+    "support_daily_limit_other",
+    "support_resolve_rate_goal",
+)
+
+
+def _core_kv_queryset(tenant, tenant_membership):
+    """Core keys plus bare User Management custom field keys (e.g. STATE)."""
+    return (
+        TenantMemberSetting.objects.filter(
+            tenant=tenant,
+            tenant_membership=tenant_membership,
+        )
+        .filter(Q(key__in=_CORE_KV_SETTING_KEYS) | ~Q(key__in=USER_KV_RESERVED_KEYS))
+        .order_by("key")
+    )
 
 
 def _resolve_tenant_membership_for_settings(tenant, user_id):
@@ -351,14 +379,18 @@ def _resolve_tenant_membership_for_settings(tenant, user_id):
 
 class UserCoreKVSettingsView(APIView):
     """
-    Per-user core KV settings (GET + PATCH support daily limits / resolve-rate goal for CSE).
+    Per-user core KV settings (GET + PATCH).
 
-    GET returns GROUP, DAILY_TARGET, DAILY_LIMIT, and CSE support ST/other
-    limit + resolve-rate goal keys when set.
+    GET returns GROUP, DAILY_TARGET, DAILY_LIMIT, STATE, DISTRICT, CSE support
+    keys, and any free-form custom field keys.
 
-    PATCH accepts any of:
-    ``support_daily_limit_self_trial``, ``support_daily_limit_other``,
-    ``support_resolve_rate_goal`` (null clears). Membership must have CSE role.
+    PATCH accepts:
+    - CSE support keys (``support_daily_limit_*``, ``support_resolve_rate_goal``)
+      — requires CSE role on the target membership
+    - Bare uppercase free-form custom keys for any role
+
+    STATE / DISTRICT are core keys (like GROUP / DAILY_LIMIT) and are set via
+    user create/update, not this free-form patch path.
     """
 
     permission_classes = [IsTenantAuthenticated]
@@ -374,11 +406,7 @@ class UserCoreKVSettingsView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        qs = TenantMemberSetting.objects.filter(
-            tenant=tenant,
-            tenant_membership=tenant_membership,
-            key__in=_CORE_KV_SETTING_KEYS,
-        ).order_by("key")
+        qs = _core_kv_queryset(tenant, tenant_membership)
         return Response(TenantMemberSettingSerializer(qs, many=True).data, status=status.HTTP_200_OK)
 
     def patch(self, request, user_id):
@@ -390,39 +418,89 @@ class UserCoreKVSettingsView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        role_key = (tenant_membership.role.key or "").upper() if tenant_membership.role else ""
-        if role_key != "CSE":
+        raw = request.data
+        if not isinstance(raw, dict):
+            return Response(
+                {"error": "Request body must be a JSON object"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        custom_fields = {
+            key: value
+            for key, value in raw.items()
+            if is_user_management_kv_key(key)
+        }
+        reserved_collision = [
+            key for key in raw if isinstance(key, str) and key in USER_KV_RESERVED_KEYS
+        ]
+        if reserved_collision:
             return Response(
                 {
                     "error": (
-                        "TenantMembership must have CSE role to set support "
-                        "daily limits / resolve-rate goals"
+                        f"Cannot set reserved key(s) via this patch: "
+                        f"{', '.join(reserved_collision)}"
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        serializer = UserCoreKVSettingsPatchSerializer(data=request.data, partial=True)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        support_payload = {key: raw[key] for key in _SUPPORT_PATCH_KEYS if key in raw}
 
-        data = serializer.validated_data
-        upsert_support_daily_limit_kv(
-            tenant=tenant,
-            tenant_membership=tenant_membership,
-            self_trial_limit=data.get("support_daily_limit_self_trial"),
-            other_limit=data.get("support_daily_limit_other"),
-            update_self_trial="support_daily_limit_self_trial" in data,
-            update_other="support_daily_limit_other" in data,
-            resolve_rate_goal=data.get("support_resolve_rate_goal"),
-            update_resolve_rate_goal="support_resolve_rate_goal" in data,
-        )
+        if not custom_fields and not support_payload:
+            return Response(
+                {
+                    "error": (
+                        "Provide at least one of support_daily_limit_self_trial, "
+                        "support_daily_limit_other, support_resolve_rate_goal, "
+                        "or a custom field key (e.g. STATE, DISTRICT)"
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        qs = TenantMemberSetting.objects.filter(
-            tenant=tenant,
-            tenant_membership=tenant_membership,
-            key__in=_CORE_KV_SETTING_KEYS,
-        ).order_by("key")
+        if support_payload:
+            role_key = (tenant_membership.role.key or "").upper() if tenant_membership.role else ""
+            if role_key != "CSE":
+                return Response(
+                    {
+                        "error": (
+                            "TenantMembership must have CSE role to set support "
+                            "daily limits / resolve-rate goals"
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            serializer = UserCoreKVSettingsPatchSerializer(data=support_payload, partial=True)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+            data = serializer.validated_data
+            upsert_support_daily_limit_kv(
+                tenant=tenant,
+                tenant_membership=tenant_membership,
+                self_trial_limit=data.get("support_daily_limit_self_trial"),
+                other_limit=data.get("support_daily_limit_other"),
+                update_self_trial="support_daily_limit_self_trial" in data,
+                update_other="support_daily_limit_other" in data,
+                resolve_rate_goal=data.get("support_resolve_rate_goal"),
+                update_resolve_rate_goal="support_resolve_rate_goal" in data,
+            )
+
+        if custom_fields:
+            for key, value in custom_fields.items():
+                if value is not None and not isinstance(value, (str, int, float, bool)):
+                    return Response(
+                        {"error": f"{key} must be a string, number, boolean, or null"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            upsert_custom_field_kv(
+                tenant=tenant,
+                tenant_membership=tenant_membership,
+                fields=custom_fields,
+            )
+
+        qs = _core_kv_queryset(tenant, tenant_membership)
         return Response(TenantMemberSettingSerializer(qs, many=True).data, status=status.HTTP_200_OK)
 
 
@@ -486,6 +564,30 @@ class LeadStatesListView(APIView):
     def get(self, request):
         options = get_lead_filter_options(request.tenant)
         return Response({"lead_states": options["lead_states"]}, status=status.HTTP_200_OK)
+
+
+class GeoPartyCatalogView(APIView):
+    """
+    Circle state / district / party ID→name catalog for User Management dropdowns.
+
+    Labels are ``Name (id)``; values are Circle IDs. Optional ``?state_id=`` filters
+    districts (and parties) to that state.
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        state_id = (request.query_params.get("state_id") or "").strip() or None
+        catalog = load_geo_party_catalog()
+        return Response(
+            {
+                "version": catalog.get("version"),
+                "states": catalog_options("states"),
+                "districts": catalog_options("districts", state_id=state_id),
+                "parties": catalog_options("parties", state_id=state_id),
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class LeadFilterOptionsView(APIView):

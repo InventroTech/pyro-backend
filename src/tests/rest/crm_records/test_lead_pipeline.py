@@ -38,7 +38,7 @@ from crm_records.lead_pipeline.pipeline import LeadPipeline
 from crm_records.lead_pipeline.pull_strategy import PullStrategyApplier
 from crm_records.models import Bucket, Record, UserBucketAssignment
 from user_settings.models import Group, TenantMemberSetting
-from user_settings.services import USER_KV_DAILY_LIMIT_KEY, USER_KV_GROUP_ID_KEY
+from user_settings.services import USER_KV_DAILY_LIMIT_KEY, USER_KV_DISTRICT_KEY, USER_KV_GROUP_ID_KEY
 
 from tests.factories import (
     RecordFactory,
@@ -67,6 +67,7 @@ def _make_rm_user(
     lead_sources: list | None = None,
     lead_statuses: list | None = None,
     daily_limit: int | None = None,
+    district: str | None = "TestDistrict",
 ):
     """RM user + membership + Group/KV filter settings."""
     uid = str(uuid.uuid4())
@@ -104,6 +105,13 @@ def _make_rm_user(
         key=USER_KV_DAILY_LIMIT_KEY,
         defaults={"value": daily_limit},
     )
+    if district:
+        TenantMemberSetting.objects.update_or_create(
+            tenant=tenant,
+            tenant_membership=membership,
+            key=USER_KV_DISTRICT_KEY,
+            defaults={"value": district},
+        )
     return user, membership, uid
 
 
@@ -668,6 +676,254 @@ def test_pull_strategy_order_day_first_assigned_at():
 # ===================================================================
 # INTEGRATION — LeadPipeline
 # ===================================================================
+
+
+@pytest.mark.django_db
+def test_pull_strategy_district_priority_order():
+    """Matching RM district sorts before other district, which sorts before blank."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    blank = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="Blank", lead_stage="IN_QUEUE", lead_score=50),
+    )
+    other = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="Other", lead_stage="IN_QUEUE", lead_score=50, district="Mysuru"
+        ),
+    )
+    match = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="Match", lead_stage="IN_QUEUE", lead_score=50, district="Bengaluru"
+        ),
+    )
+    Record.objects.filter(pk__in=[blank.pk, other.pk, match.pk]).update(created_at=now)
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[blank.id, other.id, match.id]
+    )
+    ordered = list(
+        PullStrategyApplier()
+        .apply(
+            qs=qs,
+            strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
+            now_iso=now.isoformat(),
+            rm_district="Bengaluru",
+        )
+    )
+    assert [r.id for r in ordered] == [match.id, other.id, blank.id]
+
+
+@pytest.mark.django_db
+def test_pull_strategy_party_priority_order():
+    """Matching affiliated_party name sorts before other party, then blank."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    blank = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="BlankParty",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            affiliated_party="",
+        ),
+    )
+    other = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="OtherParty",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            affiliated_party="Congress",
+        ),
+    )
+    match = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="MatchParty",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            affiliated_party="Telugu Desam Party",
+        ),
+    )
+    Record.objects.filter(pk__in=[blank.pk, other.pk, match.pk]).update(created_at=now)
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[blank.id, other.id, match.id]
+    )
+    ordered = list(
+        PullStrategyApplier()
+        .apply(
+            qs=qs,
+            strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
+            now_iso=now.isoformat(),
+            rm_party="Telugu Desam Party",
+        )
+    )
+    assert [r.id for r in ordered] == [match.id, other.id, blank.id]
+
+
+@pytest.mark.django_db
+def test_pull_strategy_district_wins_over_party():
+    """When both district and party are set, district match beats party match."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    # Party match, wrong district
+    party_match_wrong_dist = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="PartyOnly",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district="Mysuru",
+            affiliated_party="Telugu Desam Party",
+        ),
+    )
+    # District match, other party
+    dist_match_other_party = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="DistOnly",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district="Bengaluru",
+            affiliated_party="Congress",
+        ),
+    )
+    # Both match
+    both_match = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="Both",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district="Bengaluru",
+            affiliated_party="Telugu Desam Party",
+        ),
+    )
+    Record.objects.filter(
+        pk__in=[party_match_wrong_dist.pk, dist_match_other_party.pk, both_match.pk]
+    ).update(created_at=now)
+
+    qs = Record.objects.filter(
+        tenant=tenant,
+        entity_type="lead",
+        id__in=[party_match_wrong_dist.id, dist_match_other_party.id, both_match.id],
+    )
+    ordered = list(
+        PullStrategyApplier()
+        .apply(
+            qs=qs,
+            strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
+            now_iso=now.isoformat(),
+            rm_district="Bengaluru",
+            rm_party="Telugu Desam Party",
+        )
+    )
+    assert [r.id for r in ordered] == [
+        both_match.id,
+        dist_match_other_party.id,
+        party_match_wrong_dist.id,
+    ]
+
+
+@pytest.mark.django_db
+def test_pull_strategy_neither_district_nor_party_is_normal_score_order():
+    """Without district/party soft-rank, higher lead_score wins."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    low = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="Low",
+            lead_stage="IN_QUEUE",
+            lead_score=10,
+            district="Bengaluru",
+            affiliated_party="Telugu Desam Party",
+        ),
+    )
+    high = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="High",
+            lead_stage="IN_QUEUE",
+            lead_score=90,
+            district="Mysuru",
+            affiliated_party="Congress",
+        ),
+    )
+    Record.objects.filter(pk__in=[low.pk, high.pk]).update(created_at=now)
+
+    qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[low.id, high.id])
+    ordered = list(
+        PullStrategyApplier()
+        .apply(
+            qs=qs,
+            strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
+            now_iso=now.isoformat(),
+        )
+    )
+    assert [r.id for r in ordered] == [high.id, low.id]
+
+
+@pytest.mark.django_db
+def test_pull_strategy_normal_order_beats_district_soft_rank():
+    """Higher score wins even when lower-score lead matches RM district."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    low_match = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="LowMatch",
+            lead_stage="IN_QUEUE",
+            lead_score=10,
+            district="Bengaluru",
+        ),
+    )
+    high_other = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="HighOther",
+            lead_stage="IN_QUEUE",
+            lead_score=90,
+            district="Mysuru",
+        ),
+    )
+    Record.objects.filter(pk__in=[low_match.pk, high_other.pk]).update(created_at=now)
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[low_match.id, high_other.id]
+    )
+    ordered = list(
+        PullStrategyApplier()
+        .apply(
+            qs=qs,
+            strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
+            now_iso=now.isoformat(),
+            rm_district="Bengaluru",
+        )
+    )
+    assert [r.id for r in ordered] == [high_other.id, low_match.id]
 
 
 @pytest.mark.django_db
