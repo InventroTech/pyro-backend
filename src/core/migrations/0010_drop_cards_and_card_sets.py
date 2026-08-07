@@ -18,7 +18,7 @@ def reverse_drop_cards_tables(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("core", "0008_alter_recordaggregator_unique_together_and_more"),
+        ("core", "0009_chatbot_page_owner_email"),
     ]
 
     operations = [
