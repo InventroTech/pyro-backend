@@ -64,7 +64,8 @@ CHATBOT_MODEL_OPENAI=gpt-4.1-mini
 | `get_billing_report` | Membership billing for a month | No (read-only) |
 | `list_my_pages` / `create_page` | Pages under configured owner email | Create needs `confirm=true` |
 | `update_page` | Add widgets (lead/ticket/inventory table) or replace config | Needs `confirm=true` |
-| `delete_page` | Soft-delete a page by id/name | Needs `confirm=true` |
+
+Page delete is **not** available via chatbot (use My Pages / Page Builder).
 
 Page ownership is **not** the requesting GM. Set per tenant:
 

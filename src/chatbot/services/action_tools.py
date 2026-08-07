@@ -263,37 +263,6 @@ ACTION_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "delete_page",
-            "description": (
-                "Delete (soft-delete) an existing dashboard page owned by the configured "
-                "chatbot page owner. page_name is REQUIRED and must match the page exactly. "
-                "Optional page_id helps when multiple pages share a name. "
-                "Never delete a different page than the name the user asked for. "
-                "REQUIRES confirm=true."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "page_id": {
-                        "type": "string",
-                        "description": "Optional page UUID (must match page_name if both set)",
-                    },
-                    "page_name": {
-                        "type": "string",
-                        "description": "Exact page name to delete (required), e.g. Ops Home",
-                    },
-                    "confirm": {
-                        "type": "boolean",
-                        "description": "Must be true to delete the page",
-                    },
-                },
-                "required": ["page_name", "confirm"],
-            },
-        },
-    },
 ]
 
 
@@ -1044,127 +1013,6 @@ def tool_update_page(
     }
 
 
-def tool_delete_page(
-    tenant,
-    page_id: str = "",
-    page_name: str = "",
-    confirm: bool = False,
-    user_id=None,
-) -> dict[str, Any]:
-    """Soft-delete a page owned by the configured chatbot page owner."""
-    wanted_name = (page_name or "").strip()
-    if not wanted_name:
-        return {
-            "error": "page_name is required so the correct page is deleted (never delete by id alone)."
-        }
-
-    raw_id = (page_id or "").strip()
-
-    # Resolve by name first (avoids LLM picking an unrelated page_id).
-    page, err = _resolve_owner_page(tenant, page_id="", page_name=wanted_name)
-    if err == "ambiguous":
-        payload = page if isinstance(page, dict) else {}
-        matches = payload.get("matches") or []
-        if raw_id and any(str(m.get("id")) == raw_id for m in matches):
-            page, err = _resolve_owner_page(tenant, page_id=raw_id, page_name="")
-        else:
-            return payload
-    if err:
-        return {"error": err}
-
-    if page.name.strip().lower() != wanted_name.lower():
-        return {
-            "error": (
-                f'Refusing delete: resolved page is "{page.name}", '
-                f'but requested page_name is "{wanted_name}".'
-            )
-        }
-
-    # Extra guard if the model also sent a page_id.
-    if raw_id and str(page.id) != raw_id:
-        return {
-            "error": (
-                f'Refusing delete: page_id {raw_id} does not match '
-                f'"{page.name}" ({page.id}). Use the id for "{wanted_name}" only.'
-            )
-        }
-
-    owner_id, owner_email, _ = resolve_chatbot_page_owner(tenant)
-
-    if not confirm:
-        return {
-            "error": "confirm_required",
-            "message": (
-                f'Refusing to delete page "{page.name}" without confirm=true. '
-                "Ask the user to confirm, then call again with confirm=true and the same page_name."
-            ),
-            "preview": {
-                "page_id": str(page.id),
-                "page_name": page.name,
-                "action": "delete",
-                "change": f'Delete page "{page.name}"',
-                "page_owner_email": owner_email,
-                "page_owner_user_id": str(owner_id),
-                "requested_by_user_id": str(user_id) if user_id else None,
-            },
-        }
-
-    deleted_id = str(page.id)
-    deleted_name = page.name
-    from django.utils import timezone
-    from pages.models import Page
-
-    # Soft-delete explicitly and verify — don't trust LLM/history side-effects.
-    now = timezone.now()
-    updated = Page.all_objects.filter(pk=page.pk, is_deleted=False).update(
-        is_deleted=True,
-        deleted_at=now,
-        updated_at=now,
-    )
-    if not updated:
-        # Already gone, or row vanished between resolve and delete.
-        still = Page.all_objects.filter(pk=page.pk).first()
-        if still and still.is_deleted:
-            return {
-                "deleted": True,
-                "id": deleted_id,
-                "name": deleted_name,
-                "page_owner_email": owner_email,
-                "page_owner_user_id": str(owner_id),
-                "requested_by_user_id": str(user_id) if user_id else None,
-                "message": (
-                    f'Page "{deleted_name}" was already deleted. '
-                    "Refresh My Pages / the app nav."
-                ),
-            }
-        return {
-            "error": (
-                f'Failed to delete page "{deleted_name}" ({deleted_id}). '
-                "Please try again or delete it from My Pages."
-            )
-        }
-
-    verified = Page.all_objects.filter(pk=page.pk, is_deleted=True).exists()
-    if not verified:
-        return {
-            "error": (
-                f'Delete did not persist for page "{deleted_name}" ({deleted_id}).'
-            )
-        }
-
-    return {
-        "deleted": True,
-        "id": deleted_id,
-        "name": deleted_name,
-        "page_owner_email": owner_email,
-        "page_owner_user_id": str(owner_id),
-        "requested_by_user_id": str(user_id) if user_id else None,
-        "message": (
-            f'Page "{deleted_name}" deleted. Refresh My Pages / the app nav to see it gone.'
-        ),
-    }
-
-
 ACTION_TOOL_HANDLERS = {
     "get_billing_report": lambda tenant, args, user_id=None: tool_get_billing_report(
         tenant,
@@ -1219,13 +1067,6 @@ ACTION_TOOL_HANDLERS = {
         widget_type=args.get("widget_type", ""),
         api_endpoint=args.get("api_endpoint", ""),
         config=args.get("config"),
-        confirm=bool(args.get("confirm", False)),
-        user_id=user_id,
-    ),
-    "delete_page": lambda tenant, args, user_id=None: tool_delete_page(
-        tenant,
-        page_id=args.get("page_id", ""),
-        page_name=args.get("page_name", ""),
         confirm=bool(args.get("confirm", False)),
         user_id=user_id,
     ),
