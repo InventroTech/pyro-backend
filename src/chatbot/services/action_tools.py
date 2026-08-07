@@ -1052,7 +1052,47 @@ def tool_delete_page(
 
     deleted_id = str(page.id)
     deleted_name = page.name
-    page.delete()
+    from django.utils import timezone
+    from pages.models import Page
+
+    # Soft-delete explicitly and verify — don't trust LLM/history side-effects.
+    now = timezone.now()
+    updated = Page.all_objects.filter(pk=page.pk, is_deleted=False).update(
+        is_deleted=True,
+        deleted_at=now,
+        updated_at=now,
+    )
+    if not updated:
+        # Already gone, or row vanished between resolve and delete.
+        still = Page.all_objects.filter(pk=page.pk).first()
+        if still and still.is_deleted:
+            return {
+                "deleted": True,
+                "id": deleted_id,
+                "name": deleted_name,
+                "page_owner_email": owner_email,
+                "page_owner_user_id": str(owner_id),
+                "requested_by_user_id": str(user_id) if user_id else None,
+                "message": (
+                    f'Page "{deleted_name}" was already deleted. '
+                    "Refresh My Pages / the app nav."
+                ),
+            }
+        return {
+            "error": (
+                f'Failed to delete page "{deleted_name}" ({deleted_id}). '
+                "Please try again or delete it from My Pages."
+            )
+        }
+
+    verified = Page.all_objects.filter(pk=page.pk, is_deleted=True).exists()
+    if not verified:
+        return {
+            "error": (
+                f'Delete did not persist for page "{deleted_name}" ({deleted_id}).'
+            )
+        }
+
     return {
         "deleted": True,
         "id": deleted_id,
