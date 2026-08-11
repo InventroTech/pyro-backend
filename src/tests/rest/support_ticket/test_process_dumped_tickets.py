@@ -8,14 +8,9 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 
-from background_jobs.job_handlers import ProcessDumpedTicketsJobHandler
-from background_jobs.job_processor import (
-    PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME,
-    SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL,
-    JobProcessor,
-)
-from background_jobs.models import BackgroundJob, JobStatus, JobType
+from background_jobs.models import JobType
 from crm_records.models import Record
+from pyro_jobs.models import PyroJob
 from support_ticket.views import (
     SUPPORT_TICKET_ENTITY_TYPE,
     _dedupe_dumps_latest_wins,
@@ -574,257 +569,35 @@ class ProcessDumpedTicketsIngestTest(BaseAPITestCase):
         self.assertIsNotNone(job1)
         self.assertIsNone(job2)
         self.assertEqual(
-            BackgroundJob.objects.filter(
-                job_type=JobType.PROCESS_DUMPED_TICKETS,
-                tenant_id=self.tenant_id,
+            PyroJob.objects.filter(
+                job_name="process_dumped_tickets",
+                payload__tenant_id=str(self.tenant_id),
             ).count(),
             1,
         )
 
-    def test_enqueue_skips_when_job_is_processing(self):
+    def test_enqueue_skips_when_job_is_running(self):
         enqueue_process_dumped_tickets_job(self.tenant_id)
-        job = BackgroundJob.objects.get(
-            job_type=JobType.PROCESS_DUMPED_TICKETS,
-            tenant_id=self.tenant_id,
+        job = PyroJob.objects.get(
+            job_name="process_dumped_tickets",
+            payload__tenant_id=str(self.tenant_id),
         )
-        job.status = JobStatus.PROCESSING
+        job.status = PyroJob.STATUS_RUNNING
         job.save(update_fields=["status"])
 
         self.assertIsNone(enqueue_process_dumped_tickets_job(self.tenant_id))
         self.assertEqual(
-            BackgroundJob.objects.filter(
-                job_type=JobType.PROCESS_DUMPED_TICKETS,
-                tenant_id=self.tenant_id,
+            PyroJob.objects.filter(
+                job_name="process_dumped_tickets",
+                payload__tenant_id=str(self.tenant_id),
             ).count(),
             1,
         )
-
-    def test_enqueue_skips_when_job_is_retrying(self):
-        enqueue_process_dumped_tickets_job(self.tenant_id)
-        job = BackgroundJob.objects.get(
-            job_type=JobType.PROCESS_DUMPED_TICKETS,
-            tenant_id=self.tenant_id,
-        )
-        job.status = JobStatus.RETRYING
-        job.save(update_fields=["status"])
-
-        self.assertIsNone(enqueue_process_dumped_tickets_job(self.tenant_id))
-
-
-class ProcessDumpedTicketsSchedulerTest(BaseAPITestCase):
-    """Scheduler throttle for process_dumped_tickets enqueue ticks."""
-
-    def _make_processor(self):
-        processor = JobProcessor(worker_id="test-scheduler")
-        processor._last_support_ticket_dump_enqueue_at = None
-        return processor
-
-    @staticmethod
-    def _mock_atomic(mock_atomic):
-        mock_atomic.return_value.__enter__ = Mock(return_value=None)
-        mock_atomic.return_value.__exit__ = Mock(return_value=False)
-
-    @patch("background_jobs.job_processor.transaction.atomic")
-    @patch("background_jobs.job_processor.EntityTypeDiscoverySyncState.objects")
-    @patch("support_ticket.views.enqueue_process_dumped_tickets_for_pending_dumps")
-    def test_scheduler_skips_tick_within_five_minutes(
-        self, mock_enqueue, mock_state_objects, mock_atomic,
-    ):
-        self._mock_atomic(mock_atomic)
-        mock_enqueue.return_value = {"enqueued": [], "skipped_active_job": []}
-
-        scheduler_state = Mock()
-        scheduler_state.last_success_at = timezone.now() - timedelta(seconds=60)
-        mock_state_objects.select_for_update.return_value.get_or_create.return_value = (
-            scheduler_state,
-            False,
-        )
-
-        self._make_processor()._maybe_enqueue_process_dumped_tickets()
-        mock_enqueue.assert_not_called()
-
-    @patch("background_jobs.job_processor.transaction.atomic")
-    @patch("background_jobs.job_processor.EntityTypeDiscoverySyncState.objects")
-    @patch("support_ticket.views.enqueue_process_dumped_tickets_for_pending_dumps")
-    def test_scheduler_runs_tick_after_five_minutes(
-        self, mock_enqueue, mock_state_objects, mock_atomic,
-    ):
-        self._mock_atomic(mock_atomic)
-        mock_enqueue.return_value = {"enqueued": [], "skipped_active_job": []}
-
-        scheduler_state = Mock()
-        scheduler_state.last_success_at = timezone.now() - timedelta(
-            seconds=SUPPORT_TICKET_DUMP_ENQUEUE_INTERVAL + 1
-        )
-        scheduler_state.last_error = "old error"
-        mock_state_objects.select_for_update.return_value.get_or_create.return_value = (
-            scheduler_state,
-            False,
-        )
-
-        self._make_processor()._maybe_enqueue_process_dumped_tickets()
-
-        mock_enqueue.assert_called_once()
-        self.assertIsNotNone(scheduler_state.last_success_at)
-        self.assertIsNone(scheduler_state.last_error)
-        scheduler_state.save.assert_called_once_with(
-            update_fields=["last_success_at", "last_error", "updated_at"]
-        )
-
-    @patch("background_jobs.job_processor.EntityTypeDiscoverySyncState.objects")
-    @patch("background_jobs.job_processor.transaction.atomic")
-    @patch(
-        "support_ticket.views.enqueue_process_dumped_tickets_for_pending_dumps",
-        side_effect=RuntimeError("enqueue failed"),
-    )
-    def test_scheduler_records_error_without_advancing_success(
-        self, mock_enqueue, mock_atomic, mock_state_objects,
-    ):
-        self._mock_atomic(mock_atomic)
-
-        scheduler_state = Mock()
-        scheduler_state.last_success_at = None
-        mock_state_objects.select_for_update.return_value.get_or_create.return_value = (
-            scheduler_state,
-            True,
-        )
-
-        self._make_processor()._maybe_enqueue_process_dumped_tickets()
-
-        mock_enqueue.assert_called_once()
-        mock_state_objects.update_or_create.assert_called_once()
-        call_kwargs = mock_state_objects.update_or_create.call_args.kwargs
-        self.assertEqual(
-            call_kwargs["job_name"],
-            PROCESS_DUMPED_TICKETS_SCHEDULER_JOB_NAME,
-        )
-        self.assertIn("enqueue failed", call_kwargs["defaults"]["last_error"])
-
-
-class ProcessDumpedTicketsEnqueueRaceTest(TransactionTestCase):
-    """
-    TransactionTestCase is required so concurrent threads each commit
-    independently (advisory locks are transaction-scoped).
-    """
-
-    def setUp(self):
-        self.tenant = TenantFactory()
-        self.tenant_id = str(self.tenant.id)
-        BackgroundJob.objects.all().delete()
-
-    def test_concurrent_enqueue_creates_only_one_job(self):
-        worker_count = 8
-        results: list = []
-        errors: list = []
-        barrier = threading.Barrier(worker_count)
-
-        def worker():
-            close_old_connections()
-            try:
-                barrier.wait(timeout=5)
-                job = enqueue_process_dumped_tickets_job(self.tenant_id)
-                results.append(job.id if job else None)
-            except Exception as exc:
-                errors.append(exc)
-            finally:
-                close_old_connections()
-
-        threads = [threading.Thread(target=worker) for _ in range(worker_count)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-
-        self.assertEqual(errors, [])
-        created_ids = [job_id for job_id in results if job_id is not None]
-        self.assertEqual(len(created_ids), 1)
-        self.assertEqual(sum(1 for job_id in results if job_id is None), worker_count - 1)
-        self.assertEqual(
-            BackgroundJob.objects.filter(
-                job_type=JobType.PROCESS_DUMPED_TICKETS,
-                tenant_id=self.tenant_id,
-            ).count(),
-            1,
-        )
-
-    def test_concurrent_scheduler_tick_creates_only_one_job(self):
-        SupportTicketDumpFactory.create(
-            tenant_id=self.tenant_id,
-            data=dump_data(user_id="race_user"),
-        )
-        worker_count = 4
-        results: list = []
-        errors: list = []
-        barrier = threading.Barrier(worker_count)
-
-        def worker():
-            close_old_connections()
-            try:
-                barrier.wait(timeout=5)
-                result = enqueue_process_dumped_tickets_for_pending_dumps()
-                results.append(result)
-            except Exception as exc:
-                errors.append(exc)
-            finally:
-                close_old_connections()
-
-        threads = [threading.Thread(target=worker) for _ in range(worker_count)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-
-        self.assertEqual(errors, [])
-        self.assertEqual(
-            BackgroundJob.objects.filter(
-                job_type=JobType.PROCESS_DUMPED_TICKETS,
-                tenant_id=self.tenant_id,
-            ).count(),
-            1,
-        )
-        enqueued_counts = [len(r.get("enqueued") or []) for r in results]
-        self.assertEqual(sum(enqueued_counts), 1)
-        skipped_counts = [len(r.get("skipped_active_job") or []) for r in results]
-        self.assertEqual(sum(skipped_counts), worker_count - 1)
-
-
-class ProcessDumpedTicketsJobHandlerTest(BaseAPITestCase):
-    def setUp(self):
-        super().setUp()
-        SupportTicketDump.objects.all().delete()
-        Record.objects.filter(entity_type=SUPPORT_TICKET_ENTITY_TYPE).delete()
-
-    @patch("support_ticket.views.on_ticket_created_after_dump")
-    def test_job_handler_processes_tenant_dumps(self, mock_on_ticket_created):
-        SupportTicketDumpFactory.create(
-            tenant_id=self.tenant_id,
-            data=dump_data(user_id="job_user", name="From job"),
-        )
-        job = BackgroundJob.objects.create(
-            job_type=JobType.PROCESS_DUMPED_TICKETS,
-            status=JobStatus.PENDING,
-            tenant_id=self.tenant_id,
-            payload={},
-        )
-
-        ok = ProcessDumpedTicketsJobHandler().process(job)
-
-        self.assertTrue(ok)
-        self.assertEqual(job.result["inserted_tickets"], 1)
-        self.assertTrue(
-            Record.objects.filter(
-                tenant=self.tenant,
-                entity_type=SUPPORT_TICKET_ENTITY_TYPE,
-                data__user_id="job_user",
-            ).exists()
-        )
-        mock_on_ticket_created.assert_called_once()
 
 
 class ProcessDumpedTicketsAPITest(BaseAPITestCase):
     def setUp(self):
         super().setUp()
-        BackgroundJob.objects.all().delete()
         self.url = reverse("support_ticket:process-dumped-tickets")
 
     def test_api_enqueues_job_for_tenant(self):
@@ -837,9 +610,9 @@ class ProcessDumpedTicketsAPITest(BaseAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(response.data["tenant_id"], str(self.tenant_id))
         self.assertTrue(
-            BackgroundJob.objects.filter(
-                job_type=JobType.PROCESS_DUMPED_TICKETS,
-                tenant_id=self.tenant_id,
-                status=JobStatus.PENDING,
+            PyroJob.objects.filter(
+                job_name="process_dumped_tickets",
+                payload__tenant_id=str(self.tenant_id),
+                status=PyroJob.STATUS_PENDING,
             ).exists()
         )

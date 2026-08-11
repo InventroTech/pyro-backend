@@ -25,18 +25,6 @@ class JobType(models.TextChoices):
     PARTNER_LEAD_ASSIGN = "partner_lead_assign", "Partner Lead Assign"
     UNASSIGN_SNOOZED_LEADS = "unassign_snoozed_leads", "Unassign Snoozed Leads"
     RELEASE_LEADS_AFTER_12H = "release_leads_after_12h", "Release Leads After 12h"
-    CLOSE_STALE_SELF_TRIAL_SUPPORT_TICKETS = (
-        "close_stale_self_trial_support_tickets",
-        "Close Stale Self Trial Support Tickets",
-    )
-    SNOOZED_TO_NOT_CONNECTED_MIDNIGHT = (
-        "snoozed_to_not_connected_midnight",
-        "Snoozed To Not Connected (midnight)",
-    )
-    PURGE_OLD_LOG_TABLES = "purge_old_log_tables", "Purge Old Log Tables"
-    SYNC_DISPATCH_TO_RECORDS = "sync_dispatch_to_records", "Sync Dispatch To Records"
-    PROCESS_DUMPED_TICKETS = "process_dumped_tickets", "Process Dumped Support Tickets"
-    DISCOVER_ENTITY_TYPES = "discover_entity_types", "Discover Entity Types"
     REFRESH_INVENTORY_SHIPMENT_TRACKING = (
         "refresh_inventory_shipment_tracking",
         "Refresh Inventory Shipment Tracking",
