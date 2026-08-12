@@ -1667,3 +1667,225 @@ def test_pipeline_returns_none_without_bucket_assignments():
     )
     pipeline = LeadPipeline()
     assert pipeline.get_next(tenant=tenant, request_user=user) is None
+
+
+# ===================================================================
+# UNIT — network_density tiebreaker (PullStrategyApplier)
+# ===================================================================
+
+
+@pytest.mark.django_db
+def test_pull_strategy_network_density_breaks_score_tie():
+    """Same lead_score: higher network_density wins."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    low_density = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="LowDensity", lead_stage="IN_QUEUE", lead_score=100, network_density=10),
+    )
+    high_density = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="HighDensity", lead_stage="IN_QUEUE", lead_score=100, network_density=99),
+    )
+
+    qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[low_density.id, high_density.id])
+    applier = PullStrategyApplier()
+    ordered = applier.apply(
+        qs=qs,
+        strategy={"order": ["-lead_score", "-network_density", "-created_at"], "ignore_score_for_sources": []},
+        now_iso=now.isoformat(),
+    )
+    assert ordered.first().id == high_density.id
+
+
+@pytest.mark.django_db
+def test_pull_strategy_lead_score_beats_network_density():
+    """Higher lead_score always wins even if network_density is lower."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    high_score_low_density = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="HighScore", lead_stage="IN_QUEUE", lead_score=500, network_density=1),
+    )
+    low_score_high_density = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="LowScore", lead_stage="IN_QUEUE", lead_score=10, network_density=99),
+    )
+
+    qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[high_score_low_density.id, low_score_high_density.id])
+    applier = PullStrategyApplier()
+    ordered = applier.apply(
+        qs=qs,
+        strategy={"order": ["-lead_score", "-network_density", "-created_at"], "ignore_score_for_sources": []},
+        now_iso=now.isoformat(),
+    )
+    assert ordered.first().id == high_score_low_density.id
+
+
+@pytest.mark.django_db
+def test_pull_strategy_missing_network_density_treated_as_zero():
+    """Lead with no network_density set is treated as 0 and sorts last."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    no_density = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="NoDensity", lead_stage="IN_QUEUE", lead_score=100),
+    )
+    with_density = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="WithDensity", lead_stage="IN_QUEUE", lead_score=100, network_density=1),
+    )
+
+    qs = Record.objects.filter(tenant=tenant, entity_type="lead", id__in=[no_density.id, with_density.id])
+    applier = PullStrategyApplier()
+    ordered = applier.apply(
+        qs=qs,
+        strategy={"order": ["-lead_score", "-network_density", "-created_at"], "ignore_score_for_sources": []},
+        now_iso=now.isoformat(),
+    )
+    assert ordered.first().id == with_density.id
+
+
+@pytest.mark.django_db
+def test_pull_strategy_default_order_includes_network_density():
+    """When pull_strategy has no explicit order list, _DEFAULT_ORDER is used which includes network_density."""
+    from crm_records.lead_pipeline.pull_strategy import _DEFAULT_ORDER
+    assert "-network_density" in _DEFAULT_ORDER
+    score_idx = _DEFAULT_ORDER.index("-lead_score")
+    density_idx = _DEFAULT_ORDER.index("-network_density")
+    assert density_idx == score_idx + 1, "network_density must come immediately after lead_score"
+
+
+# ===================================================================
+# INTEGRATION — network_density tiebreaker (LeadPipeline)
+# ===================================================================
+
+
+def _pull_strategy_fresh_with_density():
+    return {
+        "order": ["-day(created_at)", "-lead_score", "-network_density", "-created_at"],
+        "day_timezone": "Asia/Kolkata",
+        "include_snoozed_due": True,
+        "ignore_score_for_sources": [],
+    }
+
+
+def _seed_tenant_buckets_with_density(tenant) -> dict:
+    """Same as _seed_tenant_buckets but fresh bucket pull_strategy includes network_density."""
+    cache.clear()
+
+    followup = Bucket.objects.create(
+        tenant=tenant,
+        name="Followup Callback",
+        slug="followup_callback",
+        filter_conditions={
+            "lead_stage": ["SNOOZED", "IN_QUEUE"],
+            "call_attempts": {"lt": 6},
+            "next_call_due": True,
+            "assigned_scope": "me",
+            "fallback_assigned_scope": "unassigned",
+        },
+    )
+    fresh = Bucket.objects.create(
+        tenant=tenant,
+        name="Fresh Leads",
+        slug="fresh_leads",
+        filter_conditions={
+            "lead_stage": ["FRESH", "IN_QUEUE"],
+            "call_attempts": {"lte": 0},
+            "next_call_due": False,
+            "assigned_scope": "unassigned",
+            "daily_limit_applies": True,
+        },
+    )
+    UserBucketAssignment.objects.create(tenant=tenant, user=None, bucket=followup, priority=1, pull_strategy=_pull_strategy_followup())
+    UserBucketAssignment.objects.create(tenant=tenant, user=None, bucket=fresh, priority=2, pull_strategy=_pull_strategy_fresh_with_density())
+    return {"followup": followup, "fresh": fresh}
+
+
+@pytest.mark.django_db
+def test_pipeline_network_density_breaks_score_tie_end_to_end():
+    """End-to-end: same score, higher network_density gets assigned first."""
+    tenant = TenantFactory()
+    _seed_tenant_buckets_with_density(tenant)
+    user, _, _ = _make_rm_user(tenant, lead_sources=[], lead_statuses=["SALES LEAD"])
+
+    RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="LowDensity", lead_stage="IN_QUEUE", lead_score=200, network_density=10),
+    )
+    high = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="HighDensity", lead_stage="IN_QUEUE", lead_score=200, network_density=99),
+    )
+
+    pipeline = LeadPipeline()
+    result = pipeline.get_next(tenant=tenant, request_user=user)
+    assert result is not None
+    assert result.pk == high.pk
+
+
+@pytest.mark.django_db
+def test_pipeline_network_density_does_not_override_lead_score():
+    """End-to-end: lead_score=500/density=1 must beat lead_score=10/density=99."""
+    tenant = TenantFactory()
+    _seed_tenant_buckets_with_density(tenant)
+    user, _, _ = _make_rm_user(tenant, lead_sources=[], lead_statuses=["SALES LEAD"])
+
+    winner = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="HighScore", lead_stage="IN_QUEUE", lead_score=500, network_density=1),
+    )
+    RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(name="HighDensity", lead_stage="IN_QUEUE", lead_score=10, network_density=99),
+    )
+
+    pipeline = LeadPipeline()
+    result = pipeline.get_next(tenant=tenant, request_user=user)
+    assert result is not None
+    assert result.pk == winner.pk
+
+
+# ===================================================================
+# UNIT — migration backfill helper
+# ===================================================================
+
+
+def _get_insert_after_lead_score():
+    import importlib.util, pathlib
+    path = pathlib.Path(__file__).parents[3] / "crm_records" / "migrations" / "0040_backfill_network_density_pull_strategy.py"
+    spec = importlib.util.spec_from_file_location("migration_0040", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod._insert_after_lead_score
+
+
+def test_migration_backfill_inserts_network_density_after_lead_score():
+    fn = _get_insert_after_lead_score()
+    assert fn(["-lead_score", "-created_at"]) == ["-lead_score", "-network_density", "-created_at"]
+
+
+def test_migration_backfill_skips_if_already_present():
+    fn = _get_insert_after_lead_score()
+    order = ["-lead_score", "-network_density", "-created_at"]
+    assert fn(order) == order
+
+
+def test_migration_backfill_skips_if_no_lead_score():
+    fn = _get_insert_after_lead_score()
+    order = ["call_attempts", "-created_at"]
+    assert fn(order) == order

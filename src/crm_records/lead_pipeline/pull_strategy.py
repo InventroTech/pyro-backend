@@ -6,7 +6,7 @@ from django.conf import settings
 from django.db.models import F, QuerySet
 
 _DEFAULT_DAY_TIMEZONE = "Asia/Kolkata"
-_DEFAULT_ORDER = ["-lead_score", "-created_at"]
+_DEFAULT_ORDER = ["-lead_score", "-network_density", "-created_at"]
 _MODEL_ORDER_FIELDS = frozenset({"created_at", "updated_at"})
 
 _JSON_TS = """
@@ -217,6 +217,8 @@ class PullStrategyApplier:
             return "is_expired_snoozed", self._is_expired_snoozed_expr()
         if field == "next_call_at":
             return "sort_next_call_at", _NEXT_CALL_AT_TS
+        if field in ("network_density", "network_density_for_sort"):
+            return "network_density_for_sort", "COALESCE((data->>'network_density')::int, 0)"
         raise ValueError(f"Unsupported pull_strategy order field: {field}")
 
     @staticmethod

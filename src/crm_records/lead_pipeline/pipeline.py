@@ -388,7 +388,7 @@ class LeadPipeline:
         Unassigned NOT_CONNECTED leads are never pulled here.
         """
         retry_strategy = {
-            "order": ["-day(created_at)", "-lead_score", "-created_at"],
+            "order": ["-day(created_at)", "-lead_score", "-network_density", "-created_at"],
             "day_timezone": "Asia/Kolkata",
             "include_snoozed_due": False,
             "ignore_score_for_sources": [],
