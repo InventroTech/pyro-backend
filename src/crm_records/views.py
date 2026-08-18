@@ -2,7 +2,7 @@ import os
 from rest_framework import generics, status, serializers
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError, NotFound
+from rest_framework.exceptions import ValidationError, NotFound, PermissionDenied
 from rest_framework.permissions import AllowAny
 from authz.permissions import IsTenantAuthenticated
 from config.supabase_auth import SupabaseJWTAuthentication
