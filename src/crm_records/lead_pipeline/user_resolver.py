@@ -24,6 +24,8 @@ class ResolvedUser:
     eligible_lead_statuses: List[str]
     eligible_states: List[str]
     daily_limit: Optional[int]
+    district: Optional[str]
+    party: Optional[str]  # affiliated_party match name from PARTY KV
 
 
 class UserResolver:
@@ -36,6 +38,7 @@ class UserResolver:
         email = getattr(request_user, "email", None)
 
         filters = get_lead_filters_for_user(tenant, identifier)
+
         return ResolvedUser(
             identifier=identifier,
             uuid=filters.user_uuid,
@@ -46,5 +49,6 @@ class UserResolver:
             eligible_lead_statuses=filters.eligible_lead_statuses,
             eligible_states=filters.eligible_states,
             daily_limit=filters.daily_limit,
+            district=filters.district,
+            party=filters.party,
         )
-

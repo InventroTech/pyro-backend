@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, List, Sequence
+from typing import Any, List, Optional, Sequence
 
 from django.conf import settings
 from django.db.models import F, QuerySet
@@ -54,6 +54,50 @@ def _resolve_order_tokens(strategy: dict) -> list[str]:
     return ["is_expired_snoozed", *tokens]
 
 
+def _district_priority_sql(rm_district: str) -> str:
+    """
+    Soft-rank for RM district matching on ``data.district``:
+      0 = matches RM district
+      1 = lead has a (different) non-blank district
+      2 = lead district blank / missing
+    """
+    safe = rm_district.strip().replace("'", "''").lower()
+    return f"""
+        CASE
+            WHEN TRIM(COALESCE(data->>'district', '')) != ''
+                 AND LOWER(TRIM(data->>'district')) NOT IN ('null', 'none')
+                 AND LOWER(TRIM(data->>'district')) = '{safe}'
+            THEN 0
+            WHEN TRIM(COALESCE(data->>'district', '')) != ''
+                 AND LOWER(TRIM(data->>'district')) NOT IN ('null', 'none')
+            THEN 1
+            ELSE 2
+        END
+    """
+
+
+def _party_priority_sql(rm_party: str) -> str:
+    """
+    Soft-rank for RM party matching on ``data.affiliated_party`` (name):
+      0 = matches RM party
+      1 = lead has a (different) non-blank affiliated_party
+      2 = lead affiliated_party blank / missing
+    """
+    safe = rm_party.strip().replace("'", "''").lower()
+    return f"""
+        CASE
+            WHEN TRIM(COALESCE(data->>'affiliated_party', '')) != ''
+                 AND LOWER(TRIM(data->>'affiliated_party')) NOT IN ('null', 'none')
+                 AND LOWER(TRIM(data->>'affiliated_party')) = '{safe}'
+            THEN 0
+            WHEN TRIM(COALESCE(data->>'affiliated_party', '')) != ''
+                 AND LOWER(TRIM(data->>'affiliated_party')) NOT IN ('null', 'none')
+            THEN 1
+            ELSE 2
+        END
+    """
+
+
 class PullStrategyApplier:
     """
     Applies next-call filter and ORDER BY from ``pull_strategy``.
@@ -61,6 +105,9 @@ class PullStrategyApplier:
     ``order``: sort keys (``-`` prefix = descending). Day bucketing: ``day(created_at)``
     or ``day(first_assigned_at)`` (JSON timestamptz).
     ``include_snoozed_due``: when true, due SNOOZED rows sort first (prepends ``is_expired_snoozed`` unless already in ``order``).
+    ``rm_district``: when set, soft-ranks matching ``data.district`` after normal order keys.
+    ``rm_party``: when set, soft-ranks matching ``data.affiliated_party`` after district
+    (so district wins when both are present). Soft-rank is always after ``pull_strategy.order``.
     """
 
     _NEXT_CALL_READY_WHERE = """
@@ -82,6 +129,8 @@ class PullStrategyApplier:
         strategy: dict,
         now_iso: str,
         require_next_call_ready: bool = True,
+        rm_district: Optional[str] = None,
+        rm_party: Optional[str] = None,
     ) -> QuerySet:
         if require_next_call_ready:
             qs = qs.extra(where=[self._NEXT_CALL_READY_WHERE])
@@ -92,6 +141,8 @@ class PullStrategyApplier:
             tokens=tokens,
             call_attempts_expr="COALESCE((data->>'call_attempts')::int, 0)",
             score_expr=self._build_score_expr(strategy.get("ignore_score_for_sources") or []),
+            rm_district=(rm_district or "").strip() or None,
+            rm_party=(rm_party or "").strip() or None,
         )
 
     def _apply_order_list(
@@ -102,11 +153,14 @@ class PullStrategyApplier:
         tokens: Sequence[Any],
         call_attempts_expr: str,
         score_expr: str,
+        rm_district: Optional[str] = None,
+        rm_party: Optional[str] = None,
     ) -> QuerySet:
         tz = _day_timezone(strategy)
         select: dict[str, str] = {}
         order_parts: list[Any] = []
 
+        # Normal pull_strategy order first; district/party soft-rank only as tiebreakers.
         for raw in tokens:
             parsed = _parse_order_token(raw) if isinstance(raw, str) else None
             if not parsed:
@@ -130,6 +184,16 @@ class PullStrategyApplier:
             order_parts.append(
                 expr.desc(nulls_last=True) if descending else expr.asc(nulls_last=True)
             )
+
+        # District before party when both are set.
+        if rm_district:
+            select["district_priority"] = _district_priority_sql(rm_district)
+            # String alias (not F()) — Django resolves F() before extra(select=...).
+            order_parts.append("district_priority")
+
+        if rm_party:
+            select["party_priority"] = _party_priority_sql(rm_party)
+            order_parts.append("party_priority")
 
         order_parts.append("id")
         return qs.extra(select=select).order_by(*order_parts)
