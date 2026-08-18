@@ -117,6 +117,16 @@ TEAM_LEAD_ORDER_FROM_STATUSES = frozenset({
     "VENDOR_IDENTIFIED"
    # "PAYMENT_PENDING",
 })
+# Requestor role may edit their own request only while it is still pending approval.
+REQUESTER_EDITABLE_STATUSES = frozenset({
+    "",
+    "NEW_REQUEST",
+    "ON_HOLD",
+    "REQ_TO_VERIFY",
+})
+REQUESTER_EDIT_LOCKED_MESSAGE = (
+    "This request can no longer be edited after it has been approved."
+)
 
 
 def _normalize_status_value(raw_status):
@@ -302,6 +312,76 @@ def _is_manager_or_pm_role(membership) -> bool:
     if "manager" in blob:
         return True
     return False
+
+
+def _current_user_membership(request):
+    """Active TenantMembership for the authenticated user in this tenant."""
+    tenant = getattr(request, "tenant", None)
+    user = getattr(request, "user", None)
+    uid = getattr(user, "supabase_uid", None)
+    if tenant is None or not uid:
+        return None
+    return (
+        TenantMembership.objects
+        .filter(tenant=tenant, user_id=uid, is_active=True)
+        .select_related("role")
+        .first()
+    )
+
+
+def _is_current_user_request_requester(request, record) -> bool:
+    """True when the authenticated user created / owns this inventory request."""
+    user = getattr(request, "user", None)
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    data = record.data if isinstance(getattr(record, "data", None), dict) else {}
+    requester_ref = str(data.get("requester_id") or data.get("created_by_id") or "").strip()
+    if not requester_ref:
+        return False
+
+    record_ids = {requester_ref}
+    membership = _resolve_requester_membership(getattr(request, "tenant", None), data)
+    if membership is not None:
+        if membership.user_id:
+            record_ids.add(str(membership.user_id).strip())
+        record_ids.add(str(membership.id).strip())
+
+    user_ids = set()
+    uid = getattr(user, "supabase_uid", None)
+    if uid:
+        user_ids.add(str(uid).strip())
+    if getattr(user, "id", None) is not None:
+        user_ids.add(str(user.id).strip())
+    return bool(record_ids & user_ids)
+
+
+def _reject_requester_edit_if_locked(request, record, *, incoming_data=None):
+    """
+    Requestor role may edit their own request until it is approved
+    (VENDOR_IDENTIFIED and later). Team lead / PM updates stay allowed.
+    """
+    if getattr(record, "entity_type", None) not in REQUEST_NOTIFICATION_ENTITY_TYPES:
+        return
+    actor = _current_user_membership(request)
+    if _is_team_lead_role(actor) or _is_manager_or_pm_role(actor):
+        return
+    if not _is_current_user_request_requester(request, record):
+        return
+
+    # Requesters can never change delivery pipeline / shipment fields.
+    # Silently strip them so the rest of the edit can proceed.
+    requester_stripped_shipment_keys = frozenset({
+        "shipment_status", "tracking_number", "tracking_link",
+        "courier_name", "tracking_updated_at",
+    })
+    if isinstance(incoming_data, dict):
+        for key in requester_stripped_shipment_keys:
+            incoming_data.pop(key, None)
+
+    data = record.data if isinstance(record.data, dict) else {}
+    status_value = _normalize_status_value(data.get("status"))
+    if status_value not in REQUESTER_EDITABLE_STATUSES:
+        raise PermissionDenied(REQUESTER_EDIT_LOCKED_MESSAGE)
 
 
 def _walk_requester_parents(tenant, data: dict, max_depth: int = 5):
@@ -1387,6 +1467,12 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 {'error': f'Record with id {record_id} not found'}, 
                 status=status.HTTP_404_NOT_FOUND
             )
+
+        _reject_requester_edit_if_locked(
+            request,
+            record,
+            incoming_data=request.data.get("data") if isinstance(request.data, dict) else None,
+        )
         
         # Update the record
         serializer = self.get_serializer(record, data=request.data, partial=False)
@@ -1448,6 +1534,12 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 {'error': f'Record with id {record_id} not found'}, 
                 status=status.HTTP_404_NOT_FOUND
             )
+
+        _reject_requester_edit_if_locked(
+            request,
+            record,
+            incoming_data=request.data.get("data") if isinstance(request.data, dict) else None,
+        )
         
         # Partially update the record
         serializer = self.get_serializer(record, data=request.data, partial=True)
@@ -1550,6 +1642,14 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
         if instance is not None and isinstance(getattr(instance, "data", None), dict):
             previous_status = instance.data.get("status")
             previous_assigned_to = instance.data.get("assigned_to")
+        if instance is not None:
+            _reject_requester_edit_if_locked(
+                self.request,
+                instance,
+                incoming_data=serializer.validated_data.get("data")
+                if hasattr(serializer, "validated_data")
+                else None,
+            )
 
         updated_record = serializer.save()
         _notify_request_status_emails(self.request, updated_record, previous_status)

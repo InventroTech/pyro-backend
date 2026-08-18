@@ -80,6 +80,15 @@ class InventoryRequestFormBackendTests(TestCase):
         self.client.force_login(self.user)
         return {"HTTP_X_Tenant_Slug": self.tenant.slug}
 
+    def _patch_request(self, record, data, user=None):
+        self.client.force_login(user or self.user)
+        return self.client.patch(
+            f"/crm-records/records/{record.id}/",
+            {"data": data},
+            format="json",
+            HTTP_X_Tenant_Slug=self.tenant.slug,
+        )
+
     def test_create_inventory_request_stores_all_form_fields(self):
         """POST with entity_type=inventory_request stores full form data in record.data."""
         payload = {
@@ -509,3 +518,52 @@ class InventoryRequestFormBackendTests(TestCase):
         self.assertEqual(response.data["data"]["quantity_required"], 1)
         self.assertEqual(response.data["data"]["vendor"], "")
         self.assertEqual(response.data["data"]["additional_link"], "")
+
+    def test_requester_can_edit_new_request(self):
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={
+                "status": "NEW_REQUEST",
+                "requester_id": str(self.user.supabase_uid),
+                "vendor": "Old Vendor",
+            },
+        )
+        response = self._patch_request(record, {"vendor": "Updated Vendor"})
+        self.assertEqual(response.status_code, 200, response.data)
+        record.refresh_from_db()
+        self.assertEqual(record.data.get("vendor"), "Updated Vendor")
+
+    def test_requester_cannot_edit_after_approval(self):
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={
+                "status": "VENDOR_IDENTIFIED",
+                "requester_id": str(self.user.supabase_uid),
+                "vendor": "Old Vendor",
+            },
+        )
+        response = self._patch_request(record, {"vendor": "Updated Vendor"})
+        self.assertEqual(response.status_code, 403, response.data)
+        record.refresh_from_db()
+        self.assertEqual(record.data.get("vendor"), "Old Vendor")
+
+    def test_team_lead_can_edit_approved_request(self):
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={
+                "status": "VENDOR_IDENTIFIED",
+                "requester_id": str(self.user.supabase_uid),
+                "vendor": "Old Vendor",
+            },
+        )
+        response = self._patch_request(
+            record,
+            {"vendor": "Updated Vendor"},
+            user=self.team_lead_user,
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        record.refresh_from_db()
+        self.assertEqual(record.data.get("vendor"), "Updated Vendor")
