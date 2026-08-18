@@ -414,6 +414,41 @@ class InventoryRequestFormBackendTests(TestCase):
         )
 
     @patch("crm_records.views.send_email")
+    def test_req_to_verify_emails_requestor(self, mock_send_email):
+        """Send to requestor to verify emails the requestor with the verify template."""
+        mock_send_email.return_value = (True, "ok")
+        from types import SimpleNamespace
+        from crm_records.views import _notify_request_status_emails
+
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "REQ TO VERIFY",
+                "status_text": "REQ TO VERIFY",
+                "requester_id": str(self.user.supabase_uid),
+                "requester_name": "Test Requester",
+                "item_name_freeform": "Drone",
+                "team_lead": self.team_lead_membership.id,
+            },
+        )
+        request = SimpleNamespace(
+            tenant=self.tenant,
+            user=self.user,
+            build_absolute_uri=lambda path: f"https://example.com{path}",
+        )
+        _notify_request_status_emails(request, record, previous_status="NEW_REQUEST")
+
+        self.assertEqual(mock_send_email.call_count, 1)
+        self.assertEqual(mock_send_email.call_args.kwargs.get("to_emails"), "requester@example.com")
+        self.assertEqual(
+            mock_send_email.call_args.kwargs.get("client_name"),
+            "RequestToVerifyNotification",
+        )
+        subject = mock_send_email.call_args.kwargs.get("subject", "")
+        self.assertIn("verify", subject.lower())
+
+    @patch("crm_records.views.send_email")
     def test_any_status_change_emails_requestor(self, mock_send_email):
         """Requester gets an email for every status change, including previously uncovered ones."""
         mock_send_email.return_value = (True, "ok")
@@ -424,8 +459,8 @@ class InventoryRequestFormBackendTests(TestCase):
             tenant=self.tenant,
             entity_type="unmannd_request",
             data={
-                "status": "REQ_TO_VERIFY",
-                "status_text": "REQ_TO_VERIFY",
+                "status": "IN_CART",
+                "status_text": "IN_CART",
                 "requester_id": str(self.user.supabase_uid),
                 "requester_name": "Test Requester",
                 "item_name_freeform": "Drone",
@@ -446,7 +481,7 @@ class InventoryRequestFormBackendTests(TestCase):
             "RequestStatusChangedNotification",
         )
         subject = mock_send_email.call_args.kwargs.get("subject", "")
-        self.assertIn("REQ_TO_VERIFY", subject)
+        self.assertIn("IN_CART", subject)
 
     @patch.dict(os.environ, {"PYRO_FRONTEND_URL": "https://app.thepyro.ai"}, clear=False)
     @patch("crm_records.views.send_email")
@@ -519,6 +554,15 @@ class InventoryRequestFormBackendTests(TestCase):
         self.assertEqual(response.data["data"]["vendor"], "")
         self.assertEqual(response.data["data"]["additional_link"], "")
 
+    def _patch_request(self, record, data, user=None):
+        self.client.force_login(user or self.user)
+        return self.client.patch(
+            f"/crm-records/records/{record.id}/",
+            {"data": data},
+            format="json",
+            HTTP_X_Tenant_Slug=self.tenant.slug,
+        )
+
     def test_requester_can_edit_new_request(self):
         record = Record.objects.create(
             tenant=self.tenant,
@@ -526,13 +570,18 @@ class InventoryRequestFormBackendTests(TestCase):
             data={
                 "status": "NEW_REQUEST",
                 "requester_id": str(self.user.supabase_uid),
-                "vendor": "Old Vendor",
+                "item_name_freeform": "Mouse",
+                "quantity_required": 1,
             },
         )
-        response = self._patch_request(record, {"vendor": "Updated Vendor"})
+        response = self._patch_request(
+            record,
+            {**record.data, "item_name_freeform": "Wireless Mouse", "quantity_required": 2},
+        )
         self.assertEqual(response.status_code, 200, response.data)
         record.refresh_from_db()
-        self.assertEqual(record.data.get("vendor"), "Updated Vendor")
+        self.assertEqual(record.data["item_name_freeform"], "Wireless Mouse")
+        self.assertEqual(record.data["quantity_required"], 2)
 
     def test_requester_cannot_edit_after_approval(self):
         record = Record.objects.create(
@@ -541,29 +590,35 @@ class InventoryRequestFormBackendTests(TestCase):
             data={
                 "status": "VENDOR_IDENTIFIED",
                 "requester_id": str(self.user.supabase_uid),
-                "vendor": "Old Vendor",
-            },
-        )
-        response = self._patch_request(record, {"vendor": "Updated Vendor"})
-        self.assertEqual(response.status_code, 403, response.data)
-        record.refresh_from_db()
-        self.assertEqual(record.data.get("vendor"), "Old Vendor")
-
-    def test_team_lead_can_edit_approved_request(self):
-        record = Record.objects.create(
-            tenant=self.tenant,
-            entity_type="inventory_request",
-            data={
-                "status": "VENDOR_IDENTIFIED",
-                "requester_id": str(self.user.supabase_uid),
-                "vendor": "Old Vendor",
+                "item_name_freeform": "Mouse",
+                "quantity_required": 1,
             },
         )
         response = self._patch_request(
             record,
-            {"vendor": "Updated Vendor"},
+            {**record.data, "item_name_freeform": "Should not save"},
+        )
+        self.assertEqual(response.status_code, 403)
+        record.refresh_from_db()
+        self.assertEqual(record.data["item_name_freeform"], "Mouse")
+
+    def test_team_lead_can_edit_approved_request(self):
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "VENDOR_IDENTIFIED",
+                "requester_id": str(self.user.supabase_uid),
+                "item_name_freeform": "Drone",
+                "quantity_required": 1,
+                "team_lead": self.team_lead_membership.id,
+            },
+        )
+        response = self._patch_request(
+            record,
+            {**record.data, "status": "IN_SHIPPING"},
             user=self.team_lead_user,
         )
         self.assertEqual(response.status_code, 200, response.data)
         record.refresh_from_db()
-        self.assertEqual(record.data.get("vendor"), "Updated Vendor")
+        self.assertEqual(record.data["status"], "IN_SHIPPING")
