@@ -6046,3 +6046,72 @@ class ShipmentTrackView(APIView):
             )
         return Response(payload, status=status.HTTP_200_OK)
 
+
+class ProductLinkExtractView(APIView):
+    """
+    Extract product name and price from a storefront URL.
+
+    POST /crm-records/product-link-extract/
+    {
+      "url": "https://robu.in/product/...",
+      "pincode": "560001"
+    }
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+    authentication_classes = [SupabaseJWTAuthentication]
+
+    @extend_schema(
+        summary="Extract product details from a storefront URL",
+        description=(
+            "Uses ScrapingBee (SCRAPINGBEE_API_KEY) to read the product page and "
+            "return name, price, currency, image, and vendor. "
+            "Same pattern as AfterShip for shipment tracking."
+        ),
+        request={
+            "application/json": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "format": "uri"},
+                    "pincode": {"type": "string"},
+                },
+                "required": ["url"],
+            }
+        },
+        responses={
+            200: OpenApiResponse(description="Extracted product fields"),
+            400: OpenApiResponse(description="Invalid product URL"),
+        },
+        tags=["Inventory"],
+    )
+    def post(self, request, *args, **kwargs):
+        from .product_link_extract import ProductLinkExtractError, extract_product_from_url
+
+        try:
+            payload = extract_product_from_url(
+                url=request.data.get("url") or request.data.get("link"),
+                pincode=request.data.get("pincode"),
+            )
+            logger.info(
+                "ProductLinkExtractView result ok=%s configured=%s vendor=%s price=%s error=%s debug=%s",
+                payload.get("ok"),
+                payload.get("configured"),
+                payload.get("vendor"),
+                payload.get("price"),
+                payload.get("error"),
+                payload.get("debug"),
+            )
+        except ProductLinkExtractError:
+            logger.warning("ProductLinkExtractView validation failed", exc_info=True)
+            return Response(
+                {"error": "Provide a valid https product URL."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception:
+            logger.exception("ProductLinkExtractView failed")
+            return Response(
+                {"error": "Product extract failed."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(payload, status=status.HTTP_200_OK)
+
