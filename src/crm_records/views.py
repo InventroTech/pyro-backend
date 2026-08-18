@@ -1545,6 +1545,14 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
         if instance is not None and isinstance(getattr(instance, "data", None), dict):
             previous_status = instance.data.get("status")
             previous_assigned_to = instance.data.get("assigned_to")
+        if instance is not None:
+            _reject_requester_edit_if_locked(
+                self.request,
+                instance,
+                incoming_data=serializer.validated_data.get("data")
+                if hasattr(serializer, "validated_data")
+                else None,
+            )
 
         updated_record = serializer.save()
         _notify_request_status_emails(self.request, updated_record, previous_status)

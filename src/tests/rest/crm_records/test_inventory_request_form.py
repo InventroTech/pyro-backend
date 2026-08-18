@@ -80,6 +80,15 @@ class InventoryRequestFormBackendTests(TestCase):
         self.client.force_login(self.user)
         return {"HTTP_X_Tenant_Slug": self.tenant.slug}
 
+    def _patch_request(self, record, data, user=None):
+        self.client.force_login(user or self.user)
+        return self.client.patch(
+            f"/crm-records/records/{record.id}/",
+            {"data": data},
+            format="json",
+            HTTP_X_Tenant_Slug=self.tenant.slug,
+        )
+
     def test_create_inventory_request_stores_all_form_fields(self):
         """POST with entity_type=inventory_request stores full form data in record.data."""
         payload = {
