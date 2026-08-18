@@ -71,6 +71,21 @@ def serialize_instance(instance: models.Model, config: HistoryConfig) -> Dict[st
     raise ValueError(f"Unsupported snapshot_strategy {config.snapshot_strategy}")
 
 
+def _is_empty_history_value(value: Any) -> bool:
+    """Treat missing, null, and blank strings as the same empty value."""
+    if value is None:
+        return True
+    if isinstance(value, str) and value.strip() == "":
+        return True
+    return False
+
+
+def _history_values_equal(before_val: Any, after_val: Any) -> bool:
+    if before_val == after_val:
+        return True
+    return _is_empty_history_value(before_val) and _is_empty_history_value(after_val)
+
+
 def redact_payload(
     payload: Dict[str, Any], redact_fields: Iterable[str]
 ) -> Dict[str, Any]:
@@ -96,7 +111,7 @@ def compute_diff(
         before_val = before.get(field)
         after_val = after.get(field)
         
-        if before_val == after_val:
+        if _history_values_equal(before_val, after_val):
             continue
             
         # 👇 NEW LOGIC: If the field is a nested dictionary (like "data"), look inside it!
