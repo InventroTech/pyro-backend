@@ -488,4 +488,9 @@ HEALTH_CPU_THRESHOLD = env.float('HEALTH_CPU_THRESHOLD', default=70.0)          
 HEALTH_MEMORY_THRESHOLD = env.float('HEALTH_MEMORY_THRESHOLD', default=60.0)    # % RAM before alert
 HEALTH_RESPONSE_TIME_THRESHOLD_SECONDS = env.float('HEALTH_RESPONSE_TIME_THRESHOLD_SECONDS', default=1.0)
 
+# Product-link extract (inventory request form): ScrapingBee reads any storefront URL
+# the same way AfterShip is used for shipment tracking. Sign up at scrapingbee.com
+# and set the API key. Leave empty to disable auto-fill.
+SCRAPINGBEE_API_KEY = env('SCRAPINGBEE_API_KEY', default='')
+
 import config.spectacular_auth
