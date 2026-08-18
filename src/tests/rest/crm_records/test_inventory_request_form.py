@@ -509,3 +509,72 @@ class InventoryRequestFormBackendTests(TestCase):
         self.assertEqual(response.data["data"]["quantity_required"], 1)
         self.assertEqual(response.data["data"]["vendor"], "")
         self.assertEqual(response.data["data"]["additional_link"], "")
+
+    def _patch_request(self, record, data, user=None):
+        self.client.force_login(user or self.user)
+        return self.client.patch(
+            f"/crm-records/records/{record.id}/",
+            {"data": data},
+            format="json",
+            HTTP_X_Tenant_Slug=self.tenant.slug,
+        )
+
+    def test_requester_can_edit_new_request(self):
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={
+                "status": "NEW_REQUEST",
+                "requester_id": str(self.user.supabase_uid),
+                "item_name_freeform": "Mouse",
+                "quantity_required": 1,
+            },
+        )
+        response = self._patch_request(
+            record,
+            {**record.data, "item_name_freeform": "Wireless Mouse", "quantity_required": 2},
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        record.refresh_from_db()
+        self.assertEqual(record.data["item_name_freeform"], "Wireless Mouse")
+        self.assertEqual(record.data["quantity_required"], 2)
+
+    def test_requester_cannot_edit_after_approval(self):
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={
+                "status": "VENDOR_IDENTIFIED",
+                "requester_id": str(self.user.supabase_uid),
+                "item_name_freeform": "Mouse",
+                "quantity_required": 1,
+            },
+        )
+        response = self._patch_request(
+            record,
+            {**record.data, "item_name_freeform": "Should not save"},
+        )
+        self.assertEqual(response.status_code, 403)
+        record.refresh_from_db()
+        self.assertEqual(record.data["item_name_freeform"], "Mouse")
+
+    def test_team_lead_can_edit_approved_request(self):
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "VENDOR_IDENTIFIED",
+                "requester_id": str(self.user.supabase_uid),
+                "item_name_freeform": "Drone",
+                "quantity_required": 1,
+                "team_lead": self.team_lead_membership.id,
+            },
+        )
+        response = self._patch_request(
+            record,
+            {**record.data, "status": "IN_SHIPPING"},
+            user=self.team_lead_user,
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        record.refresh_from_db()
+        self.assertEqual(record.data["status"], "IN_SHIPPING")
