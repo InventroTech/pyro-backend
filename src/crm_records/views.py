@@ -73,6 +73,7 @@ from email_protocol.templates.requestRejectedUnmannd import build_request_reject
 from email_protocol.templates.requestOnHoldUnmannd import build_request_on_hold_unmannd_email
 from email_protocol.templates.requestOrderedUnmannd import build_request_ordered_unmannd_email
 from email_protocol.templates.requestStatusChangedUnmannd import build_request_status_changed_unmannd_email
+from email_protocol.templates.requestToVerifyUnmannd import build_request_to_verify_unmannd_email
 
 from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
 from crm_records.lead_pipeline.pipeline import LeadPipeline
@@ -110,6 +111,7 @@ MANAGER_APPROVE_FROM_STATUSES = frozenset({
     "",
     "NEW_REQUEST",
     "ON_HOLD",
+    "REQ_TO_VERIFY",
 })
 # Team Lead Order button sets IN_SHIPPING.
 TEAM_LEAD_ORDERED_STATUSES = frozenset({"IN_SHIPPING"})
@@ -135,7 +137,13 @@ REQUESTER_SHIPMENT_STATUS_EDIT_DENIED_MESSAGE = (
 def _normalize_status_value(raw_status):
     if raw_status is None:
         return ""
-    return str(raw_status).strip().upper()
+    return (
+        str(raw_status)
+        .strip()
+        .upper()
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
 
 
 # Unmannd Page Builder pages used by Open Request email buttons.
@@ -774,6 +782,8 @@ def _requester_status_email_content(context, current_status, old_status):
         return build_request_rejected_unmannd_email(context), "RequestRejectedNotification"
     if current_status == "ON_HOLD":
         return build_request_on_hold_unmannd_email(context), "RequestOnHoldNotification"
+    if current_status == "REQ_TO_VERIFY":
+        return build_request_to_verify_unmannd_email(context), "RequestToVerifyNotification"
     if current_status == "PAID":
         return build_request_paid_unmannd_email(context), "RequestPaidNotification"
     if (
@@ -850,123 +860,6 @@ def _notify_requester_on_status_change(request, record, previous_status):
             "approver_name": team_lead_name or "Team Lead",
             "ordered_by_name": manager_name or "Procurement Manager",
             "redirect_url": _record_app_redirect_url(request, record, open_page="my_requests"),
-        }
-        (subject, text_body, html_body), client_name = _requester_status_email_content(
-            context, current_status, old_status
-        )
-        send_ok, send_msg = send_email(
-            to_emails=requester_email,
-            subject=subject,
-            message=text_body,
-            html_message=html_body,
-            client_name=client_name,
-            fail_silently=True,
-        )
-        if not send_ok:
-            logger.warning(
-                "[RequestStatusChangedEmail] Failed: record=%s email=%s status=%s→%s msg=%s",
-                getattr(record, "id", None),
-                requester_email,
-                old_status or "(empty)",
-                current_status,
-                send_msg,
-            )
-        else:
-            logger.info(
-                "[RequestStatusChangedEmail] Sent: record=%s email=%s status=%s→%s client=%s",
-                getattr(record, "id", None),
-                requester_email,
-                old_status or "(empty)",
-                current_status,
-                client_name,
-            )
-    except Exception:
-        logger.exception(
-            "Unexpected error while sending status-change email for record=%s",
-            getattr(record, "id", None),
-        )
-
-
-def _requester_status_email_content(context, current_status, old_status):
-    """Pick the best requester email template for a status transition."""
-    if current_status == "REJECTED":
-        return build_request_rejected_unmannd_email(context), "RequestRejectedNotification"
-    if current_status == "ON_HOLD":
-        return build_request_on_hold_unmannd_email(context), "RequestOnHoldNotification"
-    if current_status == "PAID":
-        return build_request_paid_unmannd_email(context), "RequestPaidNotification"
-    if (
-        current_status in MANAGER_APPROVED_STATUSES
-        and old_status in MANAGER_APPROVE_FROM_STATUSES
-    ):
-        return (
-            build_request_approved_unmannd_email(
-                {**context, "recipient_name": context.get("requester_name") or "Requester"}
-            ),
-            "RequestApprovedNotification",
-        )
-    if (
-        current_status in TEAM_LEAD_ORDERED_STATUSES
-        and old_status in TEAM_LEAD_ORDER_FROM_STATUSES
-    ):
-        return (
-            build_request_ordered_unmannd_email(
-                {**context, "recipient_name": context.get("requester_name") or "Requester"}
-            ),
-            "RequestOrderedNotification",
-        )
-    return (
-        build_request_status_changed_unmannd_email(context),
-        "RequestStatusChangedNotification",
-    )
-
-
-def _notify_requester_on_status_change(request, record, previous_status):
-    """
-    Email the requester whenever inventory / UNMANND request status changes.
-    Uses dedicated templates for known transitions; generic otherwise.
-    Best-effort only; never raises.
-    """
-    if not record or record.entity_type not in REQUEST_NOTIFICATION_ENTITY_TYPES:
-        return
-
-    tenant = getattr(request, "tenant", None)
-    if not tenant:
-        return
-
-    data = record.data if isinstance(record.data, dict) else {}
-    current_status = _normalize_status_value(data.get("status"))
-    old_status = _normalize_status_value(previous_status)
-    if not current_status or current_status == old_status:
-        return
-
-    try:
-        requester_email, requester_name = _resolve_requester_email_name(tenant, data)
-        if not requester_email:
-            logger.info(
-                "[RequestStatusChangedEmail] Skip: record=%s requester email not found.",
-                getattr(record, "id", None),
-            )
-            return
-
-        manager_ref = _resolve_manager_membership_id(tenant, data)
-        _, manager_name = _membership_email_name(tenant, manager_ref, default_name="Manager")
-        team_lead_ref = _resolve_team_lead_membership_id(tenant, data)
-        _, team_lead_name = _membership_email_name(
-            tenant, team_lead_ref, default_name="Team Lead"
-        )
-
-        context = {
-            "request_id": record.id,
-            "requester_name": requester_name or "Requester",
-            "tenant_name": getattr(tenant, "name", "Pyro"),
-            "item_name": str(data.get("item_name_freeform") or data.get("item_name") or "N/A").strip(),
-            "previous_status": old_status or "N/A",
-            "current_status": current_status,
-            "status_text": str(data.get("status_text") or data.get("status") or current_status).strip(),
-            "approver_name": manager_name or "Manager",
-            "ordered_by_name": team_lead_name or "Team Lead",
-            "redirect_url": _record_app_redirect_url(request, record),
         }
         (subject, text_body, html_body), client_name = _requester_status_email_content(
             context, current_status, old_status
@@ -1652,6 +1545,14 @@ class RecordDetailView(TenantScopedMixin, generics.RetrieveUpdateAPIView):
         if instance is not None and isinstance(getattr(instance, "data", None), dict):
             previous_status = instance.data.get("status")
             previous_assigned_to = instance.data.get("assigned_to")
+        if instance is not None:
+            _reject_requester_edit_if_locked(
+                self.request,
+                instance,
+                incoming_data=serializer.validated_data.get("data")
+                if hasattr(serializer, "validated_data")
+                else None,
+            )
 
         updated_record = serializer.save()
         _notify_request_status_emails(self.request, updated_record, previous_status)

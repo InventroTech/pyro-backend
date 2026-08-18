@@ -80,6 +80,15 @@ class InventoryRequestFormBackendTests(TestCase):
         self.client.force_login(self.user)
         return {"HTTP_X_Tenant_Slug": self.tenant.slug}
 
+    def _patch_request(self, record, data, user=None):
+        self.client.force_login(user or self.user)
+        return self.client.patch(
+            f"/crm-records/records/{record.id}/",
+            {"data": data},
+            format="json",
+            HTTP_X_Tenant_Slug=self.tenant.slug,
+        )
+
     def test_create_inventory_request_stores_all_form_fields(self):
         """POST with entity_type=inventory_request stores full form data in record.data."""
         payload = {
@@ -405,6 +414,41 @@ class InventoryRequestFormBackendTests(TestCase):
         )
 
     @patch("crm_records.views.send_email")
+    def test_req_to_verify_emails_requestor(self, mock_send_email):
+        """Send to requestor to verify emails the requestor with the verify template."""
+        mock_send_email.return_value = (True, "ok")
+        from types import SimpleNamespace
+        from crm_records.views import _notify_request_status_emails
+
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "REQ TO VERIFY",
+                "status_text": "REQ TO VERIFY",
+                "requester_id": str(self.user.supabase_uid),
+                "requester_name": "Test Requester",
+                "item_name_freeform": "Drone",
+                "team_lead": self.team_lead_membership.id,
+            },
+        )
+        request = SimpleNamespace(
+            tenant=self.tenant,
+            user=self.user,
+            build_absolute_uri=lambda path: f"https://example.com{path}",
+        )
+        _notify_request_status_emails(request, record, previous_status="NEW_REQUEST")
+
+        self.assertEqual(mock_send_email.call_count, 1)
+        self.assertEqual(mock_send_email.call_args.kwargs.get("to_emails"), "requester@example.com")
+        self.assertEqual(
+            mock_send_email.call_args.kwargs.get("client_name"),
+            "RequestToVerifyNotification",
+        )
+        subject = mock_send_email.call_args.kwargs.get("subject", "")
+        self.assertIn("verify", subject.lower())
+
+    @patch("crm_records.views.send_email")
     def test_any_status_change_emails_requestor(self, mock_send_email):
         """Requester gets an email for every status change, including previously uncovered ones."""
         mock_send_email.return_value = (True, "ok")
@@ -415,8 +459,8 @@ class InventoryRequestFormBackendTests(TestCase):
             tenant=self.tenant,
             entity_type="unmannd_request",
             data={
-                "status": "REQ_TO_VERIFY",
-                "status_text": "REQ_TO_VERIFY",
+                "status": "IN_CART",
+                "status_text": "IN_CART",
                 "requester_id": str(self.user.supabase_uid),
                 "requester_name": "Test Requester",
                 "item_name_freeform": "Drone",
@@ -437,7 +481,7 @@ class InventoryRequestFormBackendTests(TestCase):
             "RequestStatusChangedNotification",
         )
         subject = mock_send_email.call_args.kwargs.get("subject", "")
-        self.assertIn("REQ_TO_VERIFY", subject)
+        self.assertIn("IN_CART", subject)
 
     @patch.dict(os.environ, {"PYRO_FRONTEND_URL": "https://app.thepyro.ai"}, clear=False)
     @patch("crm_records.views.send_email")
