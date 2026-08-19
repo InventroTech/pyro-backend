@@ -5987,7 +5987,7 @@ class ShipmentTrackView(APIView):
     {
       "tracking_number": "AWB...",
       "tracking_link": "https://...",
-      "courier_name": "Delhivery"   # optional hint
+      "courier_name": "FedEx"   # required with a bare tracking number
     }
     """
 
@@ -5998,7 +5998,8 @@ class ShipmentTrackView(APIView):
         summary="Track shipment by number or link",
         description=(
             "Resolves the current delivery pipeline status from a tracking number "
-            "and/or tracking link (Delhivery API, optional AfterShip, allowlisted pages)."
+            "plus courier (FedEx, DHL, BlueDart, …) and/or a tracking link. "
+            "Courier is required when tracking by number alone; it is not guessed from the AWB."
         ),
         request={
             "application/json": {
@@ -6006,7 +6007,17 @@ class ShipmentTrackView(APIView):
                 "properties": {
                     "tracking_number": {"type": "string"},
                     "tracking_link": {"type": "string", "format": "uri"},
-                    "courier_name": {"type": "string"},
+                    "courier_name": {
+                        "type": "string",
+                        "description": (
+                            "Shipping courier / vendor (FedEx, DHL, BlueDart, Delhivery, Amazon). "
+                            "Required with tracking_number unless the tracking_link already identifies the carrier."
+                        ),
+                    },
+                    "vendor": {
+                        "type": "string",
+                        "description": "Alias for courier_name (shipping courier, not the purchase vendor).",
+                    },
                 },
             }
         },
@@ -6023,7 +6034,7 @@ class ShipmentTrackView(APIView):
             payload = track_shipment(
                 tracking_number=request.data.get("tracking_number"),
                 tracking_link=request.data.get("tracking_link"),
-                courier_name=request.data.get("courier_name"),
+                courier_name=request.data.get("courier_name") or request.data.get("vendor"),
             )
             logger.info(
                 "ShipmentTrackView result awb=%s ok=%s status=%s method=%s courier=%s detail=%s error=%s aftership_key_set=%s",
@@ -6036,10 +6047,10 @@ class ShipmentTrackView(APIView):
                 payload.get("error"),
                 bool((os.environ.get("AFTERSHIP_API_KEY") or "").strip()),
             )
-        except ShipmentTrackError:
+        except ShipmentTrackError as exc:
             logger.warning("ShipmentTrackView validation failed", exc_info=True)
             return Response(
-                {"error": "Provide a valid tracking number or supported tracking link."},
+                {"error": str(exc) or "Provide a valid tracking number or supported tracking link."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         except Exception:
@@ -6049,6 +6060,28 @@ class ShipmentTrackView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
         return Response(payload, status=status.HTTP_200_OK)
+
+
+class ShipmentCouriersView(APIView):
+    """AfterShip courier catalog for the inventory tracking combobox."""
+
+    permission_classes = [IsTenantAuthenticated]
+    authentication_classes = [SupabaseJWTAuthentication]
+
+    @extend_schema(
+        summary="List shipment couriers",
+        description="Returns AfterShip courier names and slugs for the tracking courier picker.",
+        responses={200: OpenApiResponse(description="Courier catalog")},
+        tags=["Inventory"],
+    )
+    def get(self, request, *args, **kwargs):
+        from .aftership_couriers import load_aftership_couriers
+
+        couriers = load_aftership_couriers()
+        return Response(
+            {"couriers": couriers, "count": len(couriers)},
+            status=status.HTTP_200_OK,
+        )
 
 
 class ProductLinkExtractView(APIView):
