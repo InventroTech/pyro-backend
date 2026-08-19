@@ -113,11 +113,12 @@ MANAGER_APPROVE_FROM_STATUSES = frozenset({
     "ON_HOLD",
     "REQ_TO_VERIFY",
 })
-# Team Lead Order button sets IN_SHIPPING.
+# Team Lead Order button sets IN_SHIPPING (from cart, or legacy vendor-identified).
 TEAM_LEAD_ORDERED_STATUSES = frozenset({"IN_SHIPPING"})
 TEAM_LEAD_ORDER_FROM_STATUSES = frozenset({
-    "VENDOR_IDENTIFIED"
-   # "PAYMENT_PENDING",
+    "IN_CART",
+    "VENDOR_IDENTIFIED",
+    # "PAYMENT_PENDING",
 })
 # Requestor role may edit their own request only while it is still pending approval.
 REQUESTER_EDITABLE_STATUSES = frozenset({
