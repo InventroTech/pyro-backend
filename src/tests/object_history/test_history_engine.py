@@ -226,3 +226,37 @@ def test_persistent_history_when_tenant_settings_enabled(model_instance):
     )
     assert hist is not None
     assert hist.persistent_history is True
+
+
+def test_compute_diff_ignores_null_vs_blank_string():
+    from object_history.serializers import compute_diff
+
+    diff = compute_diff(
+        {"data": {"notes": None, "status": "NEW"}},
+        {"data": {"notes": "", "status": "NEW", "additional_link": "  "}},
+        redact_fields=[],
+    )
+    assert diff == {}
+
+
+def test_compute_diff_keeps_real_empty_to_value_change():
+    from object_history.serializers import compute_diff
+
+    diff = compute_diff(
+        {"data": {"shipment_status": None, "notes": ""}},
+        {"data": {"shipment_status": "NOT_SHIPPED", "notes": ""}},
+        redact_fields=[],
+    )
+    assert diff == {
+        "shipment_status": {"from": None, "to": "NOT_SHIPPED"},
+    }
+
+
+@pytest.mark.django_db(transaction=True)
+def test_blank_optional_fields_do_not_write_history(model_instance):
+    HistoryEngine.capture_before(model_instance)
+    model_instance.data["notes"] = ""
+    model_instance.data["additional_link"] = None
+    HistoryEngine.capture_after(model_instance)
+
+    assert ObjectHistory.objects.filter(object_id=str(model_instance.pk)).count() == 0
