@@ -77,12 +77,17 @@ class RecordSerializer(serializers.ModelSerializer):
         attrs = super().validate(attrs)
         entity_type = attrs.get("entity_type") or getattr(self.instance, "entity_type", None)
         data = attrs.get("data")
+        previous = None
+        if self.instance is not None and isinstance(getattr(self.instance, "data", None), dict):
+            previous = self.instance.data
+        if entity_type in ("inventory_request", "unmannd_request") and isinstance(data, dict):
+            from crm_records.inventory_workflow import apply_inventory_cart_status_side_effects
+
+            data = apply_inventory_cart_status_side_effects(data, previous=previous)
+            attrs["data"] = data
         if entity_type == "inventory_request" and isinstance(data, dict):
             from crm_records.inventory_shipment_tracking import apply_shipment_tracking_normalization
 
-            previous = None
-            if self.instance is not None and isinstance(getattr(self.instance, "data", None), dict):
-                previous = self.instance.data
             attrs["data"] = apply_shipment_tracking_normalization(data, previous=previous)
         return attrs
     
