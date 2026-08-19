@@ -404,7 +404,7 @@ class InventoryRequestFormBackendTests(TestCase):
             user=self.team_lead_user,
             build_absolute_uri=lambda path: f"https://example.com{path}",
         )
-        _notify_request_status_emails(request, record, previous_status="VENDOR_IDENTIFIED")
+        _notify_request_status_emails(request, record, previous_status="IN_CART")
 
         emails = [c.kwargs.get("to_emails") for c in mock_send_email.call_args_list]
         self.assertEqual(emails, ["requester@example.com"])
@@ -622,3 +622,68 @@ class InventoryRequestFormBackendTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         record.refresh_from_db()
         self.assertEqual(record.data["status"], "IN_SHIPPING")
+
+    def test_requester_cannot_edit_in_cart_request(self):
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={
+                "status": "IN_CART",
+                "requester_id": str(self.user.supabase_uid),
+                "item_name_freeform": "Mouse",
+                "quantity_required": 1,
+                "cart_id": "cart-1",
+            },
+        )
+        response = self._patch_request(
+            record,
+            {**record.data, "item_name_freeform": "Should not save"},
+        )
+        self.assertEqual(response.status_code, 403)
+        record.refresh_from_db()
+        self.assertEqual(record.data["item_name_freeform"], "Mouse")
+
+    def test_remove_from_cart_sets_vendor_identified_and_clears_cart_id(self):
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "IN_CART",
+                "status_text": "IN_CART",
+                "requester_id": str(self.user.supabase_uid),
+                "item_name_freeform": "Drone",
+                "quantity_required": 1,
+                "cart_id": "cart-1",
+                "team_lead": self.team_lead_membership.id,
+            },
+        )
+        response = self._patch_request(
+            record,
+            {**record.data, "status": "VENDOR_IDENTIFIED", "status_text": "VENDOR_IDENTIFIED"},
+            user=self.team_lead_user,
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        record.refresh_from_db()
+        self.assertEqual(record.data["status"], "VENDOR_IDENTIFIED")
+        self.assertIsNone(record.data.get("cart_id"))
+
+    def test_team_lead_can_add_vendor_identified_item_to_cart(self):
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "VENDOR_IDENTIFIED",
+                "requester_id": str(self.user.supabase_uid),
+                "item_name_freeform": "Drone",
+                "quantity_required": 1,
+                "team_lead": self.team_lead_membership.id,
+            },
+        )
+        response = self._patch_request(
+            record,
+            {**record.data, "status": "IN_CART", "status_text": "IN_CART"},
+            user=self.team_lead_user,
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        record.refresh_from_db()
+        self.assertEqual(record.data["status"], "IN_CART")
