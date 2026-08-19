@@ -56,33 +56,39 @@ class ShipmentLiveTrackMappingTests(SimpleTestCase):
         self.assertEqual(map_status_text("Shipment Delivered"), "DELIVERED")
         self.assertEqual(map_status_text("Shipment Out for Delivery"), "OUT_FOR_DELIVERY")
 
-    def test_eleven_digit_awb_prefers_bluedart_scraper(self):
+    def test_eleven_digit_awb_does_not_guess_bluedart(self):
         from crm_records.inventory_shipment_live_track import _carrier_trackers_for_awb
 
-        names = [n for n, _ in _carrier_trackers_for_awb("90591653202", None)]
-        self.assertEqual(names[0], "bluedart")
-        self.assertEqual(set(names), {"bluedart", "delhivery"})
+        self.assertEqual(_carrier_trackers_for_awb("90591653202", None), [])
+        names = [n for n, _ in _carrier_trackers_for_awb("90591653202", "bluedart")]
+        self.assertEqual(names, ["bluedart"])
+        self.assertEqual(
+            [n for n, _ in _carrier_trackers_for_awb("123456789012", "delhivery")],
+            ["delhivery"],
+        )
+        self.assertEqual(_carrier_trackers_for_awb("471904076719", "fedex"), [])
 
-    def test_aftership_slug_heuristics_for_fedex_dhl(self):
-        """FedEx/DHL go through AfterShip — auto-detect before length heuristics."""
-        import inspect
-        from crm_records import inventory_shipment_live_track as mod
+    def test_aftership_slugs_follow_user_courier_only(self):
+        from crm_records.inventory_shipment_live_track import _aftership_slugs_for_courier
 
-        src = inspect.getsource(mod._track_aftership_api)
-        self.assertIn("def _aftership_detect_slugs", inspect.getsource(mod))
-        self.assertIn("_aftership_detect_slugs(awb, headers=headers)", src)
-        self.assertIn('digits and length == 12', src)
-        # Length hints come AFTER detect + None — not FedEx-first.
-        self.assertIn('slug_candidates.extend(["fedex", "dhl", "dhl-express"])', src)
-        self.assertIn('slug_candidates.extend(["dhl", "dhl-express", "fedex"])', src)
-        self.assertNotIn("def _track_fedex", inspect.getsource(mod))
-        self.assertNotIn("def _track_dhl", inspect.getsource(mod))
+        self.assertEqual(_aftership_slugs_for_courier("FedEx"), ["fedex"])
+        self.assertEqual(_aftership_slugs_for_courier("fedex"), ["fedex"])
+        self.assertEqual(_aftership_slugs_for_courier("FEDEX"), ["fedex"])
+        self.assertEqual(_aftership_slugs_for_courier("Fed Ex"), ["fedex"])
+        self.assertNotIn("dhl", _aftership_slugs_for_courier("FedEx"))
+        self.assertNotIn("amazon", _aftership_slugs_for_courier("DHL"))
+        dhl = _aftership_slugs_for_courier("DHL")
+        self.assertEqual(dhl[0], "dhl")
+        self.assertEqual(_aftership_slugs_for_courier("dhl")[0], "dhl")
+        self.assertIn("dhl-express", dhl)
+        self.assertEqual(_aftership_slugs_for_courier("Amazon"), ["amazon", "amazon-order", "amazon-mcf"])
+        self.assertEqual(_aftership_slugs_for_courier(None), [])
+        self.assertEqual(_aftership_slugs_for_courier("vendor"), [])
 
     def test_twelve_digit_amazonish_not_assumed_fedex_by_shape_alone(self):
-        """12-digit ids like 371022899423 must not be hard-coded as FedEx."""
+        """12-digit ids like 371022899423 are not a courier by themselves."""
         from crm_records.inventory_shipment_live_track import looks_like_amazon_tracking_id
 
-        # Pure digits aren't matched by Amazon regex — detect API / auto slug handles them.
         self.assertFalse(looks_like_amazon_tracking_id("371022899423"))
         self.assertEqual(len("371022899423"), 12)
 
@@ -203,7 +209,7 @@ class ShipmentLiveTrackMappingTests(SimpleTestCase):
 
 
     def test_amazon_id_not_fedex(self):
-        """Amazon order / TBA ids must detect as amazon — never FedEx via length heuristics."""
+        """Amazon order / TBA ids are recognized as Amazon only when the user says so."""
         from crm_records.inventory_shipment_live_track import (
             detect_courier,
             looks_like_amazon_tracking_id,
@@ -213,10 +219,92 @@ class ShipmentLiveTrackMappingTests(SimpleTestCase):
         self.assertTrue(looks_like_amazon_tracking_id("402-1234567-1234567"))
         self.assertTrue(looks_like_amazon_tracking_id("TBA123456789012"))
         self.assertFalse(looks_like_amazon_tracking_id("471904076719"))
-        self.assertEqual(detect_courier(tracking_number="402-1234567-1234567"), "amazon")
+        self.assertIsNone(detect_courier(tracking_link=None, courier_name=None))
         self.assertEqual(detect_courier(courier_name="Amazon"), "amazon")
+        for typed in ("FedEx", "fedex", "FEDEX", "fed-ex", "Fed Ex"):
+            self.assertEqual(detect_courier(courier_name=typed), "fedex", typed)
+        for typed in ("DHL", "dhl", "Dhl"):
+            self.assertEqual(detect_courier(courier_name=typed), "dhl", typed)
+        self.assertEqual(detect_courier(courier_name="BLUE DART"), "bluedart")
+        self.assertEqual(
+            detect_courier(tracking_link="https://www.aftership.com/track/fedex/471904076719"),
+            "fedex",
+        )
         self.assertIn("amazon", (_public_tracking_link("402-1234567-1234567", "amazon") or ""))
 
     def test_track_shipment_requires_input(self):
         with self.assertRaises(ShipmentTrackError):
             track_shipment()
+
+    def test_track_shipment_requires_courier_with_number(self):
+        with self.assertRaises(ShipmentTrackError) as ctx:
+            track_shipment(tracking_number="471904076719")
+        self.assertIn("courier_name", str(ctx.exception))
+
+    def test_track_shipment_accepts_number_with_courier(self):
+        """Number + courier is enough to start tracking (AfterShip may be unset)."""
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {"AFTERSHIP_API_KEY": ""}, clear=False):
+            result = track_shipment(tracking_number="471904076719", courier_name="FedEx")
+        self.assertEqual(result.get("tracking_number"), "471904076719")
+        self.assertEqual((result.get("courier") or "").lower(), "fedex")
+        self.assertIn("fedex", str(result.get("courier_name") or "").lower())
+
+    def test_aftership_queries_only_user_courier_slug(self):
+        from unittest.mock import MagicMock, patch
+        from crm_records.inventory_shipment_live_track import _track_aftership_api
+
+        get_resp = MagicMock()
+        get_resp.status_code = 200
+        get_resp.json.return_value = {
+            "data": {
+                "trackings": [
+                    {
+                        "id": "trk_1",
+                        "slug": "fedex",
+                        "tag": "InTransit",
+                        "checkpoints": [{"tag": "InTransit", "message": "Departed"}],
+                    }
+                ]
+            }
+        }
+        with patch.dict("os.environ", {"AFTERSHIP_API_KEY": "test-key"}, clear=False):
+            with patch(
+                "crm_records.inventory_shipment_live_track.requests.get",
+                return_value=get_resp,
+            ) as get_mock:
+                with patch(
+                    "crm_records.inventory_shipment_live_track.requests.post",
+                ) as post_mock:
+                    result = _track_aftership_api("471904076719", courier="fedex")
+
+        self.assertTrue(result.get("ok"))
+        self.assertEqual(result.get("courier"), "fedex")
+        params = get_mock.call_args.kwargs.get("params") or {}
+        self.assertEqual(params.get("slug"), "fedex")
+        self.assertEqual(params.get("tracking_numbers"), "471904076719")
+        for call in post_mock.call_args_list:
+            url = call.args[0] if call.args else ""
+            self.assertNotIn("couriers/detect", url)
+
+
+class AftershipCourierCatalogTests(SimpleTestCase):
+    def test_catalog_includes_common_slugs(self):
+        from crm_records.aftership_couriers import load_aftership_couriers
+
+        couriers = load_aftership_couriers()
+        slugs = {row["slug"] for row in couriers}
+        self.assertGreater(len(couriers), 900)
+        for slug in (
+            "amazon",
+            "fedex",
+            "dhl",
+            "bluedart",
+            "delhivery",
+            "dtdc",
+            "shiprocket",
+            "india-post",
+            "ecom-express",
+        ):
+            self.assertIn(slug, slugs)
