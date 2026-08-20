@@ -38,11 +38,16 @@ class UserResolver:
         email = getattr(request_user, "email", None)
 
         filters = get_lead_filters_for_user(tenant, identifier)
+        membership = filters.tenant_membership
+        if membership is not None:
+            raw_email = getattr(membership, "email", None)
+            if isinstance(raw_email, str) and raw_email.strip():
+                email = raw_email.strip()
 
         return ResolvedUser(
             identifier=identifier,
             uuid=filters.user_uuid,
-            membership=filters.tenant_membership,
+            membership=membership,
             email=email,
             eligible_lead_types=filters.eligible_lead_types,
             eligible_lead_sources=filters.eligible_lead_sources,
