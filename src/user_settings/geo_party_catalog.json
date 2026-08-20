@@ -1,7 +1,7 @@
 {
-  "version": 1,
+  "version": 2,
   "source": [
-    "Circle names spelled in App - District Names.pdf",
+    "Circle names spelled in App - District Names(V1).pdf",
     "Circle names spelled in App - Party Names.pdf"
   ],
   "label_format": "{name} ({id})",
@@ -30,16 +30,6 @@
       "state_id": 33009
     },
     {
-      "id": 30733,
-      "name": "Amalapuram",
-      "state_id": 33009
-    },
-    {
-      "id": 30727,
-      "name": "Anakapalle",
-      "state_id": 33009
-    },
-    {
       "id": 90290,
       "name": "Anakapalli",
       "state_id": 33009
@@ -50,23 +40,8 @@
       "state_id": 33009
     },
     {
-      "id": 30734,
-      "name": "Anantapur",
-      "state_id": 33009
-    },
-    {
       "id": 90300,
       "name": "Annamayya",
-      "state_id": 33009
-    },
-    {
-      "id": 30735,
-      "name": "Araku",
-      "state_id": 33009
-    },
-    {
-      "id": 30729,
-      "name": "Bapatla",
       "state_id": 33009
     },
     {
@@ -80,18 +55,13 @@
       "state_id": 33009
     },
     {
-      "id": 30743,
-      "name": "Chittoor",
+      "id": 90296,
+      "name": "Dr. B. R. Ambedkar Konaseema",
       "state_id": 33009
     },
     {
       "id": 13280,
       "name": "East Godavari",
-      "state_id": 33009
-    },
-    {
-      "id": 30741,
-      "name": "Eluru",
       "state_id": 33009
     },
     {
@@ -102,26 +72,6 @@
     {
       "id": 13286,
       "name": "Guntur",
-      "state_id": 33009
-    },
-    {
-      "id": 30749,
-      "name": "Guntur",
-      "state_id": 33009
-    },
-    {
-      "id": 30745,
-      "name": "Hindupur",
-      "state_id": 33009
-    },
-    {
-      "id": 30737,
-      "name": "Kadapa",
-      "state_id": 33009
-    },
-    {
-      "id": 30747,
-      "name": "Kakinada",
       "state_id": 33009
     },
     {
@@ -140,43 +90,13 @@
       "state_id": 33009
     },
     {
-      "id": 30732,
-      "name": "Kurnool",
-      "state_id": 33009
-    },
-    {
-      "id": 30736,
-      "name": "Machilipatnam",
-      "state_id": 33009
-    },
-    {
       "id": 90299,
       "name": "Markapuram",
       "state_id": 33009
     },
     {
-      "id": 30728,
-      "name": "Nandyal",
-      "state_id": 33009
-    },
-    {
       "id": 90302,
       "name": "Nandyal",
-      "state_id": 33009
-    },
-    {
-      "id": 30726,
-      "name": "Narasapuram",
-      "state_id": 33009
-    },
-    {
-      "id": 30742,
-      "name": "Narasaraopet",
-      "state_id": 33009
-    },
-    {
-      "id": 30738,
-      "name": "Nellore",
       "state_id": 33009
     },
     {
@@ -187,11 +107,6 @@
     {
       "id": 90228,
       "name": "NTR",
-      "state_id": 33009
-    },
-    {
-      "id": 30740,
-      "name": "Ongole",
       "state_id": 33009
     },
     {
@@ -220,16 +135,6 @@
       "state_id": 33009
     },
     {
-      "id": 30731,
-      "name": "Rajahmundry",
-      "state_id": 33009
-    },
-    {
-      "id": 30750,
-      "name": "Rajampet",
-      "state_id": 33009
-    },
-    {
       "id": 90303,
       "name": "Sri Sathya Sai",
       "state_id": 33009
@@ -240,23 +145,8 @@
       "state_id": 33009
     },
     {
-      "id": 30730,
-      "name": "Srikakulam",
-      "state_id": 33009
-    },
-    {
-      "id": 30746,
-      "name": "Tirupati",
-      "state_id": 33009
-    },
-    {
       "id": 90301,
       "name": "Tirupati",
-      "state_id": 33009
-    },
-    {
-      "id": 30748,
-      "name": "Vijayawada",
       "state_id": 33009
     },
     {
@@ -265,17 +155,7 @@
       "state_id": 33009
     },
     {
-      "id": 30739,
-      "name": "Visakhapatnam",
-      "state_id": 33009
-    },
-    {
       "id": 13291,
-      "name": "Vizianagaram",
-      "state_id": 33009
-    },
-    {
-      "id": 30744,
       "name": "Vizianagaram",
       "state_id": 33009
     },
@@ -290,33 +170,13 @@
       "state_id": 33009
     },
     {
-      "id": 90296,
-      "name": "నDr. B. R. Ambedkar Konaseema",
-      "state_id": 33009
-    },
-    {
       "id": 1127,
-      "name": "Adilabad",
-      "state_id": 33010
-    },
-    {
-      "id": 31129,
       "name": "Adilabad",
       "state_id": 33010
     },
     {
       "id": 589,
       "name": "Bhadradri Kothagudem",
-      "state_id": 33010
-    },
-    {
-      "id": 31127,
-      "name": "Bhuvanagiri",
-      "state_id": 33010
-    },
-    {
-      "id": 31137,
-      "name": "Chevella",
       "state_id": 33010
     },
     {
@@ -330,11 +190,6 @@
       "state_id": 33010
     },
     {
-      "id": 31134,
-      "name": "Hyderabad",
-      "state_id": 33010
-    },
-    {
       "id": 1144,
       "name": "Jagtial",
       "state_id": 33010
@@ -342,6 +197,11 @@
     {
       "id": 1139,
       "name": "Jangaon",
+      "state_id": 33010
+    },
+    {
+      "id": 1147,
+      "name": "Jayashankar Bhupalapalle",
       "state_id": 33010
     },
     {
@@ -360,17 +220,7 @@
       "state_id": 33010
     },
     {
-      "id": 31138,
-      "name": "Karimnagar",
-      "state_id": 33010
-    },
-    {
       "id": 1,
-      "name": "Khammam",
-      "state_id": 33010
-    },
-    {
-      "id": 31132,
       "name": "Khammam",
       "state_id": 33010
     },
@@ -385,23 +235,8 @@
       "state_id": 33010
     },
     {
-      "id": 31135,
-      "name": "Mahabubabad",
-      "state_id": 33010
-    },
-    {
       "id": 1126,
       "name": "Mahabubnagar",
-      "state_id": 33010
-    },
-    {
-      "id": 31140,
-      "name": "Mahabubnagar",
-      "state_id": 33010
-    },
-    {
-      "id": 31141,
-      "name": "Malkajgiri",
       "state_id": 33010
     },
     {
@@ -411,11 +246,6 @@
     },
     {
       "id": 1130,
-      "name": "Medak",
-      "state_id": 33010
-    },
-    {
-      "id": 31143,
       "name": "Medak",
       "state_id": 33010
     },
@@ -435,17 +265,7 @@
       "state_id": 33010
     },
     {
-      "id": 31126,
-      "name": "Nagarkurnool",
-      "state_id": 33010
-    },
-    {
       "id": 1124,
-      "name": "Nalgonda",
-      "state_id": 33010
-    },
-    {
-      "id": 31139,
       "name": "Nalgonda",
       "state_id": 33010
     },
@@ -465,17 +285,7 @@
       "state_id": 33010
     },
     {
-      "id": 31130,
-      "name": "Nizamabad",
-      "state_id": 33010
-    },
-    {
       "id": 1135,
-      "name": "Peddapalli",
-      "state_id": 33010
-    },
-    {
-      "id": 31133,
       "name": "Peddapalli",
       "state_id": 33010
     },
@@ -492,11 +302,6 @@
     {
       "id": 1133,
       "name": "Sangareddy",
-      "state_id": 33010
-    },
-    {
-      "id": 31131,
-      "name": "Secunderabad",
       "state_id": 33010
     },
     {
@@ -520,11 +325,6 @@
       "state_id": 33010
     },
     {
-      "id": 31136,
-      "name": "Warangal",
-      "state_id": 33010
-    },
-    {
       "id": 1138,
       "name": "Warangal Rural",
       "state_id": 33010
@@ -533,26 +333,6 @@
       "id": 1125,
       "name": "Yadadri Bhongiri",
       "state_id": 33010
-    },
-    {
-      "id": 31128,
-      "name": "Zahirabad",
-      "state_id": 33010
-    },
-    {
-      "id": 1147,
-      "name": "ȃų Jayashankar Bhupalapalle",
-      "state_id": 33010
-    },
-    {
-      "id": 87020,
-      "name": "Arakkonam",
-      "state_id": 72631
-    },
-    {
-      "id": 87022,
-      "name": "Arani",
-      "state_id": 72631
     },
     {
       "id": 73005,
@@ -570,22 +350,7 @@
       "state_id": 72631
     },
     {
-      "id": 87143,
-      "name": "Chennai South",
-      "state_id": 72631
-    },
-    {
-      "id": 87029,
-      "name": "Chidambaram",
-      "state_id": 72631
-    },
-    {
       "id": 73584,
-      "name": "Coimbatore",
-      "state_id": 72631
-    },
-    {
-      "id": 87055,
       "name": "Coimbatore",
       "state_id": 72631
     },
@@ -595,17 +360,7 @@
       "state_id": 72631
     },
     {
-      "id": 87061,
-      "name": "Cuddalore",
-      "state_id": 72631
-    },
-    {
       "id": 74523,
-      "name": "Dharmapuri",
-      "state_id": 72631
-    },
-    {
-      "id": 87066,
       "name": "Dharmapuri",
       "state_id": 72631
     },
@@ -615,17 +370,7 @@
       "state_id": 72631
     },
     {
-      "id": 87033,
-      "name": "Dindigul",
-      "state_id": 72631
-    },
-    {
       "id": 75106,
-      "name": "Erode",
-      "state_id": 72631
-    },
-    {
-      "id": 87064,
       "name": "Erode",
       "state_id": 72631
     },
@@ -635,17 +380,7 @@
       "state_id": 72631
     },
     {
-      "id": 87035,
-      "name": "Kallakurichi",
-      "state_id": 72631
-    },
-    {
       "id": 75768,
-      "name": "Kancheepuram",
-      "state_id": 72631
-    },
-    {
-      "id": 87047,
       "name": "Kancheepuram",
       "state_id": 72631
     },
@@ -655,17 +390,7 @@
       "state_id": 72631
     },
     {
-      "id": 87058,
-      "name": "Kanniyakumari",
-      "state_id": 72631
-    },
-    {
       "id": 76153,
-      "name": "Karur",
-      "state_id": 72631
-    },
-    {
-      "id": 87026,
       "name": "Karur",
       "state_id": 72631
     },
@@ -675,17 +400,7 @@
       "state_id": 72631
     },
     {
-      "id": 87041,
-      "name": "Krishnagiri",
-      "state_id": 72631
-    },
-    {
       "id": 76664,
-      "name": "Madurai",
-      "state_id": 72631
-    },
-    {
-      "id": 87122,
       "name": "Madurai",
       "state_id": 72631
     },
@@ -695,17 +410,7 @@
       "state_id": 72631
     },
     {
-      "id": 87115,
-      "name": "Mayiladuthurai",
-      "state_id": 72631
-    },
-    {
       "id": 77344,
-      "name": "Nagapattinam",
-      "state_id": 72631
-    },
-    {
-      "id": 87103,
       "name": "Nagapattinam",
       "state_id": 72631
     },
@@ -715,33 +420,13 @@
       "state_id": 72631
     },
     {
-      "id": 87147,
-      "name": "Namakkal",
-      "state_id": 72631
-    },
-    {
       "id": 80955,
-      "name": "Nilgiris",
-      "state_id": 72631
-    },
-    {
-      "id": 87039,
       "name": "Nilgiris",
       "state_id": 72631
     },
     {
       "id": 77882,
       "name": "Perambalur",
-      "state_id": 72631
-    },
-    {
-      "id": 87112,
-      "name": "Perambalur",
-      "state_id": 72631
-    },
-    {
-      "id": 87105,
-      "name": "Pollachi",
       "state_id": 72631
     },
     {
@@ -755,17 +440,12 @@
       "state_id": 72631
     },
     {
-      "id": 87024,
-      "name": "Ramanathapuram",
+      "id": 78959,
+      "name": "Ranipet",
       "state_id": 72631
     },
     {
       "id": 79255,
-      "name": "Salem",
-      "state_id": 72631
-    },
-    {
-      "id": 87070,
       "name": "Salem",
       "state_id": 72631
     },
@@ -775,22 +455,7 @@
       "state_id": 72631
     },
     {
-      "id": 87005,
-      "name": "Sivaganga",
-      "state_id": 72631
-    },
-    {
-      "id": 87003,
-      "name": "Sriperumbudur",
-      "state_id": 72631
-    },
-    {
       "id": 80119,
-      "name": "Tenkasi",
-      "state_id": 72631
-    },
-    {
-      "id": 87089,
       "name": "Tenkasi",
       "state_id": 72631
     },
@@ -800,17 +465,7 @@
       "state_id": 72631
     },
     {
-      "id": 87134,
-      "name": "Thanjavur",
-      "state_id": 72631
-    },
-    {
       "id": 80997,
-      "name": "Theni",
-      "state_id": 72631
-    },
-    {
-      "id": 87014,
       "name": "Theni",
       "state_id": 72631
     },
@@ -820,27 +475,12 @@
       "state_id": 72631
     },
     {
-      "id": 87108,
-      "name": "Thoothukkudi",
-      "state_id": 72631
-    },
-    {
       "id": 81552,
       "name": "Tiruchirappalli",
       "state_id": 72631
     },
     {
-      "id": 87075,
-      "name": "Tiruchirappalli",
-      "state_id": 72631
-    },
-    {
       "id": 81971,
-      "name": "Tirunelveli",
-      "state_id": 72631
-    },
-    {
-      "id": 87007,
       "name": "Tirunelveli",
       "state_id": 72631
     },
@@ -855,27 +495,12 @@
       "state_id": 72631
     },
     {
-      "id": 87018,
-      "name": "Tiruppur",
-      "state_id": 72631
-    },
-    {
       "id": 82679,
       "name": "Tiruvallur",
       "state_id": 72631
     },
     {
-      "id": 87037,
-      "name": "Tiruvallur",
-      "state_id": 72631
-    },
-    {
       "id": 83220,
-      "name": "Tiruvannamalai",
-      "state_id": 72631
-    },
-    {
-      "id": 87049,
       "name": "Tiruvannamalai",
       "state_id": 72631
     },
@@ -890,17 +515,7 @@
       "state_id": 72631
     },
     {
-      "id": 87011,
-      "name": "Vellore",
-      "state_id": 72631
-    },
-    {
       "id": 84796,
-      "name": "Viluppuram",
-      "state_id": 72631
-    },
-    {
-      "id": 87230,
       "name": "Viluppuram",
       "state_id": 72631
     },
@@ -908,31 +523,6 @@
       "id": 85498,
       "name": "Virudhunagar",
       "state_id": 72631
-    },
-    {
-      "id": 87031,
-      "name": "Virudhunagar",
-      "state_id": 72631
-    },
-    {
-      "id": 87068,
-      "name": " Chennai North",
-      "state_id": 72631
-    },
-    {
-      "id": 78959,
-      "name": "ட Ranipet",
-      "state_id": 72631
-    },
-    {
-      "id": 87016,
-      "name": "ன Chennai Central",
-      "state_id": 72631
-    },
-    {
-      "id": 103315,
-      "name": "Bagalkot",
-      "state_id": 95829
     },
     {
       "id": 96050,
@@ -945,43 +535,13 @@
       "state_id": 95829
     },
     {
-      "id": 103324,
-      "name": "Bangalore Central",
-      "state_id": 95829
-    },
-    {
-      "id": 103333,
-      "name": "Bangalore North",
-      "state_id": 95829
-    },
-    {
-      "id": 103342,
-      "name": "Bangalore Rural",
-      "state_id": 95829
-    },
-    {
-      "id": 103360,
-      "name": "Belagavi",
-      "state_id": 95829
-    },
-    {
       "id": 96255,
       "name": "Belagavi",
       "state_id": 95829
     },
     {
-      "id": 103369,
-      "name": "Bellary",
-      "state_id": 95829
-    },
-    {
       "id": 97762,
       "name": "Bengaluru Rural",
-      "state_id": 95829
-    },
-    {
-      "id": 103351,
-      "name": "Bengaluru South",
       "state_id": 95829
     },
     {
@@ -995,11 +555,6 @@
       "state_id": 95829
     },
     {
-      "id": 103378,
-      "name": "Bidar",
-      "state_id": 95829
-    },
-    {
       "id": 99545,
       "name": "Bidar",
       "state_id": 95829
@@ -1007,11 +562,6 @@
     {
       "id": 100618,
       "name": "Chamarajanagar",
-      "state_id": 95829
-    },
-    {
-      "id": 103396,
-      "name": "Chamrajanagar",
       "state_id": 95829
     },
     {
@@ -1025,21 +575,6 @@
       "state_id": 95829
     },
     {
-      "id": 103405,
-      "name": "Chikkballapur",
-      "state_id": 95829
-    },
-    {
-      "id": 103414,
-      "name": "Chikkodi",
-      "state_id": 95829
-    },
-    {
-      "id": 103423,
-      "name": "Chitradurga",
-      "state_id": 95829
-    },
-    {
       "id": 98134,
       "name": "Chitradurga",
       "state_id": 95829
@@ -1050,23 +585,8 @@
       "state_id": 95829
     },
     {
-      "id": 103432,
-      "name": "Dakshina Kannada",
-      "state_id": 95829
-    },
-    {
-      "id": 103441,
-      "name": "Davanagere",
-      "state_id": 95829
-    },
-    {
       "id": 98329,
       "name": "Davanagere",
-      "state_id": 95829
-    },
-    {
-      "id": 103450,
-      "name": "Dharwad",
       "state_id": 95829
     },
     {
@@ -1080,23 +600,8 @@
       "state_id": 95829
     },
     {
-      "id": 103459,
-      "name": "Gulbarga",
-      "state_id": 95829
-    },
-    {
       "id": 101225,
       "name": "Hassan",
-      "state_id": 95829
-    },
-    {
-      "id": 103468,
-      "name": "Hassan",
-      "state_id": 95829
-    },
-    {
-      "id": 103477,
-      "name": "Haveri",
       "state_id": 95829
     },
     {
@@ -1115,11 +620,6 @@
       "state_id": 95829
     },
     {
-      "id": 103486,
-      "name": "Kolar",
-      "state_id": 95829
-    },
-    {
       "id": 98530,
       "name": "Kolar",
       "state_id": 95829
@@ -1130,23 +630,8 @@
       "state_id": 95829
     },
     {
-      "id": 103495,
-      "name": "Koppal",
-      "state_id": 95829
-    },
-    {
       "id": 101611,
       "name": "Mandya",
-      "state_id": 95829
-    },
-    {
-      "id": 103504,
-      "name": "Mandya",
-      "state_id": 95829
-    },
-    {
-      "id": 103513,
-      "name": "Mysore",
       "state_id": 95829
     },
     {
@@ -1160,16 +645,6 @@
       "state_id": 95829
     },
     {
-      "id": 103523,
-      "name": "Raichur",
-      "state_id": 95829
-    },
-    {
-      "id": 103532,
-      "name": "Shivamogga",
-      "state_id": 95829
-    },
-    {
       "id": 98825,
       "name": "Shivamogga",
       "state_id": 95829
@@ -1180,18 +655,8 @@
       "state_id": 95829
     },
     {
-      "id": 103541,
-      "name": "Tumkur",
-      "state_id": 95829
-    },
-    {
       "id": 102113,
       "name": "Udupi",
-      "state_id": 95829
-    },
-    {
-      "id": 103559,
-      "name": "Uttara Kannada",
       "state_id": 95829
     },
     {
@@ -1205,11 +670,6 @@
       "state_id": 95829
     },
     {
-      "id": 103387,
-      "name": "Vijayapura",
-      "state_id": 95829
-    },
-    {
       "id": 97536,
       "name": "Vijayapura",
       "state_id": 95829
@@ -1217,11 +677,6 @@
     {
       "id": 100487,
       "name": "Yadgir",
-      "state_id": 95829
-    },
-    {
-      "id": 103550,
-      "name": "ು Udupi Chikmagalur",
       "state_id": 95829
     }
   ],
