@@ -317,7 +317,9 @@ def _is_manager_or_pm_role(membership) -> bool:
     blob = f"{getattr(role, 'key', '')} {getattr(role, 'name', '')}".lower().strip()
     if not blob:
         return False
-    if blob in {"pm", "manager"}:
+    # Exact tokens (role key alone or name alone) — blob is "key name".
+    tokens = {t for t in blob.replace("-", "_").split() if t}
+    if tokens & {"pm", "manager"}:
         return True
     if "procurement" in blob:
         return True
