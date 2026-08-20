@@ -4839,8 +4839,7 @@ class PrajaLeadSyncAPIView(PrajaLeadsAPIView):
         # Create new record — no Mixpanel event
         request_data = {"data": incoming_data, "entity_type": entity_type}
         request_data["data"]["lead_status"] = "CLOSED"
-        if "lead_stage" not in incoming_data or not incoming_data.get("lead_stage"):
-            request_data["data"]["lead_stage"] = "FRESH"
+        request_data["data"]["lead_stage"] = "CLOSED"
         if "call_attempts" not in incoming_data:
             request_data["data"]["call_attempts"] = 0
 
