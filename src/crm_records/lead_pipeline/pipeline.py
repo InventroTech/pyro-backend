@@ -53,9 +53,13 @@ class LeadPipeline:
             return None
 
         mem_id = getattr(resolved_user.membership, "id", None) if resolved_user.membership else None
+        rm_district = (resolved_user.district or "").strip() or None
+        rm_party = (resolved_user.party or "").strip() or None
+        rm_email = (resolved_user.email or "").strip() or None
         logger.info(
             "[LeadPipeline] start tenant=%s user=%s membership_id=%s user_uuid=%s "
-            "filters: affiliated_party=%s lead_source=%s lead_status=%s lead_state=%s daily_limit=%s debug=%s",
+            "filters: affiliated_party=%s lead_source=%s lead_status=%s lead_state=%s "
+            "daily_limit=%s district=%s party=%s rm_email=%s debug=%s",
             _tenant_label(tenant),
             user_identifier,
             mem_id,
@@ -65,8 +69,20 @@ class LeadPipeline:
             resolved_user.eligible_lead_statuses or "(none)",
             resolved_user.eligible_states or "(none)",
             resolved_user.daily_limit,
+            rm_district or "(blank)",
+            rm_party or "(blank)",
+            rm_email or "(blank)",
             debug,
         )
+
+        # District required for any next-lead pull; missing party only skips party soft-rank.
+        if not rm_district and not debug:
+            logger.info(
+                "[LeadPipeline] abort: RM district blank — no leads user=%s tenant=%s",
+                user_identifier,
+                _tenant_label(tenant),
+            )
+            return None
 
         limit_status = None
         if resolved_user.daily_limit is not None:
@@ -164,7 +180,14 @@ class LeadPipeline:
                 #     now=now,
                 # )
 
-                qs = self.strategy_applier.apply(qs=qs, strategy=assignment.pull_strategy, now_iso=now_iso)
+                qs = self.strategy_applier.apply(
+                    qs=qs,
+                    strategy=assignment.pull_strategy,
+                    now_iso=now_iso,
+                    rm_district=rm_district,
+                    rm_party=rm_party,
+                    rm_email=rm_email,
+                )
 
                 # Full COUNT(*) on JSON-heavy lead querysets is slow at scale; only run when debug=1.
                 qs_count = None

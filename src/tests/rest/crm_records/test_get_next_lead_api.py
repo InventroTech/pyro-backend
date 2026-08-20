@@ -38,13 +38,13 @@ from authz import service as authz_service
 from django.core.cache import cache
 from crm_records.models import Bucket, UserBucketAssignment
 from user_settings.models import Group, TenantMemberSetting
-from user_settings.services import USER_KV_DAILY_LIMIT_KEY, USER_KV_GROUP_ID_KEY
+from user_settings.services import USER_KV_DAILY_LIMIT_KEY, USER_KV_DISTRICT_KEY, USER_KV_GROUP_ID_KEY
 
 from tests.base.test_setup import BaseAPITestCase
 from tests.factories import RecordFactory
 
 
-def _link_membership_to_group(tenant, membership, group, *, daily_limit=None):
+def _link_membership_to_group(tenant, membership, group, *, daily_limit=None, district="TestDistrict"):
     """Point membership at a Group via KV; optional DAILY_LIMIT int for legacy daily-limit paths."""
     TenantMemberSetting.objects.update_or_create(
         tenant=tenant,
@@ -58,6 +58,13 @@ def _link_membership_to_group(tenant, membership, group, *, daily_limit=None):
             tenant_membership=membership,
             key=USER_KV_DAILY_LIMIT_KEY,
             defaults={"value": int(daily_limit)},
+        )
+    if district:
+        TenantMemberSetting.objects.update_or_create(
+            tenant=tenant,
+            tenant_membership=membership,
+            key=USER_KV_DISTRICT_KEY,
+            defaults={"value": district},
         )
 
 

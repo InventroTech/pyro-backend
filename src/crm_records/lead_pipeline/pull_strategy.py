@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, List, Sequence
+from typing import Any, List, Optional, Sequence
 
 from django.conf import settings
 from django.db.models import F, QuerySet
@@ -54,6 +54,113 @@ def _resolve_order_tokens(strategy: dict) -> list[str]:
     return ["is_expired_snoozed", *tokens]
 
 
+# Django .extra() treats % as a param placeholder — double it for LIKE.
+_REFERRAL_SOURCE_SQL = (
+    "UPPER(TRIM(COALESCE(data->>'lead_source', ''))) LIKE '%%REFERRAL%%'"
+)
+
+
+def _sql_literal(value: str) -> str:
+    return value.strip().replace("'", "''").lower()
+
+
+def _json_id_rank_sql(field: str, rm_id: str) -> str:
+    """
+    Soft-rank a JSON ID field (``data->>'…'`` is always text, so string/number both work):
+      0 = matches RM id
+      1 = lead has a (different) non-blank id
+      2 = id blank / missing
+    """
+    safe = _sql_literal(rm_id)
+    raw = f"TRIM(COALESCE(data->>'{field}', ''))"
+    present = f"{raw} != '' AND LOWER({raw}) NOT IN ('null', 'none')"
+    return f"""
+        CASE
+            WHEN {present} AND LOWER({raw}) = '{safe}' THEN 0
+            WHEN {present} THEN 1
+            ELSE 2
+        END
+    """
+
+
+def _district_rank_sql(rm_district: str) -> str:
+    """Soft-rank RM district against lead ``data.district_id``."""
+    return _json_id_rank_sql("district_id", rm_district)
+
+
+def _party_rank_sql(rm_party: str) -> str:
+    """Soft-rank RM party against lead ``data.affiliated_party_id``."""
+    return _json_id_rank_sql("affiliated_party_id", rm_party)
+
+
+def _lead_creator_rank_sql(rm_email: str) -> str:
+    """
+    Soft-rank for referral Lead Creator vs RM email:
+      0 = creator matches RM email
+      1 = creator present but different RM
+      2 = creator blank / missing
+    """
+    safe = _sql_literal(rm_email)
+    creator_raw = "TRIM(COALESCE(data->>'lead_creator', ''))"
+    creator_blank = f"""(
+        {creator_raw} = ''
+        OR LOWER({creator_raw}) IN ('null', 'none')
+    )"""
+    creator_matches = f"""(
+        NOT ({creator_blank})
+        AND LOWER({creator_raw}) = '{safe}'
+    )"""
+    return f"""
+        CASE
+            WHEN {creator_matches} THEN 0
+            WHEN {creator_blank} THEN 2
+            ELSE 1
+        END
+    """
+
+
+def _routing_priority_sql(
+    rm_district: Optional[str],
+    rm_email: Optional[str],
+) -> str:
+    """
+    First routing tiebreaker after ``pull_strategy.order``.
+
+    Referral sources (``lead_source`` contains ``REFERRAL``): Lead Creator only —
+    district is ignored. Non-referral: district rank (or ``0`` if RM has no district).
+    """
+    if rm_email and rm_district:
+        return f"""
+            CASE
+                WHEN {_REFERRAL_SOURCE_SQL} THEN ({_lead_creator_rank_sql(rm_email)})
+                ELSE ({_district_rank_sql(rm_district)})
+            END
+        """
+    if rm_email:
+        return f"""
+            CASE
+                WHEN {_REFERRAL_SOURCE_SQL} THEN ({_lead_creator_rank_sql(rm_email)})
+                ELSE 0
+            END
+        """
+    return f"""
+        CASE
+            WHEN {_REFERRAL_SOURCE_SQL} THEN 0
+            ELSE ({_district_rank_sql(rm_district or "")})
+        END
+    """
+
+
+def _party_priority_sql(rm_party: str) -> str:
+    """Party tiebreaker for non-referral leads only; referral rows get ``0``."""
+    return f"""
+        CASE
+            WHEN {_REFERRAL_SOURCE_SQL} THEN 0
+            ELSE ({_party_rank_sql(rm_party)})
+        END
+    """
+
+
 class PullStrategyApplier:
     """
     Applies next-call filter and ORDER BY from ``pull_strategy``.
@@ -61,6 +168,12 @@ class PullStrategyApplier:
     ``order``: sort keys (``-`` prefix = descending). Day bucketing: ``day(created_at)``
     or ``day(first_assigned_at)`` (JSON timestamptz).
     ``include_snoozed_due``: when true, due SNOOZED rows sort first (prepends ``is_expired_snoozed`` unless already in ``order``).
+    ``rm_district`` / ``rm_email``: after normal order, first routing tiebreaker is
+    ``data.district_id`` for non-referral leads, or ``data.lead_creator`` vs RM email
+    for referral sources (``lead_source`` contains ``REFERRAL``). District/party do not
+    apply to referrals.
+    ``rm_party``: when set, soft-ranks matching ``data.affiliated_party_id`` after that
+    (non-referral only). Soft-rank is always after ``pull_strategy.order``.
     """
 
     _NEXT_CALL_READY_WHERE = """
@@ -82,6 +195,9 @@ class PullStrategyApplier:
         strategy: dict,
         now_iso: str,
         require_next_call_ready: bool = True,
+        rm_district: Optional[str] = None,
+        rm_party: Optional[str] = None,
+        rm_email: Optional[str] = None,
     ) -> QuerySet:
         if require_next_call_ready:
             qs = qs.extra(where=[self._NEXT_CALL_READY_WHERE])
@@ -92,6 +208,9 @@ class PullStrategyApplier:
             tokens=tokens,
             call_attempts_expr="COALESCE((data->>'call_attempts')::int, 0)",
             score_expr=self._build_score_expr(strategy.get("ignore_score_for_sources") or []),
+            rm_district=(rm_district or "").strip() or None,
+            rm_party=(rm_party or "").strip() or None,
+            rm_email=(rm_email or "").strip() or None,
         )
 
     def _apply_order_list(
@@ -102,11 +221,15 @@ class PullStrategyApplier:
         tokens: Sequence[Any],
         call_attempts_expr: str,
         score_expr: str,
+        rm_district: Optional[str] = None,
+        rm_party: Optional[str] = None,
+        rm_email: Optional[str] = None,
     ) -> QuerySet:
         tz = _day_timezone(strategy)
         select: dict[str, str] = {}
         order_parts: list[Any] = []
 
+        # Normal pull_strategy order first; district/party/creator only as tiebreakers.
         for raw in tokens:
             parsed = _parse_order_token(raw) if isinstance(raw, str) else None
             if not parsed:
@@ -130,6 +253,16 @@ class PullStrategyApplier:
             order_parts.append(
                 expr.desc(nulls_last=True) if descending else expr.asc(nulls_last=True)
             )
+
+        # Referral → creator email; non-referral → district. Party is non-referral only.
+        if rm_district or rm_email:
+            select["routing_priority"] = _routing_priority_sql(rm_district, rm_email)
+            # String alias (not F()) — Django resolves F() before extra(select=...).
+            order_parts.append("routing_priority")
+
+        if rm_party:
+            select["party_priority"] = _party_priority_sql(rm_party)
+            order_parts.append("party_priority")
 
         order_parts.append("id")
         return qs.extra(select=select).order_by(*order_parts)

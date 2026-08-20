@@ -78,6 +78,7 @@ from email_protocol.templates.requestToVerifyUnmannd import build_request_to_ver
 from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
 from crm_records.lead_pipeline.pipeline import LeadPipeline
 from crm_records.lead_pipeline.post_assignment import PostAssignmentActions
+from crm_records.lead_pipeline.queryset_builder import id_or_legacy_name_q
 
 
 def _parse_lead_stage_param(value):
@@ -2915,13 +2916,27 @@ class GetNextLeadView(APIView):
         ).extra(where=[_assigned_snoozed_where], params=[user_identifier])
         # Routing rules removed for lead flow; group/KV filters only.
         if eligible_lead_types:
-            assigned_snoozed_qs = assigned_snoozed_qs.filter(data__affiliated_party__in=eligible_lead_types)
+            assigned_snoozed_qs = assigned_snoozed_qs.filter(
+                id_or_legacy_name_q(
+                    id_field="affiliated_party_id",
+                    name_field="affiliated_party",
+                    values=eligible_lead_types,
+                    catalog_kind="parties",
+                )
+            )
         if eligible_lead_sources:
             assigned_snoozed_qs = assigned_snoozed_qs.filter(data__lead_source__in=eligible_lead_sources)
         if eligible_lead_statuses:
             assigned_snoozed_qs = assigned_snoozed_qs.filter(data__lead_status__in=eligible_lead_statuses)
         if eligible_states:
-            assigned_snoozed_qs = assigned_snoozed_qs.filter(data__state__in=eligible_states)
+            assigned_snoozed_qs = assigned_snoozed_qs.filter(
+                id_or_legacy_name_q(
+                    id_field="state_id",
+                    name_field="state",
+                    values=eligible_states,
+                    catalog_kind="states",
+                )
+            )
         ordered_assigned_snoozed = self._order_by_score(assigned_snoozed_qs, now_iso)
         for c in ordered_assigned_snoozed[:50]:
             if self._lead_is_due_for_call(c.data, now):
@@ -2946,13 +2961,27 @@ class GetNextLeadView(APIView):
             ).extra(where=[_unassigned_snoozed_where])
             # Routing rules removed for lead flow; group/KV filters only.
             if eligible_lead_types:
-                unassigned_snoozed_qs = unassigned_snoozed_qs.filter(data__affiliated_party__in=eligible_lead_types)
+                unassigned_snoozed_qs = unassigned_snoozed_qs.filter(
+                    id_or_legacy_name_q(
+                        id_field="affiliated_party_id",
+                        name_field="affiliated_party",
+                        values=eligible_lead_types,
+                        catalog_kind="parties",
+                    )
+                )
             if eligible_lead_sources:
                 unassigned_snoozed_qs = unassigned_snoozed_qs.filter(data__lead_source__in=eligible_lead_sources)
             if eligible_lead_statuses:
                 unassigned_snoozed_qs = unassigned_snoozed_qs.filter(data__lead_status__in=eligible_lead_statuses)
             if eligible_states:
-                unassigned_snoozed_qs = unassigned_snoozed_qs.filter(data__state__in=eligible_states)
+                unassigned_snoozed_qs = unassigned_snoozed_qs.filter(
+                    id_or_legacy_name_q(
+                        id_field="state_id",
+                        name_field="state",
+                        values=eligible_states,
+                        catalog_kind="states",
+                    )
+                )
             unassigned_snoozed_qs = unassigned_snoozed_qs.extra(
                 where=["""
                     NOT (
@@ -3006,7 +3035,14 @@ class GetNextLeadView(APIView):
             unassigned = base_qs
             logger.info("[GetNextLead] No party types configured - using all queueable leads (unfiltered by affiliated_party)")
         else:
-            unassigned = base_qs.filter(data__affiliated_party__in=eligible_lead_types)
+            unassigned = base_qs.filter(
+                id_or_legacy_name_q(
+                    id_field="affiliated_party_id",
+                    name_field="affiliated_party",
+                    values=eligible_lead_types,
+                    catalog_kind="parties",
+                )
+            )
             logger.info("[GetNextLead] Filtered unassigned leads by eligible types (from lead filter): %s", eligible_lead_types)
 
         # Intersection of all selected: only leads matching party AND lead_source AND lead_status (when each is configured).
@@ -3017,7 +3053,14 @@ class GetNextLeadView(APIView):
             unassigned = unassigned.filter(data__lead_status__in=eligible_lead_statuses)
             logger.info("[GetNextLead] Filtered unassigned leads by eligible lead statuses (intersection): %s", eligible_lead_statuses)
         if eligible_states:
-            unassigned = unassigned.filter(data__state__in=eligible_states)
+            unassigned = unassigned.filter(
+                id_or_legacy_name_q(
+                    id_field="state_id",
+                    name_field="state",
+                    values=eligible_states,
+                    catalog_kind="states",
+                )
+            )
             logger.info("[GetNextLead] Filtered unassigned leads by eligible states (intersection): %s", eligible_states)
 
         # Exclude leads assigned to someone else (assigned_to = non-empty and != current user).

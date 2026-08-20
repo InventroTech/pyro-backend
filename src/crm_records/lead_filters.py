@@ -15,7 +15,10 @@ from authz.models import TenantMembership
 from user_settings.models import Group, TenantMemberSetting
 from user_settings.services import (
     USER_KV_DAILY_LIMIT_KEY,
+    USER_KV_DISTRICT_KEY,
     USER_KV_GROUP_ID_KEY,
+    USER_KV_PARTY_KEY,
+    coerce_kv_int,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,6 +33,8 @@ class LeadFilters:
     eligible_lead_statuses: List[str]
     eligible_states: List[str]
     daily_limit: Optional[int]
+    district: Optional[str]  # RM DISTRICT from user_kv_settings; blank → considered with party for fresh gate
+    party: Optional[str]  # RM PARTY Circle id for affiliated_party_id soft-rank
     user_uuid: Optional[uuid_module.UUID]
     tenant_membership: Optional[TenantMembership]
 
@@ -37,13 +42,16 @@ class LeadFilters:
 def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
     """
     Load lead filters for the given user from the database only (no frontend params).
-    Group/KV settings: eligible_lead_types, eligible_lead_sources, eligible_lead_statuses, states, daily_limit, user_uuid.
+    Group/KV settings: eligible_lead_types, eligible_lead_sources, eligible_lead_statuses,
+    states, daily_limit, district, party, user_uuid.
     """
     eligible_lead_types: List[str] = []
     eligible_lead_sources: List[str] = []
     eligible_lead_statuses: List[str] = []
     eligible_states: List[str] = []
     daily_limit: Optional[int] = None
+    district: Optional[str] = None
+    party: Optional[str] = None
     user_uuid = None
     tenant_membership = None
 
@@ -54,6 +62,8 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
             eligible_lead_statuses=eligible_lead_statuses,
             eligible_states=eligible_states,
             daily_limit=daily_limit,
+            district=district,
+            party=party,
             user_uuid=user_uuid,
             tenant_membership=tenant_membership,
         )
@@ -81,7 +91,12 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
             kv_settings = TenantMemberSetting.objects.filter(
                 tenant=tenant,
                 tenant_membership=tenant_membership,
-                key__in=[USER_KV_DAILY_LIMIT_KEY, USER_KV_GROUP_ID_KEY],
+                key__in=[
+                    USER_KV_DAILY_LIMIT_KEY,
+                    USER_KV_GROUP_ID_KEY,
+                    USER_KV_DISTRICT_KEY,
+                    USER_KV_PARTY_KEY,
+                ],
             )
             kv_map = {row.key: row.value for row in kv_settings}
             _dl = kv_map.get(USER_KV_DAILY_LIMIT_KEY)
@@ -90,6 +105,25 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
                     daily_limit = int(_dl)
                 except (TypeError, ValueError):
                     pass
+
+            # Prefer Circle district / party ids (numbers); fall back to legacy strings.
+            _raw_district = kv_map.get(USER_KV_DISTRICT_KEY)
+            _district_id = coerce_kv_int(_raw_district)
+            if _district_id is not None:
+                district = str(_district_id)
+            elif isinstance(_raw_district, str):
+                district = _raw_district.strip() or None
+            elif _raw_district is not None and not isinstance(_raw_district, bool):
+                district = str(_raw_district).strip() or None
+
+            _raw_party = kv_map.get(USER_KV_PARTY_KEY)
+            _party_id = coerce_kv_int(_raw_party)
+            if _party_id is not None:
+                party = str(_party_id)
+            elif isinstance(_raw_party, str):
+                party = _raw_party.strip() or None
+            elif _raw_party is not None and not isinstance(_raw_party, bool):
+                party = str(_raw_party).strip() or None
 
             group = None
             group_id = kv_map.get(USER_KV_GROUP_ID_KEY)
@@ -102,18 +136,24 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
                 eligible_lead_statuses = group_data.get("lead_statuses") if isinstance(group_data.get("lead_statuses"), list) else []
                 eligible_states = group_data.get("states") if isinstance(group_data.get("states"), list) else []
                 logger.info(
-                    "[LeadFilters] From Group(%s): lead_types=%s lead_sources=%s lead_statuses=%s states=%s daily_limit=%s",
+                    "[LeadFilters] From Group(%s): lead_types=%s lead_sources=%s lead_statuses=%s "
+                    "states=%s daily_limit=%s district=%s party=%s",
                     group.name,
                     eligible_lead_types,
                     eligible_lead_sources or "(none)",
                     eligible_lead_statuses or "(none)",
                     eligible_states or "(none)",
                     daily_limit,
+                    district or "(blank)",
+                    party or "(blank)",
                 )
             else:
                 logger.info(
-                    "[LeadFilters] No GROUP KV for user %s - all queueable leads eligible",
+                    "[LeadFilters] No GROUP KV for user %s - all queueable leads eligible "
+                    "district=%s party=%s",
                     user_identifier,
+                    district or "(blank)",
+                    party or "(blank)",
                 )
         else:
             logger.warning("[LeadFilters] No TenantMembership for user_identifier=%s", user_identifier)
@@ -126,6 +166,8 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
         eligible_lead_statuses=eligible_lead_statuses,
         eligible_states=eligible_states,
         daily_limit=daily_limit,
+        district=district,
+        party=party,
         user_uuid=user_uuid,
         tenant_membership=tenant_membership,
     )

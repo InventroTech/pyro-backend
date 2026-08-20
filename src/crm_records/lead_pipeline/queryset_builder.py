@@ -12,6 +12,54 @@ from crm_records.models import Record
 logger = logging.getLogger(__name__)
 
 
+def _build_contains_in_q(field: str, values: List[str]) -> Q:
+    """Build OR of data__contains lookups to leverage the GIN index."""
+    parts = [Q(data__contains={field: v}) for v in values if v is not None and str(v) != ""]
+    if not parts:
+        return Q()
+    return reduce(or_, parts)
+
+
+def _build_id_in_q(field: str, values: List[str]) -> Q:
+    """Match JSON IDs stored as strings or numbers."""
+    parts: list[Q] = []
+    for raw in values:
+        if raw is None or isinstance(raw, bool):
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        parts.append(Q(data__contains={field: text}))
+        if text.isdigit():
+            parts.append(Q(data__contains={field: int(text)}))
+    if not parts:
+        return Q()
+    return reduce(or_, parts)
+
+
+def id_or_legacy_name_q(
+    *,
+    id_field: str,
+    name_field: str,
+    values: List[str],
+    catalog_kind: str,
+) -> Q:
+    """
+    Match Circle IDs on ``id_field`` (resolving names via catalog) and keep a
+    legacy name match on ``name_field`` for older lead payloads.
+    """
+    from user_settings.geo_party_catalog import normalize_to_catalog_ids
+
+    originals = [str(v).strip() for v in values if v is not None and str(v).strip()]
+    ids = normalize_to_catalog_ids(catalog_kind, values)
+    q = Q()
+    if ids:
+        q |= _build_id_in_q(id_field, ids)
+    if originals:
+        q |= _build_contains_in_q(name_field, originals)
+    return q
+
+
 class BucketQuerysetBuilder:
     """
     Builds record querysets from ``Bucket.filter_conditions`` (generic bucket engine).
@@ -153,7 +201,14 @@ class BucketQuerysetBuilder:
 
         # Lead-only eligibility filters (no-op for support when lists are empty).
         if eligible_lead_types:
-            qs = qs.filter(self._build_contains_in_q("affiliated_party", eligible_lead_types))
+            qs = qs.filter(
+                id_or_legacy_name_q(
+                    id_field="affiliated_party_id",
+                    name_field="affiliated_party",
+                    values=eligible_lead_types,
+                    catalog_kind="parties",
+                )
+            )
             if debug:
                 logger.info(
                     "[BucketQuerysetBuilder] after eligible_lead_types=%s count=%s",
@@ -161,7 +216,7 @@ class BucketQuerysetBuilder:
                     qs.count(),
                 )
         if eligible_lead_sources:
-            qs = qs.filter(self._build_contains_in_q("lead_source", eligible_lead_sources))
+            qs = qs.filter(_build_contains_in_q("lead_source", eligible_lead_sources))
             if debug:
                 logger.info(
                     "[BucketQuerysetBuilder] after eligible_lead_sources=%s count=%s",
@@ -169,7 +224,7 @@ class BucketQuerysetBuilder:
                     qs.count(),
                 )
         if eligible_lead_statuses:
-            qs = qs.filter(self._build_contains_in_q("lead_status", eligible_lead_statuses))
+            qs = qs.filter(_build_contains_in_q("lead_status", eligible_lead_statuses))
             if debug:
                 logger.info(
                     "[BucketQuerysetBuilder] after eligible_lead_statuses=%s count=%s",
@@ -177,7 +232,14 @@ class BucketQuerysetBuilder:
                     qs.count(),
                 )
         if eligible_states:
-            qs = qs.filter(self._build_contains_in_q("state", eligible_states))
+            qs = qs.filter(
+                id_or_legacy_name_q(
+                    id_field="state_id",
+                    name_field="state",
+                    values=eligible_states,
+                    catalog_kind="states",
+                )
+            )
             if debug:
                 logger.info(
                     "[BucketQuerysetBuilder] after eligible_states=%s count=%s",
@@ -215,11 +277,6 @@ class BucketQuerysetBuilder:
         if exclude_other_assignees:
             qs = qs.extra(where=[self._EXCLUDE_OTHER_ASSIGNEES_WHERE], params=[user_identifier])
         return qs
-
-    @staticmethod
-    def _build_contains_in_q(field: str, values: List[str]) -> Q:
-        """Build OR of data__contains lookups to leverage the GIN index."""
-        return reduce(or_, [Q(data__contains={field: v}) for v in values])
 
     @staticmethod
     def _apply_resolution_status(qs: QuerySet, statuses: Any) -> QuerySet:

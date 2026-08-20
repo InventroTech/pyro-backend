@@ -1,0 +1,1970 @@
+{
+  "version": 1,
+  "source": [
+    "Circle names spelled in App - District Names.pdf",
+    "Circle names spelled in App - Party Names.pdf"
+  ],
+  "label_format": "{name} ({id})",
+  "states": [
+    {
+      "id": 33009,
+      "name": "Andhra Pradesh"
+    },
+    {
+      "id": 95829,
+      "name": "Karnataka"
+    },
+    {
+      "id": 72631,
+      "name": "Tamil Nadu"
+    },
+    {
+      "id": 33010,
+      "name": "Telangana"
+    }
+  ],
+  "districts": [
+    {
+      "id": 90288,
+      "name": "Alluri Sitharamaraju",
+      "state_id": 33009
+    },
+    {
+      "id": 30733,
+      "name": "Amalapuram",
+      "state_id": 33009
+    },
+    {
+      "id": 30727,
+      "name": "Anakapalle",
+      "state_id": 33009
+    },
+    {
+      "id": 90290,
+      "name": "Anakapalli",
+      "state_id": 33009
+    },
+    {
+      "id": 13284,
+      "name": "Anantapur",
+      "state_id": 33009
+    },
+    {
+      "id": 30734,
+      "name": "Anantapur",
+      "state_id": 33009
+    },
+    {
+      "id": 90300,
+      "name": "Annamayya",
+      "state_id": 33009
+    },
+    {
+      "id": 30735,
+      "name": "Araku",
+      "state_id": 33009
+    },
+    {
+      "id": 30729,
+      "name": "Bapatla",
+      "state_id": 33009
+    },
+    {
+      "id": 90295,
+      "name": "Baptla",
+      "state_id": 33009
+    },
+    {
+      "id": 13290,
+      "name": "Chittoor",
+      "state_id": 33009
+    },
+    {
+      "id": 30743,
+      "name": "Chittoor",
+      "state_id": 33009
+    },
+    {
+      "id": 13280,
+      "name": "East Godavari",
+      "state_id": 33009
+    },
+    {
+      "id": 30741,
+      "name": "Eluru",
+      "state_id": 33009
+    },
+    {
+      "id": 90297,
+      "name": "Eluru",
+      "state_id": 33009
+    },
+    {
+      "id": 13286,
+      "name": "Guntur",
+      "state_id": 33009
+    },
+    {
+      "id": 30749,
+      "name": "Guntur",
+      "state_id": 33009
+    },
+    {
+      "id": 30745,
+      "name": "Hindupur",
+      "state_id": 33009
+    },
+    {
+      "id": 30737,
+      "name": "Kadapa",
+      "state_id": 33009
+    },
+    {
+      "id": 30747,
+      "name": "Kakinada",
+      "state_id": 33009
+    },
+    {
+      "id": 90460,
+      "name": "Kakinada",
+      "state_id": 33009
+    },
+    {
+      "id": 13279,
+      "name": "Krishna",
+      "state_id": 33009
+    },
+    {
+      "id": 13283,
+      "name": "Kurnool",
+      "state_id": 33009
+    },
+    {
+      "id": 30732,
+      "name": "Kurnool",
+      "state_id": 33009
+    },
+    {
+      "id": 30736,
+      "name": "Machilipatnam",
+      "state_id": 33009
+    },
+    {
+      "id": 90299,
+      "name": "Markapuram",
+      "state_id": 33009
+    },
+    {
+      "id": 30728,
+      "name": "Nandyal",
+      "state_id": 33009
+    },
+    {
+      "id": 90302,
+      "name": "Nandyal",
+      "state_id": 33009
+    },
+    {
+      "id": 30726,
+      "name": "Narasapuram",
+      "state_id": 33009
+    },
+    {
+      "id": 30742,
+      "name": "Narasaraopet",
+      "state_id": 33009
+    },
+    {
+      "id": 30738,
+      "name": "Nellore",
+      "state_id": 33009
+    },
+    {
+      "id": 13285,
+      "name": "Nellore Sri Potti Sriramulu",
+      "state_id": 33009
+    },
+    {
+      "id": 90228,
+      "name": "NTR",
+      "state_id": 33009
+    },
+    {
+      "id": 30740,
+      "name": "Ongole",
+      "state_id": 33009
+    },
+    {
+      "id": 39808,
+      "name": "Others",
+      "state_id": 33009
+    },
+    {
+      "id": 90287,
+      "name": "Palnadu",
+      "state_id": 33009
+    },
+    {
+      "id": 90291,
+      "name": "Parvathipuram Manyam",
+      "state_id": 33009
+    },
+    {
+      "id": 90294,
+      "name": "Polavaram",
+      "state_id": 33009
+    },
+    {
+      "id": 13281,
+      "name": "Prakasam",
+      "state_id": 33009
+    },
+    {
+      "id": 30731,
+      "name": "Rajahmundry",
+      "state_id": 33009
+    },
+    {
+      "id": 30750,
+      "name": "Rajampet",
+      "state_id": 33009
+    },
+    {
+      "id": 90303,
+      "name": "Sri Sathya Sai",
+      "state_id": 33009
+    },
+    {
+      "id": 13287,
+      "name": "Srikakulam",
+      "state_id": 33009
+    },
+    {
+      "id": 30730,
+      "name": "Srikakulam",
+      "state_id": 33009
+    },
+    {
+      "id": 30746,
+      "name": "Tirupati",
+      "state_id": 33009
+    },
+    {
+      "id": 90301,
+      "name": "Tirupati",
+      "state_id": 33009
+    },
+    {
+      "id": 30748,
+      "name": "Vijayawada",
+      "state_id": 33009
+    },
+    {
+      "id": 13288,
+      "name": "Visakhapatnam",
+      "state_id": 33009
+    },
+    {
+      "id": 30739,
+      "name": "Visakhapatnam",
+      "state_id": 33009
+    },
+    {
+      "id": 13291,
+      "name": "Vizianagaram",
+      "state_id": 33009
+    },
+    {
+      "id": 30744,
+      "name": "Vizianagaram",
+      "state_id": 33009
+    },
+    {
+      "id": 13282,
+      "name": "West Godavari",
+      "state_id": 33009
+    },
+    {
+      "id": 13289,
+      "name": "YSR Kadapa",
+      "state_id": 33009
+    },
+    {
+      "id": 90296,
+      "name": "నDr. B. R. Ambedkar Konaseema",
+      "state_id": 33009
+    },
+    {
+      "id": 1127,
+      "name": "Adilabad",
+      "state_id": 33010
+    },
+    {
+      "id": 31129,
+      "name": "Adilabad",
+      "state_id": 33010
+    },
+    {
+      "id": 589,
+      "name": "Bhadradri Kothagudem",
+      "state_id": 33010
+    },
+    {
+      "id": 31127,
+      "name": "Bhuvanagiri",
+      "state_id": 33010
+    },
+    {
+      "id": 31137,
+      "name": "Chevella",
+      "state_id": 33010
+    },
+    {
+      "id": 1146,
+      "name": "Hanamkonda",
+      "state_id": 33010
+    },
+    {
+      "id": 1132,
+      "name": "Hyderabad",
+      "state_id": 33010
+    },
+    {
+      "id": 31134,
+      "name": "Hyderabad",
+      "state_id": 33010
+    },
+    {
+      "id": 1144,
+      "name": "Jagtial",
+      "state_id": 33010
+    },
+    {
+      "id": 1139,
+      "name": "Jangaon",
+      "state_id": 33010
+    },
+    {
+      "id": 1129,
+      "name": "Jogulamba Gadwal",
+      "state_id": 33010
+    },
+    {
+      "id": 1140,
+      "name": "Kamareddy",
+      "state_id": 33010
+    },
+    {
+      "id": 1150,
+      "name": "Karimnagar",
+      "state_id": 33010
+    },
+    {
+      "id": 31138,
+      "name": "Karimnagar",
+      "state_id": 33010
+    },
+    {
+      "id": 1,
+      "name": "Khammam",
+      "state_id": 33010
+    },
+    {
+      "id": 31132,
+      "name": "Khammam",
+      "state_id": 33010
+    },
+    {
+      "id": 1137,
+      "name": "Komaram Bheem",
+      "state_id": 33010
+    },
+    {
+      "id": 1143,
+      "name": "Mahabubabad",
+      "state_id": 33010
+    },
+    {
+      "id": 31135,
+      "name": "Mahabubabad",
+      "state_id": 33010
+    },
+    {
+      "id": 1126,
+      "name": "Mahabubnagar",
+      "state_id": 33010
+    },
+    {
+      "id": 31140,
+      "name": "Mahabubnagar",
+      "state_id": 33010
+    },
+    {
+      "id": 31141,
+      "name": "Malkajgiri",
+      "state_id": 33010
+    },
+    {
+      "id": 1145,
+      "name": "Mancherial",
+      "state_id": 33010
+    },
+    {
+      "id": 1130,
+      "name": "Medak",
+      "state_id": 33010
+    },
+    {
+      "id": 31143,
+      "name": "Medak",
+      "state_id": 33010
+    },
+    {
+      "id": 1148,
+      "name": "Medchal-Malkajgiri",
+      "state_id": 33010
+    },
+    {
+      "id": 1152,
+      "name": "Mulugu",
+      "state_id": 33010
+    },
+    {
+      "id": 1123,
+      "name": "Nagarkurnool",
+      "state_id": 33010
+    },
+    {
+      "id": 31126,
+      "name": "Nagarkurnool",
+      "state_id": 33010
+    },
+    {
+      "id": 1124,
+      "name": "Nalgonda",
+      "state_id": 33010
+    },
+    {
+      "id": 31139,
+      "name": "Nalgonda",
+      "state_id": 33010
+    },
+    {
+      "id": 1151,
+      "name": "Narayanpet",
+      "state_id": 33010
+    },
+    {
+      "id": 1142,
+      "name": "Nirmal",
+      "state_id": 33010
+    },
+    {
+      "id": 1136,
+      "name": "Nizamabad",
+      "state_id": 33010
+    },
+    {
+      "id": 31130,
+      "name": "Nizamabad",
+      "state_id": 33010
+    },
+    {
+      "id": 1135,
+      "name": "Peddapalli",
+      "state_id": 33010
+    },
+    {
+      "id": 31133,
+      "name": "Peddapalli",
+      "state_id": 33010
+    },
+    {
+      "id": 1149,
+      "name": "Rajanna Siricilla",
+      "state_id": 33010
+    },
+    {
+      "id": 1122,
+      "name": "Rangareddy",
+      "state_id": 33010
+    },
+    {
+      "id": 1133,
+      "name": "Sangareddy",
+      "state_id": 33010
+    },
+    {
+      "id": 31131,
+      "name": "Secunderabad",
+      "state_id": 33010
+    },
+    {
+      "id": 1128,
+      "name": "Siddipet",
+      "state_id": 33010
+    },
+    {
+      "id": 1134,
+      "name": "Suryapet",
+      "state_id": 33010
+    },
+    {
+      "id": 1141,
+      "name": "Vikarabad",
+      "state_id": 33010
+    },
+    {
+      "id": 1131,
+      "name": "Wanaparthy",
+      "state_id": 33010
+    },
+    {
+      "id": 31136,
+      "name": "Warangal",
+      "state_id": 33010
+    },
+    {
+      "id": 1138,
+      "name": "Warangal Rural",
+      "state_id": 33010
+    },
+    {
+      "id": 1125,
+      "name": "Yadadri Bhongiri",
+      "state_id": 33010
+    },
+    {
+      "id": 31128,
+      "name": "Zahirabad",
+      "state_id": 33010
+    },
+    {
+      "id": 1147,
+      "name": "ȃų Jayashankar Bhupalapalle",
+      "state_id": 33010
+    },
+    {
+      "id": 87020,
+      "name": "Arakkonam",
+      "state_id": 72631
+    },
+    {
+      "id": 87022,
+      "name": "Arani",
+      "state_id": 72631
+    },
+    {
+      "id": 73005,
+      "name": "Ariyalur",
+      "state_id": 72631
+    },
+    {
+      "id": 73213,
+      "name": "Chengalpattu",
+      "state_id": 72631
+    },
+    {
+      "id": 73581,
+      "name": "Chennai",
+      "state_id": 72631
+    },
+    {
+      "id": 87143,
+      "name": "Chennai South",
+      "state_id": 72631
+    },
+    {
+      "id": 87029,
+      "name": "Chidambaram",
+      "state_id": 72631
+    },
+    {
+      "id": 73584,
+      "name": "Coimbatore",
+      "state_id": 72631
+    },
+    {
+      "id": 87055,
+      "name": "Coimbatore",
+      "state_id": 72631
+    },
+    {
+      "id": 73825,
+      "name": "Cuddalore",
+      "state_id": 72631
+    },
+    {
+      "id": 87061,
+      "name": "Cuddalore",
+      "state_id": 72631
+    },
+    {
+      "id": 74523,
+      "name": "Dharmapuri",
+      "state_id": 72631
+    },
+    {
+      "id": 87066,
+      "name": "Dharmapuri",
+      "state_id": 72631
+    },
+    {
+      "id": 74785,
+      "name": "Dindigul",
+      "state_id": 72631
+    },
+    {
+      "id": 87033,
+      "name": "Dindigul",
+      "state_id": 72631
+    },
+    {
+      "id": 75106,
+      "name": "Erode",
+      "state_id": 72631
+    },
+    {
+      "id": 87064,
+      "name": "Erode",
+      "state_id": 72631
+    },
+    {
+      "id": 75346,
+      "name": "Kallakurichi",
+      "state_id": 72631
+    },
+    {
+      "id": 87035,
+      "name": "Kallakurichi",
+      "state_id": 72631
+    },
+    {
+      "id": 75768,
+      "name": "Kancheepuram",
+      "state_id": 72631
+    },
+    {
+      "id": 87047,
+      "name": "Kancheepuram",
+      "state_id": 72631
+    },
+    {
+      "id": 76048,
+      "name": "Kanniyakumari",
+      "state_id": 72631
+    },
+    {
+      "id": 87058,
+      "name": "Kanniyakumari",
+      "state_id": 72631
+    },
+    {
+      "id": 76153,
+      "name": "Karur",
+      "state_id": 72631
+    },
+    {
+      "id": 87026,
+      "name": "Karur",
+      "state_id": 72631
+    },
+    {
+      "id": 76319,
+      "name": "Krishnagiri",
+      "state_id": 72631
+    },
+    {
+      "id": 87041,
+      "name": "Krishnagiri",
+      "state_id": 72631
+    },
+    {
+      "id": 76664,
+      "name": "Madurai",
+      "state_id": 72631
+    },
+    {
+      "id": 87122,
+      "name": "Madurai",
+      "state_id": 72631
+    },
+    {
+      "id": 77098,
+      "name": "Mayiladuthurai",
+      "state_id": 72631
+    },
+    {
+      "id": 87115,
+      "name": "Mayiladuthurai",
+      "state_id": 72631
+    },
+    {
+      "id": 77344,
+      "name": "Nagapattinam",
+      "state_id": 72631
+    },
+    {
+      "id": 87103,
+      "name": "Nagapattinam",
+      "state_id": 72631
+    },
+    {
+      "id": 77544,
+      "name": "Namakkal",
+      "state_id": 72631
+    },
+    {
+      "id": 87147,
+      "name": "Namakkal",
+      "state_id": 72631
+    },
+    {
+      "id": 80955,
+      "name": "Nilgiris",
+      "state_id": 72631
+    },
+    {
+      "id": 87039,
+      "name": "Nilgiris",
+      "state_id": 72631
+    },
+    {
+      "id": 77882,
+      "name": "Perambalur",
+      "state_id": 72631
+    },
+    {
+      "id": 87112,
+      "name": "Perambalur",
+      "state_id": 72631
+    },
+    {
+      "id": 87105,
+      "name": "Pollachi",
+      "state_id": 72631
+    },
+    {
+      "id": 78007,
+      "name": "Pudukkottai",
+      "state_id": 72631
+    },
+    {
+      "id": 78518,
+      "name": "Ramanathapuram",
+      "state_id": 72631
+    },
+    {
+      "id": 87024,
+      "name": "Ramanathapuram",
+      "state_id": 72631
+    },
+    {
+      "id": 79255,
+      "name": "Salem",
+      "state_id": 72631
+    },
+    {
+      "id": 87070,
+      "name": "Salem",
+      "state_id": 72631
+    },
+    {
+      "id": 79661,
+      "name": "Sivaganga",
+      "state_id": 72631
+    },
+    {
+      "id": 87005,
+      "name": "Sivaganga",
+      "state_id": 72631
+    },
+    {
+      "id": 87003,
+      "name": "Sriperumbudur",
+      "state_id": 72631
+    },
+    {
+      "id": 80119,
+      "name": "Tenkasi",
+      "state_id": 72631
+    },
+    {
+      "id": 87089,
+      "name": "Tenkasi",
+      "state_id": 72631
+    },
+    {
+      "id": 80351,
+      "name": "Thanjavur",
+      "state_id": 72631
+    },
+    {
+      "id": 87134,
+      "name": "Thanjavur",
+      "state_id": 72631
+    },
+    {
+      "id": 80997,
+      "name": "Theni",
+      "state_id": 72631
+    },
+    {
+      "id": 87014,
+      "name": "Theni",
+      "state_id": 72631
+    },
+    {
+      "id": 81136,
+      "name": "Thoothukkudi",
+      "state_id": 72631
+    },
+    {
+      "id": 87108,
+      "name": "Thoothukkudi",
+      "state_id": 72631
+    },
+    {
+      "id": 81552,
+      "name": "Tiruchirappalli",
+      "state_id": 72631
+    },
+    {
+      "id": 87075,
+      "name": "Tiruchirappalli",
+      "state_id": 72631
+    },
+    {
+      "id": 81971,
+      "name": "Tirunelveli",
+      "state_id": 72631
+    },
+    {
+      "id": 87007,
+      "name": "Tirunelveli",
+      "state_id": 72631
+    },
+    {
+      "id": 82185,
+      "name": "Tirupattur",
+      "state_id": 72631
+    },
+    {
+      "id": 82400,
+      "name": "Tiruppur",
+      "state_id": 72631
+    },
+    {
+      "id": 87018,
+      "name": "Tiruppur",
+      "state_id": 72631
+    },
+    {
+      "id": 82679,
+      "name": "Tiruvallur",
+      "state_id": 72631
+    },
+    {
+      "id": 87037,
+      "name": "Tiruvallur",
+      "state_id": 72631
+    },
+    {
+      "id": 83220,
+      "name": "Tiruvannamalai",
+      "state_id": 72631
+    },
+    {
+      "id": 87049,
+      "name": "Tiruvannamalai",
+      "state_id": 72631
+    },
+    {
+      "id": 84100,
+      "name": "Tiruvarur",
+      "state_id": 72631
+    },
+    {
+      "id": 84541,
+      "name": "Vellore",
+      "state_id": 72631
+    },
+    {
+      "id": 87011,
+      "name": "Vellore",
+      "state_id": 72631
+    },
+    {
+      "id": 84796,
+      "name": "Viluppuram",
+      "state_id": 72631
+    },
+    {
+      "id": 87230,
+      "name": "Viluppuram",
+      "state_id": 72631
+    },
+    {
+      "id": 85498,
+      "name": "Virudhunagar",
+      "state_id": 72631
+    },
+    {
+      "id": 87031,
+      "name": "Virudhunagar",
+      "state_id": 72631
+    },
+    {
+      "id": 87068,
+      "name": " Chennai North",
+      "state_id": 72631
+    },
+    {
+      "id": 78959,
+      "name": "ட Ranipet",
+      "state_id": 72631
+    },
+    {
+      "id": 87016,
+      "name": "ன Chennai Central",
+      "state_id": 72631
+    },
+    {
+      "id": 103315,
+      "name": "Bagalkot",
+      "state_id": 95829
+    },
+    {
+      "id": 96050,
+      "name": "Bagalkot",
+      "state_id": 95829
+    },
+    {
+      "id": 99443,
+      "name": "Ballari",
+      "state_id": 95829
+    },
+    {
+      "id": 103324,
+      "name": "Bangalore Central",
+      "state_id": 95829
+    },
+    {
+      "id": 103333,
+      "name": "Bangalore North",
+      "state_id": 95829
+    },
+    {
+      "id": 103342,
+      "name": "Bangalore Rural",
+      "state_id": 95829
+    },
+    {
+      "id": 103360,
+      "name": "Belagavi",
+      "state_id": 95829
+    },
+    {
+      "id": 96255,
+      "name": "Belagavi",
+      "state_id": 95829
+    },
+    {
+      "id": 103369,
+      "name": "Bellary",
+      "state_id": 95829
+    },
+    {
+      "id": 97762,
+      "name": "Bengaluru Rural",
+      "state_id": 95829
+    },
+    {
+      "id": 103351,
+      "name": "Bengaluru South",
+      "state_id": 95829
+    },
+    {
+      "id": 98693,
+      "name": "Bengaluru South",
+      "state_id": 95829
+    },
+    {
+      "id": 97869,
+      "name": "Bengaluru Urban",
+      "state_id": 95829
+    },
+    {
+      "id": 103378,
+      "name": "Bidar",
+      "state_id": 95829
+    },
+    {
+      "id": 99545,
+      "name": "Bidar",
+      "state_id": 95829
+    },
+    {
+      "id": 100618,
+      "name": "Chamarajanagar",
+      "state_id": 95829
+    },
+    {
+      "id": 103396,
+      "name": "Chamrajanagar",
+      "state_id": 95829
+    },
+    {
+      "id": 97968,
+      "name": "Chikkaballapur",
+      "state_id": 95829
+    },
+    {
+      "id": 100754,
+      "name": "Chikkamagaluru",
+      "state_id": 95829
+    },
+    {
+      "id": 103405,
+      "name": "Chikkballapur",
+      "state_id": 95829
+    },
+    {
+      "id": 103414,
+      "name": "Chikkodi",
+      "state_id": 95829
+    },
+    {
+      "id": 103423,
+      "name": "Chitradurga",
+      "state_id": 95829
+    },
+    {
+      "id": 98134,
+      "name": "Chitradurga",
+      "state_id": 95829
+    },
+    {
+      "id": 100993,
+      "name": "Dakshina Kannada",
+      "state_id": 95829
+    },
+    {
+      "id": 103432,
+      "name": "Dakshina Kannada",
+      "state_id": 95829
+    },
+    {
+      "id": 103441,
+      "name": "Davanagere",
+      "state_id": 95829
+    },
+    {
+      "id": 98329,
+      "name": "Davanagere",
+      "state_id": 95829
+    },
+    {
+      "id": 103450,
+      "name": "Dharwad",
+      "state_id": 95829
+    },
+    {
+      "id": 96777,
+      "name": "Dharwad",
+      "state_id": 95829
+    },
+    {
+      "id": 96930,
+      "name": "Gadag",
+      "state_id": 95829
+    },
+    {
+      "id": 103459,
+      "name": "Gulbarga",
+      "state_id": 95829
+    },
+    {
+      "id": 101225,
+      "name": "Hassan",
+      "state_id": 95829
+    },
+    {
+      "id": 103468,
+      "name": "Hassan",
+      "state_id": 95829
+    },
+    {
+      "id": 103477,
+      "name": "Haveri",
+      "state_id": 95829
+    },
+    {
+      "id": 97060,
+      "name": "Haveri",
+      "state_id": 95829
+    },
+    {
+      "id": 99739,
+      "name": "Kalaburagi",
+      "state_id": 95829
+    },
+    {
+      "id": 101501,
+      "name": "Kodagu",
+      "state_id": 95829
+    },
+    {
+      "id": 103486,
+      "name": "Kolar",
+      "state_id": 95829
+    },
+    {
+      "id": 98530,
+      "name": "Kolar",
+      "state_id": 95829
+    },
+    {
+      "id": 100011,
+      "name": "Koppal",
+      "state_id": 95829
+    },
+    {
+      "id": 103495,
+      "name": "Koppal",
+      "state_id": 95829
+    },
+    {
+      "id": 101611,
+      "name": "Mandya",
+      "state_id": 95829
+    },
+    {
+      "id": 103504,
+      "name": "Mandya",
+      "state_id": 95829
+    },
+    {
+      "id": 103513,
+      "name": "Mysore",
+      "state_id": 95829
+    },
+    {
+      "id": 101849,
+      "name": "Mysuru",
+      "state_id": 95829
+    },
+    {
+      "id": 100172,
+      "name": "Raichur",
+      "state_id": 95829
+    },
+    {
+      "id": 103523,
+      "name": "Raichur",
+      "state_id": 95829
+    },
+    {
+      "id": 103532,
+      "name": "Shivamogga",
+      "state_id": 95829
+    },
+    {
+      "id": 98825,
+      "name": "Shivamogga",
+      "state_id": 95829
+    },
+    {
+      "id": 99103,
+      "name": "Tumakuru",
+      "state_id": 95829
+    },
+    {
+      "id": 103541,
+      "name": "Tumkur",
+      "state_id": 95829
+    },
+    {
+      "id": 102113,
+      "name": "Udupi",
+      "state_id": 95829
+    },
+    {
+      "id": 103559,
+      "name": "Uttara Kannada",
+      "state_id": 95829
+    },
+    {
+      "id": 97292,
+      "name": "Uttara Kannada",
+      "state_id": 95829
+    },
+    {
+      "id": 100343,
+      "name": "Vijayanagara",
+      "state_id": 95829
+    },
+    {
+      "id": 103387,
+      "name": "Vijayapura",
+      "state_id": 95829
+    },
+    {
+      "id": 97536,
+      "name": "Vijayapura",
+      "state_id": 95829
+    },
+    {
+      "id": 100487,
+      "name": "Yadgir",
+      "state_id": 95829
+    },
+    {
+      "id": 103550,
+      "name": "ು Udupi Chikmagalur",
+      "state_id": 95829
+    }
+  ],
+  "parties": [
+    {
+      "id": 37972,
+      "name": "Aam Aadmi Party Andhra Pradesh",
+      "state_id": 33009
+    },
+    {
+      "id": 63171,
+      "name": "All India Bahujan Samaj Party",
+      "state_id": 33009
+    },
+    {
+      "id": 35766,
+      "name": "All India Forward Bloc",
+      "state_id": 33009
+    },
+    {
+      "id": 33079,
+      "name": "Bahujan Samaj Party",
+      "state_id": 33009
+    },
+    {
+      "id": 69903,
+      "name": "Bharat Adivasi Party",
+      "state_id": 33009
+    },
+    {
+      "id": 37801,
+      "name": "Bharata Chaitanya Yuvajana Party",
+      "state_id": 33009
+    },
+    {
+      "id": 37788,
+      "name": "BJP Andhra Pradesh",
+      "state_id": 33009
+    },
+    {
+      "id": 37973,
+      "name": "Communist Party of India (CPI) Andhra Pradesh",
+      "state_id": 33009
+    },
+    {
+      "id": 59055,
+      "name": "Communist Party of India (Marxist–Leninist) Janashakti",
+      "state_id": 33009
+    },
+    {
+      "id": 64534,
+      "name": "Communist Party of India (Marxist–Leninist) Red Star",
+      "state_id": 33009
+    },
+    {
+      "id": 31400,
+      "name": "Communist Party of India ;Marxist (CPM)",
+      "state_id": 33009
+    },
+    {
+      "id": 57222,
+      "name": "Communist Party of United States of India",
+      "state_id": 33009
+    },
+    {
+      "id": 37967,
+      "name": "Congress Party Andhra Pradesh",
+      "state_id": 33009
+    },
+    {
+      "id": 63287,
+      "name": "Dalita Bahujana Party",
+      "state_id": 33009
+    },
+    {
+      "id": 37797,
+      "name": "Dharma Samaj Party",
+      "state_id": 33009
+    },
+    {
+      "id": 59053,
+      "name": "Gondwana Dandkaranya Party",
+      "state_id": 33009
+    },
+    {
+      "id": 65905,
+      "name": "Hindustani Awam Morcha (Secular)",
+      "state_id": 33009
+    },
+    {
+      "id": 67482,
+      "name": "India Praja Bandhu Party",
+      "state_id": 33009
+    },
+    {
+      "id": 53163,
+      "name": "Indian Union Muslim League",
+      "state_id": 33009
+    },
+    {
+      "id": 37970,
+      "name": "Jai Bharat National Party",
+      "state_id": 33009
+    },
+    {
+      "id": 38180,
+      "name": "Jai Bheem Rao Bharat Party",
+      "state_id": 33009
+    },
+    {
+      "id": 48346,
+      "name": "Jai Swaraj Party",
+      "state_id": 33009
+    },
+    {
+      "id": 31406,
+      "name": "Janasena Party",
+      "state_id": 33009
+    },
+    {
+      "id": 57248,
+      "name": "Janata Dal (Secular)",
+      "state_id": 33009
+    },
+    {
+      "id": 56836,
+      "name": "Jathiya Chetivruthula Ikyavedika Party",
+      "state_id": 33009
+    },
+    {
+      "id": 52280,
+      "name": "Liberation Congress Party",
+      "state_id": 33009
+    },
+    {
+      "id": 61691,
+      "name": "Lok Janshakti Party",
+      "state_id": 33009
+    },
+    {
+      "id": 33012,
+      "name": "Lok Satta Party",
+      "state_id": 33009
+    },
+    {
+      "id": 58584,
+      "name": "Mahajana Rajyam Party",
+      "state_id": 33009
+    },
+    {
+      "id": 39664,
+      "name": "Mahajana Socialist Party",
+      "state_id": 33009
+    },
+    {
+      "id": 59511,
+      "name": "National Nava Kranthi Party",
+      "state_id": 33009
+    },
+    {
+      "id": 72941,
+      "name": "Nationalist Congress Party Andhrapradesh",
+      "state_id": 33009
+    },
+    {
+      "id": 56330,
+      "name": "Nationalist Janshakti Party",
+      "state_id": 33009
+    },
+    {
+      "id": 56184,
+      "name": "Navodayam Party",
+      "state_id": 33009
+    },
+    {
+      "id": 66216,
+      "name": "Praja Seva Samithi",
+      "state_id": 33009
+    },
+    {
+      "id": 71053,
+      "name": "Praja Socialist Party",
+      "state_id": 33009
+    },
+    {
+      "id": 61579,
+      "name": "Radical party of India(Ambedkarist) Andhrapradesh",
+      "state_id": 33009
+    },
+    {
+      "id": 50860,
+      "name": "Republican Party of India(Ambedkar)",
+      "state_id": 33009
+    },
+    {
+      "id": 42122,
+      "name": "Revolutionary Socialist Party",
+      "state_id": 33009
+    },
+    {
+      "id": 33417,
+      "name": "Samajwadi Party",
+      "state_id": 33009
+    },
+    {
+      "id": 57843,
+      "name": "Social Democratic Party of India Andhra Pradesh",
+      "state_id": 33009
+    },
+    {
+      "id": 64911,
+      "name": "Social Justice Party of India",
+      "state_id": 33009
+    },
+    {
+      "id": 106480,
+      "name": "Socialist Party (India) Andhra Pradesh",
+      "state_id": 33009
+    },
+    {
+      "id": 31402,
+      "name": "Telugu Desam Party",
+      "state_id": 33009
+    },
+    {
+      "id": 61506,
+      "name": "Vidutalai Chiruthigaal Katchi Andhrapradesh",
+      "state_id": 33009
+    },
+    {
+      "id": 31403,
+      "name": "YSRCP",
+      "state_id": 33009
+    },
+    {
+      "id": 49519,
+      "name": "Aadar Party",
+      "state_id": 33010
+    },
+    {
+      "id": 33013,
+      "name": "Aam Aadmi Party Telangana",
+      "state_id": 33010
+    },
+    {
+      "id": 35766,
+      "name": "All India Forward Bloc",
+      "state_id": 33010
+    },
+    {
+      "id": 93729,
+      "name": "All India Majlis-E-Inquilab-E-Millat",
+      "state_id": 33010
+    },
+    {
+      "id": 31404,
+      "name": "All India Majlis-E-Ittehadul-Muslimeen",
+      "state_id": 33010
+    },
+    {
+      "id": 59276,
+      "name": "Ambedkar National Congress",
+      "state_id": 33010
+    },
+    {
+      "id": 59825,
+      "name": "Bahujan Mukti Party Telangana",
+      "state_id": 33010
+    },
+    {
+      "id": 33079,
+      "name": "Bahujan Samaj Party",
+      "state_id": 33010
+    },
+    {
+      "id": 53049,
+      "name": "Bahujana Left Party Telangana",
+      "state_id": 33010
+    },
+    {
+      "id": 31405,
+      "name": "Bharat Rashtra Samithi",
+      "state_id": 33010
+    },
+    {
+      "id": 37801,
+      "name": "Bharata Chaitanya Yuvajana Party",
+      "state_id": 33010
+    },
+    {
+      "id": 58659,
+      "name": "Bharatiya Rashtravadi Paksha",
+      "state_id": 33010
+    },
+    {
+      "id": 61951,
+      "name": "Bhartiya Swadeshi Congress",
+      "state_id": 33010
+    },
+    {
+      "id": 31398,
+      "name": "BJP Telangana",
+      "state_id": 33010
+    },
+    {
+      "id": 31399,
+      "name": "Communist Party of India (CPI) Telangana",
+      "state_id": 33010
+    },
+    {
+      "id": 59055,
+      "name": "Communist Party of India (Marxist–Leninist) Janashakti",
+      "state_id": 33010
+    },
+    {
+      "id": 64534,
+      "name": "Communist Party of India (Marxist–Leninist) Red Star",
+      "state_id": 33010
+    },
+    {
+      "id": 31400,
+      "name": "Communist Party of India ;Marxist (CPM)",
+      "state_id": 33010
+    },
+    {
+      "id": 57222,
+      "name": "Communist Party of United States of India",
+      "state_id": 33010
+    },
+    {
+      "id": 31401,
+      "name": "Congress Party Telangana",
+      "state_id": 33010
+    },
+    {
+      "id": 58171,
+      "name": "CPI (ML) Mass Line (Prajapandha) Telangana",
+      "state_id": 33010
+    },
+    {
+      "id": 63287,
+      "name": "Dalita Bahujana Party",
+      "state_id": 33010
+    },
+    {
+      "id": 37797,
+      "name": "Dharma Samaj Party",
+      "state_id": 33010
+    },
+    {
+      "id": 59053,
+      "name": "Gondwana Dandkaranya Party",
+      "state_id": 33010
+    },
+    {
+      "id": 67482,
+      "name": "India Praja Bandhu Party",
+      "state_id": 33010
+    },
+    {
+      "id": 49887,
+      "name": "Indian National Yuva Jana party",
+      "state_id": 33010
+    },
+    {
+      "id": 62921,
+      "name": "Indian Praja Congress",
+      "state_id": 33010
+    },
+    {
+      "id": 48346,
+      "name": "Jai Swaraj Party",
+      "state_id": 33010
+    },
+    {
+      "id": 57248,
+      "name": "Janata Dal (Secular)",
+      "state_id": 33010
+    },
+    {
+      "id": 56836,
+      "name": "Jathiya Chetivruthula Ikyavedika Party",
+      "state_id": 33010
+    },
+    {
+      "id": 61691,
+      "name": "Lok Janshakti Party",
+      "state_id": 33010
+    },
+    {
+      "id": 33012,
+      "name": "Lok Satta Party",
+      "state_id": 33010
+    },
+    {
+      "id": 58584,
+      "name": "Mahajana Rajyam Party",
+      "state_id": 33010
+    },
+    {
+      "id": 39664,
+      "name": "Mahajana Socialist Party",
+      "state_id": 33010
+    },
+    {
+      "id": 68868,
+      "name": "Majlis Bachao Tehreek",
+      "state_id": 33010
+    },
+    {
+      "id": 61680,
+      "name": "Mana Telangana Rashtra Samaikya Party",
+      "state_id": 33010
+    },
+    {
+      "id": 65498,
+      "name": "Marxist Communist Party of India (United)",
+      "state_id": 33010
+    },
+    {
+      "id": 50529,
+      "name": "Nationalist Congress Party Telangana",
+      "state_id": 33010
+    },
+    {
+      "id": 59876,
+      "name": "Nava Janashakthi Congress Party",
+      "state_id": 33010
+    },
+    {
+      "id": 56184,
+      "name": "Navodayam Party",
+      "state_id": 33010
+    },
+    {
+      "id": 41340,
+      "name": "New India Party",
+      "state_id": 33010
+    },
+    {
+      "id": 39568,
+      "name": "Rashtra Samanya Praja Party",
+      "state_id": 33010
+    },
+    {
+      "id": 67939,
+      "name": "Republican Party of India (Athawale)",
+      "state_id": 33010
+    },
+    {
+      "id": 50860,
+      "name": "Republican Party of India(Ambedkar)",
+      "state_id": 33010
+    },
+    {
+      "id": 42122,
+      "name": "Revolutionary Socialist Party",
+      "state_id": 33010
+    },
+    {
+      "id": 62602,
+      "name": "Samajika Telangana Party",
+      "state_id": 33010
+    },
+    {
+      "id": 33417,
+      "name": "Samajwadi Party",
+      "state_id": 33010
+    },
+    {
+      "id": 57781,
+      "name": "Shiv Sena",
+      "state_id": 33010
+    },
+    {
+      "id": 64911,
+      "name": "Social Justice Party of India",
+      "state_id": 33010
+    },
+    {
+      "id": 55888,
+      "name": "Socialist Party (India) Telangana",
+      "state_id": 33010
+    },
+    {
+      "id": 35813,
+      "name": "Telangana Jana Samithi",
+      "state_id": 33010
+    },
+    {
+      "id": 39840,
+      "name": "Telangana Praja Sakthi Party",
+      "state_id": 33010
+    },
+    {
+      "id": 38677,
+      "name": "Telangana Praja Samithi",
+      "state_id": 33010
+    },
+    {
+      "id": 68089,
+      "name": "Telangana Rajyadhikara Party",
+      "state_id": 33010
+    },
+    {
+      "id": 62160,
+      "name": "Telangana Rakshana Samithi (Democratic)",
+      "state_id": 33010
+    },
+    {
+      "id": 107322,
+      "name": "Telangana Rakshana Sena",
+      "state_id": 33010
+    },
+    {
+      "id": 54002,
+      "name": "Vidyarthula Rajakiya Party",
+      "state_id": 33010
+    },
+    {
+      "id": 90223,
+      "name": "Aam Aadmi Party Tamil Nadu",
+      "state_id": 72631
+    },
+    {
+      "id": 72998,
+      "name": "All India Anna Dravida Munnetra Kazhagam",
+      "state_id": 72631
+    },
+    {
+      "id": 95259,
+      "name": "All India Forward Bloc",
+      "state_id": 72631
+    },
+    {
+      "id": 105010,
+      "name": "All India Puratchi Thalaivar Makkal Munnettra Kazhagam",
+      "state_id": 72631
+    },
+    {
+      "id": 91798,
+      "name": "Amma Makkal Munnetra Kazhagam",
+      "state_id": 72631
+    },
+    {
+      "id": 111228,
+      "name": "Annamalai - We The Leaders",
+      "state_id": 72631
+    },
+    {
+      "id": 90225,
+      "name": "Bahujan Samaj Party Tamil Nadu",
+      "state_id": 72631
+    },
+    {
+      "id": 72994,
+      "name": "Bharatiya Janatha Party Tamilnadu",
+      "state_id": 72631
+    },
+    {
+      "id": 88223,
+      "name": "Communist Party of India (CPI) Tamilnadu",
+      "state_id": 72631
+    },
+    {
+      "id": 88353,
+      "name": "Communist Party of India (Marxist) - CPI(M) Tamilnadu",
+      "state_id": 72631
+    },
+    {
+      "id": 72996,
+      "name": "Congress Party Tamilnadu",
+      "state_id": 72631
+    },
+    {
+      "id": 109301,
+      "name": "Desiya Jananayaga Katchi",
+      "state_id": 72631
+    },
+    {
+      "id": 88455,
+      "name": "Desiya Murpokku Dravida Kazhagam",
+      "state_id": 72631
+    },
+    {
+      "id": 72997,
+      "name": "Dravida Munnetra Kazhagam",
+      "state_id": 72631
+    },
+    {
+      "id": 95304,
+      "name": "Indian Union Muslim League Tamilnadu",
+      "state_id": 72631
+    },
+    {
+      "id": 92211,
+      "name": "Indiya Jananayaka Katchi",
+      "state_id": 72631
+    },
+    {
+      "id": 95375,
+      "name": "Kongu Makkal Munnani",
+      "state_id": 72631
+    },
+    {
+      "id": 95325,
+      "name": "Kongunadu Makkal Desia Katchi",
+      "state_id": 72631
+    },
+    {
+      "id": 88900,
+      "name": "Kshatriya Sandror Padai",
+      "state_id": 72631
+    },
+    {
+      "id": 57200,
+      "name": "Makkal Needhi Maiam",
+      "state_id": 72631
+    },
+    {
+      "id": 104548,
+      "name": "Makkal Rajjiyam Katchi",
+      "state_id": 72631
+    },
+    {
+      "id": 95376,
+      "name": "Manithaneya Jananayaga Katchi",
+      "state_id": 72631
+    },
+    {
+      "id": 95377,
+      "name": "Manithaneya Makkal Katchi",
+      "state_id": 72631
+    },
+    {
+      "id": 88901,
+      "name": "Marumalarchi Dravida Munnetra Kazhagam",
+      "state_id": 72631
+    },
+    {
+      "id": 73001,
+      "name": "Naam Tamilar Katchi",
+      "state_id": 72631
+    },
+    {
+      "id": 90229,
+      "name": "National People's Party Tamilnadu",
+      "state_id": 72631
+    },
+    {
+      "id": 93257,
+      "name": "Nationalist Congress Party Tamilnadu",
+      "state_id": 72631
+    },
+    {
+      "id": 89032,
+      "name": "Pattali Makkal Katchi",
+      "state_id": 72631
+    },
+    {
+      "id": 95315,
+      "name": "Puratchi Bharatham Katchi",
+      "state_id": 72631
+    },
+    {
+      "id": 93542,
+      "name": "Puthiya Dravida Kazhagam",
+      "state_id": 72631
+    },
+    {
+      "id": 93397,
+      "name": "Puthiya Tamilagam",
+      "state_id": 72631
+    },
+    {
+      "id": 95367,
+      "name": "Social Democratic Party of India",
+      "state_id": 72631
+    },
+    {
+      "id": 90397,
+      "name": "Tamil Maanila Congress (Moopanar)",
+      "state_id": 72631
+    },
+    {
+      "id": 94572,
+      "name": "Tamil Manila Bahujan Samaj Party",
+      "state_id": 72631
+    },
+    {
+      "id": 95359,
+      "name": "Tamizhaga Makkal Munnetra Kazhagam",
+      "state_id": 72631
+    },
+    {
+      "id": 90403,
+      "name": "Tamizhaga Vazhvurimai Katchi",
+      "state_id": 72631
+    },
+    {
+      "id": 73000,
+      "name": "Tamizhaga Vetri Kazhagam",
+      "state_id": 72631
+    },
+    {
+      "id": 72999,
+      "name": "Vidutalai Chiruthigaal Katchi",
+      "state_id": 72631
+    },
+    {
+      "id": 102503,
+      "name": "Aam Aadmi Party Karnataka",
+      "state_id": 95829
+    },
+    {
+      "id": 102501,
+      "name": "Bahujan Samaj Party Karnataka",
+      "state_id": 95829
+    },
+    {
+      "id": 102341,
+      "name": "Bharatiya Janatha Party Karnataka",
+      "state_id": 95829
+    },
+    {
+      "id": 102344,
+      "name": "Congress Party Karnataka",
+      "state_id": 95829
+    },
+    {
+      "id": 102347,
+      "name": "Janata Dal (Secular) Karnataka",
+      "state_id": 95829
+    },
+    {
+      "id": 102528,
+      "name": "Karnataka Rashtra Samithi",
+      "state_id": 95829
+    },
+    {
+      "id": 102525,
+      "name": "Uttama Prajaakeeya Party",
+      "state_id": 95829
+    }
+  ]
+}
