@@ -21,12 +21,10 @@ class TenantMembershipCreateSerializer(serializers.Serializer):
         email = attrs["email"].strip().lower()
         attrs["email"] = email
 
-        # NEW: Check TenantMembership instead of LegacyUser
         from authz.models import TenantMembership
         role_id = attrs.get("role_id")
         
         if role_id:
-            # Check for duplicate TenantMembership with same tenant + email + role
             if TenantMembership.objects.filter(
                 tenant=tenant,
                 email=email,
@@ -36,7 +34,6 @@ class TenantMembershipCreateSerializer(serializers.Serializer):
                     'email': f'User with this email and role already exists in this tenant.'
                 })
         else:
-            # If no role_id, check if any TenantMembership exists with this email
             if TenantMembership.objects.filter(
                 tenant=tenant,
                 email=email
@@ -58,6 +55,10 @@ class TenantMembershipUpdateSerializer(serializers.Serializer):
     lead_group_name = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)
     daily_target = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     daily_limit = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    
+    # Optional manager fields added to prevent them from being stripped during updates
+    manager_email = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
+    manager_name = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)
 
     def validate(self, attrs):
         req = self.context["request"]
@@ -102,14 +103,6 @@ class LinkUserUidSerializer(serializers.Serializer):
 
 
 class DeleteUserEverywhereSerializer(serializers.Serializer):
-    """
-    Identify a user by:
-      A) uid (Supabase auth.users.id) or
-      B) (email + role_id) scoped to request.tenant
-
-    role_id can be either the Legacy Role ID (public.roles.id) OR the AuthZ Role ID.
-    We attempt to resolve both to maximize match success.
-    """
     uid = serializers.UUIDField(required=False)
     email = serializers.EmailField(required=False)
     role_id = serializers.UUIDField(required=False)
@@ -125,11 +118,9 @@ class DeleteUserEverywhereSerializer(serializers.Serializer):
         email = attrs.get("email")
         role_id = attrs.get("role_id")
 
-        # Normalize email
         if email:
             attrs["email"] = email.strip().lower()
 
-        # Must have either uid OR (email & role_id)
         if not uid and not (email and role_id):
             raise serializers.ValidationError(
                 "Provide either 'uid' or both 'email' and 'role_id'."
