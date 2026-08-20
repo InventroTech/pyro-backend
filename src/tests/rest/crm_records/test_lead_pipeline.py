@@ -231,6 +231,23 @@ def _non_referral_row(**kwargs):
     return _sales_lead_row(**kwargs)
 
 
+# Circle IDs from production lead payloads / geo_party_catalog.json
+_DISTRICT_ANAKAPALLI = "90290"
+_DISTRICT_ALLURI = "90288"
+_PARTY_TDP = "31402"
+_PARTY_YSRCP = "31403"
+_STATE_ANDHRA = "33009"
+_STATE_TAMIL_NADU = "72631"
+
+
+def test_normalize_to_catalog_ids_maps_names_and_ids():
+    from user_settings.geo_party_catalog import normalize_to_catalog_ids
+
+    assert normalize_to_catalog_ids("states", ["Andhra Pradesh", "33009"]) == ["33009"]
+    assert normalize_to_catalog_ids("districts", [90290, "Anakapalli"]) == ["90290"]
+    assert normalize_to_catalog_ids("parties", ["Telugu Desam Party"]) == ["31402"]
+
+
 # ===================================================================
 # UNIT — CandidateSelector (no DB)
 # ===================================================================
@@ -686,7 +703,7 @@ def test_pull_strategy_order_day_first_assigned_at():
 
 @pytest.mark.django_db
 def test_pull_strategy_district_priority_order():
-    """Matching RM district sorts before other district, which sorts before blank."""
+    """Matching RM district_id sorts before other district_id, which sorts before blank."""
     tenant = TenantFactory()
     now = timezone.now()
 
@@ -699,14 +716,20 @@ def test_pull_strategy_district_priority_order():
         tenant=tenant,
         entity_type="lead",
         data=_non_referral_row(
-            name="Other", lead_stage="IN_QUEUE", lead_score=50, district="Mysuru"
+            name="Other",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district_id=_DISTRICT_ALLURI,
         ),
     )
     match = RecordFactory(
         tenant=tenant,
         entity_type="lead",
         data=_non_referral_row(
-            name="Match", lead_stage="IN_QUEUE", lead_score=50, district="Bengaluru"
+            name="Match",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district_id=_DISTRICT_ANAKAPALLI,
         ),
     )
     Record.objects.filter(pk__in=[blank.pk, other.pk, match.pk]).update(created_at=now)
@@ -720,7 +743,7 @@ def test_pull_strategy_district_priority_order():
             qs=qs,
             strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
             now_iso=now.isoformat(),
-            rm_district="Bengaluru",
+            rm_district=_DISTRICT_ANAKAPALLI,
         )
     )
     assert [r.id for r in ordered] == [match.id, other.id, blank.id]
@@ -728,7 +751,7 @@ def test_pull_strategy_district_priority_order():
 
 @pytest.mark.django_db
 def test_pull_strategy_party_priority_order():
-    """Matching affiliated_party name sorts before other party, then blank."""
+    """Matching affiliated_party_id sorts before other party, then blank."""
     tenant = TenantFactory()
     now = timezone.now()
 
@@ -739,7 +762,7 @@ def test_pull_strategy_party_priority_order():
             name="BlankParty",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            affiliated_party="",
+            affiliated_party_id="",
         ),
     )
     other = RecordFactory(
@@ -749,7 +772,7 @@ def test_pull_strategy_party_priority_order():
             name="OtherParty",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            affiliated_party="Congress",
+            affiliated_party_id=_PARTY_YSRCP,
         ),
     )
     match = RecordFactory(
@@ -759,7 +782,7 @@ def test_pull_strategy_party_priority_order():
             name="MatchParty",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            affiliated_party="Telugu Desam Party",
+            affiliated_party_id=_PARTY_TDP,
         ),
     )
     Record.objects.filter(pk__in=[blank.pk, other.pk, match.pk]).update(created_at=now)
@@ -773,7 +796,7 @@ def test_pull_strategy_party_priority_order():
             qs=qs,
             strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
             now_iso=now.isoformat(),
-            rm_party="Telugu Desam Party",
+            rm_party=_PARTY_TDP,
         )
     )
     assert [r.id for r in ordered] == [match.id, other.id, blank.id]
@@ -781,7 +804,7 @@ def test_pull_strategy_party_priority_order():
 
 @pytest.mark.django_db
 def test_pull_strategy_district_wins_over_party():
-    """When both district and party are set, district match beats party match."""
+    """When both district and party are set, district_id match beats party_id match."""
     tenant = TenantFactory()
     now = timezone.now()
 
@@ -793,8 +816,8 @@ def test_pull_strategy_district_wins_over_party():
             name="PartyOnly",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="Mysuru",
-            affiliated_party="Telugu Desam Party",
+            district_id=_DISTRICT_ALLURI,
+            affiliated_party_id=_PARTY_TDP,
         ),
     )
     # District match, other party
@@ -805,8 +828,8 @@ def test_pull_strategy_district_wins_over_party():
             name="DistOnly",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="Bengaluru",
-            affiliated_party="Congress",
+            district_id=_DISTRICT_ANAKAPALLI,
+            affiliated_party_id=_PARTY_YSRCP,
         ),
     )
     # Both match
@@ -817,8 +840,8 @@ def test_pull_strategy_district_wins_over_party():
             name="Both",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="Bengaluru",
-            affiliated_party="Telugu Desam Party",
+            district_id=_DISTRICT_ANAKAPALLI,
+            affiliated_party_id=_PARTY_TDP,
         ),
     )
     Record.objects.filter(
@@ -836,8 +859,8 @@ def test_pull_strategy_district_wins_over_party():
             qs=qs,
             strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
             now_iso=now.isoformat(),
-            rm_district="Bengaluru",
-            rm_party="Telugu Desam Party",
+            rm_district=_DISTRICT_ANAKAPALLI,
+            rm_party=_PARTY_TDP,
         )
     )
     assert [r.id for r in ordered] == [
@@ -860,7 +883,7 @@ def test_pull_strategy_neither_district_nor_party_is_normal_score_order():
             name="Low",
             lead_stage="IN_QUEUE",
             lead_score=10,
-            district="Bengaluru",
+            district_id=_DISTRICT_ANAKAPALLI,
             affiliated_party="Telugu Desam Party",
         ),
     )
@@ -871,7 +894,7 @@ def test_pull_strategy_neither_district_nor_party_is_normal_score_order():
             name="High",
             lead_stage="IN_QUEUE",
             lead_score=90,
-            district="Mysuru",
+            district_id=_DISTRICT_ALLURI,
             affiliated_party="Congress",
         ),
     )
@@ -902,7 +925,7 @@ def test_pull_strategy_normal_order_beats_district_soft_rank():
             name="LowMatch",
             lead_stage="IN_QUEUE",
             lead_score=10,
-            district="Bengaluru",
+            district_id=_DISTRICT_ANAKAPALLI,
         ),
     )
     high_other = RecordFactory(
@@ -912,7 +935,7 @@ def test_pull_strategy_normal_order_beats_district_soft_rank():
             name="HighOther",
             lead_stage="IN_QUEUE",
             lead_score=90,
-            district="Mysuru",
+            district_id=_DISTRICT_ALLURI,
         ),
     )
     Record.objects.filter(pk__in=[low_match.pk, high_other.pk]).update(created_at=now)
@@ -926,7 +949,7 @@ def test_pull_strategy_normal_order_beats_district_soft_rank():
             qs=qs,
             strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
             now_iso=now.isoformat(),
-            rm_district="Bengaluru",
+            rm_district=_DISTRICT_ANAKAPALLI,
         )
     )
     assert [r.id for r in ordered] == [high_other.id, low_match.id]
@@ -1045,8 +1068,8 @@ def test_pull_strategy_referral_ignores_district_and_party():
             name="OwnOtherGeo",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="Mysuru",
-            affiliated_party="Congress",
+            district_id=_DISTRICT_ALLURI,
+            affiliated_party_id=_PARTY_YSRCP,
             lead_source="PREMIUM_REFERRAL",
             lead_creator="priya.sharma@example.com",
         ),
@@ -1058,8 +1081,8 @@ def test_pull_strategy_referral_ignores_district_and_party():
             name="OtherMatchingGeo",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="Bengaluru",
-            affiliated_party="Telugu Desam Party",
+            district_id=_DISTRICT_ANAKAPALLI,
+            affiliated_party_id=_PARTY_TDP,
             lead_source="REFERRAL_TO_RM",
             lead_creator="other.rm@example.com",
         ),
@@ -1071,8 +1094,8 @@ def test_pull_strategy_referral_ignores_district_and_party():
             name="BlankMatchingGeo",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="Bengaluru",
-            affiliated_party="Telugu Desam Party",
+            district_id=_DISTRICT_ANAKAPALLI,
+            affiliated_party_id=_PARTY_TDP,
             lead_source="PREMIUM_REFERRAL",
         ),
     )
@@ -1091,8 +1114,8 @@ def test_pull_strategy_referral_ignores_district_and_party():
             qs=qs,
             strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
             now_iso=now.isoformat(),
-            rm_district="Bengaluru",
-            rm_party="Telugu Desam Party",
+            rm_district=_DISTRICT_ANAKAPALLI,
+            rm_party=_PARTY_TDP,
             rm_email="priya.sharma@example.com",
         )
     )
@@ -1116,7 +1139,7 @@ def test_pull_strategy_non_referral_still_uses_district_when_rm_email_set():
             name="OtherDistrict",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="Mysuru",
+            district_id=_DISTRICT_ALLURI,
             lead_creator="priya.sharma@example.com",
         ),
     )
@@ -1127,7 +1150,7 @@ def test_pull_strategy_non_referral_still_uses_district_when_rm_email_set():
             name="MatchDistrict",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="Bengaluru",
+            district_id=_DISTRICT_ANAKAPALLI,
             lead_creator="other.rm@example.com",
         ),
     )
@@ -1142,7 +1165,7 @@ def test_pull_strategy_non_referral_still_uses_district_when_rm_email_set():
             qs=qs,
             strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
             now_iso=now.isoformat(),
-            rm_district="Bengaluru",
+            rm_district=_DISTRICT_ANAKAPALLI,
             rm_email="priya.sharma@example.com",
         )
     )
@@ -1778,7 +1801,50 @@ def test_pipeline_tenant_isolation():
 @pytest.mark.django_db
 def test_pipeline_group_states_filter():
     """Group.states in group_data narrows the pool (e.g. state)."""
-    tenant = TenantFactory()
+    tenant = TenantFactory(slug=f"states-{uuid.uuid4()}", name=f"states-{uuid.uuid4()}")
+    _seed_tenant_buckets(tenant)
+    user, membership, _ = _make_rm_user(tenant, lead_sources=[], lead_statuses=["SALES LEAD"])
+
+    group_id = TenantMemberSetting.objects.get(
+        tenant=tenant,
+        tenant_membership=membership,
+        key=USER_KV_GROUP_ID_KEY,
+    ).value
+    group = Group.objects.get(id=group_id)
+    group.group_data = {**group.group_data, "states": [_STATE_ANDHRA]}
+    group.save()
+
+    RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="Tamil Nadu lead",
+            lead_stage="IN_QUEUE",
+            state_id=_STATE_TAMIL_NADU,
+            call_attempts=0,
+        ),
+    )
+    ap = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="AP lead",
+            lead_stage="IN_QUEUE",
+            state_id=_STATE_ANDHRA,
+            call_attempts=0,
+        ),
+    )
+
+    pipeline = LeadPipeline()
+    result = pipeline.get_next(tenant=tenant, request_user=user)
+    assert result is not None
+    assert result.pk == ap.pk
+
+
+@pytest.mark.django_db
+def test_pipeline_group_state_names_match_lead_state_id():
+    """Legacy group state names still match Circle ``state_id`` on the lead."""
+    tenant = TenantFactory(slug=f"states-name-{uuid.uuid4()}", name=f"states-name-{uuid.uuid4()}")
     _seed_tenant_buckets(tenant)
     user, membership, _ = _make_rm_user(tenant, lead_sources=[], lead_statuses=["SALES LEAD"])
 
@@ -1797,7 +1863,7 @@ def test_pipeline_group_states_filter():
         data=_sales_lead_row(
             name="Tamil Nadu lead",
             lead_stage="IN_QUEUE",
-            state="Tamil Nadu",
+            state_id=_STATE_TAMIL_NADU,
             call_attempts=0,
         ),
     )
@@ -1807,7 +1873,7 @@ def test_pipeline_group_states_filter():
         data=_sales_lead_row(
             name="AP lead",
             lead_stage="IN_QUEUE",
-            state="Andhra Pradesh",
+            state_id=_STATE_ANDHRA,
             call_attempts=0,
         ),
     )

@@ -46,6 +46,13 @@ from tests.factories import RoleFactory, SupabaseAuthUserFactory, TenantMembersh
 
 pytestmark = pytest.mark.django_db
 
+# Circle IDs from production lead payloads / geo_party_catalog.json
+_DISTRICT_ANAKAPALLI = "90290"
+_DISTRICT_ALLURI = "90288"
+_PARTY_TDP = "31402"
+_PARTY_YSRCP = "31403"
+_STATE_ANDHRA = "33009"
+
 
 def _uid():
     import uuid
@@ -255,8 +262,9 @@ def _sales_lead_data(**kwargs):
 
 
 def test_pipeline_filters_by_eligible_affiliated_party_only(sales_lead_env):
-    """UserSettings.value (parties) maps to data.affiliated_party; other parties are excluded."""
+    """Group party names match Circle ``affiliated_party_id`` on the lead."""
     env = sales_lead_env
+    Record.objects.filter(tenant=env.tenant, entity_type="lead").delete()
     _make_sales_lead_user_settings(env, eligible_parties=["Telugu Desam Party"], lead_sources=[])
 
     RecordFactory(
@@ -264,7 +272,8 @@ def test_pipeline_filters_by_eligible_affiliated_party_only(sales_lead_env):
         entity_type="lead",
         data=_sales_lead_data(
             name="Wrong party",
-            affiliated_party="Other Party",
+            affiliated_party="",
+            affiliated_party_id=_PARTY_YSRCP,
             lead_stage="IN_QUEUE",
             lead_score=999,
         ),
@@ -274,7 +283,8 @@ def test_pipeline_filters_by_eligible_affiliated_party_only(sales_lead_env):
         entity_type="lead",
         data=_sales_lead_data(
             name="Matching party",
-            affiliated_party="Telugu Desam Party",
+            affiliated_party="",
+            affiliated_party_id=_PARTY_TDP,
             lead_stage="IN_QUEUE",
             lead_score=1,
         ),
@@ -743,7 +753,7 @@ def test_pipeline_blank_rm_district_blocks_all_leads(sales_lead_env):
             name="Fresh",
             lead_stage="IN_QUEUE",
             lead_score=500,
-            district="Bengaluru",
+            district_id=_DISTRICT_ANAKAPALLI,
         ),
     )
     RecordFactory(
@@ -772,7 +782,7 @@ def test_pipeline_party_only_without_district_blocks_all_leads(sales_lead_env):
         eligible_parties=[],
         lead_sources=[],
         district=None,
-        party="Telugu Desam Party",
+        party=_PARTY_TDP,
     )
 
     RecordFactory(
@@ -782,7 +792,7 @@ def test_pipeline_party_only_without_district_blocks_all_leads(sales_lead_env):
             name="FreshPartyOnly",
             lead_stage="IN_QUEUE",
             lead_score=500,
-            affiliated_party="Telugu Desam Party",
+            affiliated_party_id=_PARTY_TDP,
         ),
     )
 
@@ -798,7 +808,7 @@ def test_pipeline_blank_party_still_pulls_when_district_set(sales_lead_env):
         env,
         eligible_parties=[],
         lead_sources=[],
-        district="Bengaluru",
+        district=_DISTRICT_ANAKAPALLI,
         party=None,
     )
 
@@ -809,7 +819,7 @@ def test_pipeline_blank_party_still_pulls_when_district_set(sales_lead_env):
             name="DistOnly",
             lead_stage="IN_QUEUE",
             lead_score=500,
-            district="Bengaluru",
+            district_id=_DISTRICT_ANAKAPALLI,
         ),
     )
 
@@ -820,11 +830,11 @@ def test_pipeline_blank_party_still_pulls_when_district_set(sales_lead_env):
 
 
 def test_pipeline_prefers_matching_district_over_other_and_blank(sales_lead_env):
-    """Same-district fresh lead beats other-district and blank when scores/order tie."""
+    """Same district_id fresh lead beats other district_id and blank when scores/order tie."""
     env = sales_lead_env
     Record.objects.filter(tenant=env.tenant, entity_type="lead").delete()
     _make_sales_lead_user_settings(
-        env, eligible_parties=[], lead_sources=[], district="Bengaluru"
+        env, eligible_parties=[], lead_sources=[], district=_DISTRICT_ANAKAPALLI
     )
     now = timezone.now()
 
@@ -845,7 +855,7 @@ def test_pipeline_prefers_matching_district_over_other_and_blank(sales_lead_env)
             name="OtherDistrict",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="Mysuru",
+            district_id=_DISTRICT_ALLURI,
             lead_source="COLD_CALL",
         ),
     )
@@ -856,7 +866,7 @@ def test_pipeline_prefers_matching_district_over_other_and_blank(sales_lead_env)
             name="MatchDistrict",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="bengaluru",  # case-insensitive match
+            district_id=int(_DISTRICT_ANAKAPALLI),  # JSON number still matches RM string id
             lead_source="COLD_CALL",
         ),
     )
@@ -873,7 +883,7 @@ def test_pipeline_other_district_before_blank_when_no_match(sales_lead_env):
     env = sales_lead_env
     Record.objects.filter(tenant=env.tenant, entity_type="lead").delete()
     _make_sales_lead_user_settings(
-        env, eligible_parties=[], lead_sources=[], district="Bengaluru"
+        env, eligible_parties=[], lead_sources=[], district=_DISTRICT_ANAKAPALLI
     )
     now = timezone.now()
 
@@ -894,7 +904,7 @@ def test_pipeline_other_district_before_blank_when_no_match(sales_lead_env):
             name="OtherDistrict",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="Mysuru",
+            district_id=_DISTRICT_ALLURI,
             lead_source="COLD_CALL",
         ),
     )
@@ -913,7 +923,7 @@ def test_pipeline_prefers_own_referral_lead_creator(sales_lead_env):
     env.membership.save(update_fields=["name"])
     Record.objects.filter(tenant=env.tenant, entity_type="lead").delete()
     _make_sales_lead_user_settings(
-        env, eligible_parties=[], lead_sources=[], district="Bengaluru"
+        env, eligible_parties=[], lead_sources=[], district=_DISTRICT_ANAKAPALLI
     )
     now = timezone.now()
 
@@ -924,7 +934,7 @@ def test_pipeline_prefers_own_referral_lead_creator(sales_lead_env):
             name="BlankCreator",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="Bengaluru",
+            district_id=_DISTRICT_ANAKAPALLI,
             lead_source="PREMIUM_REFERRAL",
         ),
     )
@@ -935,7 +945,7 @@ def test_pipeline_prefers_own_referral_lead_creator(sales_lead_env):
             name="OtherCreator",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="Bengaluru",
+            district_id=_DISTRICT_ANAKAPALLI,
             lead_source="REFERRAL_TO_RM",
             lead_creator="someone.else@example.com",
         ),
@@ -947,7 +957,7 @@ def test_pipeline_prefers_own_referral_lead_creator(sales_lead_env):
             name="NameOnly",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="Bengaluru",
+            district_id=_DISTRICT_ANAKAPALLI,
             lead_source="PREMIUM_REFERRAL",
             lead_creator="Priya Sharma",
         ),
@@ -959,7 +969,7 @@ def test_pipeline_prefers_own_referral_lead_creator(sales_lead_env):
             name="Mine",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="Mysuru",
+            district_id=_DISTRICT_ALLURI,
             lead_source="PREMIUM_REFERRAL",
             lead_creator=env.membership.email,
         ),
@@ -979,7 +989,7 @@ def test_pipeline_referral_blank_creator_after_other_creators(sales_lead_env):
     env = sales_lead_env
     Record.objects.filter(tenant=env.tenant, entity_type="lead").delete()
     _make_sales_lead_user_settings(
-        env, eligible_parties=[], lead_sources=[], district="Bengaluru"
+        env, eligible_parties=[], lead_sources=[], district=_DISTRICT_ANAKAPALLI
     )
     now = timezone.now()
 
@@ -990,7 +1000,7 @@ def test_pipeline_referral_blank_creator_after_other_creators(sales_lead_env):
             name="BlankCreator",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="Bengaluru",
+            district_id=_DISTRICT_ANAKAPALLI,
             lead_source="PREMIUM_REFERRAL",
         ),
     )
@@ -1001,7 +1011,7 @@ def test_pipeline_referral_blank_creator_after_other_creators(sales_lead_env):
             name="OtherCreator",
             lead_stage="IN_QUEUE",
             lead_score=50,
-            district="Mysuru",
+            district_id=_DISTRICT_ALLURI,
             lead_source="PREMIUM_REFERRAL",
             lead_creator="someone.else@example.com",
         ),
@@ -1012,3 +1022,52 @@ def test_pipeline_referral_blank_creator_after_other_creators(sales_lead_env):
     result = pipeline.get_next(tenant=env.tenant, request_user=env.user)
     assert result is not None
     assert result.pk == other_creator.pk
+
+
+def test_pipeline_ranks_circle_payload_district_and_party(sales_lead_env):
+    """Non-referral Circle payload IDs: matching district_id then affiliated_party_id win."""
+    env = sales_lead_env
+    Record.objects.filter(tenant=env.tenant, entity_type="lead").delete()
+    _make_sales_lead_user_settings(
+        env,
+        eligible_parties=[],
+        lead_sources=[],
+        district=_DISTRICT_ANAKAPALLI,
+        party=_PARTY_TDP,
+    )
+    now = timezone.now()
+
+    other = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="OtherGeo",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            lead_source="COLD_CALL",
+            state_id=_STATE_ANDHRA,
+            district_id=_DISTRICT_ALLURI,
+            affiliated_party="",
+            affiliated_party_id=_PARTY_YSRCP,
+        ),
+    )
+    match = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="PayloadMatch",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            lead_source="COLD_CALL",
+            state_id=_STATE_ANDHRA,
+            district_id=_DISTRICT_ANAKAPALLI,
+            affiliated_party="Telugu Desam Party",
+            affiliated_party_id=_PARTY_TDP,
+        ),
+    )
+    Record.objects.filter(pk__in=[other.pk, match.pk]).update(created_at=now)
+
+    pipeline = LeadPipeline()
+    result = pipeline.get_next(tenant=env.tenant, request_user=env.user)
+    assert result is not None
+    assert result.pk == match.pk
