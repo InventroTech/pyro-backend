@@ -623,6 +623,78 @@ class InventoryRequestFormBackendTests(TestCase):
         record.refresh_from_db()
         self.assertEqual(record.data["status"], "IN_SHIPPING")
 
+    def test_team_lead_can_update_tracking_on_own_approved_request(self):
+        """TL who created the request may still update tracking after approval."""
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "VENDOR_IDENTIFIED",
+                "requester_id": str(self.team_lead_user.supabase_uid),
+                "item_name_freeform": "Drone",
+                "quantity_required": 1,
+                "team_lead": self.team_lead_membership.id,
+            },
+        )
+        response = self._patch_request(
+            record,
+            {
+                **record.data,
+                "tracking_number": "471904076719",
+                "courier_name": "FedEx",
+                "tracking_link": "https://www.fedex.com/fedextrack/?trknbr=471904076719",
+            },
+            user=self.team_lead_user,
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        record.refresh_from_db()
+        self.assertEqual(record.data["tracking_number"], "471904076719")
+        self.assertEqual(record.data["courier_name"], "FedEx")
+
+    def test_pm_can_update_tracking_on_own_approved_request(self):
+        """Procurement manager who created the request may update tracking after approval."""
+        pm_user = User.objects.create_user(
+            email="pm@example.com",
+            password="pass1234",
+            supabase_uid=str(uuid.uuid4()),
+        )
+        pm_role = Role.objects.create(
+            tenant=self.tenant,
+            key="pm",
+            name="Procurement Manager",
+        )
+        TenantMembership.objects.create(
+            tenant=self.tenant,
+            user_id=pm_user.supabase_uid,
+            email=pm_user.email,
+            role=pm_role,
+            is_active=True,
+            name="PM User",
+        )
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "IN_SHIPPING",
+                "requester_id": str(pm_user.supabase_uid),
+                "item_name_freeform": "Laptop",
+                "quantity_required": 1,
+            },
+        )
+        response = self._patch_request(
+            record,
+            {
+                **record.data,
+                "tracking_number": "AWB999888777",
+                "courier_name": "Delhivery",
+            },
+            user=pm_user,
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        record.refresh_from_db()
+        self.assertEqual(record.data["tracking_number"], "AWB999888777")
+        self.assertEqual(record.data["courier_name"], "Delhivery")
+
     def test_requester_cannot_edit_in_cart_request(self):
         record = Record.objects.create(
             tenant=self.tenant,
