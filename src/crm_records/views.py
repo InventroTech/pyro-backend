@@ -4848,9 +4848,9 @@ class PrajaLeadSyncAPIView(PrajaLeadsAPIView):
         try:
             with transaction.atomic():
                 record = serializer.save(tenant=tenant, entity_type=entity_type)
-        except Exception as e:
-            logger.error("[PrajaLeadSync] Failed to create praja_id=%s: %s", praja_id, str(e))
-            return {"status": "error", "praja_id": praja_id, "error": str(e)}
+        except Exception:
+            logger.exception("[PrajaLeadSync] Failed to create praja_id=%s", praja_id)
+            return {"status": "error", "praja_id": praja_id, "error": "Failed to create record"}
 
         logger.info(
             "[PrajaLeadSync] Created praja_id=%s id=%s tenant=%s (no Mixpanel)",
