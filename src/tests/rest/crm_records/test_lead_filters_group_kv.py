@@ -11,7 +11,12 @@ import pytest
 
 from crm_records.lead_filters import get_lead_filters_for_user
 from user_settings.models import Group, TenantMemberSetting
-from user_settings.services import USER_KV_DAILY_LIMIT_KEY, USER_KV_GROUP_ID_KEY
+from user_settings.services import (
+    USER_KV_DAILY_LIMIT_KEY,
+    USER_KV_DISTRICT_KEY,
+    USER_KV_GROUP_ID_KEY,
+    USER_KV_PARTY_KEY,
+)
 from tests.factories.authz_factory import TenantMembershipFactory
 from tests.factories.core_factory import TenantFactory
 
@@ -45,6 +50,12 @@ def test_lead_filters_from_group_and_kv():
         key=USER_KV_DAILY_LIMIT_KEY,
         value=25,
     )
+    TenantMemberSetting.objects.create(
+        tenant=tenant,
+        tenant_membership=membership,
+        key=USER_KV_DISTRICT_KEY,
+        value="Bengaluru Urban",
+    )
 
     filters = get_lead_filters_for_user(tenant, str(user_uuid))
 
@@ -53,8 +64,34 @@ def test_lead_filters_from_group_and_kv():
     assert filters.eligible_lead_statuses == ["NEW"]
     assert filters.eligible_states == ["Karnataka"]
     assert filters.daily_limit == 25
+    assert filters.district == "Bengaluru Urban"
     assert filters.user_uuid == user_uuid
     assert filters.tenant_membership == membership
+
+
+@pytest.mark.django_db
+def test_lead_filters_numeric_district_and_party_ids():
+    tenant = TenantFactory()
+    user_uuid = uuid.uuid4()
+    membership = TenantMembershipFactory(tenant=tenant, user_id=user_uuid)
+
+    TenantMemberSetting.objects.create(
+        tenant=tenant,
+        tenant_membership=membership,
+        key=USER_KV_DISTRICT_KEY,
+        value=90290,
+    )
+    TenantMemberSetting.objects.create(
+        tenant=tenant,
+        tenant_membership=membership,
+        key=USER_KV_PARTY_KEY,
+        value="31402",
+    )
+
+    filters = get_lead_filters_for_user(tenant, str(user_uuid))
+
+    assert filters.district == "90290"
+    assert filters.party == "31402"
 
 
 @pytest.mark.django_db
@@ -67,3 +104,4 @@ def test_lead_filters_no_group_kv_returns_empty_filters():
 
     assert filters.eligible_lead_types == []
     assert filters.daily_limit is None
+    assert filters.district is None

@@ -33,13 +33,25 @@ from crm_records.lead_pipeline.pipeline import LeadPipeline
 from crm_records.models import Bucket, Record, UserBucketAssignment
 from crm_records.rule_engine import action_compute_next_call_from_attempts
 from user_settings.models import Group, TenantMemberSetting
-from user_settings.services import USER_KV_DAILY_LIMIT_KEY, USER_KV_GROUP_ID_KEY
+from user_settings.services import (
+    USER_KV_DAILY_LIMIT_KEY,
+    USER_KV_DISTRICT_KEY,
+    USER_KV_GROUP_ID_KEY,
+    USER_KV_PARTY_KEY,
+)
 
 from tests.factories import BackgroundJobFactory, RecordFactory, TenantFactory, UserFactory
 from tests.factories import RoleFactory, SupabaseAuthUserFactory, TenantMembershipFactory
 
 
 pytestmark = pytest.mark.django_db
+
+# Circle IDs from production lead payloads / geo_party_catalog.json
+_DISTRICT_ANAKAPALLI = "90290"
+_DISTRICT_ALLURI = "90288"
+_PARTY_TDP = "31402"
+_PARTY_YSRCP = "31403"
+_STATE_ANDHRA = "33009"
 
 
 def _uid():
@@ -69,6 +81,8 @@ def _make_sales_lead_user_settings(
     eligible_parties: list | None = None,
     lead_sources: list | None = None,
     daily_limit: int | None = None,
+    district: str | None = "TestDistrict",
+    party: str | None = None,
 ):
     """Group/KV settings for SALES LEAD RMs (lead_statuses filter)."""
     group, _ = Group.objects.update_or_create(
@@ -94,48 +108,80 @@ def _make_sales_lead_user_settings(
         key=USER_KV_DAILY_LIMIT_KEY,
         defaults={"value": daily_limit},
     )
+    if district:
+        TenantMemberSetting.objects.update_or_create(
+            tenant=env.tenant,
+            tenant_membership=env.membership,
+            key=USER_KV_DISTRICT_KEY,
+            defaults={"value": district},
+        )
+    else:
+        TenantMemberSetting.objects.filter(
+            tenant=env.tenant,
+            tenant_membership=env.membership,
+            key=USER_KV_DISTRICT_KEY,
+        ).delete()
+    if party:
+        TenantMemberSetting.objects.update_or_create(
+            tenant=env.tenant,
+            tenant_membership=env.membership,
+            key=USER_KV_PARTY_KEY,
+            defaults={"value": party},
+        )
+    else:
+        TenantMemberSetting.objects.filter(
+            tenant=env.tenant,
+            tenant_membership=env.membership,
+            key=USER_KV_PARTY_KEY,
+        ).delete()
 
 
 def _seed_default_buckets(tenant) -> None:
     """
     Tenant-wide bucket order matching production: follow-up → fresh → not-connected retry.
     """
-    followup = Bucket.objects.create(
+    followup, _ = Bucket.objects.get_or_create(
         tenant=tenant,
-        name="Followup Callback",
         slug="followup_callback",
-        filter_conditions={
-            "lead_stage": ["SNOOZED", "IN_QUEUE"],
-            "call_attempts": {"lt": 6},
-            "next_call_due": True,
-            "assigned_scope": "me",
-            "apply_routing_rule": True,
-            "fallback_assigned_scope": "unassigned",
+        defaults={
+            "name": "Followup Callback",
+            "filter_conditions": {
+                "lead_stage": ["SNOOZED", "IN_QUEUE"],
+                "call_attempts": {"lt": 6},
+                "next_call_due": True,
+                "assigned_scope": "me",
+                "apply_routing_rule": True,
+                "fallback_assigned_scope": "unassigned",
+            },
         },
     )
-    fresh = Bucket.objects.create(
+    fresh, _ = Bucket.objects.get_or_create(
         tenant=tenant,
-        name="Fresh Leads",
         slug="fresh_leads",
-        filter_conditions={
-            "lead_stage": ["FRESH", "IN_QUEUE"],
-            "call_attempts": {"lte": 0},
-            "next_call_due": False,
-            "assigned_scope": "unassigned",
-            "apply_routing_rule": True,
-            "daily_limit_applies": True,
+        defaults={
+            "name": "Fresh Leads",
+            "filter_conditions": {
+                "lead_stage": ["FRESH", "IN_QUEUE"],
+                "call_attempts": {"lte": 0},
+                "next_call_due": False,
+                "assigned_scope": "unassigned",
+                "apply_routing_rule": True,
+                "daily_limit_applies": True,
+            },
         },
     )
-    not_connected = Bucket.objects.create(
+    not_connected, _ = Bucket.objects.get_or_create(
         tenant=tenant,
-        name="Not Connected Retry",
         slug="not_connected_retry",
-        filter_conditions={
-            "lead_stage": ["NOT_CONNECTED", "IN_QUEUE"],
-            "call_attempts": {"lt": 6, "gte": 1},
-            "next_call_due": True,
-            "assigned_scope": "me",
-            "apply_routing_rule": False,
+        defaults={
+            "name": "Not Connected Retry",
+            "filter_conditions": {
+                "lead_stage": ["NOT_CONNECTED", "IN_QUEUE"],
+                "call_attempts": {"lt": 6, "gte": 1},
+                "next_call_due": True,
+                "assigned_scope": "me",
+                "apply_routing_rule": False,
+            },
         },
     )
 
@@ -158,26 +204,23 @@ def _seed_default_buckets(tenant) -> None:
         "ignore_score_for_sources": [],
     }
 
-    UserBucketAssignment.objects.create(
+    UserBucketAssignment.objects.get_or_create(
         tenant=tenant,
         user=None,
         bucket=followup,
-        priority=1,
-        pull_strategy=strategy_followup,
+        defaults={"priority": 1, "pull_strategy": strategy_followup},
     )
-    UserBucketAssignment.objects.create(
+    UserBucketAssignment.objects.get_or_create(
         tenant=tenant,
         user=None,
         bucket=fresh,
-        priority=2,
-        pull_strategy=strategy_fresh,
+        defaults={"priority": 2, "pull_strategy": strategy_fresh},
     )
-    UserBucketAssignment.objects.create(
+    UserBucketAssignment.objects.get_or_create(
         tenant=tenant,
         user=None,
         bucket=not_connected,
-        priority=3,
-        pull_strategy=strategy_not_connected,
+        defaults={"priority": 3, "pull_strategy": strategy_not_connected},
     )
 
 
@@ -188,7 +231,7 @@ def sales_lead_env():
     uid = _uid()
     user = UserFactory(
         supabase_uid=uid,
-        email="pipeline-test@example.com",
+        email=f"pipeline-{uid[:8]}@example.com",
         tenant_id=str(tenant.id),
     )
     import uuid as _uuid
@@ -219,8 +262,9 @@ def _sales_lead_data(**kwargs):
 
 
 def test_pipeline_filters_by_eligible_affiliated_party_only(sales_lead_env):
-    """UserSettings.value (parties) maps to data.affiliated_party; other parties are excluded."""
+    """Group party names match Circle ``affiliated_party_id`` on the lead."""
     env = sales_lead_env
+    Record.objects.filter(tenant=env.tenant, entity_type="lead").delete()
     _make_sales_lead_user_settings(env, eligible_parties=["Telugu Desam Party"], lead_sources=[])
 
     RecordFactory(
@@ -228,7 +272,8 @@ def test_pipeline_filters_by_eligible_affiliated_party_only(sales_lead_env):
         entity_type="lead",
         data=_sales_lead_data(
             name="Wrong party",
-            affiliated_party="Other Party",
+            affiliated_party="",
+            affiliated_party_id=_PARTY_YSRCP,
             lead_stage="IN_QUEUE",
             lead_score=999,
         ),
@@ -238,7 +283,8 @@ def test_pipeline_filters_by_eligible_affiliated_party_only(sales_lead_env):
         entity_type="lead",
         data=_sales_lead_data(
             name="Matching party",
-            affiliated_party="Telugu Desam Party",
+            affiliated_party="",
+            affiliated_party_id=_PARTY_TDP,
             lead_stage="IN_QUEUE",
             lead_score=1,
         ),
@@ -690,3 +736,338 @@ def test_compute_next_call_from_attempts_fixed_minutes_matches_rule_engine():
     parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
     delta = (parsed - before).total_seconds()
     assert 120 - 30 <= delta <= 120 + 30
+
+
+def test_pipeline_blank_rm_district_blocks_all_leads(sales_lead_env):
+    """RM with blank DISTRICT must not get any next lead (fresh or follow-up)."""
+    env = sales_lead_env
+    _make_sales_lead_user_settings(
+        env, eligible_parties=[], lead_sources=[], district=None, party=None
+    )
+    now = timezone.now()
+
+    RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="Fresh",
+            lead_stage="IN_QUEUE",
+            lead_score=500,
+            district_id=_DISTRICT_ANAKAPALLI,
+        ),
+    )
+    RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="MineDue",
+            lead_stage="SNOOZED",
+            call_attempts=1,
+            assigned_to=env.user_identifier,
+            next_call_at=(now - timedelta(minutes=5)).isoformat(),
+            lead_score=10,
+        ),
+    )
+
+    pipeline = LeadPipeline()
+    assert pipeline.get_next(tenant=env.tenant, request_user=env.user) is None
+
+
+def test_pipeline_party_only_without_district_blocks_all_leads(sales_lead_env):
+    """Party alone does not unlock pulls — district is required."""
+    env = sales_lead_env
+    Record.objects.filter(tenant=env.tenant, entity_type="lead").delete()
+    _make_sales_lead_user_settings(
+        env,
+        eligible_parties=[],
+        lead_sources=[],
+        district=None,
+        party=_PARTY_TDP,
+    )
+
+    RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="FreshPartyOnly",
+            lead_stage="IN_QUEUE",
+            lead_score=500,
+            affiliated_party_id=_PARTY_TDP,
+        ),
+    )
+
+    pipeline = LeadPipeline()
+    assert pipeline.get_next(tenant=env.tenant, request_user=env.user) is None
+
+
+def test_pipeline_blank_party_still_pulls_when_district_set(sales_lead_env):
+    """Missing PARTY has no gate effect — district alone is enough to pull."""
+    env = sales_lead_env
+    Record.objects.filter(tenant=env.tenant, entity_type="lead").delete()
+    _make_sales_lead_user_settings(
+        env,
+        eligible_parties=[],
+        lead_sources=[],
+        district=_DISTRICT_ANAKAPALLI,
+        party=None,
+    )
+
+    lead = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="DistOnly",
+            lead_stage="IN_QUEUE",
+            lead_score=500,
+            district_id=_DISTRICT_ANAKAPALLI,
+        ),
+    )
+
+    pipeline = LeadPipeline()
+    result = pipeline.get_next(tenant=env.tenant, request_user=env.user)
+    assert result is not None
+    assert result.id == lead.id
+
+
+def test_pipeline_prefers_matching_district_over_other_and_blank(sales_lead_env):
+    """Same district_id fresh lead beats other district_id and blank when scores/order tie."""
+    env = sales_lead_env
+    Record.objects.filter(tenant=env.tenant, entity_type="lead").delete()
+    _make_sales_lead_user_settings(
+        env, eligible_parties=[], lead_sources=[], district=_DISTRICT_ANAKAPALLI
+    )
+    now = timezone.now()
+
+    blank = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="BlankDistrict",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            lead_source="COLD_CALL",
+        ),
+    )
+    other = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="OtherDistrict",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district_id=_DISTRICT_ALLURI,
+            lead_source="COLD_CALL",
+        ),
+    )
+    match = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="MatchDistrict",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district_id=int(_DISTRICT_ANAKAPALLI),  # JSON number still matches RM string id
+            lead_source="COLD_CALL",
+        ),
+    )
+    Record.objects.filter(pk__in=[blank.pk, other.pk, match.pk]).update(created_at=now)
+
+    pipeline = LeadPipeline()
+    result = pipeline.get_next(tenant=env.tenant, request_user=env.user)
+    assert result is not None
+    assert result.pk == match.pk
+
+
+def test_pipeline_other_district_before_blank_when_no_match(sales_lead_env):
+    """When no RM-district match exists, other districts beat blank when scores tie."""
+    env = sales_lead_env
+    Record.objects.filter(tenant=env.tenant, entity_type="lead").delete()
+    _make_sales_lead_user_settings(
+        env, eligible_parties=[], lead_sources=[], district=_DISTRICT_ANAKAPALLI
+    )
+    now = timezone.now()
+
+    blank = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="BlankDistrict",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            lead_source="COLD_CALL",
+        ),
+    )
+    other = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="OtherDistrict",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district_id=_DISTRICT_ALLURI,
+            lead_source="COLD_CALL",
+        ),
+    )
+    Record.objects.filter(pk__in=[blank.pk, other.pk]).update(created_at=now)
+
+    pipeline = LeadPipeline()
+    result = pipeline.get_next(tenant=env.tenant, request_user=env.user)
+    assert result is not None
+    assert result.pk == other.pk
+
+
+def test_pipeline_prefers_own_referral_lead_creator(sales_lead_env):
+    """Referral leads whose Lead Creator email matches this RM are prioritized."""
+    env = sales_lead_env
+    env.membership.name = "Priya Sharma"
+    env.membership.save(update_fields=["name"])
+    Record.objects.filter(tenant=env.tenant, entity_type="lead").delete()
+    _make_sales_lead_user_settings(
+        env, eligible_parties=[], lead_sources=[], district=_DISTRICT_ANAKAPALLI
+    )
+    now = timezone.now()
+
+    blank_creator = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="BlankCreator",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district_id=_DISTRICT_ANAKAPALLI,
+            lead_source="PREMIUM_REFERRAL",
+        ),
+    )
+    other_creator = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="OtherCreator",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district_id=_DISTRICT_ANAKAPALLI,
+            lead_source="REFERRAL_TO_RM",
+            lead_creator="someone.else@example.com",
+        ),
+    )
+    name_only = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="NameOnly",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district_id=_DISTRICT_ANAKAPALLI,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="Priya Sharma",
+        ),
+    )
+    mine = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="Mine",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district_id=_DISTRICT_ALLURI,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator=env.membership.email,
+        ),
+    )
+    Record.objects.filter(
+        pk__in=[blank_creator.pk, other_creator.pk, name_only.pk, mine.pk]
+    ).update(created_at=now)
+
+    pipeline = LeadPipeline()
+    result = pipeline.get_next(tenant=env.tenant, request_user=env.user)
+    assert result is not None
+    assert result.pk == mine.pk
+
+
+def test_pipeline_referral_blank_creator_after_other_creators(sales_lead_env):
+    """When RM has no self-created referral, other creator emails beat blank Lead Creator."""
+    env = sales_lead_env
+    Record.objects.filter(tenant=env.tenant, entity_type="lead").delete()
+    _make_sales_lead_user_settings(
+        env, eligible_parties=[], lead_sources=[], district=_DISTRICT_ANAKAPALLI
+    )
+    now = timezone.now()
+
+    blank_creator = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="BlankCreator",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district_id=_DISTRICT_ANAKAPALLI,
+            lead_source="PREMIUM_REFERRAL",
+        ),
+    )
+    other_creator = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="OtherCreator",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district_id=_DISTRICT_ALLURI,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="someone.else@example.com",
+        ),
+    )
+    Record.objects.filter(pk__in=[blank_creator.pk, other_creator.pk]).update(created_at=now)
+
+    pipeline = LeadPipeline()
+    result = pipeline.get_next(tenant=env.tenant, request_user=env.user)
+    assert result is not None
+    assert result.pk == other_creator.pk
+
+
+def test_pipeline_ranks_circle_payload_district_and_party(sales_lead_env):
+    """Non-referral Circle payload IDs: matching district_id then affiliated_party_id win."""
+    env = sales_lead_env
+    Record.objects.filter(tenant=env.tenant, entity_type="lead").delete()
+    _make_sales_lead_user_settings(
+        env,
+        eligible_parties=[],
+        lead_sources=[],
+        district=_DISTRICT_ANAKAPALLI,
+        party=_PARTY_TDP,
+    )
+    now = timezone.now()
+
+    other = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="OtherGeo",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            lead_source="COLD_CALL",
+            state_id=_STATE_ANDHRA,
+            district_id=_DISTRICT_ALLURI,
+            affiliated_party="",
+            affiliated_party_id=_PARTY_YSRCP,
+        ),
+    )
+    match = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="PayloadMatch",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            lead_source="COLD_CALL",
+            state_id=_STATE_ANDHRA,
+            district_id=_DISTRICT_ANAKAPALLI,
+            affiliated_party="Telugu Desam Party",
+            affiliated_party_id=_PARTY_TDP,
+        ),
+    )
+    Record.objects.filter(pk__in=[other.pk, match.pk]).update(created_at=now)
+
+    pipeline = LeadPipeline()
+    result = pipeline.get_next(tenant=env.tenant, request_user=env.user)
+    assert result is not None
+    assert result.pk == match.pk
