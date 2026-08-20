@@ -22,7 +22,7 @@ from drf_spectacular.views import (
     SpectacularRedocView,
     SpectacularSwaggerView,
 )
-from crm_records.views import PrajaLeadsAPIView, PrajaLeadEntityBackfillAPIView
+from crm_records.views import PrajaLeadsAPIView, PrajaLeadEntityBackfillAPIView, PrajaLeadSyncAPIView
 from support_ticket.views import SupportTicketEntityAPIView
 from middleware.prometheus_metrics import metrics_view
 
@@ -53,6 +53,7 @@ urlpatterns = [
     path('entity/', PrajaLeadsAPIView.as_view(), name='entity-api'),
     path('entity/support_ticket/', SupportTicketEntityAPIView.as_view(), name='entity-support-ticket-api'),
     path('entity/backfill/', PrajaLeadEntityBackfillAPIView.as_view(), name='entity-backfill-api'),
+    path('entity/sync/', PrajaLeadSyncAPIView.as_view(), name='entity-sync-api'),
     
     # OpenAPI schema
     path("api/schema/", SpectacularAPIView.as_view(

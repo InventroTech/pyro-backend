@@ -3656,7 +3656,7 @@ class PartnerEventsView(APIView):
         if api_secret_obj and api_secret_obj.tenant:
             return api_secret_obj.tenant, None
         # 2) Optional: tenant_id in request (e.g. when using default PYRO_SECRET without DB mapping)
-        tenant_id = request.query_params.get('tenant_id') or request.data.get('tenant_id')
+        tenant_id = request.query_params.get('tenant_id') or (request.data.get('tenant_id') if isinstance(request.data, dict) else None)
         if tenant_id:
             try:
                 tenant = Tenant.objects.get(id=tenant_id)
@@ -4001,7 +4001,7 @@ class PrajaLeadsAPIView(APIView):
     
     def get_entity_type(self, request):
         """Get entity_type from query params, request body, or default to 'lead'"""
-        entity_type = request.query_params.get('entity') or request.data.get('entity_type')
+        entity_type = request.query_params.get('entity') or (request.data.get('entity_type') if isinstance(request.data, dict) else None)
         return entity_type if entity_type else 'lead'
     
     def _get_tenant(self, request):
@@ -4014,7 +4014,7 @@ class PrajaLeadsAPIView(APIView):
         from django.conf import settings
         
         # Priority 1: Check if tenant_id is provided in query params or request data
-        tenant_id = request.query_params.get('tenant_id') or request.data.get('tenant_id')
+        tenant_id = request.query_params.get('tenant_id') or (request.data.get('tenant_id') if isinstance(request.data, dict) else None)
         if tenant_id:
             try:
                 tenant = Tenant.objects.get(id=tenant_id)
@@ -4728,6 +4728,135 @@ class PrajaLeadEntityBackfillAPIView(PrajaLeadsAPIView):
             return Response(payload, status=status.HTTP_200_OK)
 
         return self._execute_entity_create(prepared)
+
+
+class PrajaLeadSyncAPIView(PrajaLeadsAPIView):
+    """
+    Sync endpoint for Praja to push leads that are missing from our DB without
+    firing the pyro_crm_lead_created Mixpanel event.
+
+    Supports single lead or bulk (array of leads).
+
+    POST /entity/sync/
+    Auth: X-Secret-Pyro header (same as /entity/)
+
+    Single:
+        { "data": { "praja_id": "1234", "name": "...", ... } }
+
+    Bulk:
+        [ { "data": { "praja_id": "1234", ... } }, { "data": { "praja_id": "5678", ... } } ]
+
+    Behaviour per lead:
+        - If praja_id exists and is active   → merge data, return existing record (no Mixpanel)
+        - If praja_id exists and is deleted  → restore + merge data (no Mixpanel)
+        - If praja_id not found              → create new record (no Mixpanel)
+        - praja_id missing in payload        → skip with error message
+    """
+
+    http_method_names = ["post", "options"]
+
+    def post(self, request):
+        payload = request.data
+        is_bulk = isinstance(payload, list)
+        items = payload if is_bulk else [payload]
+
+        tenant, error_response = self._get_tenant(request)
+        if error_response:
+            return error_response
+
+        entity_type = self.get_entity_type(request)
+
+        results = []
+        for item in items:
+            result = self._sync_single_lead(item, tenant, entity_type)
+            results.append(result)
+
+        if is_bulk:
+            created = sum(1 for r in results if r.get("status") == "created")
+            restored = sum(1 for r in results if r.get("status") == "restored")
+            updated = sum(1 for r in results if r.get("status") == "updated")
+            skipped = sum(1 for r in results if r.get("status") == "error")
+            return Response(
+                {
+                    "total": len(results),
+                    "created": created,
+                    "restored": restored,
+                    "updated": updated,
+                    "errors": skipped,
+                    "results": results,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        r = results[0]
+        http_status = status.HTTP_201_CREATED if r.get("status") == "created" else status.HTTP_200_OK
+        if r.get("status") == "error":
+            http_status = status.HTTP_400_BAD_REQUEST
+        return Response(r, status=http_status)
+
+    def _sync_single_lead(self, item, tenant, entity_type):
+        incoming_data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        praja_id = str(incoming_data.get("praja_id", "")).strip() or None
+
+        if not praja_id:
+            return {"status": "error", "error": "praja_id is required in data"}
+
+        # Check including soft-deleted records
+        existing = Record.all_objects.filter(
+            data__praja_id=praja_id,
+            tenant=tenant,
+            entity_type=entity_type,
+        ).first()
+
+        if existing:
+            data = existing.data.copy() if existing.data else {}
+            data.update(incoming_data)
+            data["lead_status"] = "CLOSED"
+            existing.data = data
+            existing.updated_at = timezone.now()
+
+            if existing.is_deleted:
+                existing.is_deleted = False
+                existing.deleted_at = None
+                existing.save(update_fields=["data", "updated_at", "is_deleted", "deleted_at"])
+                logger.info(
+                    "[PrajaLeadSync] Restored praja_id=%s id=%s tenant=%s",
+                    praja_id, existing.id, tenant.slug,
+                )
+                return {"status": "restored", "id": existing.id, "praja_id": praja_id}
+
+            existing.save(update_fields=["data", "updated_at"])
+            logger.info(
+                "[PrajaLeadSync] Updated praja_id=%s id=%s tenant=%s",
+                praja_id, existing.id, tenant.slug,
+            )
+            return {"status": "updated", "id": existing.id, "praja_id": praja_id}
+
+        # Create new record — no Mixpanel event
+        request_data = {"data": incoming_data, "entity_type": entity_type}
+        request_data["data"]["lead_status"] = "CLOSED"
+        if "lead_stage" not in incoming_data or not incoming_data.get("lead_stage"):
+            request_data["data"]["lead_stage"] = "FRESH"
+        if "call_attempts" not in incoming_data:
+            request_data["data"]["call_attempts"] = 0
+
+        serializer = RecordSerializer(data=request_data)
+        if not serializer.is_valid():
+            logger.warning("[PrajaLeadSync] Invalid data for praja_id=%s: %s", praja_id, serializer.errors)
+            return {"status": "error", "praja_id": praja_id, "error": serializer.errors}
+
+        try:
+            with transaction.atomic():
+                record = serializer.save(tenant=tenant, entity_type=entity_type)
+        except Exception as e:
+            logger.error("[PrajaLeadSync] Failed to create praja_id=%s: %s", praja_id, str(e))
+            return {"status": "error", "praja_id": praja_id, "error": str(e)}
+
+        logger.info(
+            "[PrajaLeadSync] Created praja_id=%s id=%s tenant=%s (no Mixpanel)",
+            praja_id, record.id, tenant.slug,
+        )
+        return {"status": "created", "id": record.id, "praja_id": praja_id}
 
 
 class EntityTypeSchemaListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
