@@ -32,7 +32,6 @@ def _apply_group_and_assignment(
     daily_target,
     daily_limit,
 ):
-    """Bind user to a group and sync core TenantMemberSetting KV rows."""
     group = None
     normalized_group_name = (lead_group_name or "").strip()
     if normalized_group_name:
@@ -51,13 +50,6 @@ def _apply_group_and_assignment(
     return group
 
 class TenantMembershipCreateView(APIView):
-    """
-    NEW: Creates TenantMembership directly (no longer creates LegacyUser).
-    Body: { name, email, [company_name], [department], [role_id], [uid] }
-    
-    DEPRECATED: LegacyUser creation removed. This endpoint now only creates TenantMembership.
-    """
-    # permission_classes = [IsTenantAuthenticated, HasTenantRole("GM")]
     permission_classes = [IsTenantAuthenticated]
     def post(self, request):
         ser = TenantMembershipCreateSerializer(data = request.data, context={'request':request})
@@ -80,12 +72,9 @@ class TenantMembershipCreateView(APIView):
 
         with transaction.atomic():
             try:
-                # Get the authz role (role_id should be AuthZ role ID, not legacy)
-                # Try to get by ID first (assume it's AuthZ role ID)
                 try:
                     authz_role = Role.objects.get(id=role_id, tenant=tenant)
                 except Role.DoesNotExist:
-                    # Fallback: try legacy role mapping (for backward compatibility during transition)
                     try:
                         authz_role = get_authz_role_from_legacy_role(role_id, tenant)
                     except Exception as e:
@@ -94,7 +83,6 @@ class TenantMembershipCreateView(APIView):
                             'error': f'Role with ID {role_id} not found for this tenant'
                         }, status=status.HTTP_400_BAD_REQUEST)
                 
-                # Create or update TenantMembership directly (no LegacyUser)
                 membership, created = TenantMembership.objects.get_or_create(
                     tenant=tenant,
                     email=email,
@@ -108,7 +96,6 @@ class TenantMembershipCreateView(APIView):
                     }
                 )
                 
-                # If membership already exists, update it
                 if not created:
                     membership.name = name
                     if company_name is not None:
@@ -129,8 +116,6 @@ class TenantMembershipCreateView(APIView):
                     daily_limit=daily_limit,
                 )
                 
-                # Invalidate permissions cache so newly updated role (e.g. GM) is seen immediately
-                # without user having to re-login (permission checks use cached role with 10min TTL)
                 if membership.user_id:
                     drop_permissions_cache(str(membership.user_id), membership.tenant)
                 
@@ -157,10 +142,6 @@ class TenantMembershipCreateView(APIView):
 
 
 class TenantMembershipUpdateView(APIView):
-    """
-    Update existing TenantMembership identified by original_email + original_role_id.
-    Body: { name, email, department, role_id, original_email, original_role_id }
-    """
     permission_classes = [IsTenantAuthenticated]
 
     def post(self, request):
@@ -194,6 +175,13 @@ class TenantMembershipUpdateView(APIView):
                 membership.email = email
                 membership.department = department
                 membership.role = authz_role
+
+                # Preserve or update manager details safely if provided in request
+                if "manager_email" in ser.validated_data:
+                    membership.manager_email = ser.validated_data["manager_email"]
+                if "manager_name" in ser.validated_data:
+                    membership.manager_name = ser.validated_data["manager_name"]
+
                 membership.save()
 
                 group = _apply_group_and_assignment(
@@ -225,31 +213,22 @@ class TenantMembershipUpdateView(APIView):
                 return Response({
                     "error": f"Failed to update user: {str(e)}"
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
-
 
 
 class AssigneesByRoleView(APIView):
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
-        """
-        NEW: Using TenantMembership instead of LegacyUser
-        Returns assignees filtered by role key (e.g., 'CSE', 'RM')
-        """
         role_key = (request.query_params.get('role') or '').strip().upper()
         tenant = request.tenant
         
         if not tenant:
             return Response({'error': "Unable to determine tenant for current user."}, status=403)
         
-        # NEW: Query TenantMembership filtered by Role key
         try:
             if role_key:
-                # Find role by key (case-insensitive)
                 role = Role.objects.filter(tenant=tenant, key__iexact=role_key).first()
                 if not role:
-                    # Fallback: try to find by name for backward compatibility
                     role = Role.objects.filter(tenant=tenant, name__iexact=role_key).first()
                 
                 if role:
@@ -261,16 +240,13 @@ class AssigneesByRoleView(APIView):
                 else:
                     qs = TenantMembership.objects.none()
             else:
-                # Return all active memberships if no role specified
                 qs = TenantMembership.objects.filter(
                     tenant=tenant,
                     is_active=True
                 ).select_related('role').order_by('email', 'id')
             
-            # NEW: Serialize using TenantMembership.name directly (no LegacyUser fallback)
             data = []
             for membership in qs:
-                # Use TenantMembership.name field (migrated from LegacyUser)
                 name = membership.name or membership.email.split('@')[0] if membership.email else 'Unknown'
                 
                 data.append({
@@ -291,7 +267,6 @@ class AssigneesByRoleView(APIView):
             
         except Exception as e:
             logger.error(f"Error in AssigneesByRoleView: {e}", exc_info=True)
-            # Return empty result on error (no legacy fallback)
             return Response({'count': 0, 'results': []}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -300,7 +275,6 @@ PYRO_ADMIN_ROLE_NAME = "PYRO_ADMIN"
 
 
 def _slugify_tenant_slug(raw: str) -> str:
-    """Normalize to lowercase alphanumeric and hyphens (matches Tenant.slug validator)."""
     if not raw or not isinstance(raw, str):
         return ""
     s = re.sub(r"[^a-z0-9\-]", "", raw.lower().strip())
@@ -308,10 +282,6 @@ def _slugify_tenant_slug(raw: str) -> str:
 
 
 class SetupNewTenantView(APIView):
-    """
-    Signup flow: create tenant → PYRO_ADMIN role → TenantMembership.
-    POST with Supabase JWT. Body: { "tenant_slug": "...", "tenant_name": "..." (optional) }.
-    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -395,9 +365,6 @@ class SetupNewTenantView(APIView):
 
 
 class LinkUserUidView(APIView):
-    """
-    POST: Link Supabase UID to a user and activate tenant memberships.
-    """
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -424,24 +391,8 @@ class LinkUserUidView(APIView):
             )
 
 
-
 class DeleteUserEverywhereView(APIView):
-    """
-    DELETE /api/accounts/delete-user
-    Body:
-      - Preferred: { "uid": "<uuid>" }
-      - Or:        { "email": "user@example.com", "role_id": "<uuid>" }
-
-    Behavior:
-      - Requires authenticated, tenant-scoped caller.
-      - GM/OWNER (or whichever role you prefer) can delete users in their tenant.
-      - Deletes rows in:
-          1) auth.users (by uid)  [cascades public.users via FK]
-          2) public.users (any leftovers)
-          3) public.authz_tenantmembership (scoped to tenant)
-      - Idempotent; returns counts of actually deleted rows.
-    """
-    permission_classes = [IsTenantAuthenticated]  # adjust to your policy
+    permission_classes = [IsTenantAuthenticated]
 
     def delete(self, request):
         try:
@@ -455,7 +406,6 @@ class DeleteUserEverywhereView(APIView):
 
             report = delete_user_everywhere(tenant=tenant, uid=uid, email=email, role_id=role_id)
 
-            # 204 is also OK for delete
             return Response(
                 {
                     "success": True,
