@@ -225,6 +225,12 @@ def _sales_lead_row(**kwargs):
     return base
 
 
+def _non_referral_row(**kwargs):
+    """Non-referral row so district/party ranking applies (referrals ignore geo)."""
+    kwargs.setdefault("lead_source", "COLD_CALL")
+    return _sales_lead_row(**kwargs)
+
+
 # ===================================================================
 # UNIT — CandidateSelector (no DB)
 # ===================================================================
@@ -687,19 +693,19 @@ def test_pull_strategy_district_priority_order():
     blank = RecordFactory(
         tenant=tenant,
         entity_type="lead",
-        data=_sales_lead_row(name="Blank", lead_stage="IN_QUEUE", lead_score=50),
+        data=_non_referral_row(name="Blank", lead_stage="IN_QUEUE", lead_score=50),
     )
     other = RecordFactory(
         tenant=tenant,
         entity_type="lead",
-        data=_sales_lead_row(
+        data=_non_referral_row(
             name="Other", lead_stage="IN_QUEUE", lead_score=50, district="Mysuru"
         ),
     )
     match = RecordFactory(
         tenant=tenant,
         entity_type="lead",
-        data=_sales_lead_row(
+        data=_non_referral_row(
             name="Match", lead_stage="IN_QUEUE", lead_score=50, district="Bengaluru"
         ),
     )
@@ -729,7 +735,7 @@ def test_pull_strategy_party_priority_order():
     blank = RecordFactory(
         tenant=tenant,
         entity_type="lead",
-        data=_sales_lead_row(
+        data=_non_referral_row(
             name="BlankParty",
             lead_stage="IN_QUEUE",
             lead_score=50,
@@ -739,7 +745,7 @@ def test_pull_strategy_party_priority_order():
     other = RecordFactory(
         tenant=tenant,
         entity_type="lead",
-        data=_sales_lead_row(
+        data=_non_referral_row(
             name="OtherParty",
             lead_stage="IN_QUEUE",
             lead_score=50,
@@ -749,7 +755,7 @@ def test_pull_strategy_party_priority_order():
     match = RecordFactory(
         tenant=tenant,
         entity_type="lead",
-        data=_sales_lead_row(
+        data=_non_referral_row(
             name="MatchParty",
             lead_stage="IN_QUEUE",
             lead_score=50,
@@ -783,7 +789,7 @@ def test_pull_strategy_district_wins_over_party():
     party_match_wrong_dist = RecordFactory(
         tenant=tenant,
         entity_type="lead",
-        data=_sales_lead_row(
+        data=_non_referral_row(
             name="PartyOnly",
             lead_stage="IN_QUEUE",
             lead_score=50,
@@ -795,7 +801,7 @@ def test_pull_strategy_district_wins_over_party():
     dist_match_other_party = RecordFactory(
         tenant=tenant,
         entity_type="lead",
-        data=_sales_lead_row(
+        data=_non_referral_row(
             name="DistOnly",
             lead_stage="IN_QUEUE",
             lead_score=50,
@@ -807,7 +813,7 @@ def test_pull_strategy_district_wins_over_party():
     both_match = RecordFactory(
         tenant=tenant,
         entity_type="lead",
-        data=_sales_lead_row(
+        data=_non_referral_row(
             name="Both",
             lead_stage="IN_QUEUE",
             lead_score=50,
@@ -892,7 +898,7 @@ def test_pull_strategy_normal_order_beats_district_soft_rank():
     low_match = RecordFactory(
         tenant=tenant,
         entity_type="lead",
-        data=_sales_lead_row(
+        data=_non_referral_row(
             name="LowMatch",
             lead_stage="IN_QUEUE",
             lead_score=10,
@@ -902,7 +908,7 @@ def test_pull_strategy_normal_order_beats_district_soft_rank():
     high_other = RecordFactory(
         tenant=tenant,
         entity_type="lead",
-        data=_sales_lead_row(
+        data=_non_referral_row(
             name="HighOther",
             lead_stage="IN_QUEUE",
             lead_score=90,
@@ -924,6 +930,223 @@ def test_pull_strategy_normal_order_beats_district_soft_rank():
         )
     )
     assert [r.id for r in ordered] == [high_other.id, low_match.id]
+
+
+@pytest.mark.django_db
+def test_pull_strategy_lead_creator_priority_for_referral():
+    """Referral creator match → other creator → blank creator (email, not name)."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    blank = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="BlankCreator",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            lead_source="PREMIUM_REFERRAL",
+        ),
+    )
+    other = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="OtherCreator",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            lead_source="REFERRAL_TO_RM",
+            lead_creator="other.rm@example.com",
+        ),
+    )
+    match = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="MyCreator",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="priya.sharma@example.com",
+        ),
+    )
+    Record.objects.filter(pk__in=[blank.pk, other.pk, match.pk]).update(created_at=now)
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[blank.id, other.id, match.id]
+    )
+    ordered = list(
+        PullStrategyApplier()
+        .apply(
+            qs=qs,
+            strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
+            now_iso=now.isoformat(),
+            rm_email="Priya.Sharma@example.com",
+        )
+    )
+    assert [r.id for r in ordered] == [match.id, other.id, blank.id]
+
+
+@pytest.mark.django_db
+def test_pull_strategy_lead_creator_matches_email_not_name():
+    """A display-name Lead Creator must not rank as a match; email does."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    name_only = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="NameOnly",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="Priya Sharma",
+        ),
+    )
+    email_match = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="EmailMatch",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="priya.sharma@example.com",
+        ),
+    )
+    Record.objects.filter(pk__in=[name_only.pk, email_match.pk]).update(created_at=now)
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[name_only.id, email_match.id]
+    )
+    ordered = list(
+        PullStrategyApplier()
+        .apply(
+            qs=qs,
+            strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
+            now_iso=now.isoformat(),
+            rm_email="priya.sharma@example.com",
+        )
+    )
+    assert [r.id for r in ordered] == [email_match.id, name_only.id]
+
+
+@pytest.mark.django_db
+def test_pull_strategy_referral_ignores_district_and_party():
+    """Referral ranking is creator-only; matching district/party must not win over own creator."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    own_other_geo = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="OwnOtherGeo",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district="Mysuru",
+            affiliated_party="Congress",
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="priya.sharma@example.com",
+        ),
+    )
+    other_matching_geo = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="OtherMatchingGeo",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district="Bengaluru",
+            affiliated_party="Telugu Desam Party",
+            lead_source="REFERRAL_TO_RM",
+            lead_creator="other.rm@example.com",
+        ),
+    )
+    blank_matching_geo = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="BlankMatchingGeo",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district="Bengaluru",
+            affiliated_party="Telugu Desam Party",
+            lead_source="PREMIUM_REFERRAL",
+        ),
+    )
+    Record.objects.filter(
+        pk__in=[own_other_geo.pk, other_matching_geo.pk, blank_matching_geo.pk]
+    ).update(created_at=now)
+
+    qs = Record.objects.filter(
+        tenant=tenant,
+        entity_type="lead",
+        id__in=[own_other_geo.id, other_matching_geo.id, blank_matching_geo.id],
+    )
+    ordered = list(
+        PullStrategyApplier()
+        .apply(
+            qs=qs,
+            strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
+            now_iso=now.isoformat(),
+            rm_district="Bengaluru",
+            rm_party="Telugu Desam Party",
+            rm_email="priya.sharma@example.com",
+        )
+    )
+    assert [r.id for r in ordered] == [
+        own_other_geo.id,
+        other_matching_geo.id,
+        blank_matching_geo.id,
+    ]
+
+
+@pytest.mark.django_db
+def test_pull_strategy_non_referral_still_uses_district_when_rm_email_set():
+    """Non-referral leads keep district ranking even when RM email is present."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    other = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_non_referral_row(
+            name="OtherDistrict",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district="Mysuru",
+            lead_creator="priya.sharma@example.com",
+        ),
+    )
+    match = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_non_referral_row(
+            name="MatchDistrict",
+            lead_stage="IN_QUEUE",
+            lead_score=50,
+            district="Bengaluru",
+            lead_creator="other.rm@example.com",
+        ),
+    )
+    Record.objects.filter(pk__in=[other.pk, match.pk]).update(created_at=now)
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[other.id, match.id]
+    )
+    ordered = list(
+        PullStrategyApplier()
+        .apply(
+            qs=qs,
+            strategy={"order": ["-lead_score", "-created_at"], "ignore_score_for_sources": []},
+            now_iso=now.isoformat(),
+            rm_district="Bengaluru",
+            rm_email="priya.sharma@example.com",
+        )
+    )
+    assert [r.id for r in ordered] == [match.id, other.id]
 
 
 @pytest.mark.django_db
