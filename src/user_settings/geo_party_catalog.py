@@ -69,3 +69,43 @@ def catalog_options(
             option["state_id"] = item_state_id
         options.append(option)
     return options
+
+
+def normalize_to_catalog_ids(kind: str, values: list) -> list[str]:
+    """
+    Map a list of catalog IDs or English names to ID strings.
+
+    Unknown values are kept as stripped strings so callers can still apply
+    a legacy name fallback on the original lead field.
+    """
+    catalog = load_geo_party_catalog()
+    items = catalog.get(kind) or []
+    by_id: dict[str, str] = {}
+    by_name: dict[str, str] = {}
+    for item in items:
+        item_id = _as_int(item.get("id"))
+        if item_id is None:
+            continue
+        sid = str(item_id)
+        by_id[sid] = sid
+        name = str(item.get("name") or "").strip().lower()
+        if name:
+            by_name[name] = sid
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values or []:
+        if raw is None or isinstance(raw, bool):
+            continue
+        as_int = _as_int(raw)
+        if as_int is not None:
+            key = str(as_int)
+        else:
+            text = str(raw).strip()
+            if not text:
+                continue
+            key = by_id.get(text) or by_name.get(text.lower()) or text
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out

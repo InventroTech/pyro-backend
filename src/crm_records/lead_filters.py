@@ -19,7 +19,6 @@ from user_settings.services import (
     USER_KV_GROUP_ID_KEY,
     USER_KV_PARTY_KEY,
     coerce_kv_int,
-    resolve_party_match_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,7 +34,7 @@ class LeadFilters:
     eligible_states: List[str]
     daily_limit: Optional[int]
     district: Optional[str]  # RM DISTRICT from user_kv_settings; blank → considered with party for fresh gate
-    party: Optional[str]  # RM PARTY display name for affiliated_party soft-rank
+    party: Optional[str]  # RM PARTY Circle id for affiliated_party_id soft-rank
     user_uuid: Optional[uuid_module.UUID]
     tenant_membership: Optional[TenantMembership]
 
@@ -107,7 +106,7 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
                 except (TypeError, ValueError):
                     pass
 
-            # Prefer Circle district id (number); fall back to legacy string names.
+            # Prefer Circle district / party ids (numbers); fall back to legacy strings.
             _raw_district = kv_map.get(USER_KV_DISTRICT_KEY)
             _district_id = coerce_kv_int(_raw_district)
             if _district_id is not None:
@@ -117,7 +116,14 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
             elif _raw_district is not None and not isinstance(_raw_district, bool):
                 district = str(_raw_district).strip() or None
 
-            party = resolve_party_match_name(kv_map.get(USER_KV_PARTY_KEY))
+            _raw_party = kv_map.get(USER_KV_PARTY_KEY)
+            _party_id = coerce_kv_int(_raw_party)
+            if _party_id is not None:
+                party = str(_party_id)
+            elif isinstance(_raw_party, str):
+                party = _raw_party.strip() or None
+            elif _raw_party is not None and not isinstance(_raw_party, bool):
+                party = str(_raw_party).strip() or None
 
             group = None
             group_id = kv_map.get(USER_KV_GROUP_ID_KEY)

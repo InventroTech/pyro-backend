@@ -64,48 +64,33 @@ def _sql_literal(value: str) -> str:
     return value.strip().replace("'", "''").lower()
 
 
-def _district_rank_sql(rm_district: str) -> str:
+def _json_id_rank_sql(field: str, rm_id: str) -> str:
     """
-    Soft-rank for RM district matching on ``data.district``:
-      0 = matches RM district
-      1 = lead has a (different) non-blank district
-      2 = lead district blank / missing
+    Soft-rank a JSON ID field (``data->>'…'`` is always text, so string/number both work):
+      0 = matches RM id
+      1 = lead has a (different) non-blank id
+      2 = id blank / missing
     """
-    safe = _sql_literal(rm_district)
+    safe = _sql_literal(rm_id)
+    raw = f"TRIM(COALESCE(data->>'{field}', ''))"
+    present = f"{raw} != '' AND LOWER({raw}) NOT IN ('null', 'none')"
     return f"""
         CASE
-            WHEN TRIM(COALESCE(data->>'district', '')) != ''
-                 AND LOWER(TRIM(data->>'district')) NOT IN ('null', 'none')
-                 AND LOWER(TRIM(data->>'district')) = '{safe}'
-            THEN 0
-            WHEN TRIM(COALESCE(data->>'district', '')) != ''
-                 AND LOWER(TRIM(data->>'district')) NOT IN ('null', 'none')
-            THEN 1
+            WHEN {present} AND LOWER({raw}) = '{safe}' THEN 0
+            WHEN {present} THEN 1
             ELSE 2
         END
     """
+
+
+def _district_rank_sql(rm_district: str) -> str:
+    """Soft-rank RM district against lead ``data.district_id``."""
+    return _json_id_rank_sql("district_id", rm_district)
 
 
 def _party_rank_sql(rm_party: str) -> str:
-    """
-    Soft-rank for RM party matching on ``data.affiliated_party`` (name):
-      0 = matches RM party
-      1 = lead has a (different) non-blank affiliated_party
-      2 = lead affiliated_party blank / missing
-    """
-    safe = _sql_literal(rm_party)
-    return f"""
-        CASE
-            WHEN TRIM(COALESCE(data->>'affiliated_party', '')) != ''
-                 AND LOWER(TRIM(data->>'affiliated_party')) NOT IN ('null', 'none')
-                 AND LOWER(TRIM(data->>'affiliated_party')) = '{safe}'
-            THEN 0
-            WHEN TRIM(COALESCE(data->>'affiliated_party', '')) != ''
-                 AND LOWER(TRIM(data->>'affiliated_party')) NOT IN ('null', 'none')
-            THEN 1
-            ELSE 2
-        END
-    """
+    """Soft-rank RM party against lead ``data.affiliated_party_id``."""
+    return _json_id_rank_sql("affiliated_party_id", rm_party)
 
 
 def _lead_creator_rank_sql(rm_email: str) -> str:
@@ -184,9 +169,10 @@ class PullStrategyApplier:
     or ``day(first_assigned_at)`` (JSON timestamptz).
     ``include_snoozed_due``: when true, due SNOOZED rows sort first (prepends ``is_expired_snoozed`` unless already in ``order``).
     ``rm_district`` / ``rm_email``: after normal order, first routing tiebreaker is
-    district for non-referral leads, or ``data.lead_creator`` vs RM email for referral
-    sources (``lead_source`` contains ``REFERRAL``). District/party do not apply to referrals.
-    ``rm_party``: when set, soft-ranks matching ``data.affiliated_party`` after that
+    ``data.district_id`` for non-referral leads, or ``data.lead_creator`` vs RM email
+    for referral sources (``lead_source`` contains ``REFERRAL``). District/party do not
+    apply to referrals.
+    ``rm_party``: when set, soft-ranks matching ``data.affiliated_party_id`` after that
     (non-referral only). Soft-rank is always after ``pull_strategy.order``.
     """
 

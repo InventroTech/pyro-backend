@@ -25,7 +25,7 @@ class ResolvedUser:
     eligible_states: List[str]
     daily_limit: Optional[int]
     district: Optional[str]
-    party: Optional[str]  # affiliated_party match name from PARTY KV
+    party: Optional[str]  # affiliated_party_id match from PARTY KV
 
 
 class UserResolver:
