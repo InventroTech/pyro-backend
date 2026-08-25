@@ -3,33 +3,39 @@ name: K6 Load Test (Manual)
 on:
   workflow_dispatch:
     inputs:
-      base_url:
-        description: Target URL
+      api_base_url:
+        description: Backend API base URL (no trailing slash)
         required: true
-        default: 'https://pyro-dev.vercel.app/auth'
+        default: 'https://pyro-backend-ea2j.onrender.com'
+      tenant_slug:
+        description: Tenant slug (X-Tenant-Slug) for JWT GETs
+        required: true
+        default: 'praja'
       rate:
         description: Requests per second
         required: true
-        default: '42'
+        default: '20'
       duration_seconds:
         description: Test duration in seconds
         required: true
-        default: '300'
+        default: '60'
       preallocated_vus:
         description: Pre-allocated virtual users
         required: true
         default: '20'
-      method:
-        description: HTTP method
+      include_entity_writes:
+        description: Add PUT /entity/ + PATCH /entity/support_ticket/ (needs PYRO_SECRET)
         required: true
-        default: GET
-        type: choice
-        options:
-          - GET
-          - POST
-          - PUT
-          - PATCH
-          - DELETE
+        default: false
+        type: boolean
+      entity_praja_id:
+        description: praja_id for PUT /entity/
+        required: false
+        default: ''
+      entity_ticket_id:
+        description: ticket_id (records.id) for PATCH /entity/support_ticket/
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -45,13 +51,34 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run k6 script
+      - name: Require secrets
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.LOADTEST_ACCESS_TOKEN }}" ]; then
+            echo "::error::Add secret LOADTEST_ACCESS_TOKEN for JWT GETs."
+            exit 1
+          fi
+          if [ "${{ inputs.include_entity_writes }}" = "true" ] && [ -z "${{ secrets.LOADTEST_PYRO_SECRET }}" ]; then
+            echo "::error::include_entity_writes=true requires secret LOADTEST_PYRO_SECRET (X-Secret-Pyro)."
+            exit 1
+          fi
+          if [ "${{ inputs.include_entity_writes }}" = "true" ] && [ -z "${{ inputs.entity_praja_id }}" ] && [ -z "${{ inputs.entity_ticket_id }}" ]; then
+            echo "::error::Provide entity_praja_id and/or entity_ticket_id."
+            exit 1
+          fi
+
+      - name: Run multi-API k6 script
         env:
-          BASE_URL: ${{ inputs.base_url }}
+          API_BASE_URL: ${{ inputs.api_base_url }}
+          TENANT_SLUG: ${{ inputs.tenant_slug }}
           RATE: ${{ inputs.rate }}
           DURATION_SECONDS: ${{ inputs.duration_seconds }}
           PREALLOCATED_VUS: ${{ inputs.preallocated_vus }}
-          HTTP_METHOD: ${{ inputs.method }}
           ACCESS_TOKEN: ${{ secrets.LOADTEST_ACCESS_TOKEN }}
-          REQUEST_BODY: ${{ secrets.LOADTEST_REQUEST_BODY }}
-        run: k6 run k6-tests/basic-test.js
+          INCLUDE_ENTITY_WRITES: ${{ inputs.include_entity_writes }}
+          PYRO_SECRET: ${{ secrets.LOADTEST_PYRO_SECRET }}
+          ENTITY_PRAJA_ID: ${{ inputs.entity_praja_id }}
+          ENTITY_TICKET_ID: ${{ inputs.entity_ticket_id }}
+        run: |
+          echo "API: $API_BASE_URL | entity writes: $INCLUDE_ENTITY_WRITES"
+          k6 run k6-tests/basic-test.js
