@@ -1,8 +1,9 @@
 {
-  "version": 2,
+  "version": 3,
   "source": [
     "Circle names spelled in App - District Names(V1).pdf",
-    "Circle names spelled in App - Party Names.pdf"
+    "Circle names spelled in App - Party Names.pdf",
+    "Circle names spelled in App - Keralam Districts.pdf"
   ],
   "label_format": "{name} ({id})",
   "states": [
@@ -13,6 +14,10 @@
     {
       "id": 95829,
       "name": "Karnataka"
+    },
+    {
+      "id": 113197,
+      "name": "Keralam"
     },
     {
       "id": 72631,
@@ -678,6 +683,76 @@
       "id": 100487,
       "name": "Yadgir",
       "state_id": 95829
+    },
+    {
+      "id": 115813,
+      "name": "Alappuzha",
+      "state_id": 113197
+    },
+    {
+      "id": 115987,
+      "name": "Ernakulam",
+      "state_id": 113197
+    },
+    {
+      "id": 116207,
+      "name": "Idukki",
+      "state_id": 113197
+    },
+    {
+      "id": 116327,
+      "name": "Kannur",
+      "state_id": 113197
+    },
+    {
+      "id": 116527,
+      "name": "Kasaragod",
+      "state_id": 113197
+    },
+    {
+      "id": 116694,
+      "name": "Kollam",
+      "state_id": 113197
+    },
+    {
+      "id": 116873,
+      "name": "Kottayam",
+      "state_id": 113197
+    },
+    {
+      "id": 117051,
+      "name": "Kozhikode",
+      "state_id": 113197
+    },
+    {
+      "id": 117252,
+      "name": "Malappuram",
+      "state_id": 113197
+    },
+    {
+      "id": 117472,
+      "name": "Palakkad",
+      "state_id": 113197
+    },
+    {
+      "id": 117714,
+      "name": "Pathanamthitta",
+      "state_id": 113197
+    },
+    {
+      "id": 117835,
+      "name": "Thiruvananthapuram",
+      "state_id": 113197
+    },
+    {
+      "id": 118031,
+      "name": "Thrissur",
+      "state_id": 113197
+    },
+    {
+      "id": 118388,
+      "name": "Wayanad",
+      "state_id": 113197
     }
   ],
   "parties": [
