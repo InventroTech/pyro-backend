@@ -2,6 +2,34 @@ name: K6 Load Test (Manual)
 
 on:
   workflow_dispatch:
+    inputs:
+      base_url:
+        description: Target URL
+        required: true
+        default: 'https://pyro-dev.vercel.app/auth'
+      rate:
+        description: Requests per second
+        required: true
+        default: '42'
+      duration_seconds:
+        description: Test duration in seconds
+        required: true
+        default: '300'
+      preallocated_vus:
+        description: Pre-allocated virtual users
+        required: true
+        default: '20'
+      method:
+        description: HTTP method
+        required: true
+        default: GET
+        type: choice
+        options:
+          - GET
+          - POST
+          - PUT
+          - PATCH
+          - DELETE
 
 permissions:
   contents: read
@@ -9,7 +37,7 @@ permissions:
 jobs:
   k6:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     container:
       image: grafana/k6:latest
 
@@ -18,4 +46,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run k6 script
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          RATE: ${{ inputs.rate }}
+          DURATION_SECONDS: ${{ inputs.duration_seconds }}
+          PREALLOCATED_VUS: ${{ inputs.preallocated_vus }}
+          HTTP_METHOD: ${{ inputs.method }}
+          ACCESS_TOKEN: ${{ secrets.LOADTEST_ACCESS_TOKEN }}
+          REQUEST_BODY: ${{ secrets.LOADTEST_REQUEST_BODY }}
         run: k6 run k6-tests/basic-test.js
