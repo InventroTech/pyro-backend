@@ -3,6 +3,9 @@ name: K6 Load Test (Manual)
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   k6:
     runs-on: ubuntu-latest
