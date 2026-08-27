@@ -1624,6 +1624,66 @@ class RefreshInventoryShipmentTrackingJobHandler(JobHandler):
         return delays[min(attempt - 1, len(delays) - 1)]
 
 
+class SyncZohoShipmentEmailsJobHandler(JobHandler):
+    """
+    Poll a tenant's connected Zoho Mail inbox for shipment emails and auto-fill
+    inventory_request / unmannd_request tracking fields when a match is found.
+    """
+
+    DEFAULT_MAX_MESSAGES = 40
+
+    def process(self, job: BackgroundJob) -> bool:
+        from email_protocol.models import ZohoMailConnection
+        from email_protocol.zoho_oauth import ZohoOAuthError
+        from email_protocol.zoho_shipment_sync import sync_zoho_shipment_emails
+
+        if not job.tenant_id:
+            job.result = {"success": False, "error": "tenant_id required"}
+            return False
+
+        connection = (
+            ZohoMailConnection.objects.filter(
+                tenant_id=job.tenant_id,
+                is_active=True,
+            )
+            .exclude(refresh_token="")
+            .first()
+        )
+        if not connection:
+            job.result = {
+                "success": True,
+                "skipped": "no_zoho_connection",
+                "timestamp": timezone.now().isoformat(),
+            }
+            return True
+
+        payload = job.payload or {}
+        max_messages = int(payload.get("max_messages") or self.DEFAULT_MAX_MESSAGES)
+        max_messages = max(1, min(max_messages, 100))
+
+        try:
+            result = sync_zoho_shipment_emails(connection, max_messages=max_messages)
+        except ZohoOAuthError as exc:
+            logger.warning(
+                "[SyncZohoShipmentEmails] OAuth error tenant=%s: %s",
+                job.tenant_id,
+                exc,
+            )
+            job.result = {
+                "success": False,
+                "error": str(exc),
+                "timestamp": timezone.now().isoformat(),
+            }
+            return False
+
+        job.result = result
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [120, 600, 1800]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+
 class JobHandlerRegistry:
     """
     Registry for job handlers.
@@ -1649,6 +1709,10 @@ class JobHandlerRegistry:
         self.register_handler(
             JobType.REFRESH_INVENTORY_SHIPMENT_TRACKING,
             RefreshInventoryShipmentTrackingJobHandler(),
+        )
+        self.register_handler(
+            JobType.SYNC_ZOHO_SHIPMENT_EMAILS,
+            SyncZohoShipmentEmailsJobHandler(),
         )
         # Praja handler removed - now using MixpanelService instead
         self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
