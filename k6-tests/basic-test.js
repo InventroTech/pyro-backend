@@ -21,6 +21,7 @@ const ENDPOINTS = [
   '/analytics/get-ticket-status/',
   '/analytics/support-ticket/',
   '/analytics/support-tickets/filter-options/',
+  '/crm-records/events/',
   '/crm-records/events/count/',
   '/crm-records/leads/current/',
   '/crm-records/records/?entity_type=lead',
