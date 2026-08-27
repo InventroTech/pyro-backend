@@ -20,7 +20,7 @@ ZOHO_CLIENT_ID=...
 ZOHO_CLIENT_SECRET=...
 ZOHO_OAUTH_REDIRECT_URI=https://your-api.example.com/email/zoho/callback/
 ZOHO_ACCOUNTS_BASE_URL=https://accounts.zoho.com   # or accounts.zoho.in
-ZOHO_OAUTH_SUCCESS_REDIRECT=https://your-app.example.com/settings?tab=integrations
+ZOHO_OAUTH_SUCCESS_REDIRECT=https://your-app.example.com/settings/integrations
 ```
 
 API
@@ -33,7 +33,9 @@ API
 
 Frontend
 --------
-Connect UI is on **Settings → Integrations** (``/settings?tab=integrations``).
+Connect UI sits on the tenant **Settings** page User Management block
+(page-builder ``AddUser`` component). OAuth returns via ``/settings/integrations``
+and redirects back to that page.
 
 Matching
 --------
