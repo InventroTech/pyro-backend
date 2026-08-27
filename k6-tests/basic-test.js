@@ -24,7 +24,6 @@ const ENDPOINTS = [
   '/crm-records/events/count/',
   '/crm-records/leads/current/',
   '/crm-records/records/?entity_type=lead',
-  '/crm-records/records/events/',
 ];
 
 export const options = {
