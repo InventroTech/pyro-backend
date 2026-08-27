@@ -20,7 +20,7 @@ ZOHO_CLIENT_ID=...
 ZOHO_CLIENT_SECRET=...
 ZOHO_OAUTH_REDIRECT_URI=https://your-api.example.com/email/zoho/callback/
 ZOHO_ACCOUNTS_BASE_URL=https://accounts.zoho.com   # or accounts.zoho.in
-ZOHO_OAUTH_SUCCESS_REDIRECT=https://your-app.example.com/add-user
+ZOHO_OAUTH_SUCCESS_REDIRECT=https://your-app.example.com/settings?tab=integrations
 ```
 
 API
@@ -33,7 +33,7 @@ API
 
 Frontend
 --------
-Connect UI is on the **Users / Add User** page (``/add-user``).
+Connect UI is on **Settings → Integrations** (``/settings?tab=integrations``).
 
 Matching
 --------
