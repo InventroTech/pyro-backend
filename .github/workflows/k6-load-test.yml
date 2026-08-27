@@ -23,19 +23,6 @@ on:
         description: Pre-allocated virtual users
         required: true
         default: '20'
-      include_entity_writes:
-        description: Add PUT /entity/ + PATCH /entity/support_ticket/ (needs PYRO_SECRET)
-        required: true
-        default: false
-        type: boolean
-      entity_praja_id:
-        description: praja_id for PUT /entity/
-        required: false
-        default: ''
-      entity_ticket_id:
-        description: ticket_id (records.id) for PATCH /entity/support_ticket/
-        required: false
-        default: ''
 
 permissions:
   contents: read
@@ -44,30 +31,28 @@ jobs:
   k6:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    container:
-      image: grafana/k6:latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Require secrets
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+
+      - name: Require access token
         shell: bash
         run: |
           if [ -z "${{ secrets.LOADTEST_ACCESS_TOKEN }}" ]; then
             echo "::error::Add secret LOADTEST_ACCESS_TOKEN for JWT GETs."
             exit 1
           fi
-          if [ "${{ inputs.include_entity_writes }}" = "true" ] && [ -z "${{ secrets.LOADTEST_PYRO_SECRET }}" ]; then
-            echo "::error::include_entity_writes=true requires secret LOADTEST_PYRO_SECRET (X-Secret-Pyro)."
-            exit 1
-          fi
-          if [ "${{ inputs.include_entity_writes }}" = "true" ] && [ -z "${{ inputs.entity_praja_id }}" ] && [ -z "${{ inputs.entity_ticket_id }}" ]; then
-            echo "::error::Provide entity_praja_id and/or entity_ticket_id."
-            exit 1
-          fi
 
-      - name: Run multi-API k6 script
+      - name: Run GET-only k6 script
         env:
           API_BASE_URL: ${{ inputs.api_base_url }}
           TENANT_SLUG: ${{ inputs.tenant_slug }}
@@ -75,10 +60,6 @@ jobs:
           DURATION_SECONDS: ${{ inputs.duration_seconds }}
           PREALLOCATED_VUS: ${{ inputs.preallocated_vus }}
           ACCESS_TOKEN: ${{ secrets.LOADTEST_ACCESS_TOKEN }}
-          INCLUDE_ENTITY_WRITES: ${{ inputs.include_entity_writes }}
-          PYRO_SECRET: ${{ secrets.LOADTEST_PYRO_SECRET }}
-          ENTITY_PRAJA_ID: ${{ inputs.entity_praja_id }}
-          ENTITY_TICKET_ID: ${{ inputs.entity_ticket_id }}
         run: |
-          echo "API: $API_BASE_URL | entity writes: $INCLUDE_ENTITY_WRITES"
+          echo "API: $API_BASE_URL | GET-only | rate=$RATE/s duration=${DURATION_SECONDS}s"
           k6 run k6-tests/basic-test.js
