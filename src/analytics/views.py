@@ -878,12 +878,21 @@ class SupportTicketAssigneeOptionsView(APIView):
     permission_classes = [IsTenantAuthenticated]
     
     def get(self, request):
+        from authz.models import TenantMembership
+        
+        # Scope active users strictly to the current tenant via active memberships
+        active_user_ids = TenantMembership.objects.filter(
+            tenant=request.tenant,
+            is_active=True
+        ).values_list("user_id", flat=True)
+
         User = get_user_model()
-        users = User.objects.filter(is_active=True)
+        users = User.objects.filter(id__in=active_user_ids, is_active=True)
+        
         options = [
             {
-                "id": str(user.id),
-                "name": f"{user.first_name} {user.last_name}".strip() or user.username
+                "id": str(getattr(user, "id", "")),
+                "name": f"{user.first_name} {user.last_name}".strip() or getattr(user, "username", str(user.id))
             }
             for user in users
         ]
