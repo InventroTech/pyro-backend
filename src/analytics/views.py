@@ -68,12 +68,6 @@ from .serializers import (
 )
 
 
-# "How many support tickets did each executive resolve last week?"
-# "Which executive had the fastest average resolution time last month?"
-# "Show me the number of open vs closed tickets handled by each support executive."
-# "List the top 3 executives by the number of tickets resolved in the past month."
-# "Which executive has the highest unresolved ticket count right now?"
-
 # --- Config & Logging ---
 logger = logging.getLogger(__name__)
 
@@ -203,7 +197,7 @@ class DailyPercentileResolutionTimeView(APIView):
                         data_by_day.setdefault(day, []).append(res_time_seconds)
             except (ValueError, IndexError) as e:
                 logger.warning("Failed to parse resolution time '%s' for ticket %s: %s", 
-                             getattr(ticket, 'resolution_time', None), getattr(ticket, 'id', None), e)
+                            getattr(ticket, 'resolution_time', None), getattr(ticket, 'id', None), e)
             except Exception as e:
                 logger.warning("Failed to process resolution time for ticket %s: %s", getattr(ticket, 'id', None), e)
 
@@ -274,7 +268,7 @@ class DailyAverageResolutionTimeView(APIView):
                         data_by_day.setdefault(day, []).append(res_time_seconds)
             except (ValueError, IndexError) as e:
                 logger.warning("Failed to parse resolution time '%s' for ticket %s: %s",
-                             getattr(ticket, 'resolution_time', None), getattr(ticket, 'id', None), e)
+                            getattr(ticket, 'resolution_time', None), getattr(ticket, 'id', None), e)
             except Exception as e:
                 logger.warning("Failed to process resolution time for ticket %s: %s", getattr(ticket, 'id', None), e)
 
@@ -291,6 +285,7 @@ class DailyAverageResolutionTimeView(APIView):
             result.append({"x": date.strftime("%Y-%m-%d"), "y": y})
         logger.info("Returning %d data points", len(result))
         return Response(result)
+
 class DailyResolvedTicketsView(APIView):
     authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
@@ -846,6 +841,18 @@ class SupportTicketListView(ListAPIView):
             if ints:
                 qs = qs.filter(data__call_attempts__in=ints)
 
+        # Added dynamic parsing for Reason filter
+        reason_vals = get_multi_values(qp, "reason", "reason__in")
+        if reason_vals:
+            include_null = any(v.lower() == "null" for v in reason_vals)
+            vals = [v for v in reason_vals if v.lower() != "null"]
+            q = Q()
+            if vals:
+                q |= Q(data__reason__in=vals)
+            if include_null:
+                q |= q_data_json_null("reason")
+            qs = qs.filter(q)
+
         gte = qp.get("created_at__gte")
         lte = qp.get("created_at__lte")
         if gte:
@@ -866,6 +873,22 @@ class SupportTicketFilterOptionsView(APIView):
             "resolution_statuses": resolution_statuses,
             "poster_statuses": poster_statuses,
         }, status=status.HTTP_200_OK)
+
+class SupportTicketAssigneeOptionsView(APIView):
+    permission_classes = [IsTenantAuthenticated]
+    
+    def get(self, request):
+        User = get_user_model()
+        users = User.objects.filter(is_active=True)
+        options = [
+            {
+                "id": str(user.id),
+                "name": f"{user.first_name} {user.last_name}".strip() or user.username
+            }
+            for user in users
+        ]
+        # Wrapped in "results" root key to match page builder API expectations
+        return Response({"results": options}, status=status.HTTP_200_OK)
 
 class GetTicketStatusView(APIView):
     """
@@ -1672,7 +1695,7 @@ class AnalyticsBoardView(APIView):
     role shares them. Generic across analytics types via ``type`` (e.g. cse, rm).
 
     GET  ?type=<type>            -> { board_type, role, boards: [config, ...] }
-    POST { type?, config }       -> creates a board row and returns its config.
+    POST { type?, config }        -> creates a board row and returns its config.
     """
 
     permission_classes = [IsTenantAuthenticated]
