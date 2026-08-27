@@ -1,0 +1,65 @@
+name: K6 Load Test (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_base_url:
+        description: Backend API base URL (no trailing slash)
+        required: true
+        default: 'https://pyro-backend-ea2j.onrender.com'
+      tenant_slug:
+        description: Tenant slug (X-Tenant-Slug) for JWT GETs
+        required: true
+        default: 'praja'
+      rate:
+        description: Requests per second
+        required: true
+        default: '20'
+      duration_seconds:
+        description: Test duration in seconds
+        required: true
+        default: '60'
+      preallocated_vus:
+        description: Pre-allocated virtual users
+        required: true
+        default: '20'
+
+permissions:
+  contents: read
+
+jobs:
+  k6:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+
+      - name: Require access token
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.LOADTEST_ACCESS_TOKEN }}" ]; then
+            echo "::error::Add secret LOADTEST_ACCESS_TOKEN for JWT GETs."
+            exit 1
+          fi
+
+      - name: Run GET-only k6 script
+        env:
+          API_BASE_URL: ${{ inputs.api_base_url }}
+          TENANT_SLUG: ${{ inputs.tenant_slug }}
+          RATE: ${{ inputs.rate }}
+          DURATION_SECONDS: ${{ inputs.duration_seconds }}
+          PREALLOCATED_VUS: ${{ inputs.preallocated_vus }}
+          ACCESS_TOKEN: ${{ secrets.LOADTEST_ACCESS_TOKEN }}
+        run: |
+          echo "API: $API_BASE_URL | GET-only | rate=$RATE/s duration=${DURATION_SECONDS}s"
+          k6 run k6-tests/basic-test.js
