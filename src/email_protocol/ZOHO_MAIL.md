@@ -39,9 +39,11 @@ and redirects back to that page.
 
 Matching
 --------
-1. Record UUID in subject/body
-2. ``po_number`` / ``order_number`` / ``sales_order_number`` / ``vendor_order_id``
-3. Else: exactly one open request missing tracking for that tenant
+1. **Gate:** only emails whose **From** is a known delivery / logistics partner
+   (Blue Dart, Delhivery, DTDC, FedEx, DHL, Shiprocket, Amazon shipping, etc.)
+2. **Item:** match the email subject/body against open requests' item name
+   (``item_name_freeform`` / ``item_name`` / ``part_number_or_sku`` /
+   ``product_name``). Longest unique substring wins; ambiguous item names are skipped.
 
 Only empty tracking fields are filled (never overwrites existing values).
 """

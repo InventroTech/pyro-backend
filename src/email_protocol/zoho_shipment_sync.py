@@ -23,7 +23,42 @@ logger = logging.getLogger(__name__)
 
 ENTITY_TYPES = ("inventory_request", "unmannd_request")
 ELIGIBLE_STATUSES = ("IN_SHIPPING", "ORDERED", "VENDOR_IDENTIFIED", "APPROVED")
-ORDER_MATCH_FIELDS = ("po_number", "order_number", "sales_order_number", "vendor_order_id")
+ITEM_NAME_FIELDS = (
+    "item_name_freeform",
+    "item_name",
+    "part_number_or_sku",
+    "product_name",
+)
+_MIN_ITEM_NAME_LEN = 4
+_MARKETPLACE_SUFFIX_RE = re.compile(
+    r"\s*[:|\-–—]\s*(amazon\.in|amazon\.com|flipkart\.com|myntra\.com|"
+    r"toys\s*&\s*games|industrial\s*&\s*scientific).*$",
+    re.I,
+)
+
+
+def _normalize_item_text(value: str) -> str:
+    text = (value or "").lower()
+    text = _MARKETPLACE_SUFFIX_RE.sub("", text)
+    text = re.sub(r"[^\w\s+./-]", " ", text, flags=re.UNICODE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _record_item_names(data: Dict[str, Any]) -> List[str]:
+    names: List[str] = []
+    seen: set[str] = set()
+    for field in ITEM_NAME_FIELDS:
+        raw = str(data.get(field) or "").strip()
+        if not raw:
+            continue
+        for candidate in (raw, _MARKETPLACE_SUFFIX_RE.sub("", raw).strip()):
+            norm = _normalize_item_text(candidate)
+            if len(norm) < _MIN_ITEM_NAME_LEN or norm in seen:
+                continue
+            seen.add(norm)
+            names.append(norm)
+    return names
 
 
 def ensure_fresh_access_token(connection: ZohoMailConnection) -> str:
@@ -115,47 +150,40 @@ def match_record_for_email(
     candidates: Optional[List[Record]] = None,
 ) -> Tuple[Optional[Record], str]:
     """
-    Return (record, reason). Prefer UUID / order keys; fall back to unique open request.
-    """
-    keys = parsed.get("match_keys") or {}
-    record_ids = keys.get("record_ids") or []
+    Return (record, reason).
 
-    for rid in record_ids:
-        rec = Record.objects.filter(
-            tenant_id=tenant_id,
-            id=rid,
-            entity_type__in=ENTITY_TYPES,
-        ).first()
-        if rec:
-            return rec, "record_id"
+    Match only by item name: the request's item name must appear in the email
+    subject/body. Longer names win when several candidates match substrings
+    (e.g. "Drone with Dual 4K Camera" beats "Drone"). Ambiguous ties skip.
+    """
+    if not (parsed.get("tracking_number") or parsed.get("tracking_link")):
+        return None, "no_tracking_payload"
 
     pool = candidates if candidates is not None else _candidate_records(tenant_id)
+    email_blob = _normalize_item_text(
+        str(parsed.get("email_text") or parsed.get("subject") or "")
+    )
+    if not email_blob:
+        return None, "no_item_match"
 
-    for field in ORDER_MATCH_FIELDS:
-        value = (keys.get(field) or "").strip()
-        if not value:
-            continue
-        matches = []
-        for rec in pool:
-            data = rec.data if isinstance(rec.data, dict) else {}
-            raw = str(data.get(field) or "").strip()
-            if raw and raw.lower() == value.lower():
-                matches.append(rec)
-            elif value.lower() in str(data).lower() and re.search(
-                rf"(?i)(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])",
-                str(data),
-            ):
-                matches.append(rec)
-        if len(matches) == 1:
-            return matches[0], field
-        if len(matches) > 1:
-            return None, f"ambiguous_{field}"
+    scored: List[Tuple[int, Record]] = []
+    for rec in pool:
+        data = rec.data if isinstance(rec.data, dict) else {}
+        best_len = 0
+        for name in _record_item_names(data):
+            if name in email_blob:
+                best_len = max(best_len, len(name))
+        if best_len:
+            scored.append((best_len, rec))
 
-    if parsed.get("tracking_number") or parsed.get("tracking_link"):
-        if len(pool) == 1:
-            return pool[0], "unique_open_request"
+    if not scored:
+        return None, "no_item_match"
 
-    return None, "no_match"
+    max_len = max(length for length, _ in scored)
+    winners = {rec.id: rec for length, rec in scored if length == max_len}
+    if len(winners) == 1:
+        return next(iter(winners.values())), "item_name"
+    return None, "ambiguous_item_name"
 
 
 def apply_tracking_to_record(record: Record, parsed: Dict[str, Any]) -> bool:
@@ -245,6 +273,13 @@ def sync_zoho_shipment_emails(
 
         scanned += 1
         subject = str(msg.get("subject") or "")
+        from_address = str(
+            msg.get("fromAddress")
+            or msg.get("sender")
+            or msg.get("from")
+            or msg.get("fromAddr")
+            or ""
+        )
         folder_id = str(msg.get("folderId") or connection.inbox_folder_id)
 
         try:
@@ -260,7 +295,19 @@ def sync_zoho_shipment_emails(
                 or msg.get("summary")
                 or ""
             )
-            parsed = parse_shipment_email(subject=subject, html_or_text=str(body))
+            # Content endpoint sometimes carries From when list view does not.
+            if not from_address:
+                from_address = str(
+                    content_payload.get("fromAddress")
+                    or content_payload.get("sender")
+                    or content_payload.get("from")
+                    or ""
+                )
+            parsed = parse_shipment_email(
+                subject=subject,
+                html_or_text=str(body),
+                from_address=from_address,
+            )
         except Exception:
             errors += 1
             logger.exception(
@@ -283,7 +330,7 @@ def sync_zoho_shipment_emails(
                 message_id=message_id,
                 subject=subject[:512],
                 applied=False,
-                skip_reason="not_shipment",
+                skip_reason="not_delivery_partner",
             )
             if received_ms and (newest_seen is None or received_ms > newest_seen):
                 newest_seen = received_ms

@@ -21,37 +21,85 @@ class ZohoShipmentMatchTests(TestCase):
     def setUp(self):
         self.tenant = TenantFactory()
 
-    def test_match_by_record_id_in_email(self):
+    def test_match_by_item_name_in_email(self):
         record = RecordFactory(
             tenant=self.tenant,
             entity_type="inventory_request",
-            data={"status": "IN_SHIPPING"},
+            data={
+                "status": "IN_SHIPPING",
+                "item_name_freeform": "Bambu Lab P1S 3D Printer",
+            },
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={"status": "IN_SHIPPING", "item_name_freeform": "Drone"},
         )
         parsed = {
             "tracking_number": "AWB999888777",
             "tracking_link": None,
             "courier_name": "Delhivery",
-            "match_keys": {"record_ids": [str(record.id)]},
+            "email_text": "Your Bambu Lab P1S 3D Printer has been shipped. AWB AWB999888777",
         }
         matched, reason = match_record_for_email(tenant_id=self.tenant.id, parsed=parsed)
         self.assertEqual(matched.id, record.id)
-        self.assertEqual(reason, "record_id")
+        self.assertEqual(reason, "item_name")
 
-    def test_match_by_po_number(self):
-        record = RecordFactory(
+    def test_prefers_longer_item_name(self):
+        short = RecordFactory(
             tenant=self.tenant,
-            entity_type="inventory_request",
-            data={"status": "IN_SHIPPING", "po_number": "PO-7788"},
+            entity_type="unmannd_request",
+            data={"status": "IN_SHIPPING", "item_name_freeform": "Drone"},
+        )
+        long = RecordFactory(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "IN_SHIPPING",
+                "item_name_freeform": "Drone with Dual 4K Camera for Adults",
+            },
         )
         parsed = {
             "tracking_number": "AWB111222333",
-            "tracking_link": None,
-            "courier_name": None,
-            "match_keys": {"record_ids": [], "po_number": "PO-7788"},
+            "email_text": "Shipped: Drone with Dual 4K Camera for Adults",
         }
         matched, reason = match_record_for_email(tenant_id=self.tenant.id, parsed=parsed)
-        self.assertEqual(matched.id, record.id)
-        self.assertEqual(reason, "po_number")
+        self.assertEqual(matched.id, long.id)
+        self.assertNotEqual(matched.id, short.id)
+        self.assertEqual(reason, "item_name")
+
+    def test_ambiguous_same_item_name(self):
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={"status": "IN_SHIPPING", "item_name_freeform": "Drone"},
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={"status": "IN_SHIPPING", "item_name_freeform": "Drone"},
+        )
+        parsed = {
+            "tracking_number": "AWB111222333",
+            "email_text": "Your Drone order is in transit",
+        }
+        matched, reason = match_record_for_email(tenant_id=self.tenant.id, parsed=parsed)
+        self.assertIsNone(matched)
+        self.assertEqual(reason, "ambiguous_item_name")
+
+    def test_no_item_match(self):
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={"status": "IN_SHIPPING", "item_name_freeform": "Nylon Sleeve"},
+        )
+        parsed = {
+            "tracking_number": "AWB111222333",
+            "email_text": "Your package is out for delivery",
+        }
+        matched, reason = match_record_for_email(tenant_id=self.tenant.id, parsed=parsed)
+        self.assertIsNone(matched)
+        self.assertEqual(reason, "no_item_match")
 
     def test_apply_fills_empty_tracking_only(self):
         record = RecordFactory(
@@ -109,7 +157,10 @@ class SyncZohoShipmentEmailsJobHandlerTests(TestCase):
         record = RecordFactory(
             tenant=self.tenant,
             entity_type="inventory_request",
-            data={"status": "IN_SHIPPING", "po_number": "PO-55"},
+            data={
+                "status": "IN_SHIPPING",
+                "item_name_freeform": "Bambu Lab P1S 3D Printer",
+            },
         )
         ZohoMailConnection.objects.create(
             tenant=self.tenant,
@@ -130,13 +181,18 @@ class SyncZohoShipmentEmailsJobHandlerTests(TestCase):
             {
                 "messageId": "m1",
                 "folderId": "fold1",
-                "subject": "Shipped PO-55",
+                "subject": "Your Bambu Lab P1S 3D Printer has shipped",
+                "fromAddress": "Delhivery <noreply@delhivery.com>",
                 "receivedTime": str(int(timezone.now().timestamp() * 1000)),
                 "summary": "AWB",
             }
         ]
         fake_content = {
-            "content": "PO number: PO-55<br>Tracking number: DELH12345678<br>Courier: Delhivery"
+            "content": (
+                "Item: Bambu Lab P1S 3D Printer<br>"
+                "Tracking number: DELH12345678<br>"
+                "Courier: Delhivery"
+            )
         }
 
         with patch("email_protocol.zoho_shipment_sync.ZohoMailClient") as MockClient:
