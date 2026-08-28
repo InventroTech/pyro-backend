@@ -23,6 +23,7 @@ import os
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -182,6 +183,12 @@ def _cooldown_active(alert_key: str) -> bool:
     return last is not None and (time.monotonic() - last) < RENDER_ALERT_COOLDOWN
 
 
+def _format_alert_timestamp() -> str:
+    """Format alert time in IST for email display (servers run in UTC)."""
+    now_ist = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Kolkata"))
+    return now_ist.strftime("%Y-%m-%d %H:%M:%S IST")
+
+
 def _build_email(title: str, color: str, icon: str, rows: list[tuple[str, str, bool]], timestamp: str) -> tuple[str, str]:
     plain_rows = "\n".join(f"{label}: {value}" for label, value, _ in rows)
     plain = f"{title}\nTime: {timestamp}\n{plain_rows}\n\nThis alert will not repeat for 30 minutes."
@@ -254,7 +261,7 @@ def check_render_metrics() -> dict:
         logger.debug("[RenderMonitor] Skipping — RENDER_API_KEY or RENDER_SERVICE_ID not set")
         return {}
 
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = _format_alert_timestamp()
     result = {}
 
     # CPU
