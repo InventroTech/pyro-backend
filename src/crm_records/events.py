@@ -45,9 +45,7 @@ def dispatch_event(event_name: str, record: Record, payload: Dict[str, Any]) -> 
             execute_rules(event_name, record, payload, str(record.tenant.id))
 
         record.refresh_from_db()
-        from realtime.broadcast import broadcast_record_updated
-
-        broadcast_record_updated(record)
+        # post_save already broadcasts; skip a second full fan-out here.
         
         logger.info(f"[DISPATCH] Successfully processed event '{event_name}' for Record {record.id}")
         return True
