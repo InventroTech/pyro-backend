@@ -1191,21 +1191,24 @@ class UnassignSnoozedLeadsJobHandler(JobHandler):
             job,
         )
         unassigned_count = 0
-        for record in qs:
-            data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
-            if not data.get("assigned_to"):
-                continue
-            data["assigned_to"] = None
-            data.pop("snooze_unassign_at", None)
-            data["next_call_at"] = one_hour_later
-            # Do not change call_attempts on unassign
-            record.data = data
-            record.save(update_fields=["data", "updated_at"])
-            unassigned_count += 1
-            logger.info(
-                "[UnassignSnoozedLeads] Unassigned lead record_id=%s (snooze_unassign_at passed)",
-                record.id,
-            )
+        from realtime.broadcast import skip_realtime_broadcast
+
+        with skip_realtime_broadcast():
+            for record in qs:
+                data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
+                if not data.get("assigned_to"):
+                    continue
+                data["assigned_to"] = None
+                data.pop("snooze_unassign_at", None)
+                data["next_call_at"] = one_hour_later
+                # Do not change call_attempts on unassign
+                record.data = data
+                record.save(update_fields=["data", "updated_at"])
+                unassigned_count += 1
+                logger.info(
+                    "[UnassignSnoozedLeads] Unassigned lead record_id=%s (snooze_unassign_at passed)",
+                    record.id,
+                )
         job.result = {
             "success": True,
             "unassigned_count": unassigned_count,
@@ -1447,22 +1450,25 @@ class ReleaseLeadsAfter12hJobHandler(JobHandler):
             job,
         )
         released_count = 0
-        for record in qs:
-            data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
-            # Only clear assigned_to; do not change lead_stage (stays NOT_CONNECTED).
-            data["assigned_to"] = None
-            data["next_call_at"] = one_hour_later
-            data.pop("not_connected_unassign_at", None)
-            data.pop("first_assigned_today_at", None)
-            data.pop("first_assignment_today_date", None)
-            # Do not change call_attempts on unassign; do not remove first_assigned_at or first_assigned_to.
-            record.data = data
-            record.save(update_fields=["data", "updated_at"])
-            released_count += 1
-            logger.info(
-                "[ReleaseLeadsAfter12h] Released lead record_id=%s (NOT_CONNECTED, 12h since assignment anchor): cleared assigned_to only, stage unchanged",
-                record.id,
-            )
+        from realtime.broadcast import skip_realtime_broadcast
+
+        with skip_realtime_broadcast():
+            for record in qs:
+                data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
+                # Only clear assigned_to; do not change lead_stage (stays NOT_CONNECTED).
+                data["assigned_to"] = None
+                data["next_call_at"] = one_hour_later
+                data.pop("not_connected_unassign_at", None)
+                data.pop("first_assigned_today_at", None)
+                data.pop("first_assignment_today_date", None)
+                # Do not change call_attempts on unassign; do not remove first_assigned_at or first_assigned_to.
+                record.data = data
+                record.save(update_fields=["data", "updated_at"])
+                released_count += 1
+                logger.info(
+                    "[ReleaseLeadsAfter12h] Released lead record_id=%s (NOT_CONNECTED, 12h since assignment anchor): cleared assigned_to only, stage unchanged",
+                    record.id,
+                )
         job.result = {
             "success": True,
             "released_count": released_count,
