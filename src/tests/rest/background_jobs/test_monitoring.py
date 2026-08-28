@@ -223,6 +223,16 @@ class TestLatestMaxValue:
         assert rm._latest_max_value(series) == -1
 
 
+class TestAlertTimestamp:
+    def test_format_alert_timestamp_uses_ist(self):
+        utc_now = datetime(2026, 1, 15, 10, 30, 0, tzinfo=timezone.utc)
+        with patch("background_jobs.render_metrics_monitor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = utc_now
+            mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+            timestamp = rm._format_alert_timestamp()
+        assert timestamp == "2026-01-15 16:00:00 IST"
+
+
 class TestTimeWindow:
     def test_timestamps_end_with_z(self):
         start, end = rm._time_window(minutes=5)
