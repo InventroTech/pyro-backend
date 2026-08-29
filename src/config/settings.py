@@ -493,4 +493,20 @@ HEALTH_RESPONSE_TIME_THRESHOLD_SECONDS = env.float('HEALTH_RESPONSE_TIME_THRESHO
 # and set the API key. Leave empty to disable auto-fill.
 SCRAPINGBEE_API_KEY = env('SCRAPINGBEE_API_KEY', default='')
 
+# Zoho Mail OAuth (ops inbox → auto-fill inventory tracking). Register a
+# Server-based app at https://api-console.zoho.com/ with redirect URI matching
+# ZOHO_OAUTH_REDIRECT_URI (e.g. https://api.example.com/email/zoho/callback/).
+# Keep this separate from the Zoho login OAuth app.
+ZOHO_CLIENT_ID = env('ZOHO_CLIENT_ID', default='')
+ZOHO_CLIENT_SECRET = env('ZOHO_CLIENT_SECRET', default='')
+ZOHO_OAUTH_REDIRECT_URI = env('ZOHO_OAUTH_REDIRECT_URI', default='')
+ZOHO_ACCOUNTS_BASE_URL = env('ZOHO_ACCOUNTS_BASE_URL', default='https://accounts.zoho.com')
+ZOHO_MAIL_API_BASE_URL = env('ZOHO_MAIL_API_BASE_URL', default='https://mail.zoho.com/api')
+ZOHO_OAUTH_SCOPES = env(
+    'ZOHO_OAUTH_SCOPES',
+    default='ZohoMail.accounts.READ,ZohoMail.messages.READ,ZohoMail.folders.READ',
+)
+# After OAuth callback, browser is redirected here with ?zoho_mail=ok|error
+ZOHO_OAUTH_SUCCESS_REDIRECT = env('ZOHO_OAUTH_SUCCESS_REDIRECT', default='')
+
 import config.spectacular_auth
