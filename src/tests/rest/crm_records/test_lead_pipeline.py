@@ -11,8 +11,9 @@ Business semantics (aligned with production data + code):
   values use e.g. `PREMIUM_REFERRAL` for source and ``SALES LEAD`` for status).
 - **Bucket priority** (tenant-wide): follow-up (snoozed) → **fresh** → not-connected retry.
   So when both a fresh **and** a due NOT_CONNECTED retry exist, **fresh is tried first** and wins.
-- **Pull ordering:** ``order`` array; ``include_snoozed_due`` prepends due-snoozed sort when true.
-  Leading ``-`` = descending. ``day_timezone`` defaults to Asia/Kolkata.
+- **Pull ordering:** due snoozed (when enabled), then keys in ``order`` that precede
+  score (e.g. calendar day), then RM district (non-referral), then score and the rest
+  of ``order``, then referral creator / party. ``day_timezone`` defaults to Asia/Kolkata.
 
 Run (venv activated):
 
@@ -913,8 +914,8 @@ def test_pull_strategy_neither_district_nor_party_is_normal_score_order():
 
 
 @pytest.mark.django_db
-def test_pull_strategy_normal_order_beats_district_soft_rank():
-    """Higher score wins even when lower-score lead matches RM district."""
+def test_pull_strategy_district_soft_rank_beats_normal_order():
+    """Matching RM district sorts before a higher-score lead in another district."""
     tenant = TenantFactory()
     now = timezone.now()
 
@@ -952,7 +953,56 @@ def test_pull_strategy_normal_order_beats_district_soft_rank():
             rm_district=_DISTRICT_ANAKAPALLI,
         )
     )
-    assert [r.id for r in ordered] == [high_other.id, low_match.id]
+    assert [r.id for r in ordered] == [low_match.id, high_other.id]
+
+
+@pytest.mark.django_db
+def test_pull_strategy_newer_day_beats_matching_district():
+    """Calendar day still ranks before district: a newer other-district lead wins."""
+    tenant = TenantFactory()
+    now = timezone.now()
+    yesterday = now - timedelta(days=1)
+
+    older_match = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_non_referral_row(
+            name="OlderMatch",
+            lead_stage="IN_QUEUE",
+            lead_score=10,
+            district_id=_DISTRICT_ANAKAPALLI,
+        ),
+    )
+    newer_other = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_non_referral_row(
+            name="NewerOther",
+            lead_stage="IN_QUEUE",
+            lead_score=90,
+            district_id=_DISTRICT_ALLURI,
+        ),
+    )
+    Record.objects.filter(pk=older_match.pk).update(created_at=yesterday)
+    Record.objects.filter(pk=newer_other.pk).update(created_at=now)
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[older_match.id, newer_other.id]
+    )
+    ordered = list(
+        PullStrategyApplier()
+        .apply(
+            qs=qs,
+            strategy={
+                "order": ["-day(created_at)", "-lead_score", "-created_at"],
+                "day_timezone": "UTC",
+                "ignore_score_for_sources": [],
+            },
+            now_iso=now.isoformat(),
+            rm_district=_DISTRICT_ANAKAPALLI,
+        )
+    )
+    assert [r.id for r in ordered] == [newer_other.id, older_match.id]
 
 
 @pytest.mark.django_db
