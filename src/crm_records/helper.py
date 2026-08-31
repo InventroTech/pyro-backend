@@ -4,9 +4,14 @@ Helper utilities for filtering and parsing CRM JSON data payloads.
 Extracted into a dedicated module so the same logic can be reused in multiple views.
 """
 
+from __future__ import annotations
+
+import re
 from datetime import date, datetime
+from typing import Iterable, Optional
 
 from django.db.models import Q
+from django.db.models.fields.json import KeyTextTransform
 
 try:
     from dateutil import parser as date_parser  # type: ignore
@@ -124,4 +129,58 @@ def json_field_contains_q(field_name: str, field_value) -> Q:
             **{f"data__{field_name}__isnull": True}
         )
     return Q(data__contains={field_name: match_val})
+
+
+_JSON_TEXT_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_JSON_TEXT_COLUMNS = frozenset({"data", "pyro_data"})
+
+
+def json_text_equals_value(value) -> Optional[str]:
+    """Normalize an identity value for data->>'field' comparison."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    text = str(value).strip()
+    return text or None
+
+
+def filter_json_text_equals(qs, field: str, value, *, json_column: str = "data"):
+    """
+    Filter where ``json_column->>'field' = value`` (text).
+
+    Django ``data__praja_id=x`` compiles to ``(data -> 'praja_id') = '"x"'::jsonb``,
+    which cannot use btree expression indexes such as ``records_praja_id_idx``
+    or ``records_lead_praja_id_tenant_unique``. ``->>`` matches those indexes
+    and also matches JSON numbers stored in the key (both become text).
+    """
+    text = json_text_equals_value(value)
+    if text is None:
+        return qs.none()
+    if not _JSON_TEXT_KEY_RE.match(field):
+        raise ValueError(f"Invalid JSON key: {field!r}")
+    if json_column not in _JSON_TEXT_COLUMNS:
+        raise ValueError(f"Invalid JSON column: {json_column!r}")
+    alias = f"_jt_{json_column}_{field}"
+    return qs.alias(**{alias: KeyTextTransform(field, json_column)}).filter(**{alias: text})
+
+
+def filter_json_text_equals_any(qs, fields: Iterable[str], value, *, json_column: str = "data"):
+    """OR of ``filter_json_text_equals`` across several JSON keys (one scan)."""
+    text = json_text_equals_value(value)
+    field_list = list(fields)
+    if text is None or not field_list:
+        return qs.none()
+    if json_column not in _JSON_TEXT_COLUMNS:
+        raise ValueError(f"Invalid JSON column: {json_column!r}")
+    aliases = {}
+    q = Q()
+    for field in field_list:
+        if not _JSON_TEXT_KEY_RE.match(field):
+            raise ValueError(f"Invalid JSON key: {field!r}")
+        alias = f"_jt_{json_column}_{field}"
+        aliases[alias] = KeyTextTransform(field, json_column)
+        q |= Q(**{alias: text})
+    return qs.alias(**aliases).filter(q)
 
