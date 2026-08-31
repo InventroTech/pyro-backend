@@ -21,8 +21,7 @@ from django.db import IntegrityError
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 import logging
-import threading
-from time import monotonic
+from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
@@ -915,6 +914,7 @@ from .helper import (
     coerce_numeric,
     coerce_date_bound,
     json_field_contains_q,
+    filter_json_text_equals,
 )
 from .assignee_display import build_assigned_to_search_q
 
@@ -922,8 +922,6 @@ import re
 
 _RECORD_DISTINCT_FIELD_RE = re.compile(r'^[a-zA-Z0-9_]+$')
 _RECORD_DISTINCT_VALUES_TTL_SECONDS = 30
-_record_distinct_values_cache: dict[str, tuple[float, list[str]]] = {}
-_record_distinct_values_lock = threading.Lock()
 
 
 def _fetch_distinct_record_field_values(tenant_id, entity_type: str, field: str) -> list[str]:
@@ -945,21 +943,12 @@ def _fetch_distinct_record_field_values(tenant_id, entity_type: str, field: str)
 
 
 def get_distinct_record_field_values(tenant, entity_type: str, field: str) -> list[str]:
-    cache_key = f"{tenant.id}:{entity_type}:{field}"
-    now = monotonic()
-    with _record_distinct_values_lock:
-        cached = _record_distinct_values_cache.get(cache_key)
-        if cached and now - cached[0] < _RECORD_DISTINCT_VALUES_TTL_SECONDS:
-            return cached[1]
-
-    values = _fetch_distinct_record_field_values(tenant.id, entity_type, field)
-
-    with _record_distinct_values_lock:
-        cached = _record_distinct_values_cache.get(cache_key)
-        if cached and monotonic() - cached[0] < _RECORD_DISTINCT_VALUES_TTL_SECONDS:
-            return cached[1]
-        _record_distinct_values_cache[cache_key] = (monotonic(), values)
-        return values
+    cache_key = f"record_distinct_values:{tenant.id}:{entity_type}:{field}"
+    return cache.get_or_set(
+        cache_key,
+        lambda: _fetch_distinct_record_field_values(tenant.id, entity_type, field),
+        timeout=_RECORD_DISTINCT_VALUES_TTL_SECONDS,
+    )
 
 
 class RecordDistinctFieldValuesView(TenantScopedMixin, APIView):
@@ -3732,10 +3721,10 @@ class PartnerEventsView(APIView):
         """Resolve Record by praja_id (record.data.praja_id)."""
         if not praja_id:
             return None
-        return Record.objects.filter(
-            tenant=tenant,
-            entity_type='lead',
-            data__praja_id=praja_id
+        return filter_json_text_equals(
+            Record.objects.filter(tenant=tenant, entity_type="lead"),
+            "praja_id",
+            praja_id,
         ).first()
 
     @extend_schema(
@@ -4186,10 +4175,10 @@ class PrajaLeadsAPIView(APIView):
         incoming_data = request_data.get('data') if isinstance(request_data.get('data'), dict) else {}
 
         if praja_id:
-            existing_record = Record.objects.filter(
-                data__praja_id=praja_id,
-                tenant=tenant,
-                entity_type=entity_type,
+            existing_record = filter_json_text_equals(
+                Record.objects.filter(tenant=tenant, entity_type=entity_type),
+                "praja_id",
+                praja_id,
             ).first()
 
             if existing_record:
@@ -4440,11 +4429,11 @@ class PrajaLeadsAPIView(APIView):
             )
         
         try:
-            record = Record.objects.get(
-                data__praja_id=praja_id,
-                tenant=tenant,
-                entity_type=entity_type
-            )
+            record = filter_json_text_equals(
+                Record.objects.filter(tenant=tenant, entity_type=entity_type),
+                "praja_id",
+                praja_id,
+            ).get()
         except Record.DoesNotExist:
             return Response(
                 {'error': f'{entity_type.capitalize()} with praja_id {praja_id} not found'},
@@ -4571,11 +4560,11 @@ class PrajaLeadsAPIView(APIView):
             )
         
         try:
-            record = Record.objects.get(
-                data__praja_id=praja_id,
-                tenant=tenant,
-                entity_type=entity_type
-            )
+            record = filter_json_text_equals(
+                Record.objects.filter(tenant=tenant, entity_type=entity_type),
+                "praja_id",
+                praja_id,
+            ).get()
         except Record.DoesNotExist:
             return Response(
                 {'error': f'{entity_type.capitalize()} with praja_id {praja_id} not found'},
@@ -4687,11 +4676,11 @@ class PrajaLeadsAPIView(APIView):
             )
         
         try:
-            record = Record.objects.get(
-                data__praja_id=praja_id,
-                tenant=tenant,
-                entity_type=entity_type
-            )
+            record = filter_json_text_equals(
+                Record.objects.filter(tenant=tenant, entity_type=entity_type),
+                "praja_id",
+                praja_id,
+            ).get()
         except Record.DoesNotExist:
             return Response(
                 {'error': f'{entity_type.capitalize()} with praja_id {praja_id} not found'},
@@ -4748,10 +4737,10 @@ class PrajaLeadEntityBackfillAPIView(PrajaLeadsAPIView):
             )
 
         matching_ids = list(
-            Record.objects.filter(
-                data__praja_id=praja_id,
-                tenant=tenant,
-                entity_type=entity_type,
+            filter_json_text_equals(
+                Record.objects.filter(tenant=tenant, entity_type=entity_type),
+                "praja_id",
+                praja_id,
             ).values_list("id", flat=True)[:2]
         )
         if len(matching_ids) > 1:
@@ -4851,10 +4840,10 @@ class PrajaLeadSyncAPIView(PrajaLeadsAPIView):
             return {"status": "error", "error": "praja_id is required in data"}
 
         # Check including soft-deleted records
-        existing = Record.all_objects.filter(
-            data__praja_id=praja_id,
-            tenant=tenant,
-            entity_type=entity_type,
+        existing = filter_json_text_equals(
+            Record.all_objects.filter(tenant=tenant, entity_type=entity_type),
+            "praja_id",
+            praja_id,
         ).first()
 
         if existing:

@@ -17,6 +17,7 @@ from django.utils import timezone
 
 from background_jobs.models import JobType
 from background_jobs.queue_service import get_queue_service
+from crm_records.helper import filter_json_text_equals
 from crm_records.models import EventLog, Record
 from support_ticket.constants import (
     SUPPORT_EVENT_CALL_LATER,
@@ -122,7 +123,7 @@ def resolve_support_ticket_record(*, tenant, ticket_id: int) -> Optional[Record]
     record = base_qs.filter(id=ticket_id).first()
     if record:
         return record
-    return base_qs.filter(data__support_ticket_id=ticket_id).first()
+    return filter_json_text_equals(base_qs, "support_ticket_id", ticket_id).first()
 
 
 def _enqueue_mixpanel_event(

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Iterable, Optional
 
+from django.core.cache import cache
 from django.db.models import Count, Q
 from django.utils import timezone
 
@@ -42,20 +41,77 @@ def _exclude_expired_support_ticket_types(qs):
     )
 
 
-def _apply_ticket_group_filters(qs, group_data: dict):
+_FRESH_LEADS_INVENTORY_TTL_SECONDS = 30
+_QUEUE_INVENTORY_TTL_SECONDS = _FRESH_LEADS_INVENTORY_TTL_SECONDS
+
+
+def _ticket_group_filter_lists(group_data: dict) -> tuple[list, list]:
     states = group_data.get("states") if isinstance(group_data.get("states"), list) else []
     ticket_types = group_data.get("support_ticket_types")
     if not isinstance(ticket_types, list):
         ticket_types = group_data.get("posters") if isinstance(group_data.get("posters"), list) else []
+    return states, ticket_types
 
-    if states:
-        qs = qs.filter(data__state__in=states)
-    if ticket_types:
-        qs = qs.filter(
-            Q(data__support_ticket_type__in=ticket_types)
-            | Q(data__poster__in=ticket_types)
+
+def _ticket_inventory_row_matches(row: dict, states: list, ticket_types: list) -> bool:
+    state = row["data__state"]
+    support_ticket_type = row["data__support_ticket_type"]
+    poster = row["data__poster"]
+    if states and state not in states:
+        return False
+    if ticket_types and support_ticket_type not in ticket_types and poster not in ticket_types:
+        return False
+    return True
+
+
+def _count_ticket_group_from_inventory(
+    open_inventory: list[dict],
+    snoozed_due_inventory: list[dict],
+    group_data: dict,
+) -> int:
+    states, ticket_types = _ticket_group_filter_lists(group_data)
+    matched = 0
+    for row in open_inventory:
+        if _ticket_inventory_row_matches(row, states, ticket_types):
+            matched += row["count"]
+    for row in snoozed_due_inventory:
+        if _ticket_inventory_row_matches(row, states, ticket_types):
+            matched += row["count"]
+    return matched
+
+
+def _support_ticket_base_qs(tenant):
+    return _exclude_expired_support_ticket_types(
+        support_ticket_records_qs(tenant=tenant).filter(q_record_unassigned())
+    )
+
+
+def _fetch_support_tickets_inventory(tenant) -> dict[str, list[dict]]:
+    """Tenant-wide GROUP BY for open + due-snoozed unassigned ticket queues."""
+    base = _support_ticket_base_qs(tenant)
+    open_inventory = list(
+        base.filter(q_record_pending_resolution())
+        .values("data__state", "data__support_ticket_type", "data__poster")
+        .annotate(count=Count("id"))
+    )
+    snoozed_due_inventory = list(
+        filter_records_callback_due(
+            base.filter(data__resolution_status="Snoozed"),
+            at=timezone.now(),
         )
-    return qs
+        .values("data__state", "data__support_ticket_type", "data__poster")
+        .annotate(count=Count("id"))
+    )
+    return {"open": open_inventory, "snoozed_due": snoozed_due_inventory}
+
+
+def _support_tickets_inventory(tenant) -> dict[str, list[dict]]:
+    cache_key = f"support_tickets_inventory:{tenant.id}"
+    return cache.get_or_set(
+        cache_key,
+        lambda: _fetch_support_tickets_inventory(tenant),
+        timeout=_QUEUE_INVENTORY_TTL_SECONDS,
+    )
 
 
 def count_available_support_tickets_for_group(tenant, group_data: dict) -> int:
@@ -63,21 +119,66 @@ def count_available_support_tickets_for_group(tenant, group_data: dict) -> int:
     Count unassigned support tickets available for assignment to a group.
     Mirrors get-next-ticket open queue + due snoozed retries, with group filters applied.
     """
-    base = _exclude_expired_support_ticket_types(
-        support_ticket_records_qs(tenant=tenant).filter(q_record_unassigned())
-    )
-    open_qs = _apply_ticket_group_filters(
-        base.filter(q_record_pending_resolution()),
+    inventory = _support_tickets_inventory(tenant)
+    return _count_ticket_group_from_inventory(
+        inventory["open"],
+        inventory["snoozed_due"],
         group_data,
     )
-    snoozed_due_qs = _apply_ticket_group_filters(
-        filter_records_callback_due(
-            base.filter(data__resolution_status="Snoozed"),
-            at=timezone.now(),
-        ),
-        group_data,
+
+
+def _fetch_fresh_leads_inventory(tenant) -> list[dict]:
+    """Tenant-wide GROUP BY over queueable leads, bucketed by filter dimensions."""
+    return list(
+        Record.objects.filter(tenant=tenant, entity_type="lead")
+        .extra(where=[_QUEUEABLE_LEADS_WHERE])
+        .values(
+            "data__affiliated_party",
+            "data__lead_source",
+            "data__lead_status",
+            "data__state",
+        )
+        .annotate(count=Count("id"))
     )
-    return open_qs.count() + snoozed_due_qs.count()
+
+
+def _fresh_leads_inventory(tenant) -> list[dict]:
+    """
+    Cached tenant-wide inventory scan shared by every caller of
+    fresh_leads_counts_for_groups, regardless of which groups they pass in —
+    the expensive part is this one GROUP BY, not the per-group bucket matching.
+    """
+    cache_key = f"fresh_leads_inventory:{tenant.id}"
+    return cache.get_or_set(
+        cache_key,
+        lambda: _fetch_fresh_leads_inventory(tenant),
+        timeout=_FRESH_LEADS_INVENTORY_TTL_SECONDS,
+    )
+
+
+def _count_lead_group_from_inventory(inventory: list[dict], group_data: dict) -> int:
+    """Sum cached inventory buckets that match a lead group's filter dimensions."""
+    party = group_data.get("party") if isinstance(group_data.get("party"), list) else []
+    lead_sources = group_data.get("lead_sources") if isinstance(group_data.get("lead_sources"), list) else []
+    lead_statuses = group_data.get("lead_statuses") if isinstance(group_data.get("lead_statuses"), list) else []
+    states = group_data.get("states") if isinstance(group_data.get("states"), list) else []
+
+    matched = 0
+    for row in inventory:
+        affiliated_party = row["data__affiliated_party"]
+        lead_source = row["data__lead_source"]
+        lead_status = row["data__lead_status"]
+        state = row["data__state"]
+        if party and affiliated_party not in party:
+            continue
+        if lead_sources and lead_source not in lead_sources:
+            continue
+        if lead_statuses and lead_status not in lead_statuses:
+            continue
+        if states and state not in states:
+            continue
+        matched += row["count"]
+    return matched
 
 
 def count_available_fresh_leads_for_group(tenant, group: Group) -> int:
@@ -91,23 +192,7 @@ def count_available_fresh_leads_for_group(tenant, group: Group) -> int:
     if isinstance(queue_type, str) and queue_type.strip().lower() == "ticket":
         return count_available_support_tickets_for_group(tenant, group_data)
 
-    party = group_data.get("party") if isinstance(group_data.get("party"), list) else []
-    lead_sources = group_data.get("lead_sources") if isinstance(group_data.get("lead_sources"), list) else []
-    lead_statuses = group_data.get("lead_statuses") if isinstance(group_data.get("lead_statuses"), list) else []
-    states = group_data.get("states") if isinstance(group_data.get("states"), list) else []
-
-    qs = Record.objects.filter(tenant=tenant, entity_type="lead").extra(where=[_QUEUEABLE_LEADS_WHERE])
-
-    if party:
-        qs = qs.filter(data__affiliated_party__in=party)
-    if lead_sources:
-        qs = qs.filter(data__lead_source__in=lead_sources)
-    if lead_statuses:
-        qs = qs.filter(data__lead_status__in=lead_statuses)
-    if states:
-        qs = qs.filter(data__state__in=states)
-
-    return qs.count()
+    return _count_lead_group_from_inventory(_fresh_leads_inventory(tenant), group_data)
 
 
 def fresh_leads_counts_for_groups(tenant, groups: Iterable[Group]) -> dict[int, int]:
@@ -122,67 +207,39 @@ def fresh_leads_counts_for_groups(tenant, groups: Iterable[Group]) -> dict[int, 
 
     counts: dict[int, int] = {}
     lead_groups: list[Group] = []
+    ticket_groups: list[Group] = []
 
     for group in groups:
         group_data = group.group_data if isinstance(group.group_data, dict) else {}
         queue_type = group_data.get("queue_type")
         if isinstance(queue_type, str) and queue_type.strip().lower() == "ticket":
-            counts[group.id] = count_available_support_tickets_for_group(tenant, group_data)
+            ticket_groups.append(group)
         else:
             lead_groups.append(group)
+
+    if ticket_groups:
+        ticket_inventory = _support_tickets_inventory(tenant)
+        for group in ticket_groups:
+            group_data = group.group_data if isinstance(group.group_data, dict) else {}
+            counts[group.id] = _count_ticket_group_from_inventory(
+                ticket_inventory["open"],
+                ticket_inventory["snoozed_due"],
+                group_data,
+            )
 
     if not lead_groups:
         return counts
 
-    # Single group: one targeted COUNT is cheaper than a tenant-wide GROUP BY.
-    if len(lead_groups) == 1:
-        group = lead_groups[0]
-        counts[group.id] = count_available_fresh_leads_for_group(tenant, group)
-        return counts
-
-    # One grouped query: bucket by filter dimensions instead of loading every row.
-    inventory = list(
-        Record.objects.filter(tenant=tenant, entity_type="lead")
-        .extra(where=[_QUEUEABLE_LEADS_WHERE])
-        .values(
-            "data__affiliated_party",
-            "data__lead_source",
-            "data__lead_status",
-            "data__state",
-        )
-        .annotate(count=Count("id"))
-    )
+    inventory = _fresh_leads_inventory(tenant)
 
     for group in lead_groups:
         group_data = group.group_data if isinstance(group.group_data, dict) else {}
-        party = group_data.get("party") if isinstance(group_data.get("party"), list) else []
-        lead_sources = group_data.get("lead_sources") if isinstance(group_data.get("lead_sources"), list) else []
-        lead_statuses = group_data.get("lead_statuses") if isinstance(group_data.get("lead_statuses"), list) else []
-        states = group_data.get("states") if isinstance(group_data.get("states"), list) else []
-
-        matched = 0
-        for row in inventory:
-            affiliated_party = row["data__affiliated_party"]
-            lead_source = row["data__lead_source"]
-            lead_status = row["data__lead_status"]
-            state = row["data__state"]
-            if party and affiliated_party not in party:
-                continue
-            if lead_sources and lead_source not in lead_sources:
-                continue
-            if lead_statuses and lead_status not in lead_statuses:
-                continue
-            if states and state not in states:
-                continue
-            matched += row["count"]
-        counts[group.id] = matched
+        counts[group.id] = _count_lead_group_from_inventory(inventory, group_data)
 
     return counts
 
 
 _LEAD_FILTER_OPTIONS_TTL_SECONDS = 30
-_lead_filter_options_cache: dict[str, tuple[float, dict[str, list[str]]]] = {}
-_lead_filter_options_lock = threading.Lock()
 
 # One indexed DISTINCT per column; run in parallel (faster than UNION of 4 full scans).
 _LEAD_FILTER_DISTINCT_SQL = {
@@ -271,21 +328,12 @@ def get_lead_filter_options(tenant) -> dict[str, list[str]]:
             "lead_states": [],
         }
 
-    cache_key = str(tenant.id)
-    now = time.monotonic()
-    with _lead_filter_options_lock:
-        cached = _lead_filter_options_cache.get(cache_key)
-        if cached and now - cached[0] < _LEAD_FILTER_OPTIONS_TTL_SECONDS:
-            return cached[1]
-
-    options = _fetch_lead_filter_options_from_db(tenant.id)
-
-    with _lead_filter_options_lock:
-        cached = _lead_filter_options_cache.get(cache_key)
-        if cached and time.monotonic() - cached[0] < _LEAD_FILTER_OPTIONS_TTL_SECONDS:
-            return cached[1]
-        _lead_filter_options_cache[cache_key] = (time.monotonic(), options)
-        return options
+    cache_key = f"lead_filter_options:{tenant.id}"
+    return cache.get_or_set(
+        cache_key,
+        lambda: _fetch_lead_filter_options_from_db(tenant.id),
+        timeout=_LEAD_FILTER_OPTIONS_TTL_SECONDS,
+    )
 
 
 USER_KV_GROUP_ID_KEY = "GROUP"
