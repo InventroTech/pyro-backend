@@ -148,9 +148,19 @@ else:
 # Falls back to per-process LocMemCache when REDIS_URL is unset (e.g. local dev/tests) —
 # that's fine there since there's only one process, but on Render (multiple
 # instances/workers) only RedisCache actually shares hits across processes.
-from config.cache_settings import default_caches_config
-
-CACHES = default_caches_config(REDIS_URL)
+if REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": REDIS_URL,
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        }
+    }
 
 # Postgres LISTEN for direct SQL / Supabase table edits.
 # Supabase transaction pooler (port 6543) cannot receive cross-connection NOTIFY;
