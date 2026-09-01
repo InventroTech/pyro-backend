@@ -9,6 +9,8 @@ import time
 import psycopg2
 import psycopg2.extensions
 from django.conf import settings
+from django.db import close_old_connections
+from django.db.utils import InterfaceError, OperationalError
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +48,19 @@ def _connection_params() -> dict:
     return params
 
 
-def _handle_payload(payload: str) -> None:
+def _fetch_record(record_id):
+    """Load a record using a fresh Django DB connection (long-lived listener threads go stale)."""
     from crm_records.models import Record
 
+    close_old_connections()
+    try:
+        return Record.objects.filter(pk=record_id).first()
+    except (InterfaceError, OperationalError):
+        close_old_connections()
+        return Record.objects.filter(pk=record_id).first()
+
+
+def _handle_payload(payload: str) -> None:
     from .broadcast import broadcast_record_updated
 
     data = json.loads(payload)
@@ -64,7 +76,7 @@ def _handle_payload(payload: str) -> None:
         entity_type,
     )
 
-    record = Record.objects.filter(pk=record_id).first()
+    record = _fetch_record(record_id)
     if not record:
         logger.warning("NOTIFY for unknown record_id=%s", record_id)
         return
