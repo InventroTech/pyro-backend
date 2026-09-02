@@ -28,6 +28,7 @@ from background_jobs.queue_service import get_queue_service
 from background_jobs.models import JobType
 from core.models import Tenant
 from crm_records.models import Record
+from crm_records.helper import filter_json_text_equals, filter_json_text_equals_any
 from crm_records.permissions import HasAPISecret
 from crm_records.serializers import RecordSerializer
 from user_settings.models import Group, TenantMemberSetting
@@ -160,19 +161,17 @@ def _resolve_support_ticket_record_id(
     )
     ticket_id = _support_ticket_id_from_dump_data(dump_payload)
     if ticket_id is not None:
-        ticket_id_str = str(ticket_id)
-        record = (
-            base_qs.filter(data__support_ticket_id=ticket_id_str).first()
-            or base_qs.filter(data__support_ticket_id=ticket_id).first()
-            or base_qs.filter(data__ticket_id=ticket_id_str).first()
-            or base_qs.filter(data__ticket_id=ticket_id).first()
-        )
+        record = filter_json_text_equals_any(
+            base_qs,
+            ("support_ticket_id", "ticket_id"),
+            ticket_id,
+        ).first()
         if record:
             return record.id
 
     normalized_user_id = _normalize_dump_user_id(dump_payload.get("user_id"))
     if normalized_user_id:
-        record = base_qs.filter(data__user_id=normalized_user_id).order_by("-id").first()
+        record = filter_json_text_equals(base_qs, "user_id", normalized_user_id).order_by("-id").first()
         if record:
             return record.id
     return None
@@ -338,9 +337,10 @@ def _delete_open_support_records_for_user(
     normalized = _normalize_dump_user_id(user_id)
     if not normalized:
         return 0
-    qs = Record.objects.filter(
-        entity_type=SUPPORT_TICKET_ENTITY_TYPE,
-        data__user_id=normalized,
+    qs = filter_json_text_equals(
+        Record.objects.filter(entity_type=SUPPORT_TICKET_ENTITY_TYPE),
+        "user_id",
+        normalized,
     ).filter(q_record_pending_resolution())
     if tenant_id:
         qs = qs.filter(tenant_id=tenant_id)
@@ -629,11 +629,11 @@ def _open_support_records_for_user(
     normalized = _normalize_dump_user_id(user_id)
     if not normalized:
         return support_ticket_records_qs(tenant_id=tenant_id).none()
-    return (
-        support_ticket_records_qs(tenant_id=tenant_id)
-        .filter(data__user_id=normalized)
-        .filter(q_record_open_or_snoozed_resolution())
-    )
+    return filter_json_text_equals(
+        support_ticket_records_qs(tenant_id=tenant_id),
+        "user_id",
+        normalized,
+    ).filter(q_record_open_or_snoozed_resolution())
 
 
 def _has_open_self_trial_record_for_user(

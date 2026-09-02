@@ -119,34 +119,22 @@ def _lead_creator_rank_sql(rm_email: str) -> str:
     """
 
 
-def _routing_priority_sql(
-    rm_district: Optional[str],
-    rm_email: Optional[str],
-) -> str:
-    """
-    First routing tiebreaker after ``pull_strategy.order``.
-
-    Referral sources (``lead_source`` contains ``REFERRAL``): Lead Creator only —
-    district is ignored. Non-referral: district rank (or ``0`` if RM has no district).
-    """
-    if rm_email and rm_district:
-        return f"""
-            CASE
-                WHEN {_REFERRAL_SOURCE_SQL} THEN ({_lead_creator_rank_sql(rm_email)})
-                ELSE ({_district_rank_sql(rm_district)})
-            END
-        """
-    if rm_email:
-        return f"""
-            CASE
-                WHEN {_REFERRAL_SOURCE_SQL} THEN ({_lead_creator_rank_sql(rm_email)})
-                ELSE 0
-            END
-        """
+def _district_priority_sql(rm_district: str) -> str:
+    """District rank for non-referral leads; referral rows get ``0`` (ignore geo)."""
     return f"""
         CASE
             WHEN {_REFERRAL_SOURCE_SQL} THEN 0
-            ELSE ({_district_rank_sql(rm_district or "")})
+            ELSE ({_district_rank_sql(rm_district)})
+        END
+    """
+
+
+def _creator_priority_sql(rm_email: str) -> str:
+    """Creator tiebreaker for referral leads only; non-referral rows get ``0``."""
+    return f"""
+        CASE
+            WHEN {_REFERRAL_SOURCE_SQL} THEN ({_lead_creator_rank_sql(rm_email)})
+            ELSE 0
         END
     """
 
@@ -168,12 +156,12 @@ class PullStrategyApplier:
     ``order``: sort keys (``-`` prefix = descending). Day bucketing: ``day(created_at)``
     or ``day(first_assigned_at)`` (JSON timestamptz).
     ``include_snoozed_due``: when true, due SNOOZED rows sort first (prepends ``is_expired_snoozed`` unless already in ``order``).
-    ``rm_district`` / ``rm_email``: after normal order, first routing tiebreaker is
-    ``data.district_id`` for non-referral leads, or ``data.lead_creator`` vs RM email
-    for referral sources (``lead_source`` contains ``REFERRAL``). District/party do not
-    apply to referrals.
+    ``rm_district``: matching ``data.district_id`` sorts before lead score for
+    non-referral leads (calendar day and other keys before score stay ahead).
+    Referrals skip district.
+    ``rm_email``: referral sources then soft-rank ``data.lead_creator`` vs RM email after order.
     ``rm_party``: when set, soft-ranks matching ``data.affiliated_party_id`` after that
-    (non-referral only). Soft-rank is always after ``pull_strategy.order``.
+    (non-referral only).
     """
 
     _NEXT_CALL_READY_WHERE = """
@@ -227,9 +215,11 @@ class PullStrategyApplier:
     ) -> QuerySet:
         tz = _day_timezone(strategy)
         select: dict[str, str] = {}
-        order_parts: list[Any] = []
+        expired_parts: list[Any] = []
+        before_score: list[Any] = []
+        from_score: list[Any] = []
+        seen_score = False
 
-        # Normal pull_strategy order first; district/party/creator only as tiebreakers.
         for raw in tokens:
             parsed = _parse_order_token(raw) if isinstance(raw, str) else None
             if not parsed:
@@ -237,34 +227,52 @@ class PullStrategyApplier:
             descending, kind, field = parsed
 
             if kind == "field" and field in _MODEL_ORDER_FIELDS:
-                order_parts.append(f"-{field}" if descending else field)
+                part = f"-{field}" if descending else field
+            else:
+                alias, sql = self._select_expr(
+                    kind=kind,
+                    field=field,
+                    tz=tz,
+                    call_attempts_expr=call_attempts_expr,
+                    score_expr=score_expr,
+                )
+                if alias not in select:
+                    select[alias] = sql
+                expr = F(alias)
+                part = expr.desc(nulls_last=True) if descending else expr.asc(nulls_last=True)
+
+            if field == "is_expired_snoozed":
+                expired_parts.append(part)
                 continue
+            if not seen_score and field in ("lead_score", "lead_score_for_sort"):
+                seen_score = True
+            if seen_score:
+                from_score.append(part)
+            else:
+                before_score.append(part)
 
-            alias, sql = self._select_expr(
-                kind=kind,
-                field=field,
-                tz=tz,
-                call_attempts_expr=call_attempts_expr,
-                score_expr=score_expr,
-            )
-            if alias not in select:
-                select[alias] = sql
-            expr = F(alias)
-            order_parts.append(
-                expr.desc(nulls_last=True) if descending else expr.asc(nulls_last=True)
-            )
+        # District after day/attempts, before score. Referrals skip district.
+        geo_parts: list[Any] = []
+        if rm_district:
+            select["district_priority"] = _district_priority_sql(rm_district)
+            geo_parts.append("district_priority")
 
-        # Referral → creator email; non-referral → district. Party is non-referral only.
-        if rm_district or rm_email:
-            select["routing_priority"] = _routing_priority_sql(rm_district, rm_email)
-            # String alias (not F()) — Django resolves F() before extra(select=...).
-            order_parts.append("routing_priority")
-
+        extra_parts: list[Any] = []
+        if rm_email:
+            select["creator_priority"] = _creator_priority_sql(rm_email)
+            extra_parts.append("creator_priority")
         if rm_party:
             select["party_priority"] = _party_priority_sql(rm_party)
-            order_parts.append("party_priority")
+            extra_parts.append("party_priority")
 
-        order_parts.append("id")
+        order_parts = [
+            *expired_parts,
+            *before_score,
+            *geo_parts,
+            *from_score,
+            *extra_parts,
+            "id",
+        ]
         return qs.extra(select=select).order_by(*order_parts)
 
     def _select_expr(
