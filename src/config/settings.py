@@ -151,6 +151,19 @@ else:
 from config.cache_settings import default_caches_config
 
 CACHES = default_caches_config(REDIS_URL)
+if REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": REDIS_URL,
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        }
+    }
 
 # Postgres LISTEN for direct SQL / Supabase table edits.
 # Supabase transaction pooler (port 6543) cannot receive cross-connection NOTIFY;
