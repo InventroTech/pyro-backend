@@ -72,6 +72,15 @@ from .serializers import (
 # --- Config & Logging ---
 logger = logging.getLogger(__name__)
 
+# --- Cache & Status Constants/Helpers ---
+_TICKET_STATUS_TTL_SECONDS = 300
+
+def _ticket_status_cache_key(tenant_id, user_id, target_date):
+    return f"ticket_status_{tenant_id}_{user_id}_{target_date}"
+
+def _compute_ticket_status(tenant, user_id):
+    pass
+
 class StackedBarResolvedUnresolvedView(APIView):
     """Stacked bar data for resolved/unresolved support tickets per day."""
     authentication_classes = [SupabaseJWTAuthentication]
