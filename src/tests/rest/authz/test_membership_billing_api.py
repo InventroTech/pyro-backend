@@ -12,6 +12,8 @@ from authz.views_management import (
 )
 from tests.base.test_setup import BaseAPITestCase
 from tests.factories import RoleFactory, TenantFactory, TenantMembershipFactory
+from user_settings.models import TenantMemberSetting
+from user_settings.services import USER_KV_STATE_KEY
 
 
 class MembershipBillingCalculationTests(SimpleTestCase):
@@ -75,7 +77,7 @@ class MembershipBillingCalculationTests(SimpleTestCase):
             "role": type("Role", (), {"key": "RM", "name": "Relationship Manager"})()
         })()
 
-        self.assertEqual(get_membership_monthly_amount(cse_membership), ("CSE", Decimal("1500")))
+        self.assertEqual(get_membership_monthly_amount(cse_membership), ("CSE", Decimal("1800")))
         self.assertEqual(get_membership_monthly_amount(rm_membership), ("RM", Decimal("2000")))
 
     def test_role_rates_can_be_overridden_for_report(self):
@@ -101,6 +103,12 @@ class TenantMembershipBillingAPITests(BaseAPITestCase):
         TenantMembership.objects.filter(id=self.membership.id).update(
             role_id=cse_role.id,
             created_at=datetime(2026, 5, 13, 9, 0, 0)
+        )
+        TenantMemberSetting.objects.update_or_create(
+            tenant=self.tenant,
+            tenant_membership=self.membership,
+            key=USER_KV_STATE_KEY,
+            defaults={"value": 95829},
         )
 
         other_tenant = TenantFactory()
@@ -134,7 +142,7 @@ class TenantMembershipBillingAPITests(BaseAPITestCase):
         self.assertEqual(response.data["summary"]["member_count"], 1)
         self.assertEqual(response.data["summary"]["excluded_internal_member_count"], 2)
         self.assertEqual(response.data["summary"]["total_billable_days"], 17)
-        self.assertEqual(response.data["summary"]["total_amount"], "822.58")
+        self.assertEqual(response.data["summary"]["total_amount"], "987.10")
         self.assertEqual(response.data["cycle_days"], 31)
         self.assertEqual(response.data["period_end"], "2026-05-29")
         self.assertEqual(response.data["excluded_email_domain"], "@thepyro.ai")
@@ -146,15 +154,17 @@ class TenantMembershipBillingAPITests(BaseAPITestCase):
             role for role in response.data["billing_roles"]
             if role["key"] == "CSE"
         )
-        self.assertEqual(cse_billing_role["rate"], "1500.00")
-        self.assertEqual(response.data["role_rates"]["CSE"], "1500.00")
+        self.assertEqual(cse_billing_role["rate"], "1800.00")
+        self.assertEqual(response.data["role_rates"]["CSE"], "1800.00")
         self.assertNotIn("RM", response.data["role_rates"])
         self.assertEqual(response.data["results"][0]["billable_days"], 17)
         self.assertEqual(len(response.data["results"]), 1)
         self.assertNotIn("@thepyro.ai", response.data["results"][0]["email"])
         self.assertEqual(response.data["results"][0]["billing_role_key"], "CSE")
-        self.assertEqual(response.data["results"][0]["monthly_amount"], "1500.00")
-        self.assertEqual(response.data["results"][0]["billing_amount"], "822.58")
+        self.assertEqual(response.data["results"][0]["monthly_amount"], "1800.00")
+        self.assertEqual(response.data["results"][0]["billing_amount"], "987.10")
+        self.assertEqual(response.data["results"][0]["state_id"], 95829)
+        self.assertEqual(response.data["results"][0]["state"], "Karnataka")
 
     @patch("authz.views_management._today", return_value=date(2026, 5, 29))
     def test_rate_overrides_are_used_for_report_calculation(self, _mock_today):
@@ -213,8 +223,26 @@ class TenantMembershipBillingAPITests(BaseAPITestCase):
         self.assertTrue(row["is_deleted"])
         self.assertEqual(row["billable_days"], 11)
         self.assertEqual(row["billing_end_date"], "2026-05-20")
-        self.assertEqual(row["monthly_amount"], "1500.00")
-        self.assertEqual(row["billing_amount"], "532.26")
+        self.assertEqual(row["monthly_amount"], "1800.00")
+        self.assertEqual(row["billing_amount"], "638.71")
+
+    @patch("authz.views_management._today", return_value=date(2026, 5, 29))
+    def test_members_without_state_kv_return_null_state(self, _mock_today):
+        cse_role = RoleFactory(tenant=self.tenant, key="CSE", name="Customer Support Executive")
+        TenantMembership.objects.filter(id=self.membership.id).update(
+            role_id=cse_role.id,
+            created_at=datetime(2026, 5, 13, 9, 0, 0),
+        )
+
+        response = self.client.get(
+            self.url,
+            {"month": "2026-05"},
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertIsNone(response.data["results"][0]["state_id"])
+        self.assertIsNone(response.data["results"][0]["state"])
 
     def test_invalid_month_returns_400(self):
         response = self.client.get(

@@ -275,6 +275,7 @@ def tool_get_billing_report(
     from authz.views_management import (
         INTERNAL_BILLING_EMAIL_DOMAIN,
         _billing_period_end,
+        _billing_state_name_by_id,
         _current_billing_month,
         _default_rate_for_role,
         _internal_billing_email_q,
@@ -285,6 +286,7 @@ def tool_get_billing_report(
         calculate_membership_billing,
         get_membership_monthly_amount,
     )
+    from user_settings.services import USER_KV_STATE_KEY, kv_int_by_membership
 
     try:
         billing_month = _parse_billing_month(month or None)
@@ -310,6 +312,16 @@ def tool_get_billing_report(
         base_memberships.exclude(internal_email_query).order_by("created_at", "email")
     )
 
+    state_ids_by_membership = {}
+    state_name_by_id = {}
+    if include_members:
+        state_ids_by_membership = kv_int_by_membership(
+            tenant,
+            [membership.id for membership in memberships],
+            USER_KV_STATE_KEY,
+        )
+        state_name_by_id = _billing_state_name_by_id()
+
     rows = []
     total_amount = Decimal("0.00")
     total_billable_days = 0
@@ -328,10 +340,13 @@ def tool_get_billing_report(
         total_billable_days += billable_days
         total_amount += amount
         if include_members:
+            state_id = state_ids_by_membership.get(membership.id)
             rows.append(
                 {
                     "name": membership.name or "",
                     "email": membership.email,
+                    "state_id": state_id,
+                    "state": state_name_by_id.get(state_id) if state_id is not None else None,
                     "role": membership.role.key if membership.role_id else None,
                     "billable_days": billable_days,
                     "billing_amount": str(amount),
