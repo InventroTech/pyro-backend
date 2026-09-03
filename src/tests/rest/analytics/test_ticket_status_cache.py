@@ -93,7 +93,7 @@ class GetTicketStatusCacheTests(BaseAPITestCase):
         self.assertEqual(payload_one["ticketStats"]["resolvedByYouToday"], 3)
         compute_status.assert_called_once()
 
-    @patch("analytics.views.cache.get_or_set")
+    @patch("django.core.cache.cache.get_or_set")
     @patch("analytics.views._compute_ticket_status")
     def test_get_or_set_uses_ticket_status_ttl(self, compute_status, get_or_set):
         compute_status.return_value = {"success": True, "ticketStats": {}, "dateRange": {}}
