@@ -17,8 +17,9 @@ from authz.permissions import IsTenantAuthenticated, HasPermissionKey
 from authz.models import Role, TenantMembership
 from .serializers import RoleListSerializer, CreateSyncedRoleSerializer, TenantMembershipUserSerializer
 from .service import create_or_sync_role
+from user_settings.geo_party_catalog import load_geo_party_catalog
 from user_settings.models import Group, TenantMemberSetting
-from user_settings.services import USER_KV_GROUP_ID_KEY
+from user_settings.services import USER_KV_GROUP_ID_KEY, USER_KV_STATE_KEY, kv_int_by_membership
 
 
 INTERNAL_BILLING_EMAIL_DOMAIN = "@thepyro.ai"
@@ -43,9 +44,10 @@ INTERNAL_BILLING_EMAIL_ADDRESSES = (
     "abhsr1987@gmail.com",
     "ritam.pyro@circleapp.in",
 )
+DEFAULT_BILLING_ROLE_RATE = Decimal("2000")
 BILLING_ROLE_RATES = {
-    "CSE": Decimal("1500"),
-    "RM": Decimal("2000"),
+    "CSE": Decimal("1800"),
+    "RM": DEFAULT_BILLING_ROLE_RATE,
 }
 
 
@@ -123,7 +125,7 @@ def _default_rate_for_role(role):
     if role_name in BILLING_ROLE_RATES:
         return BILLING_ROLE_RATES[role_name]
 
-    return Decimal("0")
+    return DEFAULT_BILLING_ROLE_RATE
 
 
 def _tenant_billing_roles(tenant):
@@ -179,6 +181,20 @@ def _internal_billing_email_q():
     return query
 
 
+def _billing_state_name_by_id():
+    """Map Circle state catalog IDs to display names for billing rows."""
+    names = {}
+    for item in load_geo_party_catalog().get("states") or []:
+        try:
+            state_id = int(item.get("id"))
+        except (TypeError, ValueError):
+            continue
+        name = str(item.get("name") or "").strip()
+        if name:
+            names[state_id] = name
+    return names
+
+
 def _role_billing_key(role, role_rates=None):
     role_rates = role_rates or BILLING_ROLE_RATES
     if not role:
@@ -205,7 +221,14 @@ def get_membership_monthly_amount(membership, role_rates=None):
             return billing_key, role_rates.get(role_id, Decimal("0"))
 
     billing_key = _role_billing_key(role, role_rates)
-    return billing_key, role_rates.get(billing_key, Decimal("0"))
+    if billing_key is not None and billing_key in role_rates:
+        return billing_key, role_rates[billing_key]
+
+    if role is None:
+        return None, Decimal("0")
+
+    fallback_key = (getattr(role, "key", "") or getattr(role, "name", "") or "").strip() or None
+    return fallback_key, _default_rate_for_role(role)
 
 
 def calculate_membership_billing(joined_at, billing_month, monthly_amount, cycle_days=None, period_end=None):
@@ -381,6 +404,13 @@ class TenantMembershipBillingView(APIView):
             .order_by("created_at", "email")
         )
 
+        state_ids_by_membership = kv_int_by_membership(
+            request.tenant,
+            [membership.id for membership in memberships],
+            USER_KV_STATE_KEY,
+        )
+        state_name_by_id = _billing_state_name_by_id()
+
         rows = []
         total_amount = Decimal("0.00")
         total_billable_days = 0
@@ -402,11 +432,15 @@ class TenantMembershipBillingView(APIView):
             total_billable_days += billable_days
             total_amount += amount
             joined_date = _date_from_datetime(membership.created_at)
+            state_id = state_ids_by_membership.get(membership.id)
+            state_name = state_name_by_id.get(state_id) if state_id is not None else None
 
             rows.append({
                 "membership_id": membership.id,
                 "name": membership.name or "",
                 "email": membership.email,
+                "state_id": state_id,
+                "state": state_name,
                 "role": {
                     "id": str(membership.role.id),
                     "key": membership.role.key,
