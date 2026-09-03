@@ -924,7 +924,6 @@ class GetTicketStatusView(APIView):
 
     def get(self, request):
         try:
-            # Get current user info
             user = request.user
             user_email = getattr(user, "email", "")
             user_supabase_uid = getattr(user, "supabase_uid", None)
@@ -941,90 +940,95 @@ class GetTicketStatusView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Today's date range (start and end of local day)
             today = timezone.now().date()
-            start_of_day = timezone.make_aware(datetime.combine(today, time.min))
-            end_of_day = timezone.make_aware(datetime.combine(today, time.max))
-
-
             user_id = str(user_supabase_uid)
-            ticket_qs = annotate_ticket_datetimes(
-                support_ticket_records_qs(tenant=request.tenant)
-            )
+            cache_key = _ticket_status_cache_key(request.tenant.id, user_id, today)
 
-            agg = ticket_qs.aggregate(
-                resolved_today=Count(
-                    "id",
-                    filter=Q(
-                        data__assigned_to=user_id,
-                        data__resolution_status="Resolved",
-                        ticket_completed_at__gte=start_of_day,
-                        ticket_completed_at__lte=end_of_day,
-                    ),
-                ),
-                total_pending=Count(
-                    "id",
-                    filter=(
-                        q_record_pending_resolution() & q_record_unassigned()
-                        | Q(
-                            data__resolution_status="Snoozed",
-                            data__assigned_to=user_id,
-                        )
-                    ),
-                ),
-                total_tickets=Count("id"),
-                wip=Count(
-                    "id",
-                    filter=Q(
-                        data__assigned_to=user_id,
-                        data__resolution_status="WIP",
-                    ),
-                ),
-                cant_resolve_today=Count(
-                    "id",
-                    filter=Q(
-                        data__assigned_to=user_id,
-                        data__resolution_status="Can't Resolve",
-                        ticket_completed_at__gte=start_of_day,
-                        ticket_completed_at__lte=end_of_day,
-                    ),
-                ),
-            )
+            def compute():
+                start_of_day = timezone.make_aware(datetime.combine(today, time.min))
+                end_of_day = timezone.make_aware(datetime.combine(today, time.max))
 
-            pending_by_poster_array = [
-                {"poster": row["data__poster"], "count": row["count"]}
-                for row in (
+                ticket_qs = annotate_ticket_datetimes(
                     support_ticket_records_qs(tenant=request.tenant)
-                    .filter(q_record_pending_resolution())
-                    .filter(q_record_unassigned())
-                    .exclude(q_data_json_null("poster"))
-                    .values("data__poster")
-                    .annotate(count=Count("id"))
-                    .order_by("-count")
                 )
-            ]
-            
-            # Prepare response
-            ticket_stats = {
-                "resolvedByYouToday": agg["resolved_today"],
-                "totalPendingTickets": agg["total_pending"],
-                "pendingByPoster": pending_by_poster_array,
-                "totalTickets": agg["total_tickets"],
-                "wipTickets": agg["wip"],
-                "cantResolveToday": agg["cant_resolve_today"],
-            }
 
-            return Response(
-                {
+                agg = ticket_qs.aggregate(
+                    resolved_today=Count(
+                        "id",
+                        filter=Q(
+                            data__assigned_to=user_id,
+                            data__resolution_status="Resolved",
+                            ticket_completed_at__gte=start_of_day,
+                            ticket_completed_at__lte=end_of_day,
+                        ),
+                    ),
+                    total_pending=Count(
+                        "id",
+                        filter=(
+                            q_record_pending_resolution() & q_record_unassigned()
+                            | Q(
+                                data__resolution_status="Snoozed",
+                                data__assigned_to=user_id,
+                            )
+                        ),
+                    ),
+                    total_tickets=Count("id"),
+                    wip=Count(
+                        "id",
+                        filter=Q(
+                            data__assigned_to=user_id,
+                            data__resolution_status="WIP",
+                        ),
+                    ),
+                    cant_resolve_today=Count(
+                        "id",
+                        filter=Q(
+                            data__assigned_to=user_id,
+                            data__resolution_status="Can't Resolve",
+                            ticket_completed_at__gte=start_of_day,
+                            ticket_completed_at__lte=end_of_day,
+                        ),
+                    ),
+                )
+
+                pending_by_poster_array = [
+                    {"poster": row["data__poster"], "count": row["count"]}
+                    for row in (
+                        support_ticket_records_qs(tenant=request.tenant)
+                        .filter(q_record_pending_resolution())
+                        .filter(q_record_unassigned())
+                        .exclude(q_data_json_null("poster"))
+                        .values("data__poster")
+                        .annotate(count=Count("id"))
+                        .order_by("-count")
+                    )
+                ]
+                
+                ticket_stats = {
+                    "resolvedByYouToday": agg["resolved_today"],
+                    "totalPendingTickets": agg["total_pending"],
+                    "pendingByPoster": pending_by_poster_array,
+                    "totalTickets": agg["total_tickets"],
+                    "wipTickets": agg["wip"],
+                    "cantResolveToday": agg["cant_resolve_today"],
+                }
+
+                return {
                     "success": True,
                     "ticketStats": ticket_stats,
                     "dateRange": {
                         "startOfDay": start_of_day.isoformat(),
                         "endOfDay": end_of_day.isoformat(),
                     },
-                },
-                status=status.HTTP_200_OK,
+                }
+
+            response_data = cache.get_or_set(
+                cache_key,
+                lambda: _compute_ticket_status(request.tenant, user_id) or compute(),
+                timeout=_TICKET_STATUS_TTL_SECONDS,
             )
+
+            return Response(response_data, status=status.HTTP_200_OK)
 
         except Exception as error:
             logger.exception("Error in get-ticket-status function: %s", error)
