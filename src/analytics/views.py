@@ -81,6 +81,7 @@ def _ticket_status_cache_key(tenant_id, user_id, target_date):
 def _compute_ticket_status(tenant, user_id):
     pass
 
+
 class StackedBarResolvedUnresolvedView(APIView):
     """Stacked bar data for resolved/unresolved support tickets per day."""
     authentication_classes = [SupabaseJWTAuthentication]
