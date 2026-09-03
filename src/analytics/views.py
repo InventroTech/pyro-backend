@@ -1,10 +1,10 @@
 import json
 import logging
 import numpy as np
-from django.core.cache import cache
 from django.db.models import F, ExpressionWrapper, DurationField, Avg, Count, Q, Func, IntegerField, Case, When
 from django.db.models.functions import TruncDate
 from django.db import connection
+from django.core.cache import cache
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -69,14 +69,23 @@ from .serializers import (
 )
 
 
-# "How many support tickets did each executive resolve last week?"
-# "Which executive had the fastest average resolution time last month?"
-# "Show me the number of open vs closed tickets handled by each support executive."
-# "List the top 3 executives by the number of tickets resolved in the past month."
-# "Which executive has the highest unresolved ticket count right now?"
-
 # --- Config & Logging ---
 logger = logging.getLogger(__name__)
+
+# --- Cache & Status Constants/Helpers ---
+_TICKET_STATUS_TTL_SECONDS = 300
+
+def _ticket_status_cache_key(tenant_id, user_id, target_date):
+    return f"ticket_status_{tenant_id}_{user_id}_{target_date.isoformat()}"
+
+def invalidate_ticket_status_cache(tenant_id, user_id):
+    today = timezone.now().date()
+    today_key = _ticket_status_cache_key(tenant_id, user_id, today)
+    cache.delete(today_key)
+
+def _compute_ticket_status(tenant, user_id):
+    pass
+
 
 class StackedBarResolvedUnresolvedView(APIView):
     """Stacked bar data for resolved/unresolved support tickets per day."""
@@ -204,7 +213,7 @@ class DailyPercentileResolutionTimeView(APIView):
                         data_by_day.setdefault(day, []).append(res_time_seconds)
             except (ValueError, IndexError) as e:
                 logger.warning("Failed to parse resolution time '%s' for ticket %s: %s", 
-                             getattr(ticket, 'resolution_time', None), getattr(ticket, 'id', None), e)
+                            getattr(ticket, 'resolution_time', None), getattr(ticket, 'id', None), e)
             except Exception as e:
                 logger.warning("Failed to process resolution time for ticket %s: %s", getattr(ticket, 'id', None), e)
 
@@ -275,7 +284,7 @@ class DailyAverageResolutionTimeView(APIView):
                         data_by_day.setdefault(day, []).append(res_time_seconds)
             except (ValueError, IndexError) as e:
                 logger.warning("Failed to parse resolution time '%s' for ticket %s: %s",
-                             getattr(ticket, 'resolution_time', None), getattr(ticket, 'id', None), e)
+                            getattr(ticket, 'resolution_time', None), getattr(ticket, 'id', None), e)
             except Exception as e:
                 logger.warning("Failed to process resolution time for ticket %s: %s", getattr(ticket, 'id', None), e)
 
@@ -292,6 +301,7 @@ class DailyAverageResolutionTimeView(APIView):
             result.append({"x": date.strftime("%Y-%m-%d"), "y": y})
         logger.info("Returning %d data points", len(result))
         return Response(result)
+
 class DailyResolvedTicketsView(APIView):
     authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
@@ -847,6 +857,18 @@ class SupportTicketListView(ListAPIView):
             if ints:
                 qs = qs.filter(data__call_attempts__in=ints)
 
+        # Added dynamic parsing for Reason filter
+        reason_vals = get_multi_values(qp, "reason", "reason__in")
+        if reason_vals:
+            include_null = any(v.lower() == "null" for v in reason_vals)
+            vals = [v for v in reason_vals if v.lower() != "null"]
+            q = Q()
+            if vals:
+                q |= Q(data__reason__in=vals)
+            if include_null:
+                q |= q_data_json_null("reason")
+            qs = qs.filter(q)
+
         gte = qp.get("created_at__gte")
         lte = qp.get("created_at__lte")
         if gte:
@@ -868,99 +890,30 @@ class SupportTicketFilterOptionsView(APIView):
             "poster_statuses": poster_statuses,
         }, status=status.HTTP_200_OK)
 
-_TICKET_STATUS_TTL_SECONDS = 30
+class SupportTicketAssigneeOptionsView(APIView):
+    permission_classes = [IsTenantAuthenticated]
+    
+    def get(self, request):
+        from authz.models import TenantMembership
+        
+        # Scope active users strictly to the current tenant via active memberships
+        active_user_ids = TenantMembership.objects.filter(
+            tenant=request.tenant,
+            is_active=True
+        ).values_list("user_id", flat=True)
 
-
-def _ticket_status_cache_key(tenant_id, user_id: str, today) -> str:
-    # `today` is part of the key (not just relied on via TTL) so the
-    # resolved-today/cant-resolve-today buckets reset cleanly at midnight
-    # instead of serving a stale window for up to TTL seconds after rollover.
-    return f"ticket_status:{tenant_id}:{user_id}:{today.isoformat()}"
-
-
-def invalidate_ticket_status_cache(tenant_id, user_id: str) -> None:
-    """Call after a ticket save if the pending card must update before the TTL lapses."""
-    today = timezone.now().date()
-    cache.delete(_ticket_status_cache_key(tenant_id, user_id, today))
-
-
-def _compute_ticket_status(tenant, user_id: str) -> dict:
-    today = timezone.now().date()
-    start_of_day = timezone.make_aware(datetime.combine(today, time.min))
-    end_of_day = timezone.make_aware(datetime.combine(today, time.max))
-
-    ticket_qs = annotate_ticket_datetimes(support_ticket_records_qs(tenant=tenant))
-
-    agg = ticket_qs.aggregate(
-        resolved_today=Count(
-            "id",
-            filter=Q(
-                data__assigned_to=user_id,
-                data__resolution_status="Resolved",
-                ticket_completed_at__gte=start_of_day,
-                ticket_completed_at__lte=end_of_day,
-            ),
-        ),
-        total_pending=Count(
-            "id",
-            filter=(
-                q_record_pending_resolution() & q_record_unassigned()
-                | Q(
-                    data__resolution_status="Snoozed",
-                    data__assigned_to=user_id,
-                )
-            ),
-        ),
-        total_tickets=Count("id"),
-        wip=Count(
-            "id",
-            filter=Q(
-                data__assigned_to=user_id,
-                data__resolution_status="WIP",
-            ),
-        ),
-        cant_resolve_today=Count(
-            "id",
-            filter=Q(
-                data__assigned_to=user_id,
-                data__resolution_status="Can't Resolve",
-                ticket_completed_at__gte=start_of_day,
-                ticket_completed_at__lte=end_of_day,
-            ),
-        ),
-    )
-
-    pending_by_poster_array = [
-        {"poster": row["data__poster"], "count": row["count"]}
-        for row in (
-            support_ticket_records_qs(tenant=tenant)
-            .filter(q_record_pending_resolution())
-            .filter(q_record_unassigned())
-            .exclude(q_data_json_null("poster"))
-            .values("data__poster")
-            .annotate(count=Count("id"))
-            .order_by("-count")
-        )
-    ]
-
-    ticket_stats = {
-        "resolvedByYouToday": agg["resolved_today"],
-        "totalPendingTickets": agg["total_pending"],
-        "pendingByPoster": pending_by_poster_array,
-        "totalTickets": agg["total_tickets"],
-        "wipTickets": agg["wip"],
-        "cantResolveToday": agg["cant_resolve_today"],
-    }
-
-    return {
-        "success": True,
-        "ticketStats": ticket_stats,
-        "dateRange": {
-            "startOfDay": start_of_day.isoformat(),
-            "endOfDay": end_of_day.isoformat(),
-        },
-    }
-
+        User = get_user_model()
+        users = User.objects.filter(id__in=active_user_ids, is_active=True)
+        
+        options = [
+            {
+                "id": str(getattr(user, "id", "")),
+                "name": f"{user.first_name} {user.last_name}".strip() or getattr(user, "username", str(user.id))
+            }
+            for user in users
+        ]
+        # Wrapped in "results" root key to match page builder API expectations
+        return Response({"results": options}, status=status.HTTP_200_OK)
 
 class GetTicketStatusView(APIView):
     """
@@ -971,7 +924,6 @@ class GetTicketStatusView(APIView):
 
     def get(self, request):
         try:
-            # Get current user info
             user = request.user
             user_email = getattr(user, "email", "")
             user_supabase_uid = getattr(user, "supabase_uid", None)
@@ -988,16 +940,95 @@ class GetTicketStatusView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            user_id = str(user_supabase_uid)
             today = timezone.now().date()
+            user_id = str(user_supabase_uid)
             cache_key = _ticket_status_cache_key(request.tenant.id, user_id, today)
-            payload = cache.get_or_set(
+
+            def compute():
+                start_of_day = timezone.make_aware(datetime.combine(today, time.min))
+                end_of_day = timezone.make_aware(datetime.combine(today, time.max))
+
+                ticket_qs = annotate_ticket_datetimes(
+                    support_ticket_records_qs(tenant=request.tenant)
+                )
+
+                agg = ticket_qs.aggregate(
+                    resolved_today=Count(
+                        "id",
+                        filter=Q(
+                            data__assigned_to=user_id,
+                            data__resolution_status="Resolved",
+                            ticket_completed_at__gte=start_of_day,
+                            ticket_completed_at__lte=end_of_day,
+                        ),
+                    ),
+                    total_pending=Count(
+                        "id",
+                        filter=(
+                            q_record_pending_resolution() & q_record_unassigned()
+                            | Q(
+                                data__resolution_status="Snoozed",
+                                data__assigned_to=user_id,
+                            )
+                        ),
+                    ),
+                    total_tickets=Count("id"),
+                    wip=Count(
+                        "id",
+                        filter=Q(
+                            data__assigned_to=user_id,
+                            data__resolution_status="WIP",
+                        ),
+                    ),
+                    cant_resolve_today=Count(
+                        "id",
+                        filter=Q(
+                            data__assigned_to=user_id,
+                            data__resolution_status="Can't Resolve",
+                            ticket_completed_at__gte=start_of_day,
+                            ticket_completed_at__lte=end_of_day,
+                        ),
+                    ),
+                )
+
+                pending_by_poster_array = [
+                    {"poster": row["data__poster"], "count": row["count"]}
+                    for row in (
+                        support_ticket_records_qs(tenant=request.tenant)
+                        .filter(q_record_pending_resolution())
+                        .filter(q_record_unassigned())
+                        .exclude(q_data_json_null("poster"))
+                        .values("data__poster")
+                        .annotate(count=Count("id"))
+                        .order_by("-count")
+                    )
+                ]
+                
+                ticket_stats = {
+                    "resolvedByYouToday": agg["resolved_today"],
+                    "totalPendingTickets": agg["total_pending"],
+                    "pendingByPoster": pending_by_poster_array,
+                    "totalTickets": agg["total_tickets"],
+                    "wipTickets": agg["wip"],
+                    "cantResolveToday": agg["cant_resolve_today"],
+                }
+
+                return {
+                    "success": True,
+                    "ticketStats": ticket_stats,
+                    "dateRange": {
+                        "startOfDay": start_of_day.isoformat(),
+                        "endOfDay": end_of_day.isoformat(),
+                    },
+                }
+
+            response_data = cache.get_or_set(
                 cache_key,
-                lambda: _compute_ticket_status(request.tenant, user_id),
+                lambda: _compute_ticket_status(request.tenant, user_id) or compute(),
                 timeout=_TICKET_STATUS_TTL_SECONDS,
             )
 
-            return Response(payload, status=status.HTTP_200_OK)
+            return Response(response_data, status=status.HTTP_200_OK)
 
         except Exception as error:
             logger.exception("Error in get-ticket-status function: %s", error)
@@ -1693,7 +1724,7 @@ class AnalyticsBoardView(APIView):
     role shares them. Generic across analytics types via ``type`` (e.g. cse, rm).
 
     GET  ?type=<type>            -> { board_type, role, boards: [config, ...] }
-    POST { type?, config }       -> creates a board row and returns its config.
+    POST { type?, config }        -> creates a board row and returns its config.
     """
 
     permission_classes = [IsTenantAuthenticated]

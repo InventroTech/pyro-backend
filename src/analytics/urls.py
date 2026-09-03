@@ -12,6 +12,7 @@ from .views import (
     SLATimeView,
     SupportTicketListView,
     SupportTicketFilterOptionsView,
+    SupportTicketAssigneeOptionsView, # <-- Added import for your new assignee view
     GetTicketStatusView,
     GetCseStatsView,
     TeamOverviewView,
@@ -79,6 +80,11 @@ urlpatterns = [
     path("support-ticket/", SupportTicketListView.as_view(), name="support-ticket-list"),
     path("support-tickets/filter-options/", SupportTicketFilterOptionsView.as_view(),
          name="support-ticket-filter-options"),
+    path(
+        "support-tickets/assignee-options/", 
+        SupportTicketAssigneeOptionsView.as_view(), 
+        name="support-ticket-assignee-options"
+    ), # <-- Added new backend route for your assignee filter dropdown
     path("get-ticket-status/", GetTicketStatusView.as_view(), name="get-ticket-status"),
     
     # Team metrics endpoints
