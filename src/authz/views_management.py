@@ -19,7 +19,14 @@ from .serializers import RoleListSerializer, CreateSyncedRoleSerializer, TenantM
 from .service import create_or_sync_role
 from user_settings.geo_party_catalog import load_geo_party_catalog
 from user_settings.models import Group, TenantMemberSetting
-from user_settings.services import USER_KV_GROUP_ID_KEY, USER_KV_STATE_KEY, kv_int_by_membership
+from user_settings.services import (
+    USER_KV_DISTRICT_KEY,
+    USER_KV_GROUP_ID_KEY,
+    USER_KV_PARTY_KEY,
+    USER_KV_STATE_KEY,
+    coerce_kv_int,
+    kv_int_by_membership,
+)
 
 
 INTERNAL_BILLING_EMAIL_DOMAIN = "@thepyro.ai"
@@ -339,21 +346,26 @@ class ListTenantUsersView(APIView):
         # Serialize the data
         data = TenantMembershipUserSerializer(qs, many=True).data
         memberships = list(qs)
-        setting_map = {
-            s.tenant_membership_id: s.value
-            for s in TenantMemberSetting.objects.filter(
-                tenant=request.tenant,
-                key=USER_KV_GROUP_ID_KEY,
-                tenant_membership_id__in=[m.id for m in memberships],
-            )
-        }
-        from user_settings.services import coerce_kv_int
+        membership_ids = [m.id for m in memberships]
+        kv_rows = TenantMemberSetting.objects.filter(
+            tenant=request.tenant,
+            tenant_membership_id__in=membership_ids,
+            key__in=[
+                USER_KV_GROUP_ID_KEY,
+                USER_KV_STATE_KEY,
+                USER_KV_DISTRICT_KEY,
+                USER_KV_PARTY_KEY,
+            ],
+        )
+        kv_by_membership: dict[int, dict[str, object]] = {}
+        for row in kv_rows:
+            kv_by_membership.setdefault(row.tenant_membership_id, {})[row.key] = row.value
 
-        coerced_setting_map = {
-            membership_id: coerce_kv_int(raw_value)
-            for membership_id, raw_value in setting_map.items()
+        coerced_group_map = {
+            membership_id: coerce_kv_int(raw.get(USER_KV_GROUP_ID_KEY))
+            for membership_id, raw in kv_by_membership.items()
         }
-        group_ids = {gid for gid in coerced_setting_map.values() if gid is not None}
+        group_ids = {gid for gid in coerced_group_map.values() if gid is not None}
         groups_by_id = {}
         if group_ids:
             groups_by_id = {
@@ -369,7 +381,13 @@ class ListTenantUsersView(APIView):
             # Include company_name if serializer doesn't already include it
             if 'company_name' not in item:
                 item['company_name'] = membership.company_name or ''
-            item["lead_group_name"] = groups_by_id.get(coerced_setting_map.get(membership.id))
+            item["lead_group_name"] = groups_by_id.get(coerced_group_map.get(membership.id))
+            raw_kv = kv_by_membership.get(membership.id, {})
+            item["state"] = coerce_kv_int(raw_kv.get(USER_KV_STATE_KEY))
+            item["district"] = coerce_kv_int(raw_kv.get(USER_KV_DISTRICT_KEY))
+            item["party"] = coerce_kv_int(raw_kv.get(USER_KV_PARTY_KEY))
+            # Alias used by settings UI (hierarchy is stored as user_parent_id)
+            item["manager_email"] = item.get("user_parent_email")
         
         return Response({"count": len(data), "results": data}, status=status.HTTP_200_OK)
 

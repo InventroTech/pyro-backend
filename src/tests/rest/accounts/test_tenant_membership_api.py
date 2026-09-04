@@ -121,3 +121,174 @@ class TenantMembershipUpdateAPITests(BaseAPITestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
         self.subject.refresh_from_db()
         self.assertEqual(self.subject.name, "After Name")
+
+    def test_update_preserves_district_state_party_when_omitted(self):
+        """Partial profile updates must not wipe geo KV settings."""
+        from user_settings.models import TenantMemberSetting
+        from user_settings.services import (
+            USER_KV_DISTRICT_KEY,
+            USER_KV_PARTY_KEY,
+            USER_KV_STATE_KEY,
+        )
+
+        TenantMemberSetting.objects.create(
+            tenant=self.tenant,
+            tenant_membership=self.subject,
+            key=USER_KV_STATE_KEY,
+            value=17,
+        )
+        TenantMemberSetting.objects.create(
+            tenant=self.tenant,
+            tenant_membership=self.subject,
+            key=USER_KV_DISTRICT_KEY,
+            value=90290,
+        )
+        TenantMemberSetting.objects.create(
+            tenant=self.tenant,
+            tenant_membership=self.subject,
+            key=USER_KV_PARTY_KEY,
+            value=3,
+        )
+
+        resp = self.client.post(
+            self.url,
+            {
+                "name": "Name Only",
+                "email": self.subject.email,
+                "role_id": str(self.role.id),
+                "original_email": self.subject.email,
+                "original_role_id": str(self.role.id),
+            },
+            format="json",
+            **self.auth_headers,
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["state"], 17)
+        self.assertEqual(resp.data["district"], 90290)
+        self.assertEqual(resp.data["party"], 3)
+
+        by_key = {
+            row.key: row.value
+            for row in TenantMemberSetting.objects.filter(
+                tenant=self.tenant,
+                tenant_membership=self.subject,
+                key__in=[USER_KV_STATE_KEY, USER_KV_DISTRICT_KEY, USER_KV_PARTY_KEY],
+            )
+        }
+        self.assertEqual(by_key[USER_KV_STATE_KEY], 17)
+        self.assertEqual(by_key[USER_KV_DISTRICT_KEY], 90290)
+        self.assertEqual(by_key[USER_KV_PARTY_KEY], 3)
+
+    def test_update_can_change_district_explicitly(self):
+        from user_settings.models import TenantMemberSetting
+        from user_settings.services import USER_KV_DISTRICT_KEY
+
+        TenantMemberSetting.objects.create(
+            tenant=self.tenant,
+            tenant_membership=self.subject,
+            key=USER_KV_DISTRICT_KEY,
+            value=90290,
+        )
+
+        resp = self.client.post(
+            self.url,
+            {
+                "name": self.subject.name,
+                "email": self.subject.email,
+                "role_id": str(self.role.id),
+                "original_email": self.subject.email,
+                "original_role_id": str(self.role.id),
+                "district": 90288,
+            },
+            format="json",
+            **self.auth_headers,
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["district"], 90288)
+        row = TenantMemberSetting.objects.get(
+            tenant=self.tenant,
+            tenant_membership=self.subject,
+            key=USER_KV_DISTRICT_KEY,
+        )
+        self.assertEqual(row.value, 90288)
+
+    def test_update_sets_and_preserves_manager_email(self):
+        manager = TenantMembership.objects.create(
+            tenant=self.tenant,
+            email=f"manager-{uuid.uuid4().hex[:8]}@example.com",
+            role=self.role,
+            user_id=uuid.uuid4(),
+            name="Manager",
+            is_active=True,
+        )
+
+        resp = self.client.post(
+            self.url,
+            {
+                "name": self.subject.name,
+                "email": self.subject.email,
+                "role_id": str(self.role.id),
+                "original_email": self.subject.email,
+                "original_role_id": str(self.role.id),
+                "manager_email": manager.email,
+            },
+            format="json",
+            **self.auth_headers,
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["manager_email"], manager.email)
+        self.subject.refresh_from_db()
+        self.assertEqual(self.subject.user_parent_id_id, manager.id)
+
+        # Omitting manager_email must not clear the hierarchy link.
+        resp2 = self.client.post(
+            self.url,
+            {
+                "name": "Still Has Manager",
+                "email": self.subject.email,
+                "role_id": str(self.role.id),
+                "original_email": self.subject.email,
+                "original_role_id": str(self.role.id),
+            },
+            format="json",
+            **self.auth_headers,
+        )
+        self.assertEqual(resp2.status_code, 200, resp2.data)
+        self.assertEqual(resp2.data["manager_email"], manager.email)
+        self.subject.refresh_from_db()
+        self.assertEqual(self.subject.user_parent_id_id, manager.id)
+
+    def test_list_users_returns_geo_and_manager_email(self):
+        from user_settings.models import TenantMemberSetting
+        from user_settings.services import USER_KV_DISTRICT_KEY, USER_KV_STATE_KEY
+
+        manager = TenantMembership.objects.create(
+            tenant=self.tenant,
+            email=f"mgr-list-{uuid.uuid4().hex[:8]}@example.com",
+            role=self.role,
+            user_id=uuid.uuid4(),
+            name="List Manager",
+            is_active=True,
+        )
+        self.subject.user_parent_id = manager
+        self.subject.save(update_fields=["user_parent_id"])
+        TenantMemberSetting.objects.create(
+            tenant=self.tenant,
+            tenant_membership=self.subject,
+            key=USER_KV_STATE_KEY,
+            value=17,
+        )
+        TenantMemberSetting.objects.create(
+            tenant=self.tenant,
+            tenant_membership=self.subject,
+            key=USER_KV_DISTRICT_KEY,
+            value=90290,
+        )
+
+        resp = self.client.get("/membership/users/", **self.auth_headers)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        row = next(r for r in resp.data["results"] if r["email"] == self.subject.email)
+        self.assertEqual(row["state"], 17)
+        self.assertEqual(row["district"], 90290)
+        self.assertEqual(row["user_parent_email"], manager.email)
+        self.assertEqual(row["manager_email"], manager.email)
