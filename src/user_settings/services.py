@@ -427,30 +427,40 @@ def upsert_user_kv_settings(
     state: Optional[int] = None,
     district: Optional[int] = None,
     party: Optional[int] = None,
+    update_group: bool = True,
+    update_daily_target: bool = True,
+    update_daily_limit: bool = True,
     update_state: bool = False,
     update_district: bool = False,
     update_party: bool = False,
 ) -> None:
-    """Persist core per-user settings in TenantMemberSetting KV rows."""
+    """Persist core per-user settings in TenantMemberSetting KV rows.
 
-    TenantMemberSetting.objects.update_or_create(
-        tenant=tenant,
-        tenant_membership=tenant_membership,
-        key=USER_KV_GROUP_ID_KEY,
-        defaults={"value": group_id},
-    )
-    TenantMemberSetting.objects.update_or_create(
-        tenant=tenant,
-        tenant_membership=tenant_membership,
-        key=USER_KV_DAILY_TARGET_KEY,
-        defaults={"value": daily_target},
-    )
-    TenantMemberSetting.objects.update_or_create(
-        tenant=tenant,
-        tenant_membership=tenant_membership,
-        key=USER_KV_DAILY_LIMIT_KEY,
-        defaults={"value": daily_limit},
-    )
+    Omitted keys are left unchanged when their update_* flag is False so partial
+    profile updates do not wipe district/state/party/group/limits.
+    """
+
+    if update_group:
+        TenantMemberSetting.objects.update_or_create(
+            tenant=tenant,
+            tenant_membership=tenant_membership,
+            key=USER_KV_GROUP_ID_KEY,
+            defaults={"value": group_id},
+        )
+    if update_daily_target:
+        TenantMemberSetting.objects.update_or_create(
+            tenant=tenant,
+            tenant_membership=tenant_membership,
+            key=USER_KV_DAILY_TARGET_KEY,
+            defaults={"value": daily_target},
+        )
+    if update_daily_limit:
+        TenantMemberSetting.objects.update_or_create(
+            tenant=tenant,
+            tenant_membership=tenant_membership,
+            key=USER_KV_DAILY_LIMIT_KEY,
+            defaults={"value": daily_limit},
+        )
     if update_state:
         TenantMemberSetting.objects.update_or_create(
             tenant=tenant,

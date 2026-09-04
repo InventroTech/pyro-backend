@@ -14,6 +14,7 @@ class TenantMembershipCreateSerializer(serializers.Serializer):
     state = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     district = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     party = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    manager_email = serializers.EmailField(required=False, allow_null=True)
 
     def validate(self, attrs):
         req = self.context['request']
@@ -23,6 +24,8 @@ class TenantMembershipCreateSerializer(serializers.Serializer):
         attrs["_tenant"] = tenant
         email = attrs["email"].strip().lower()
         attrs["email"] = email
+        if attrs.get("manager_email"):
+            attrs["manager_email"] = attrs["manager_email"].strip().lower()
 
         # NEW: Check TenantMembership instead of LegacyUser
         from authz.models import TenantMembership
@@ -64,6 +67,7 @@ class TenantMembershipUpdateSerializer(serializers.Serializer):
     state = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     district = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     party = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    manager_email = serializers.EmailField(required=False, allow_null=True, allow_blank=True)
 
     def validate(self, attrs):
         req = self.context["request"]
@@ -76,6 +80,8 @@ class TenantMembershipUpdateSerializer(serializers.Serializer):
         attrs["_tenant"] = tenant
         attrs["email"] = attrs["email"].strip().lower()
         attrs["original_email"] = attrs["original_email"].strip().lower()
+        if "manager_email" in attrs and attrs["manager_email"]:
+            attrs["manager_email"] = attrs["manager_email"].strip().lower()
 
         existing_membership = TenantMembership.objects.filter(
             tenant=tenant,
