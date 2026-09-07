@@ -74,7 +74,7 @@ class ManualPyroJobControlAPITest(TestCase):
             "payload": {
                 "days": 30,
                 "chunk_size": 1000,
-                "max_chunks_per_table": 20,
+                "max_runtime_seconds": 300,
             },
         }
         response = self.client.post(url, payload, format="json", **self.auth_headers)
