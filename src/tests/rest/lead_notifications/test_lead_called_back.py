@@ -94,7 +94,7 @@ class NotifyLeadCalledBackTests(TestCase):
         self.assertEqual(payload["event"], "lead_called_back")
         self.assertEqual(payload["record_id"], str(record.id))
         self.assertEqual(payload["lead_name"], "Raj")
-        self.assertEqual(payload["phone_number"], "9876543210")
+        self.assertNotIn("phone_number", payload)
         self.assertEqual(payload["praja_id"], "PRAJA123")
         self.assertTrue(payload["wati_chatbot_call_received"])
         self.assertIsNotNone(payload.get("notification_id"))
@@ -105,6 +105,8 @@ class NotifyLeadCalledBackTests(TestCase):
         self.assertEqual(notif.record_id, record.id)
         self.assertIsNone(notif.read_at)
         self.assertIn("Raj", notif.message)
+        self.assertIn("PRAJA123", notif.message)
+        self.assertNotIn("9876543210", notif.message)
         self.assertEqual(InAppNotification.objects.filter(record_id=record.id).count(), 1)
 
     def test_skips_when_no_assignee(self):
@@ -199,7 +201,7 @@ class InAppNotificationApiTests(BaseAPITestCase):
             user_id=self.supabase_uid,
             notification_type="lead_called_back",
             title="WhatsApp call back",
-            message="Sneha Jain called back (9876543210) · Praja ID: 1793876",
+            message="Sneha Jain called back · Praja ID: 1793876",
             record_id=123,
             tenant_id=self.tenant.id,
         )

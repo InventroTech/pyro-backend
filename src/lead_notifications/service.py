@@ -91,12 +91,13 @@ def resolve_supabase_uid_for_user_pk(user_pk: int) -> str | None:
 def build_lead_called_back_payload(record, *, notification_id: int | None = None) -> dict[str, Any]:
     data = record.data if isinstance(getattr(record, "data", None), dict) else {}
     assigned_to = data.get("assigned_to")
+    # Do not include phone in the WS payload — CodeQL flags cleartext phone storage
+    # sinks, and the lead card already has the number once opened via record_id.
     payload = {
         "event": "lead_called_back",
         "record_id": str(record.id),
         "entity_type": record.entity_type,
         "lead_name": data.get("name"),
-        "phone_number": data.get("phone_number"),
         "praja_id": data.get("praja_id"),
         "assigned_to": str(assigned_to) if assigned_to is not None else None,
         CALL_RECEIVED_FIELD: True,
@@ -109,15 +110,13 @@ def build_lead_called_back_payload(record, *, notification_id: int | None = None
 def _notification_title_message(record) -> tuple[str, str]:
     data = record.data if isinstance(getattr(record, "data", None), dict) else {}
     name = str(data.get("name") or "").strip() or "Lead"
-    phone = str(data.get("phone_number") or "").strip()
     praja_id = str(data.get("praja_id") or "").strip()
     title = "WhatsApp call back"
-    if phone:
-        message = f"{name} called back ({phone})"
+    # Persist name + Praja ID only — never store phone numbers in clear text.
+    if praja_id:
+        message = f"{name} called back · Praja ID: {praja_id}"
     else:
         message = f"{name} called back"
-    if praja_id:
-        message = f"{message} · Praja ID: {praja_id}"
     return title, message
 
 
