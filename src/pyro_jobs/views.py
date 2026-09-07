@@ -62,7 +62,7 @@ class PyroEnqueueJobView(_TenantPyroJobAPIView):
                         "example": {
                             "days": 30,
                             "chunk_size": 1000,
-                            "max_chunks_per_table": 20,
+                            "max_runtime_seconds": 300,
                         },
                     },
                     "run_at": {"type": "string", "format": "date-time"},
