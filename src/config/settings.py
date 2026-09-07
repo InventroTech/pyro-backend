@@ -84,6 +84,7 @@ INSTALLED_APPS = [
     'chatbot',
     'channels',
     'realtime',
+    'lead_notifications',
 ]
 
 MIDDLEWARE = [
