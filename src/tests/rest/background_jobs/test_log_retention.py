@@ -25,6 +25,7 @@ from core.log_retention import get_log_retention_days, purge_old_log_rows
 from core.models import TenantSettings
 from crm_records.models import EventLog, Record, RuleExecutionLog, RuleSet
 from object_history.models import ObjectHistory
+from pyro_jobs.models import PyroJob
 from tests.factories import (
     BackgroundJobFactory,
     EventLogFactory,
@@ -146,6 +147,29 @@ class TestPurgeOldLogRows:
         assert not BackgroundJob.all_objects.filter(pk=done.pk).exists()
         assert BackgroundJob.all_objects.filter(pk=pending.pk).exists()
 
+    def test_deletes_old_completed_pyro_jobs_only(self):
+        done = PyroJob.objects.create(
+            job_name="purge_old_log_tables",
+            payload={},
+            run_at=timezone.now(),
+            status=PyroJob.STATUS_COMPLETED,
+        )
+        pending = PyroJob.objects.create(
+            job_name="purge_old_log_tables",
+            payload={},
+            run_at=timezone.now(),
+            status=PyroJob.STATUS_PENDING,
+        )
+        old_ts = timezone.now() - timedelta(days=90)
+        PyroJob.objects.filter(pk=done.pk).update(created_at=old_ts)
+        PyroJob.objects.filter(pk=pending.pk).update(created_at=old_ts)
+
+        stats = purge_old_log_rows(days=30, chunk_size=100)
+
+        assert stats["pyro_jobs"] >= 1
+        assert not PyroJob.objects.filter(pk=done.pk).exists()
+        assert PyroJob.objects.filter(pk=pending.pk).exists()
+
     def test_invalid_days_raises(self):
         with pytest.raises(ValueError, match=">= 1"):
             purge_old_log_rows(days=0)
@@ -157,7 +181,7 @@ class TestPurgeOldLogRows:
             ev = EventLogFactory(tenant=tenant)
             _set_created_at(EventLog, ev.pk, old_ts)
 
-        stats = purge_old_log_rows(days=30, chunk_size=2, max_chunks_per_table=100)
+        stats = purge_old_log_rows(days=30, chunk_size=2)
 
         assert stats["event_logs"] == 5
         assert stats["has_more"] is False
@@ -169,19 +193,25 @@ class TestPurgeOldLogRows:
             == 0
         )
 
-    def test_max_chunks_sets_has_more_without_deleting_remainder(self):
+    def test_time_budget_sets_has_more_without_deleting_remainder(self):
         tenant = TenantFactory()
         old_ts = timezone.now() - timedelta(days=90)
         for _ in range(5):
             ev = EventLogFactory(tenant=tenant)
             _set_created_at(EventLog, ev.pk, old_ts)
 
-        stats = purge_old_log_rows(
-            days=30,
-            chunk_size=2,
-            max_chunks_per_table=1,
-            tenant_id=str(tenant.id),
-        )
+        # Deterministic fake clock: each call to monotonic() advances by 1.
+        # With max_runtime_seconds=1, the deadline check that immediately
+        # follows a table's first chunk always trips (next_value == deadline),
+        # so a table only ever completes one chunk_size-sized chunk here.
+        counter = iter(range(10_000))
+        with patch("core.log_retention.time.monotonic", side_effect=lambda: next(counter)):
+            stats = purge_old_log_rows(
+                days=30,
+                chunk_size=2,
+                max_runtime_seconds=1,
+                tenant_id=str(tenant.id),
+            )
 
         assert stats["event_logs"] == 2
         assert stats["has_more"] is True
