@@ -387,12 +387,15 @@ SPECTACULAR_SETTINGS = {
 }
 
 
-# Object history, event_logs, rule_exec_logs, and finished background_jobs
-# (COMPLETED/FAILED only): rows older than this many days are permanently removed
-# (see core.log_retention and purge_old_log_tables job).
+# Object history, event_logs, rule_exec_logs, finished background_jobs, and
+# finished pyro_job rows (COMPLETED/FAILED only): rows older than this many
+# days are permanently removed
+# (see core.log_retention and purge_old_log_tables job). Each table is purged
+# in full every run, bounded only by a per-table time budget (not a row-count
+# cap) so the daily job can't run indefinitely.
 LOG_RETENTION_DAYS = env.int("LOG_RETENTION_DAYS", default=30)
-LOG_RETENTION_CHUNK_SIZE = env.int("LOG_RETENTION_CHUNK_SIZE", default=500)
-LOG_RETENTION_MAX_CHUNKS_PER_TABLE = env.int("LOG_RETENTION_MAX_CHUNKS_PER_TABLE", default=20)
+LOG_RETENTION_CHUNK_SIZE = env.int("LOG_RETENTION_CHUNK_SIZE", default=1000)
+LOG_RETENTION_MAX_RUNTIME_SECONDS = env.int("LOG_RETENTION_MAX_RUNTIME_SECONDS", default=300)
 
 # General background jobs (Gunicorn web service). Set EXCLUDE_JOB_TYPES when Mixpanel worker is deployed.
 BACKGROUND_JOB_WORKER_THREADS = env.int("BACKGROUND_JOB_WORKER_THREADS", default=1)
