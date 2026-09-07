@@ -2,9 +2,10 @@ import uuid
 from unittest.mock import patch
 
 from django.test import TestCase
-from django.urls import reverse
 from django.utils import timezone
+from rest_framework.test import APIRequestFactory, force_authenticate
 
+import authz.service as authz_service
 from lead_notifications.models import InAppNotification
 from lead_notifications.service import (
     build_lead_called_back_payload,
@@ -12,6 +13,10 @@ from lead_notifications.service import (
     resolve_user_pk_for_assigned_to,
     should_notify_lead_called_back,
     was_call_received,
+)
+from lead_notifications.views import (
+    InAppNotificationListView,
+    InAppNotificationMarkReadView,
 )
 from realtime.broadcast import skip_realtime_broadcast
 from tests.base.test_setup import BaseAPITestCase
@@ -195,8 +200,15 @@ class LeadCalledBackSignalTests(TestCase):
 
 
 class InAppNotificationApiTests(BaseAPITestCase):
+    """
+    Exercise list/mark-read views without HTTP JWT/tenant middleware.
+    CI can return 403 when Bearer auth / tenant resolution disagree across jobs.
+    """
+
     def setUp(self):
         super().setUp()
+        authz_service._CACHE.clear()
+        self.factory = APIRequestFactory()
         self.unread = InAppNotification.objects.create(
             user_id=self.supabase_uid,
             notification_type="lead_called_back",
@@ -222,21 +234,25 @@ class InAppNotificationApiTests(BaseAPITestCase):
             tenant_id=self.tenant.id,
         )
 
+    def _auth_request(self, method: str, path: str):
+        request = getattr(self.factory, method)(path)
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.user)
+        return request
+
     def test_list_returns_only_unread_for_current_user(self):
-        response = self.client.get(
-            reverse("lead_notifications:list"),
-            **self.auth_headers,
-        )
+        request = self._auth_request("get", "/lead-notifications/")
+        response = InAppNotificationListView.as_view()(request)
+
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(response.data["results"][0]["id"], self.unread.id)
         self.assertFalse(response.data["results"][0]["is_read"])
 
     def test_mark_read_sets_read_at_and_hides_from_list(self):
-        response = self.client.post(
-            reverse("lead_notifications:mark-read", kwargs={"pk": self.unread.id}),
-            **self.auth_headers,
-        )
+        request = self._auth_request("post", f"/lead-notifications/{self.unread.id}/read/")
+        response = InAppNotificationMarkReadView.as_view()(request, pk=self.unread.id)
+
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["is_read"])
         self.assertIsNotNone(response.data["read_at"])
@@ -244,9 +260,7 @@ class InAppNotificationApiTests(BaseAPITestCase):
         self.unread.refresh_from_db()
         self.assertIsNotNone(self.unread.read_at)
 
-        listed = self.client.get(
-            reverse("lead_notifications:list"),
-            **self.auth_headers,
-        )
+        list_request = self._auth_request("get", "/lead-notifications/")
+        listed = InAppNotificationListView.as_view()(list_request)
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(listed.data["count"], 0)
