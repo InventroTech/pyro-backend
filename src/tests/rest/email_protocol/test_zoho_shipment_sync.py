@@ -195,7 +195,10 @@ class SyncZohoShipmentEmailsJobHandlerTests(TestCase):
             )
         }
 
-        with patch("email_protocol.zoho_shipment_sync.ZohoMailClient") as MockClient:
+        # Connection already has account_id/inbox_folder_id; skip Zoho account resolution.
+        with patch("email_protocol.zoho_shipment_sync.ZohoMailClient") as MockClient, patch(
+            "email_protocol.zoho_shipment_sync.ensure_account_and_inbox"
+        ):
             client = MagicMock()
             MockClient.return_value = client
             client.list_messages.return_value = fake_messages
