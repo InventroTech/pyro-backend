@@ -82,31 +82,37 @@ def ensure_fresh_access_token(connection: ZohoMailConnection) -> str:
 
 
 def ensure_account_and_inbox(connection: ZohoMailConnection, client: ZohoMailClient) -> None:
-    changed = False
-    if not connection.account_id:
-        accounts = client.list_accounts()
-        primary = ZohoMailClient.pick_primary_account(accounts)
-        if not primary:
-            raise ZohoOAuthError("No Zoho Mail account found for this connection.")
-        connection.account_id = str(primary.get("accountId") or primary.get("account_id") or "")
-        email = (
-            primary.get("mailboxAddress")
-            or primary.get("emailAddress")
-            or primary.get("primaryEmailAddress")
-            or ""
-        )
-        if email:
-            connection.email_address = str(email)
-        if not connection.account_id:
-            raise ZohoOAuthError("Zoho accountId missing from accounts response.")
-        changed = True
+    accounts = client.list_accounts()
+    primary = ZohoMailClient.pick_primary_account(accounts)
+    if not primary:
+        raise ZohoOAuthError("No Zoho Mail account found for this connection.")
 
-    if not connection.inbox_folder_id:
-        folder_id = client.find_inbox_folder_id(connection.account_id)
+    account_id = str(primary.get("accountId") or primary.get("account_id") or "")
+    if not account_id:
+        raise ZohoOAuthError("Zoho accountId missing from accounts response.")
+
+    email = (
+        primary.get("mailboxAddress")
+        or primary.get("emailAddress")
+        or primary.get("primaryEmailAddress")
+        or ""
+    )
+
+    folder_id = connection.inbox_folder_id
+    if not folder_id or connection.account_id != account_id:
+        folder_id = client.find_inbox_folder_id(account_id)
         if not folder_id:
             raise ZohoOAuthError("Could not find Zoho Inbox folder.")
-        connection.inbox_folder_id = folder_id
-        changed = True
+
+    changed = (
+        connection.account_id != account_id
+        or (email and connection.email_address != str(email))
+        or connection.inbox_folder_id != folder_id
+    )
+    connection.account_id = account_id
+    if email:
+        connection.email_address = str(email)
+    connection.inbox_folder_id = folder_id
 
     if changed:
         connection.save(

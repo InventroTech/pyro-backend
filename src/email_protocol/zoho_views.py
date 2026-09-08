@@ -127,7 +127,7 @@ class ZohoMailCallbackView(APIView):
             access = (tokens.get("access_token") or "").strip()
             if not refresh:
                 existing = ZohoMailConnection.objects.filter(tenant=tenant).first()
-                if existing and existing.refresh_token:
+                if existing and existing.is_active and existing.refresh_token:
                     refresh = existing.refresh_token
                 else:
                     return self._finish(
@@ -145,6 +145,10 @@ class ZohoMailCallbackView(APIView):
                     "mail_api_base_url": mail_api,
                     "is_active": True,
                     "connected_by_email": (state_data.get("user_email") or "")[:254],
+                    # Force mailbox re-resolution for the newly authorized Zoho account.
+                    "email_address": "",
+                    "account_id": "",
+                    "inbox_folder_id": "",
                 },
             )
 
@@ -226,12 +230,24 @@ class ZohoMailDisconnectView(APIView):
         conn.refresh_token = ""
         conn.access_token = ""
         conn.access_token_expires_at = None
+        conn.email_address = ""
+        conn.account_id = ""
+        conn.inbox_folder_id = ""
+        conn.connected_by_email = ""
+        conn.last_synced_at = None
+        conn.last_received_time_ms = None
         conn.save(
             update_fields=[
                 "is_active",
                 "refresh_token",
                 "access_token",
                 "access_token_expires_at",
+                "email_address",
+                "account_id",
+                "inbox_folder_id",
+                "connected_by_email",
+                "last_synced_at",
+                "last_received_time_ms",
                 "updated_at",
             ]
         )
