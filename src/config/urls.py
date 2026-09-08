@@ -48,7 +48,7 @@ urlpatterns = [
     path('email/', include('email_protocol.urls')),
     path('whatsapp/', include('whatsapp.urls')),
     path('chat/', include('chatbot.urls')),
-    path('lead-notifications/', include('lead_notifications.urls')),
+    path('notifications/', include('notifications.urls')),
 
     # Top-level entity endpoint (from crm_records)
     path('entity/', PrajaLeadsAPIView.as_view(), name='entity-api'),

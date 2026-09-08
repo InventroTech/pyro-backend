@@ -6,15 +6,15 @@ from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 import authz.service as authz_service
-from lead_notifications.models import InAppNotification
-from lead_notifications.service import (
+from notifications.models import InAppNotification
+from notifications.service import (
     build_lead_called_back_payload,
     notify_lead_called_back,
     resolve_user_pk_for_assigned_to,
     should_notify_lead_called_back,
     was_call_received,
 )
-from lead_notifications.views import (
+from notifications.views import (
     InAppNotificationListView,
     InAppNotificationMarkReadView,
 )
@@ -90,7 +90,7 @@ class NotifyLeadCalledBackTests(TestCase):
             },
         )
 
-        with patch("lead_notifications.service.broadcast_to_user") as broadcast:
+        with patch("notifications.service.broadcast_to_user") as broadcast:
             notify_lead_called_back(record)
 
         broadcast.assert_called_once()
@@ -116,7 +116,7 @@ class NotifyLeadCalledBackTests(TestCase):
 
     def test_skips_when_no_assignee(self):
         record = RecordFactory(data={"wati_chatbot_call_received": False})
-        with patch("lead_notifications.service.broadcast_to_user") as broadcast:
+        with patch("notifications.service.broadcast_to_user") as broadcast:
             notify_lead_called_back(record)
         broadcast.assert_not_called()
         self.assertEqual(InAppNotification.objects.filter(record_id=record.id).count(), 0)
@@ -130,7 +130,7 @@ class NotifyLeadCalledBackTests(TestCase):
             },
         )
         before = InAppNotification.objects.count()
-        with patch("lead_notifications.service.broadcast_to_user") as broadcast:
+        with patch("notifications.service.broadcast_to_user") as broadcast:
             with skip_realtime_broadcast():
                 notify_lead_called_back(record)
         broadcast.assert_not_called()
@@ -148,7 +148,7 @@ class LeadCalledBackSignalTests(TestCase):
             },
         )
 
-        with patch("lead_notifications.service.broadcast_to_user") as broadcast:
+        with patch("notifications.service.broadcast_to_user") as broadcast:
             record.data = {**record.data, "wati_chatbot_call_received": True}
             record.save(update_fields=["data"])
 
@@ -166,7 +166,7 @@ class LeadCalledBackSignalTests(TestCase):
             },
         )
 
-        with patch("lead_notifications.service.broadcast_to_user") as broadcast:
+        with patch("notifications.service.broadcast_to_user") as broadcast:
             record.data = {**record.data, "name": "New"}
             record.save(update_fields=["data"])
 
@@ -178,7 +178,7 @@ class LeadCalledBackSignalTests(TestCase):
             data={"wati_chatbot_call_received": False},
         )
 
-        with patch("lead_notifications.service.broadcast_to_user") as broadcast:
+        with patch("notifications.service.broadcast_to_user") as broadcast:
             record.data = {**record.data, "wati_chatbot_call_received": True}
             record.save(update_fields=["data"])
 
@@ -241,7 +241,7 @@ class InAppNotificationApiTests(BaseAPITestCase):
         return request
 
     def test_list_returns_only_unread_for_current_user(self):
-        request = self._auth_request("get", "/lead-notifications/")
+        request = self._auth_request("get", "/notifications/")
         response = InAppNotificationListView.as_view()(request)
 
         self.assertEqual(response.status_code, 200)
@@ -250,7 +250,7 @@ class InAppNotificationApiTests(BaseAPITestCase):
         self.assertFalse(response.data["results"][0]["is_read"])
 
     def test_mark_read_sets_read_at_and_hides_from_list(self):
-        request = self._auth_request("post", f"/lead-notifications/{self.unread.id}/read/")
+        request = self._auth_request("post", f"/notifications/{self.unread.id}/read/")
         response = InAppNotificationMarkReadView.as_view()(request, pk=self.unread.id)
 
         self.assertEqual(response.status_code, 200)
@@ -260,7 +260,7 @@ class InAppNotificationApiTests(BaseAPITestCase):
         self.unread.refresh_from_db()
         self.assertIsNotNone(self.unread.read_at)
 
-        list_request = self._auth_request("get", "/lead-notifications/")
+        list_request = self._auth_request("get", "/notifications/")
         listed = InAppNotificationListView.as_view()(list_request)
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(listed.data["count"], 0)

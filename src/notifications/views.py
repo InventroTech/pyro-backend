@@ -19,7 +19,7 @@ def _current_user_id(request) -> str | None:
 
 class InAppNotificationListView(APIView):
     """
-    GET /lead-notifications/
+    GET /notifications/
     Returns unread in-app notifications for the current user (default).
     Pass ?include_read=true to include read ones.
     """
@@ -56,7 +56,7 @@ class InAppNotificationListView(APIView):
 
 class InAppNotificationMarkReadView(APIView):
     """
-    POST /lead-notifications/<id>/read/
+    POST /notifications/<id>/read/
     Marks a single notification as read so it no longer appears in the inbox.
     """
 

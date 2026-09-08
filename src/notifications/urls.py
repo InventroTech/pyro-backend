@@ -2,7 +2,7 @@ from django.urls import path
 
 from .views import InAppNotificationListView, InAppNotificationMarkReadView
 
-app_name = "lead_notifications"
+app_name = "notifications"
 
 urlpatterns = [
     path("", InAppNotificationListView.as_view(), name="list"),

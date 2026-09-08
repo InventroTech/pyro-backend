@@ -10,7 +10,7 @@ from .service import notify_lead_called_back, should_notify_lead_called_back
 _previous_data_by_pk: dict[int, dict | None] = {}
 
 
-@receiver(pre_save, sender=Record, dispatch_uid="lead_notifications_cache_previous_data")
+@receiver(pre_save, sender=Record, dispatch_uid="notifications_cache_previous_data")
 def cache_previous_data(sender, instance: Record, **kwargs) -> None:
     if not instance.pk:
         return
@@ -18,7 +18,7 @@ def cache_previous_data(sender, instance: Record, **kwargs) -> None:
     _previous_data_by_pk[instance.pk] = previous if isinstance(previous, dict) else {}
 
 
-@receiver(post_save, sender=Record, dispatch_uid="lead_notifications_on_lead_saved")
+@receiver(post_save, sender=Record, dispatch_uid="notifications_on_lead_saved")
 def on_lead_saved(sender, instance: Record, created: bool, **kwargs) -> None:
     if kwargs.get("raw", False):
         return
