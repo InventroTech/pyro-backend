@@ -184,6 +184,18 @@ class LeadCalledBackSignalTests(TestCase):
 
         broadcast.assert_not_called()
 
+    def test_non_lead_save_does_not_leak_signal_cache(self):
+        from notifications.signals import _previous_data_by_pk
+
+        record = RecordFactory(
+            entity_type="support_ticket",
+            data={"wati_chatbot_call_received": False},
+        )
+        record.data = {**record.data, "wati_chatbot_call_received": True}
+        record.save(update_fields=["data"])
+
+        self.assertNotIn(record.pk, _previous_data_by_pk)
+
     def test_build_payload_shape(self):
         record = RecordFactory(
             data={

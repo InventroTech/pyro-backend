@@ -12,7 +12,9 @@ _previous_data_by_pk: dict[int, dict | None] = {}
 
 @receiver(pre_save, sender=Record, dispatch_uid="notifications_cache_previous_data")
 def cache_previous_data(sender, instance: Record, **kwargs) -> None:
-    if not instance.pk:
+    # Only leads can trigger call-back notifications — skip other entity types
+    # so this module-level cache cannot grow unbounded.
+    if not instance.pk or instance.entity_type != "lead":
         return
     previous = Record.objects.filter(pk=instance.pk).values_list("data", flat=True).first()
     _previous_data_by_pk[instance.pk] = previous if isinstance(previous, dict) else {}
@@ -20,12 +22,14 @@ def cache_previous_data(sender, instance: Record, **kwargs) -> None:
 
 @receiver(post_save, sender=Record, dispatch_uid="notifications_on_lead_saved")
 def on_lead_saved(sender, instance: Record, created: bool, **kwargs) -> None:
+    # Always pop first so a cached entry cannot leak if we return early.
+    old_data = _previous_data_by_pk.pop(instance.pk, {} if created else None)
+
     if kwargs.get("raw", False):
         return
     if instance.entity_type != "lead":
         return
 
-    old_data = _previous_data_by_pk.pop(instance.pk, {} if created else None)
     if old_data is None and not created:
         old_data = {}
 
