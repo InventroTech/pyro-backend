@@ -24,6 +24,7 @@ from .job_handlers import get_handler_registry
 from .scheduler_locks import (
     SCHEDULER_LOCK_LEAD_CRON,
     SCHEDULER_LOCK_SHIPMENT_TRACKING,
+    SCHEDULER_LOCK_ZOHO_SHIPMENT_EMAILS,
     scheduler_lock,
 )
 from .tenant_jobs import enqueue_for_all_tenants
@@ -35,6 +36,9 @@ LEAD_CRON_ENQUEUE_INTERVAL = 900  # 15 minutes
 
 # Inventory / unmannd shipment live-track refresh (AfterShip / scrapers)
 SHIPMENT_TRACKING_ENQUEUE_INTERVAL = 900  # 15 minutes
+
+# Zoho Mail ops-inbox → auto-fill tracking fields
+ZOHO_SHIPMENT_EMAIL_ENQUEUE_INTERVAL = 900  # 15 minutes
 
 
 class JobProcessor:
@@ -64,6 +68,7 @@ class JobProcessor:
         self._last_lead_cron_enqueue_at = None
         # Last time we enqueued inventory shipment tracking refresh
         self._last_shipment_tracking_enqueue_at = None
+        self._last_zoho_shipment_email_enqueue_at = None
         self._run_schedulers = True
         # Circuit breaker state for connection errors
         self._connection_error_count = 0
@@ -501,6 +506,48 @@ class JobProcessor:
                 exc_info=True,
             )
 
+    def _maybe_enqueue_zoho_shipment_email_sync(self):
+        """
+        Every ZOHO_SHIPMENT_EMAIL_ENQUEUE_INTERVAL seconds, enqueue
+        sync_zoho_shipment_emails for tenants with an active Zoho Mail connection.
+        """
+        now = timezone.now()
+        if self._last_zoho_shipment_email_enqueue_at is not None:
+            elapsed = (now - self._last_zoho_shipment_email_enqueue_at).total_seconds()
+            if elapsed < ZOHO_SHIPMENT_EMAIL_ENQUEUE_INTERVAL:
+                return
+        self._last_zoho_shipment_email_enqueue_at = now
+        try:
+            from email_protocol.models import ZohoMailConnection
+
+            with scheduler_lock(SCHEDULER_LOCK_ZOHO_SHIPMENT_EMAILS) as acquired:
+                if not acquired:
+                    return
+                tenant_ids = list(
+                    ZohoMailConnection.objects.filter(is_active=True)
+                    .exclude(refresh_token="")
+                    .values_list("tenant_id", flat=True)
+                )
+                if not tenant_ids:
+                    return
+                queue = get_queue_service()
+                for tid in tenant_ids:
+                    queue.enqueue_job(
+                        job_type=JobType.SYNC_ZOHO_SHIPMENT_EMAILS,
+                        payload={"max_messages": 40},
+                        priority=0,
+                        tenant_id=str(tid),
+                    )
+            logger.debug(
+                f"[Worker {self.worker_id}] Enqueued sync_zoho_shipment_emails for %s tenant(s)",
+                len(tenant_ids),
+            )
+        except Exception as e:
+            logger.warning(
+                f"[Worker {self.worker_id}] Failed to enqueue Zoho shipment email sync: {e}",
+                exc_info=True,
+            )
+
     def process_next_job(self, tenant_id: Optional[str] = None) -> bool:
         """
         Process the next available job.
@@ -612,6 +659,8 @@ class JobProcessor:
                     self._maybe_enqueue_lead_cron_jobs()
                     # Every 15 min: refresh live carrier status for in-shipping inventory requests
                     self._maybe_enqueue_shipment_tracking_refresh()
+                    # Every 15 min: Zoho ops inbox → auto-fill tracking (connected tenants only)
+                    self._maybe_enqueue_zoho_shipment_email_sync()
                     # Every 5 min: poll Render API metrics and email alerts if thresholds exceeded
                     self._maybe_check_render_metrics()
 
