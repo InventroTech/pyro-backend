@@ -123,7 +123,11 @@ class ResolveAssignedToTests(TestCase):
         self.assertIsNone(resolve_user_pk_for_assigned_to(tenant, None))
         self.assertIsNone(resolve_user_pk_for_assigned_to(tenant, ""))
         self.assertIsNone(resolve_user_pk_for_assigned_to(tenant, "null"))
+        # Non-UUID / non-email string must not raise (membership.user_id is UUIDField).
         self.assertIsNone(resolve_user_pk_for_assigned_to(tenant, "missing-user"))
+        self.assertIsNone(
+            resolve_user_pk_for_assigned_to(tenant, "00000000-0000-0000-0000-000000000099")
+        )
 
 
 class NotifyLeadCalledBackTests(TestCase):

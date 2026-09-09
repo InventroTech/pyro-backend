@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 from authentication.models import User
@@ -68,6 +69,11 @@ def resolve_user_pk_for_assigned_to(tenant, assigned_to) -> int | None:
         )
 
     if membership is None:
+        # TenantMembership.user_id is a UUIDField — skip invalid refs instead of raising.
+        try:
+            uuid.UUID(ref)
+        except (TypeError, ValueError):
+            return None
         membership = (
             TenantMembership.objects.filter(
                 tenant=tenant,
