@@ -170,6 +170,7 @@ class SyncZohoShipmentEmailsJobHandlerTests(TestCase):
             account_id="acc1",
             inbox_folder_id="fold1",
             is_active=True,
+            initial_backfill_completed=True,
         )
         job = BackgroundJobFactory(
             tenant=self.tenant,
@@ -211,4 +212,157 @@ class SyncZohoShipmentEmailsJobHandlerTests(TestCase):
         self.assertEqual(record.data.get("tracking_number"), "DELH12345678")
         self.assertTrue(
             ZohoMailProcessedMessage.objects.filter(message_id="m1", applied=True).exists()
+        )
+
+    @override_settings(
+        ZOHO_CLIENT_ID="cid",
+        ZOHO_CLIENT_SECRET="sec",
+        ZOHO_OAUTH_REDIRECT_URI="https://api.example.com/email/zoho/callback/",
+        ZOHO_MAIL_BACKFILL_PAGE_SIZE=2,
+        ZOHO_MAIL_BACKFILL_MAX_MESSAGES_PER_RUN=10,
+    )
+    def test_initial_backfill_paginates_whole_inbox_without_time_cursor(self):
+        conn = ZohoMailConnection.objects.create(
+            tenant=self.tenant,
+            refresh_token="refresh",
+            access_token="access",
+            access_token_expires_at=timezone.now() + timedelta(hours=1),
+            account_id="acc1",
+            inbox_folder_id="fold1",
+            is_active=True,
+            initial_backfill_completed=False,
+            backfill_next_start=1,
+        )
+        page_one = [
+            {
+                "messageId": "m1",
+                "folderId": "fold1",
+                "subject": "Older mail",
+                "fromAddress": "ops@example.com",
+                "receivedTime": "1000",
+            },
+            {
+                "messageId": "m2",
+                "folderId": "fold1",
+                "subject": "Middle mail",
+                "fromAddress": "ops@example.com",
+                "receivedTime": "2000",
+            },
+        ]
+        page_two = [
+            {
+                "messageId": "m3",
+                "folderId": "fold1",
+                "subject": "Newest mail",
+                "fromAddress": "ops@example.com",
+                "receivedTime": "3000",
+            },
+        ]
+
+        with patch("email_protocol.zoho_shipment_sync.ZohoMailClient") as MockClient, patch(
+            "email_protocol.zoho_shipment_sync.ensure_account_and_inbox"
+        ):
+            client = MagicMock()
+            MockClient.return_value = client
+            client.list_messages.side_effect = [page_one, page_two]
+            client.get_message_content.return_value = {"content": "hello"}
+
+            from email_protocol.zoho_shipment_sync import sync_zoho_shipment_emails
+
+            result = sync_zoho_shipment_emails(conn)
+
+        conn.refresh_from_db()
+        self.assertTrue(result["initial_backfill_completed"])
+        self.assertEqual(client.list_messages.call_count, 2)
+        self.assertEqual(
+            ZohoMailProcessedMessage.objects.filter(connection=conn).count(),
+            3,
+        )
+        self.assertEqual(conn.last_received_time_ms, 3000)
+        self.assertEqual(conn.backfill_next_start, 1)
+
+    @override_settings(
+        ZOHO_CLIENT_ID="cid",
+        ZOHO_CLIENT_SECRET="sec",
+        ZOHO_OAUTH_REDIRECT_URI="https://api.example.com/email/zoho/callback/",
+        ZOHO_MAIL_BACKFILL_PAGE_SIZE=2,
+        ZOHO_MAIL_BACKFILL_MAX_MESSAGES_PER_RUN=2,
+    )
+    def test_inbox_scan_resumes_from_saved_start_index(self):
+        conn = ZohoMailConnection.objects.create(
+            tenant=self.tenant,
+            refresh_token="refresh",
+            access_token="access",
+            access_token_expires_at=timezone.now() + timedelta(hours=1),
+            account_id="acc1",
+            inbox_folder_id="fold1",
+            is_active=True,
+            initial_backfill_completed=False,
+            backfill_next_start=1,
+        )
+        page_one = [
+            {
+                "messageId": "m1",
+                "folderId": "fold1",
+                "subject": "Mail 1",
+                "fromAddress": "ops@example.com",
+                "receivedTime": "1000",
+            },
+            {
+                "messageId": "m2",
+                "folderId": "fold1",
+                "subject": "Mail 2",
+                "fromAddress": "ops@example.com",
+                "receivedTime": "2000",
+            },
+        ]
+        page_two = [
+            {
+                "messageId": "m3",
+                "folderId": "fold1",
+                "subject": "Mail 3",
+                "fromAddress": "ops@example.com",
+                "receivedTime": "3000",
+            },
+        ]
+
+        with patch("email_protocol.zoho_shipment_sync.ZohoMailClient") as MockClient, patch(
+            "email_protocol.zoho_shipment_sync.ensure_account_and_inbox"
+        ):
+            client = MagicMock()
+            MockClient.return_value = client
+            client.list_messages.side_effect = [page_one, page_two]
+            client.get_message_content.return_value = {"content": "hello"}
+
+            from email_protocol.zoho_shipment_sync import sync_zoho_shipment_emails
+
+            first = sync_zoho_shipment_emails(conn)
+
+        conn.refresh_from_db()
+        self.assertFalse(first["initial_backfill_completed"])
+        self.assertEqual(conn.backfill_next_start, 3)
+        self.assertEqual(
+            ZohoMailProcessedMessage.objects.filter(connection=conn).count(),
+            2,
+        )
+        self.assertEqual(client.list_messages.call_args_list[0].kwargs["start"], 1)
+
+        with patch("email_protocol.zoho_shipment_sync.ZohoMailClient") as MockClient, patch(
+            "email_protocol.zoho_shipment_sync.ensure_account_and_inbox"
+        ):
+            client = MagicMock()
+            MockClient.return_value = client
+            client.list_messages.return_value = page_two
+            client.get_message_content.return_value = {"content": "hello"}
+
+            from email_protocol.zoho_shipment_sync import sync_zoho_shipment_emails
+
+            second = sync_zoho_shipment_emails(conn)
+
+        conn.refresh_from_db()
+        self.assertTrue(second["initial_backfill_completed"])
+        self.assertEqual(client.list_messages.call_args.kwargs["start"], 3)
+        self.assertEqual(
+            ZohoMailProcessedMessage.objects.filter(connection=conn).count(),
+            3,
         )

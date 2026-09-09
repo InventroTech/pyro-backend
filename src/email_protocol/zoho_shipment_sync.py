@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
 
@@ -36,6 +38,51 @@ _MARKETPLACE_SUFFIX_RE = re.compile(
     re.I,
 )
 
+DEFAULT_BACKFILL_PAGE_SIZE = 200
+DEFAULT_BACKFILL_MAX_MESSAGES_PER_RUN = 500
+DEFAULT_INCREMENTAL_BATCH_SIZE = 40
+
+
+def _backfill_page_size() -> int:
+    return int(getattr(settings, "ZOHO_MAIL_BACKFILL_PAGE_SIZE", DEFAULT_BACKFILL_PAGE_SIZE))
+
+
+def _backfill_max_messages_per_run() -> int:
+    return int(
+        getattr(
+            settings,
+            "ZOHO_MAIL_BACKFILL_MAX_MESSAGES_PER_RUN",
+            DEFAULT_BACKFILL_MAX_MESSAGES_PER_RUN,
+        )
+    )
+
+
+@dataclass
+class _SyncStats:
+    scanned: int = 0
+    shipment_like: int = 0
+    applied: int = 0
+    unmatched: int = 0
+    skipped: int = 0
+    errors: int = 0
+    fetched: int = 0
+    newest_seen: Optional[int] = None
+
+    def merge_newest(self, received_ms: int) -> None:
+        if received_ms and (self.newest_seen is None or received_ms > self.newest_seen):
+            self.newest_seen = received_ms
+
+    def as_result(self) -> Dict[str, Any]:
+        return {
+            "scanned": self.scanned,
+            "shipment_like": self.shipment_like,
+            "applied": self.applied,
+            "unmatched": self.unmatched,
+            "skipped": self.skipped,
+            "errors": self.errors,
+            "timestamp": timezone.now().isoformat(),
+        }
+
 
 def _normalize_item_text(value: str) -> str:
     text = (value or "").lower()
@@ -48,8 +95,8 @@ def _normalize_item_text(value: str) -> str:
 def _record_item_names(data: Dict[str, Any]) -> List[str]:
     names: List[str] = []
     seen: set[str] = set()
-    for field in ITEM_NAME_FIELDS:
-        raw = str(data.get(field) or "").strip()
+    for field_name in ITEM_NAME_FIELDS:
+        raw = str(data.get(field_name) or "").strip()
         if not raw:
             continue
         for candidate in (raw, _MARKETPLACE_SUFFIX_RE.sub("", raw).strip()):
@@ -220,42 +267,24 @@ def apply_tracking_to_record(record: Record, parsed: Dict[str, Any]) -> bool:
     return True
 
 
-def sync_zoho_shipment_emails(
-    connection: ZohoMailConnection,
+def _batch_message_ids(messages: List[Dict[str, Any]]) -> List[str]:
+    ids: List[str] = []
+    for msg in messages:
+        message_id = str(msg.get("messageId") or msg.get("message_id") or "").strip()
+        if message_id:
+            ids.append(message_id)
+    return ids
+
+
+def _process_message_batch(
     *,
-    max_messages: int = 40,
-) -> Dict[str, Any]:
-    """
-    Poll Zoho inbox for recent shipment emails and auto-fill matching records.
-    """
-    if not connection.is_active:
-        return {"success": True, "skipped": "inactive"}
-
-    access_token = ensure_fresh_access_token(connection)
-    client = ZohoMailClient(
-        access_token=access_token,
-        mail_api_base_url=connection.mail_api_base_url,
-    )
-    ensure_account_and_inbox(connection, client)
-
-    messages = client.list_messages(
-        account_id=connection.account_id,
-        folder_id=connection.inbox_folder_id,
-        start=1,
-        limit=max_messages,
-    )
-
-    cursor = connection.last_received_time_ms
-    newest_seen = cursor
-    candidates = _candidate_records(connection.tenant_id)
-
-    scanned = 0
-    shipment_like = 0
-    applied = 0
-    unmatched = 0
-    skipped = 0
-    errors = 0
-
+    connection: ZohoMailConnection,
+    client: ZohoMailClient,
+    messages: List[Dict[str, Any]],
+    stats: _SyncStats,
+    candidates: List[Record],
+) -> List[Record]:
+    """Scan a batch of inbox list rows; mutate stats and return updated candidates."""
     for msg in messages:
         message_id = str(msg.get("messageId") or msg.get("message_id") or "").strip()
         if not message_id:
@@ -267,17 +296,14 @@ def sync_zoho_shipment_emails(
         except (TypeError, ValueError):
             received_ms = 0
 
-        if cursor and received_ms and received_ms <= cursor:
-            skipped += 1
-            continue
-
         if ZohoMailProcessedMessage.objects.filter(
             connection=connection, message_id=message_id
         ).exists():
-            skipped += 1
+            stats.skipped += 1
+            stats.merge_newest(received_ms)
             continue
 
-        scanned += 1
+        stats.scanned += 1
         subject = str(msg.get("subject") or "")
         from_address = str(
             msg.get("fromAddress")
@@ -301,7 +327,6 @@ def sync_zoho_shipment_emails(
                 or msg.get("summary")
                 or ""
             )
-            # Content endpoint sometimes carries From when list view does not.
             if not from_address:
                 from_address = str(
                     content_payload.get("fromAddress")
@@ -315,7 +340,7 @@ def sync_zoho_shipment_emails(
                 from_address=from_address,
             )
         except Exception:
-            errors += 1
+            stats.errors += 1
             logger.exception(
                 "[ZohoShipmentSync] failed reading message_id=%s tenant=%s",
                 message_id,
@@ -328,6 +353,7 @@ def sync_zoho_shipment_emails(
                 applied=False,
                 skip_reason="read_error",
             )
+            stats.merge_newest(received_ms)
             continue
 
         if not parsed.get("is_shipment"):
@@ -338,11 +364,10 @@ def sync_zoho_shipment_emails(
                 applied=False,
                 skip_reason="not_delivery_partner",
             )
-            if received_ms and (newest_seen is None or received_ms > newest_seen):
-                newest_seen = received_ms
+            stats.merge_newest(received_ms)
             continue
 
-        shipment_like += 1
+        stats.shipment_like += 1
         if not (parsed.get("tracking_number") or parsed.get("tracking_link")):
             ZohoMailProcessedMessage.objects.create(
                 connection=connection,
@@ -351,9 +376,8 @@ def sync_zoho_shipment_emails(
                 applied=False,
                 skip_reason="no_tracking_payload",
             )
-            unmatched += 1
-            if received_ms and (newest_seen is None or received_ms > newest_seen):
-                newest_seen = received_ms
+            stats.unmatched += 1
+            stats.merge_newest(received_ms)
             continue
 
         record, reason = match_record_for_email(
@@ -369,9 +393,8 @@ def sync_zoho_shipment_emails(
                 applied=False,
                 skip_reason=reason or "no_match",
             )
-            unmatched += 1
-            if received_ms and (newest_seen is None or received_ms > newest_seen):
-                newest_seen = received_ms
+            stats.unmatched += 1
+            stats.merge_newest(received_ms)
             continue
 
         changed = apply_tracking_to_record(record, parsed)
@@ -384,7 +407,7 @@ def sync_zoho_shipment_emails(
             skip_reason="" if changed else "unchanged",
         )
         if changed:
-            applied += 1
+            stats.applied += 1
             candidates = [c for c in candidates if c.id != record.id]
             logger.info(
                 "[ZohoShipmentSync] applied message_id=%s record_id=%s reason=%s awb=%s",
@@ -394,23 +417,157 @@ def sync_zoho_shipment_emails(
                 parsed.get("tracking_number"),
             )
         else:
-            skipped += 1
+            stats.skipped += 1
 
-        if received_ms and (newest_seen is None or received_ms > newest_seen):
-            newest_seen = received_ms
+        stats.merge_newest(received_ms)
+
+    return candidates
+
+
+def _run_paginated_sync(
+    *,
+    connection: ZohoMailConnection,
+    client: ZohoMailClient,
+    stats: _SyncStats,
+    candidates: List[Record],
+    max_messages_per_run: int,
+) -> List[Record]:
+    """
+    Walk the inbox sequentially from ``backfill_next_start``.
+
+    Initial connect scans the whole mailbox across runs. After the end is
+    reached the pointer wraps to ``start=1`` for new mail. Ongoing syncs
+    continue pagination from the saved pointer — never jump back with a
+    separate "last 40 + time cursor" mode.
+    """
+    page_size = _backfill_page_size()
+    start = max(1, int(connection.backfill_next_start or 1))
+    fetched_this_run = 0
+    reached_inbox_end = False
+
+    while fetched_this_run < max_messages_per_run:
+        limit = min(page_size, max_messages_per_run - fetched_this_run)
+        messages = client.list_messages(
+            account_id=connection.account_id,
+            folder_id=connection.inbox_folder_id,
+            start=start,
+            limit=limit,
+        )
+        if not messages:
+            reached_inbox_end = True
+            break
+
+        stats.fetched += len(messages)
+        scanned_before = stats.scanned
+        candidates = _process_message_batch(
+            connection=connection,
+            client=client,
+            messages=messages,
+            stats=stats,
+            candidates=candidates,
+        )
+        fetched_this_run += len(messages)
+
+        message_ids = _batch_message_ids(messages)
+        if (
+            connection.initial_backfill_completed
+            and start == 1
+            and message_ids
+            and stats.scanned == scanned_before
+            and ZohoMailProcessedMessage.objects.filter(
+                connection=connection,
+                message_id__in=message_ids,
+            ).count()
+            == len(message_ids)
+        ):
+            # Caught up at inbox head — no new mail since last sync.
+            connection.backfill_next_start = 1
+            break
+
+        start += len(messages)
+
+        if len(messages) < limit:
+            reached_inbox_end = True
+            break
+
+    if reached_inbox_end:
+        connection.backfill_next_start = 1
+        if not connection.initial_backfill_completed:
+            connection.initial_backfill_completed = True
+            logger.info(
+                "[ZohoShipmentSync] initial backfill complete tenant=%s connection=%s scanned=%s",
+                connection.tenant_id,
+                connection.id,
+                stats.scanned,
+            )
+    else:
+        connection.backfill_next_start = start
+        if not connection.initial_backfill_completed:
+            logger.info(
+                "[ZohoShipmentSync] inbox scan progress tenant=%s connection=%s next_start=%s",
+                connection.tenant_id,
+                connection.id,
+                connection.backfill_next_start,
+            )
+
+    return candidates
+
+
+def sync_zoho_shipment_emails(
+    connection: ZohoMailConnection,
+    *,
+    max_messages: int = DEFAULT_INCREMENTAL_BATCH_SIZE,
+) -> Dict[str, Any]:
+    """
+    Poll Zoho inbox for shipment emails and auto-fill matching records.
+
+    Always paginates from ``backfill_next_start``. New connections scan the full
+    inbox across runs; after the end is reached the pointer wraps to ``start=1``
+    for new mail. Idempotency is via processed-message rows, not received-time cutoffs.
+    """
+    if not connection.is_active:
+        return {"success": True, "skipped": "inactive"}
+
+    access_token = ensure_fresh_access_token(connection)
+    client = ZohoMailClient(
+        access_token=access_token,
+        mail_api_base_url=connection.mail_api_base_url,
+    )
+    ensure_account_and_inbox(connection, client)
+
+    stats = _SyncStats(newest_seen=connection.last_received_time_ms)
+    candidates = _candidate_records(connection.tenant_id)
+
+    if connection.initial_backfill_completed:
+        max_per_run = max(1, min(int(max_messages or DEFAULT_INCREMENTAL_BATCH_SIZE), 200))
+    else:
+        max_per_run = _backfill_max_messages_per_run()
+
+    candidates = _run_paginated_sync(
+        connection=connection,
+        client=client,
+        stats=stats,
+        candidates=candidates,
+        max_messages_per_run=max_per_run,
+    )
 
     connection.last_synced_at = timezone.now()
-    if newest_seen is not None:
-        connection.last_received_time_ms = newest_seen
-    connection.save(update_fields=["last_synced_at", "last_received_time_ms", "updated_at"])
+    if stats.newest_seen is not None:
+        connection.last_received_time_ms = stats.newest_seen
 
-    return {
-        "success": True,
-        "scanned": scanned,
-        "shipment_like": shipment_like,
-        "applied": applied,
-        "unmatched": unmatched,
-        "skipped": skipped,
-        "errors": errors,
-        "timestamp": timezone.now().isoformat(),
-    }
+    connection.save(
+        update_fields=[
+            "last_synced_at",
+            "last_received_time_ms",
+            "initial_backfill_completed",
+            "backfill_next_start",
+            "updated_at",
+        ]
+    )
+
+    result = stats.as_result()
+    result["success"] = True
+    result["fetched"] = stats.fetched
+    result["initial_backfill_completed"] = connection.initial_backfill_completed
+    result["backfill_next_start"] = connection.backfill_next_start
+    return result
