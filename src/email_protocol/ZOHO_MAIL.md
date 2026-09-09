@@ -27,7 +27,7 @@ API
 ---
 - ``GET  /email/zoho/connect/``   → ``{ authorize_url }`` (tenant JWT)
 - ``GET  /email/zoho/callback/``  → Zoho redirect (stores refresh token)
-- ``GET  /email/zoho/status/``    → connection status
+- ``GET  /email/zoho/status/``    → active connection + ``connections`` history rows
 - ``POST /email/zoho/disconnect/``
 - ``POST /email/zoho/sync-now/``  → run one sync immediately
 
@@ -46,4 +46,16 @@ Matching
    ``product_name``). Longest unique substring wins; ambiguous item names are skipped.
 
 Only empty tracking fields are filled (never overwrites existing values).
+
+Initial sync
+------------
+Each new connect enqueues a background job that **paginates the whole inbox**
+from ``backfill_next_start`` until the end is reached, then wraps to ``start=1``
+for new mail. Every later sync continues from the saved index (no jump to
+"last 40 + time cutoff"). Idempotency uses processed-message rows. Tune via env:
+
+```
+ZOHO_MAIL_BACKFILL_PAGE_SIZE=200
+ZOHO_MAIL_BACKFILL_MAX_MESSAGES_PER_RUN=500
+```
 """

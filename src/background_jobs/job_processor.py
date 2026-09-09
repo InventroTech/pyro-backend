@@ -524,7 +524,10 @@ class JobProcessor:
                 if not acquired:
                     return
                 tenant_ids = list(
-                    ZohoMailConnection.objects.filter(is_active=True)
+                    ZohoMailConnection.objects.filter(
+                        is_active=True,
+                        disconnected_at__isnull=True,
+                    )
                     .exclude(refresh_token="")
                     .values_list("tenant_id", flat=True)
                 )

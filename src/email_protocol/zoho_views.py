@@ -20,6 +20,11 @@ from config.supabase_auth import SupabaseJWTAuthentication
 from core.models import Tenant
 
 from .models import ZohoMailConnection
+from .zoho_connections import (
+    deactivate_active_connections,
+    get_active_connection,
+    serialize_connection_row,
+)
 from .zoho_mail_client import ZohoMailClient
 from .zoho_oauth import (
     ZohoOAuthError,
@@ -126,8 +131,8 @@ class ZohoMailCallbackView(APIView):
             refresh = (tokens.get("refresh_token") or "").strip()
             access = (tokens.get("access_token") or "").strip()
             if not refresh:
-                existing = ZohoMailConnection.objects.filter(tenant=tenant).first()
-                if existing and existing.is_active and existing.refresh_token:
+                existing = get_active_connection(tenant=tenant)
+                if existing and existing.refresh_token:
                     refresh = existing.refresh_token
                 else:
                     return self._finish(
@@ -135,21 +140,23 @@ class ZohoMailCallbackView(APIView):
                         detail="no_refresh_token_prompt_consent",
                     )
 
-            connection, _created = ZohoMailConnection.objects.update_or_create(
+            deactivate_active_connections(tenant=tenant)
+            connection = ZohoMailConnection.objects.create(
                 tenant=tenant,
-                defaults={
-                    "refresh_token": refresh,
-                    "access_token": access,
-                    "access_token_expires_at": token_expiry_from_payload(tokens),
-                    "accounts_base_url": accounts_base,
-                    "mail_api_base_url": mail_api,
-                    "is_active": True,
-                    "connected_by_email": (state_data.get("user_email") or "")[:254],
-                    # Force mailbox re-resolution for the newly authorized Zoho account.
-                    "email_address": "",
-                    "account_id": "",
-                    "inbox_folder_id": "",
-                },
+                refresh_token=refresh,
+                access_token=access,
+                access_token_expires_at=token_expiry_from_payload(tokens),
+                accounts_base_url=accounts_base,
+                mail_api_base_url=mail_api,
+                is_active=True,
+                disconnected_at=None,
+                connected_by_email=(state_data.get("user_email") or "")[:254],
+                email_address="",
+                account_id="",
+                inbox_folder_id="",
+                last_received_time_ms=None,
+                initial_backfill_completed=False,
+                backfill_next_start=1,
             )
 
             try:
@@ -161,6 +168,22 @@ class ZohoMailCallbackView(APIView):
                 ensure_account_and_inbox(connection, client)
             except Exception:
                 logger.exception("Zoho connect: account resolve failed tenant=%s", tenant_id)
+
+            try:
+                from background_jobs.models import JobType
+                from background_jobs.queue_service import QueueService
+
+                QueueService().enqueue_job(
+                    job_type=JobType.SYNC_ZOHO_SHIPMENT_EMAILS,
+                    payload={},
+                    priority=1,
+                    tenant_id=str(tenant.id),
+                )
+            except Exception:
+                logger.exception(
+                    "Zoho connect: failed to enqueue initial inbox backfill tenant=%s",
+                    tenant_id,
+                )
 
             return self._finish(ok=True, detail="connected", email=connection.email_address)
         except ZohoOAuthError as exc:
@@ -201,15 +224,17 @@ class ZohoMailStatusView(APIView):
 
     @extend_schema(summary="Zoho Mail connection status", tags=["Email / Zoho"])
     def get(self, request, *args, **kwargs):
-        conn = ZohoMailConnection.objects.filter(tenant=request.tenant).first()
+        conn = get_active_connection(tenant=request.tenant)
+        history = ZohoMailConnection.objects.filter(tenant=request.tenant).order_by("-created_at")
         return Response(
             {
                 "configured": zoho_oauth_configured(),
-                "connected": bool(conn and conn.is_active and conn.refresh_token),
+                "connected": bool(conn),
                 "email_address": (conn.email_address if conn else "") or "",
                 "is_active": bool(conn.is_active) if conn else False,
                 "last_synced_at": conn.last_synced_at.isoformat() if conn and conn.last_synced_at else None,
                 "connected_by_email": (conn.connected_by_email if conn else "") or "",
+                "connections": [serialize_connection_row(row) for row in history],
             },
             status=status.HTTP_200_OK,
         )
@@ -223,35 +248,21 @@ class ZohoMailDisconnectView(APIView):
 
     @extend_schema(summary="Disconnect Zoho Mail", tags=["Email / Zoho"])
     def post(self, request, *args, **kwargs):
-        conn = ZohoMailConnection.objects.filter(tenant=request.tenant).first()
+        conn = get_active_connection(tenant=request.tenant)
         if not conn:
             return Response({"success": True, "detail": "not_connected"}, status=status.HTTP_200_OK)
-        conn.is_active = False
-        conn.refresh_token = ""
-        conn.access_token = ""
-        conn.access_token_expires_at = None
-        conn.email_address = ""
-        conn.account_id = ""
-        conn.inbox_folder_id = ""
-        conn.connected_by_email = ""
-        conn.last_synced_at = None
-        conn.last_received_time_ms = None
-        conn.save(
-            update_fields=[
-                "is_active",
-                "refresh_token",
-                "access_token",
-                "access_token_expires_at",
-                "email_address",
-                "account_id",
-                "inbox_folder_id",
-                "connected_by_email",
-                "last_synced_at",
-                "last_received_time_ms",
-                "updated_at",
-            ]
+        if not deactivate_active_connections(tenant=request.tenant):
+            return Response({"success": True, "detail": "not_connected"}, status=status.HTTP_200_OK)
+        conn.refresh_from_db()
+        return Response(
+            {
+                "success": True,
+                "detail": "disconnected",
+                "disconnected_at": conn.disconnected_at.isoformat() if conn.disconnected_at else None,
+                "email_address": conn.email_address or "",
+            },
+            status=status.HTTP_200_OK,
         )
-        return Response({"success": True, "detail": "disconnected"}, status=status.HTTP_200_OK)
 
 
 class ZohoMailSyncNowView(APIView):
@@ -268,7 +279,7 @@ class ZohoMailSyncNowView(APIView):
     def post(self, request, *args, **kwargs):
         from .zoho_shipment_sync import sync_zoho_shipment_emails
 
-        conn = ZohoMailConnection.objects.filter(tenant=request.tenant, is_active=True).first()
+        conn = get_active_connection(tenant=request.tenant)
         if not conn or not conn.refresh_token:
             return Response(
                 {"error": "Zoho Mail is not connected for this tenant."},

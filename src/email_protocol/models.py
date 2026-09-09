@@ -11,16 +11,17 @@ from core.models import Tenant, TimeStampedModel
 
 class ZohoMailConnection(TimeStampedModel):
     """
-    Per-tenant Zoho Mail OAuth connection for reading an ops inbox.
+    Zoho Mail OAuth connection row for a tenant ops inbox.
 
-    One-time OAuth consent stores a refresh token; background jobs refresh
-    access tokens and poll for shipment emails.
+    Each connect creates a new row. Disconnect sets ``disconnected_at`` and
+    clears tokens but keeps ``email_address`` for history. Only one row per
+    tenant may be active at a time.
     """
 
-    tenant = models.OneToOneField(
+    tenant = models.ForeignKey(
         Tenant,
         on_delete=models.CASCADE,
-        related_name="zoho_mail_connection",
+        related_name="zoho_mail_connections",
         db_column="tenant_id",
     )
     email_address = models.EmailField(blank=True, default="")
@@ -44,13 +45,25 @@ class ZohoMailConnection(TimeStampedModel):
     )
 
     is_active = models.BooleanField(default=True, db_index=True)
+    disconnected_at = models.DateTimeField(null=True, blank=True, db_index=True)
     last_synced_at = models.DateTimeField(null=True, blank=True)
     # Incremental sync cursor: Zoho receivedTime (ms since epoch) of newest processed mail.
     last_received_time_ms = models.BigIntegerField(null=True, blank=True)
+    # False until the first full inbox backfill finishes (paginated, no time cursor).
+    initial_backfill_completed = models.BooleanField(default=False, db_index=True)
+    # Zoho list_messages ``start`` index; resumes backfill across job runs.
+    backfill_next_start = models.PositiveIntegerField(default=1)
     connected_by_email = models.EmailField(blank=True, default="")
 
     class Meta:
         db_table = "email_protocol_zoho_mail_connection"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant"],
+                condition=models.Q(is_active=True, disconnected_at__isnull=True),
+                name="uniq_active_zoho_mail_connection_per_tenant",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"ZohoMailConnection(tenant={self.tenant_id}, email={self.email_address or '?'})"

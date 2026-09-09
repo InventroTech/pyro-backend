@@ -1645,6 +1645,7 @@ class SyncZohoShipmentEmailsJobHandler(JobHandler):
             ZohoMailConnection.objects.filter(
                 tenant_id=job.tenant_id,
                 is_active=True,
+                disconnected_at__isnull=True,
             )
             .exclude(refresh_token="")
             .first()
