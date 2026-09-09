@@ -126,14 +126,6 @@ class RecordSerializer(serializers.ModelSerializer):
             return one.get(key, key)
         return key
 
-    def update(self, instance, validated_data):
-        """Merge JSON `data` on PATCH so partial updates don't wipe existing keys."""
-        incoming = validated_data.get("data")
-        if isinstance(incoming, dict):
-            existing = instance.data if isinstance(instance.data, dict) else {}
-            validated_data["data"] = {**existing, **incoming}
-        return super().update(instance, validated_data)
-
     def to_representation(self, instance):
         rep = super().to_representation(instance)
         if instance.entity_type != "lead":
