@@ -1,7 +1,11 @@
 """
 API Request/Response Logging Middleware
 
-Logs detailed information about every API call including:
+Logs API calls that are useful for debugging (errors, and optionally slow
+successes). Fast 2xx/3xx responses are skipped by default so Render is not
+paying JSON-parse + recursive-mask + log-ingest cost on every request.
+
+Logged fields (when a line is emitted):
 - Endpoint and HTTP method
 - Request payload (body, query params, headers)
 - Response status code and body
@@ -10,9 +14,9 @@ Logs detailed information about every API call including:
 - IP address and user agent
 
 HOW IT WORKS:
-1. process_request() runs when request comes in - stores start time
+1. process_request() stores start time only
 2. View processes the request
-3. process_response() runs when response is ready - captures everything and logs once
+3. process_response() decides whether to emit, then captures details and logs once
 4. Formatter (in log_formatters.py) formats the log_data into readable output
 
 SECURITY:
@@ -176,60 +180,78 @@ def _should_skip_logging(path: str) -> bool:
     return any(path.startswith(prefix) for prefix in SKIP_LOGGING_PREFIXES)
 
 
+def _should_emit_api_log(status_code: int, duration_ms: Optional[float]) -> bool:
+    """
+    Fast 2xx/3xx are skipped (Render log pressure). 4xx/5xx always emit.
+    Slow successes still emit so P95 spikes stay greppable in Render logs.
+    """
+    if status_code >= 400:
+        return True
+    if not getattr(settings, "API_LOGGING_SKIP_SUCCESS", True):
+        return True
+    slow_ms = getattr(settings, "API_LOGGING_SLOW_MS", 1500.0)
+    if slow_ms and slow_ms > 0 and duration_ms is not None and duration_ms >= slow_ms:
+        return True
+    return False
+
+
+def _get_client_ip(request: HttpRequest) -> str:
+    """Extract client IP address from request."""
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if x_forwarded_for:
+        return x_forwarded_for.split(',')[0].strip()
+    return request.META.get('REMOTE_ADDR', 'Unknown')
+
+
+def _build_request_snapshot(request: HttpRequest) -> Dict[str, Any]:
+    """Build the request side of a log line. Called only when we will emit."""
+    snapshot = {
+        "method": request.method,
+        "path": request.path,
+        "endpoint": request.get_full_path(),
+        "query_params": _mask_sensitive_data(_get_query_params(request)),
+        "headers": _mask_sensitive_data({
+            key.replace('HTTP_', '').replace('_', '-').title(): value
+            for key, value in request.META.items()
+            if key.startswith('HTTP_') or key in ('CONTENT_TYPE', 'CONTENT_LENGTH')
+        }),
+        "ip_address": _get_client_ip(request),
+        "user_agent": request.META.get('HTTP_USER_AGENT', 'Unknown'),
+    }
+    if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+        body = _get_request_body(request)
+        if body:
+            snapshot["payload"] = _mask_sensitive_data(body)
+    return snapshot
+
+
 class APILoggingMiddleware(MiddlewareMixin):
     """
-    Middleware to log detailed information about API requests and responses.
-    
-    Logs:
-    - Endpoint and HTTP method
-    - Request headers (with sensitive data masked)
-    - Request body/payload (with sensitive data masked)
-    - Query parameters
-    - Response status code
-    - Response body (truncated if large)
-    - Request timing
-    - User and tenant information
-    - IP address and user agent
+    Middleware to log API requests that need attention.
+
+    Fast successful responses are not logged. Errors and slow successes are.
+    Request/response bodies are parsed only when a line will actually be emitted.
     """
     
     def process_request(self, request: HttpRequest):
-        """Capture request start time and snapshot request details for reuse in process_response."""
+        """Capture request start time only — snapshot/bodies wait until emit."""
         if _should_skip_logging(request.path):
             return None
         
         request._api_log_start_time = time.time()
-        
-        request_snapshot = {
-            "method": request.method,
-            "path": request.path,
-            "endpoint": request.get_full_path(),
-            "query_params": _mask_sensitive_data(_get_query_params(request)),
-            "headers": _mask_sensitive_data({
-                key.replace('HTTP_', '').replace('_', '-').title(): value
-                for key, value in request.META.items()
-                if key.startswith('HTTP_') or key in ('CONTENT_TYPE', 'CONTENT_LENGTH')
-            }),
-            "ip_address": self._get_client_ip(request),
-            "user_agent": request.META.get('HTTP_USER_AGENT', 'Unknown'),
-        }
-        
-        if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
-            body = _get_request_body(request)
-            if body:
-                request_snapshot["payload"] = _mask_sensitive_data(body)
-        
-        request._api_log_snapshot = request_snapshot
-        
         return None
     
     def process_response(self, request: HttpRequest, response: HttpResponse):
-        """Log response details and calculate request duration."""
+        """Log response details when the request is an error or a slow success."""
         if _should_skip_logging(request.path):
             return response
         
         duration = None
         if hasattr(request, '_api_log_start_time'):
             duration = round((time.time() - request._api_log_start_time) * 1000, 2)
+
+        if not _should_emit_api_log(response.status_code, duration):
+            return response
         
         response_info = {
             "status_code": response.status_code,
@@ -242,7 +264,7 @@ class APILoggingMiddleware(MiddlewareMixin):
             if response_body:
                 response_info["body"] = _mask_sensitive_data(response_body)
         
-        snapshot = getattr(request, '_api_log_snapshot', {})
+        snapshot = _build_request_snapshot(request)
         log_data = {
             **snapshot,
             "request_id": getattr(request, 'id', None),
@@ -291,12 +313,3 @@ class APILoggingMiddleware(MiddlewareMixin):
         )
         
         return None
-    
-    def _get_client_ip(self, request: HttpRequest) -> str:
-        """Extract client IP address from request."""
-        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
-        if x_forwarded_for:
-            ip = x_forwarded_for.split(',')[0].strip()
-        else:
-            ip = request.META.get('REMOTE_ADDR', 'Unknown')
-        return ip
