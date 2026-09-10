@@ -512,6 +512,13 @@ HEALTH_CPU_THRESHOLD = env.float('HEALTH_CPU_THRESHOLD', default=70.0)          
 HEALTH_MEMORY_THRESHOLD = env.float('HEALTH_MEMORY_THRESHOLD', default=60.0)    # % RAM before alert
 HEALTH_RESPONSE_TIME_THRESHOLD_SECONDS = env.float('HEALTH_RESPONSE_TIME_THRESHOLD_SECONDS', default=1.0)
 
+# API request logging (middleware.api_logging). Successful 2xx/3xx lines are skipped
+# by default — they dominate Render log volume/CPU. 4xx/5xx always log. Slow
+# successes still log so P95 spikes remain greppable. Set SKIP_SUCCESS=false to
+# restore the old "log every request" behaviour. SLOW_MS<=0 disables slow-2xx logs.
+API_LOGGING_SKIP_SUCCESS = env.bool("API_LOGGING_SKIP_SUCCESS", default=True)
+API_LOGGING_SLOW_MS = env.float("API_LOGGING_SLOW_MS", default=1500.0)
+
 # Product-link extract (inventory request form): ScrapingBee reads any storefront URL
 # the same way AfterShip is used for shipment tracking. Sign up at scrapingbee.com
 # and set the API key. Leave empty to disable auto-fill.
