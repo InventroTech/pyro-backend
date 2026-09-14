@@ -27,4 +27,8 @@ Tests use **pytest** with **pytest-django**.
 - **`src/config/settings_test.py`** – Test Django settings. By default uses 
 - **`src/tests/conftest.py`** – Pytest hooks and fixtures (e.g. tenants table for SQLite)
 
+## License
+
+GPL-3.0. See [LICENSE](./LICENSE).
+
 
