@@ -503,7 +503,7 @@ RENDER_API_KEY = env('RENDER_API_KEY', default='')
 RENDER_SERVICE_ID = env('RENDER_SERVICE_ID', default='')
 RENDER_CPU_THRESHOLD = env.float('RENDER_CPU_THRESHOLD', default=85.0)
 RENDER_MEMORY_THRESHOLD = env.float('RENDER_MEMORY_THRESHOLD', default=90.0)
-RENDER_LATENCY_P95_THRESHOLD = env.float('RENDER_LATENCY_P95_THRESHOLD', default=3000.0)  # ms
+RENDER_LATENCY_P99_THRESHOLD = env.float('RENDER_LATENCY_P99_THRESHOLD', default=3000.0)  # ms
 
 # System health alerts — email notifications for high CPU, memory, or slow responses
 HEALTH_ALERT_RECIPIENTS = env('HEALTH_ALERT_RECIPIENTS', default='support@thepyro.ai')
