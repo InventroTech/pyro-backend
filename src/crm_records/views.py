@@ -4481,9 +4481,10 @@ class PrajaLeadsAPIView(APIView):
         
         # Also allow root-level fields to be merged into data
         # Common fields that should go into data JSON
-        root_fields_to_data = ['name', 'lead_score', 'lead_stage', 'latest_remarks', 'next_call_at', 
+        root_fields_to_data = ['name', 'lead_score', 'lead_stage', 'latest_remarks', 'next_call_at',
                                'assigned_to', 'call_attempts', 'last_active_date_time',
-                               'disqualification_reason', 'poster', 'phone_number', 'tasks']
+                               'disqualification_reason', 'poster', 'phone_number', 'tasks',
+                               'wati_chatbot_call_received']
         
         for field in root_fields_to_data:
             if field in request.data:
@@ -4612,9 +4613,10 @@ class PrajaLeadsAPIView(APIView):
         
         # Also allow root-level fields to be merged into data
         # Common fields that should go into data JSON
-        root_fields_to_data = ['name', 'lead_score', 'lead_stage', 'latest_remarks', 'next_call_at', 
+        root_fields_to_data = ['name', 'lead_score', 'lead_stage', 'latest_remarks', 'next_call_at',
                                'assigned_to', 'call_attempts', 'last_active_date_time',
-                               'disqualification_reason', 'poster', 'phone_number', 'tasks']
+                               'disqualification_reason', 'poster', 'phone_number', 'tasks',
+                               'wati_chatbot_call_received']
         
         for field in root_fields_to_data:
             if field in request.data:
