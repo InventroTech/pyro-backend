@@ -1,43 +1,22 @@
 """
-Supabase metrics monitor — polls the project's Prometheus-compatible metrics
-endpoint every 5 minutes and sends email alerts when CPU or memory usage
-crosses a configured threshold.
+Supabase metrics monitor — polls the project's Prometheus metrics endpoint
+(https://<project-ref>.supabase.co/customer/v1/privileged/metrics) every
+5 minutes and emails an alert when CPU or memory usage crosses threshold.
 
-Supabase exposes ~200 Postgres/platform metrics in Prometheus exposition
-format at:
-    https://<project-ref>.supabase.co/customer/v1/privileged/metrics
-secured with HTTP Basic Auth: username "service_role", password = a
-*Secret API key* (new format, "sb_secret_...") — NOT the legacy
-SUPABASE_SERVICE_ROLE_KEY JWT, which this endpoint rejects with 401.
-Generate one at Dashboard → Project Settings → API Keys → Secret keys.
-See: https://supabase.com/docs/guides/telemetry/metrics
+Auth: HTTP Basic, username "service_role", password = a *Secret API key*
+(sb_secret_...) from Dashboard → Project Settings → API Keys → Secret keys.
+The legacy SUPABASE_SERVICE_ROLE_KEY JWT gets a 401 here.
 
-Metrics checked (node_exporter-style host metrics, confirmed against
-https://github.com/supabase/supabase-grafana/blob/main/docs/metrics.md):
-  - Memory usage : (MemTotal - MemAvailable) / MemTotal, from
-                   node_memory_MemTotal_bytes / node_memory_MemAvailable_bytes
-                   (a simple gauge ratio — one scrape is enough).
-  - CPU usage    : 1 - (idle time delta / total time delta), from the
-                   node_cpu_seconds_total counter (summed across cores,
-                   grouped by `mode` label). This is a counter, not a gauge,
-                   so it needs two scrapes: we cache each cycle's per-mode
-                   totals and diff them against the previous cycle
-                   (~SUPABASE_CHECK_INTERVAL apart). The first check after
-                   startup has no prior sample and reports no CPU value.
+CPU comes from the node_cpu_seconds_total counter, so it needs two scrapes
+to compute a rate — the first check after startup reports memory only.
 
-Required env vars:
-  SUPABASE_METRICS_SECRET_KEY — Secret API key for the metrics endpoint (sb_secret_...)
-  SUPABASE_PROJECT_URL        — resolved via authentication.supabase_env
-                                 (respects its dev/staging fallback order)
+Env vars: SUPABASE_METRICS_SECRET_KEY, SUPABASE_CPU_THRESHOLD (default 90),
+SUPABASE_MEMORY_THRESHOLD (default 90). Project URL resolved via
+authentication.supabase_env.
 
-Optional thresholds:
-  SUPABASE_CPU_THRESHOLD    — % CPU before alert (default: 90)
-  SUPABASE_MEMORY_THRESHOLD — % memory before alert (default: 90)
-
-Disk usage/IO and connection-pool metrics are also available from this same
-endpoint (node_filesystem_*_bytes, node_disk_io_time_seconds_total,
-db_sql_connection_open/max_open) but aren't wired up here — add a new
-fetch_*/check block below following the same pattern if needed later.
+Disk usage/IO and connection-pool metrics are also on this endpoint
+(node_filesystem_*_bytes, db_sql_connection_open/max_open) — not wired up,
+add a fetch_*/check block below to extend.
 """
 
 import logging
@@ -182,11 +161,7 @@ def _sum_by_mode(points: list[tuple[dict, float]]) -> dict[str, float]:
 
 
 def fetch_cpu_percent(project_url: str, metrics_secret_key: str) -> Optional[float]:
-    """
-    CPU usage % since the previous check, from node_cpu_seconds_total (a
-    counter). Returns None on the first call after startup since there's no
-    prior sample to diff against yet.
-    """
+    """CPU usage % since the previous check. Returns None on the first call (no prior sample yet)."""
     text = _fetch_metrics_text(project_url, metrics_secret_key)
     if text is None:
         return None
@@ -294,11 +269,7 @@ def _send_alert(subject: str, plain: str, html: str, alert_key: str) -> None:
 # ---------------------------------------------------------------------------
 
 def check_supabase_metrics() -> dict:
-    """
-    Poll Supabase's Prometheus metrics endpoint and send alerts if CPU or
-    memory usage exceeds its threshold. Rate-limited to once per
-    SUPABASE_CHECK_INTERVAL. Safe to call every worker tick.
-    """
+    """Poll Supabase metrics and alert on CPU/memory threshold breach. Rate-limited to once per SUPABASE_CHECK_INTERVAL."""
     now = time.monotonic()
     if _last_supabase_check_at[0] is not None and (now - _last_supabase_check_at[0]) < SUPABASE_CHECK_INTERVAL:
         return {}

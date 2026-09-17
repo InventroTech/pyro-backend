@@ -1,14 +1,7 @@
 """
-Check Supabase Metrics Job
-==========================
-Polls Supabase's Prometheus metrics endpoint (CPU, memory) and emails an
-alert when a threshold is crossed. Runs every 5 minutes (see
-pyro_jobs.pyro_job_creator.SCHEDULE). The actual fetching/threshold/email
-logic lives in background_jobs.supabase_metrics_monitor.
-
-Note: CPU usage is a rate computed from two consecutive scrapes, so the
-first run after a restart reports memory only — CPU shows up starting the
-second run, 5 minutes later.
+Runs every 5 minutes (see pyro_jobs.pyro_job_creator.SCHEDULE). Fetch/threshold/
+email logic lives in background_jobs.supabase_metrics_monitor. CPU is a rate
+from two scrapes, so the first run after a restart reports memory only.
 """
 from __future__ import annotations
 
