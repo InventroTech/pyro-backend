@@ -504,7 +504,14 @@ RENDER_API_KEY = env('RENDER_API_KEY', default='')
 RENDER_SERVICE_ID = env('RENDER_SERVICE_ID', default='')
 RENDER_CPU_THRESHOLD = env.float('RENDER_CPU_THRESHOLD', default=85.0)
 RENDER_MEMORY_THRESHOLD = env.float('RENDER_MEMORY_THRESHOLD', default=90.0)
-RENDER_LATENCY_P99_THRESHOLD = env.float('RENDER_LATENCY_P99_THRESHOLD', default=3000.0)  # ms
+RENDER_LATENCY_P95_THRESHOLD = env.float('RENDER_LATENCY_P95_THRESHOLD', default=3000.0)  # ms
+
+# Supabase metrics polling — reads the project's Prometheus metrics endpoint to trigger email alerts.
+# Needs a new-format Secret API key (sb_secret_...) — Dashboard → Project Settings → API Keys → Secret keys.
+# The legacy SUPABASE_SERVICE_ROLE_KEY JWT is rejected (401) by this endpoint.
+SUPABASE_METRICS_SECRET_KEY = env('SUPABASE_METRICS_SECRET_KEY', default='')
+SUPABASE_CPU_THRESHOLD = env.float('SUPABASE_CPU_THRESHOLD', default=90.0)
+SUPABASE_MEMORY_THRESHOLD = env.float('SUPABASE_MEMORY_THRESHOLD', default=90.0)
 
 # System health alerts — email notifications for high CPU, memory, or slow responses
 HEALTH_ALERT_RECIPIENTS = env('HEALTH_ALERT_RECIPIENTS', default='support@thepyro.ai')
