@@ -13,7 +13,9 @@ Business semantics (aligned with production data + code):
   So when both a fresh **and** a due NOT_CONNECTED retry exist, **fresh is tried first** and wins.
 - **Pull ordering:** due snoozed (when enabled), then keys in ``order`` that precede
   score (e.g. calendar day), then RM district (non-referral), then score and the rest
-  of ``order``, then referral creator / party. ``day_timezone`` defaults to Asia/Kolkata.
+  of ``order``, then referral creator / party. Lead groups with
+  ``group_data.prioritize_lead_creator`` use ``lead_creator_order`` (0-attempt then
+  Lead Creator before day). ``day_timezone`` defaults to Asia/Kolkata.
 
 Run (venv activated):
 
@@ -35,6 +37,10 @@ from django.utils import timezone
 
 from crm_records.lead_pipeline.candidate_selector import CandidateSelector
 from crm_records.lead_pipeline.daily_limit import DailyLimitChecker
+from crm_records.lead_pipeline.lead_creator_order import (
+    LeadCreatorOrderApplier,
+    tokens_for_creator_first,
+)
 from crm_records.lead_pipeline.pipeline import LeadPipeline
 from crm_records.lead_pipeline.pull_strategy import PullStrategyApplier
 from crm_records.models import Bucket, Record, UserBucketAssignment
@@ -1220,6 +1226,193 @@ def test_pull_strategy_non_referral_still_uses_district_when_rm_email_set():
         )
     )
     assert [r.id for r in ordered] == [match.id, other.id]
+
+
+def test_tokens_for_creator_first_puts_attempts_then_creator_before_day():
+    assert tokens_for_creator_first(
+        ["-day(created_at)", "-lead_score", "-created_at"]
+    ) == [
+        "call_attempts",
+        "creator_priority",
+        "-day(created_at)",
+        "-lead_score",
+        "-created_at",
+        "district_priority",
+    ]
+    assert tokens_for_creator_first(
+        ["next_call_at", "call_attempts", "-day(created_at)"]
+    ) == [
+        "next_call_at",
+        "call_attempts",
+        "creator_priority",
+        "-day(created_at)",
+        "district_priority",
+    ]
+    assert tokens_for_creator_first(
+        ["is_expired_snoozed", "-day(created_at)"]
+    ) == [
+        "is_expired_snoozed",
+        "call_attempts",
+        "creator_priority",
+        "-day(created_at)",
+        "district_priority",
+    ]
+
+
+@pytest.mark.django_db
+def test_pull_strategy_creator_first_own_yesterday_beats_other_day0():
+    """Creator-first ranking: own referral from yesterday beats another RM's Day-0 lead."""
+    tenant = TenantFactory()
+    now = timezone.now()
+    yesterday = now - timedelta(days=1)
+
+    other_today = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="OtherToday",
+            lead_stage="IN_QUEUE",
+            lead_score=90,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="other.rm@example.com",
+        ),
+    )
+    mine_yesterday = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="MineYesterday",
+            lead_stage="IN_QUEUE",
+            lead_score=10,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="priya.sharma@example.com",
+        ),
+    )
+    Record.objects.filter(pk=other_today.pk).update(created_at=now)
+    Record.objects.filter(pk=mine_yesterday.pk).update(created_at=yesterday)
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[other_today.id, mine_yesterday.id]
+    )
+    ordered = list(
+        LeadCreatorOrderApplier()
+        .apply(
+            qs=qs,
+            strategy={
+                "order": ["-day(created_at)", "-lead_score", "-created_at"],
+                "day_timezone": "UTC",
+                "ignore_score_for_sources": [],
+            },
+            now_iso=now.isoformat(),
+            rm_email="priya.sharma@example.com",
+            rm_district=_DISTRICT_ANAKAPALLI,
+        )
+    )
+    assert [r.id for r in ordered] == [mine_yesterday.id, other_today.id]
+
+
+@pytest.mark.django_db
+def test_pull_strategy_day0_beats_own_creator_without_flag():
+    """Default Day-0 ranking still beats a yesterday own-creator referral."""
+    tenant = TenantFactory()
+    now = timezone.now()
+    yesterday = now - timedelta(days=1)
+
+    other_today = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="OtherToday",
+            lead_stage="IN_QUEUE",
+            lead_score=90,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="other.rm@example.com",
+        ),
+    )
+    mine_yesterday = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="MineYesterday",
+            lead_stage="IN_QUEUE",
+            lead_score=10,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="priya.sharma@example.com",
+        ),
+    )
+    Record.objects.filter(pk=other_today.pk).update(created_at=now)
+    Record.objects.filter(pk=mine_yesterday.pk).update(created_at=yesterday)
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[other_today.id, mine_yesterday.id]
+    )
+    ordered = list(
+        PullStrategyApplier()
+        .apply(
+            qs=qs,
+            strategy={
+                "order": ["-day(created_at)", "-lead_score", "-created_at"],
+                "day_timezone": "UTC",
+                "ignore_score_for_sources": [],
+            },
+            now_iso=now.isoformat(),
+            rm_email="priya.sharma@example.com",
+        )
+    )
+    assert [r.id for r in ordered] == [other_today.id, mine_yesterday.id]
+
+
+@pytest.mark.django_db
+def test_pull_strategy_creator_first_zero_attempt_beats_own_creator_retry():
+    """0-attempt leads still rank before an already-attempted own-creator referral."""
+    tenant = TenantFactory()
+    now = timezone.now()
+
+    other_fresh = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="OtherFresh",
+            lead_stage="IN_QUEUE",
+            lead_score=10,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="other.rm@example.com",
+            call_attempts=0,
+        ),
+    )
+    mine_attempted = RecordFactory(
+        tenant=tenant,
+        entity_type="lead",
+        data=_sales_lead_row(
+            name="MineAttempted",
+            lead_stage="IN_QUEUE",
+            lead_score=90,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="priya.sharma@example.com",
+            call_attempts=1,
+            next_call_at=now.isoformat(),
+        ),
+    )
+    Record.objects.filter(pk__in=[other_fresh.pk, mine_attempted.pk]).update(created_at=now)
+
+    qs = Record.objects.filter(
+        tenant=tenant, entity_type="lead", id__in=[other_fresh.id, mine_attempted.id]
+    )
+    ordered = list(
+        LeadCreatorOrderApplier()
+        .apply(
+            qs=qs,
+            strategy={
+                "order": ["-day(created_at)", "-lead_score", "-created_at"],
+                "day_timezone": "UTC",
+                "ignore_score_for_sources": [],
+            },
+            now_iso=now.isoformat(),
+            rm_email="priya.sharma@example.com",
+            require_next_call_ready=False,
+        )
+    )
+    assert [r.id for r in ordered] == [other_fresh.id, mine_attempted.id]
 
 
 @pytest.mark.django_db
