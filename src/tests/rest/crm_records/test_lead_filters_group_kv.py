@@ -9,7 +9,7 @@ import uuid
 
 import pytest
 
-from crm_records.lead_filters import get_lead_filters_for_user
+from crm_records.lead_filters import get_lead_filters_for_user, group_prioritizes_lead_creator
 from user_settings.models import Group, TenantMemberSetting
 from user_settings.services import (
     USER_KV_DAILY_LIMIT_KEY,
@@ -105,3 +105,34 @@ def test_lead_filters_no_group_kv_returns_empty_filters():
     assert filters.eligible_lead_types == []
     assert filters.daily_limit is None
     assert filters.district is None
+    assert filters.prioritize_lead_creator is False
+
+
+def test_group_prioritizes_lead_creator_requires_explicit_flag():
+    assert group_prioritizes_lead_creator(None) is False
+    assert group_prioritizes_lead_creator({}) is False
+    assert group_prioritizes_lead_creator({"lead_sources": ["PREMIUM_REFERRAL"]}) is False
+    assert group_prioritizes_lead_creator({"prioritize_lead_creator": False}) is False
+    assert group_prioritizes_lead_creator({"prioritize_lead_creator": "true"}) is False
+    assert group_prioritizes_lead_creator({"prioritize_lead_creator": True}) is True
+
+
+@pytest.mark.django_db
+def test_lead_filters_prioritize_lead_creator_from_group_flag():
+    tenant = TenantFactory()
+    user_uuid = uuid.uuid4()
+    membership = TenantMembershipFactory(tenant=tenant, user_id=user_uuid)
+    group = Group.objects.create(
+        tenant=tenant,
+        name=f"g-{uuid.uuid4().hex[:8]}",
+        group_data={"lead_sources": ["PREMIUM_REFERRAL"], "prioritize_lead_creator": True},
+    )
+    TenantMemberSetting.objects.create(
+        tenant=tenant,
+        tenant_membership=membership,
+        key=USER_KV_GROUP_ID_KEY,
+        value=group.id,
+    )
+
+    filters = get_lead_filters_for_user(tenant, str(user_uuid))
+    assert filters.prioritize_lead_creator is True
