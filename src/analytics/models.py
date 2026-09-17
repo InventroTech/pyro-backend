@@ -1,4 +1,5 @@
 import uuid
+from django.contrib.postgres.indexes import GinIndex
 from django.db import models
 
 from core.models import BaseModel
@@ -70,6 +71,8 @@ class AnalyticsBoard(BaseModel):
             f"AnalyticsBoard({self.tenant_id}:{self.role}:"
             f"{self.board_type}:{self.report_id})"
         )
+
+
 from object_history.models import HistoryTrackedModel
 
 
@@ -96,3 +99,56 @@ class AnalyticsRunCore(HistoryTrackedModel, BaseModel):
             models.Index(fields=["user_id", "created_at"]),
             models.Index(fields=["status"]),
         ]
+
+
+class RmActivityEvent(BaseModel):
+    """
+    One row per real thing that happened to an RM while working leads — a
+    call touch finishing, logging in/out, starting or ending a break. This is
+    the only table the RM PRD analytics dashboard reads from: every card and
+    "by RM" row is just this table grouped and summed in different ways.
+
+    Shaped like crm_records.Record: a couple of real columns (tenant,
+    event_type) plus one JSONB event_data blob holding everything else,
+    instead of a dedicated column per field. event_data keys:
+    rm_user_id, rm_name, manager_name, team, state, lead_record_id,
+    updated_status, lead_bucket, party, started_at, ended_at, duration_seconds.
+
+    Only the keys relevant to CALL_TOUCH rows (lead_record_id, updated_status,
+    lead_bucket, party) are filled in for that event_type — they're absent
+    for LOGIN/LOGOUT/BREAK_START/BREAK_END rows, which is expected, not a
+    data-quality problem.
+
+    rm_name/manager_name are copied in at write time (instead of always
+    joining back to the membership table) so a dashboard query never needs
+    anything besides this one table.
+    """
+
+    EVENT_TYPE_CHOICES = [
+        ("CALL_TOUCH", "Call touch"),
+        ("LOGIN", "Login"),
+        ("LOGOUT", "Logout"),
+        ("BREAK_START", "Break start"),
+        ("BREAK_END", "Break end"),
+    ]
+    UPDATED_STATUS_CHOICES = [
+        ("NOT_CONNECTED", "Not connected"),
+        ("CALL_BACK", "Call back"),
+        ("NOT_INTERESTED", "Not interested"),
+        ("TRIAL_ACTIVATED", "Trial activated"),
+    ]
+
+    event_type = models.CharField(max_length=20, choices=EVENT_TYPE_CHOICES, db_index=True)
+    event_data = models.JSONField(default=dict, blank=True)
+
+    class Meta(BaseModel.Meta):
+        db_table = "rm_activity_events"
+        indexes = [
+            *BaseModel.Meta.indexes,
+            models.Index(fields=["tenant", "event_type"], name="rm_events_tenant_type_idx"),
+            GinIndex(fields=["event_data"], name="rm_events_data_gin_idx"),
+        ]
+
+    def __str__(self):
+        data = self.event_data or {}
+        return f"RmActivityEvent({data.get('rm_name')}:{self.event_type}:{data.get('started_at')})"

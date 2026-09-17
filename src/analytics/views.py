@@ -7,7 +7,7 @@ from django.db.models.functions import TruncDate
 from django.db import connection
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework import status, generics
 from support_ticket.records import (
     TICKET_DATA_SEARCH_FIELDS,
     annotate_ticket_datetimes,
@@ -66,7 +66,9 @@ from .serializers import (
     CseMemberBreakdownSerializer,
     CseFilterOptionsSerializer,
     CseTimeSeriesSerializer,
+    RmActivityEventSerializer,
 )
+from .models import RmActivityEvent
 
 
 # "How many support tickets did each executive resolve last week?"
@@ -1821,3 +1823,58 @@ class AnalyticsBoardDetailView(APIView):
             report_id=str(report_id),
         ).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class RmActivityEventListView(TenantScopedMixin, generics.ListAPIView):
+    """
+    RM PRD analytics — returns every rm_activity_events row for the current
+    tenant. The dashboard does its own grouping/summing client-side, so this
+    stays a plain list: no aggregation logic lives on the backend (yet).
+    """
+    queryset = RmActivityEvent.objects.all().order_by("event_data__started_at")
+    serializer_class = RmActivityEventSerializer
+    permission_classes = [IsTenantAuthenticated]
+    pagination_class = None
+
+
+class RmPrdFilterOptionsView(APIView):
+    """
+    Real values for the RM PRD analytics filter bar — managers come from
+    TenantMembership (anyone who has direct reports), buckets come from
+    crm_records.Bucket, and states/parties come from what's actually on real
+    lead records (reuses the same lookup the lead-pull filters use).
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from authz.models import TenantMembership
+        from crm_records.models import Bucket
+        from user_settings.services import get_lead_filter_options
+
+        tenant = request.tenant
+
+        managers = list(
+            TenantMembership.objects.filter(
+                tenant=tenant, is_active=True, direct_reports__isnull=False,
+            )
+            .exclude(email__isnull=True)
+            .exclude(email="")
+            .values_list("email", flat=True)
+            .distinct()
+            .order_by("email")
+        )
+
+        buckets = list(
+            Bucket.objects.filter(tenant=tenant, is_active=True)
+            .values_list("name", flat=True)
+            .order_by("name")
+        )
+
+        lead_options = get_lead_filter_options(tenant)
+
+        return Response({
+            "managers": managers,
+            "lead_buckets": buckets,
+            "states": lead_options.get("lead_states", []),
+            "parties": lead_options.get("lead_types", []),
+        })
