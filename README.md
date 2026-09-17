@@ -27,4 +27,8 @@ Tests use **pytest** with **pytest-django**.
 - **`src/config/settings_test.py`** – Test Django settings. By default uses 
 - **`src/tests/conftest.py`** – Pytest hooks and fixtures (e.g. tenants table for SQLite)
 
+## License
+
+PolyForm Noncommercial License 1.0.0. Free for noncommercial use; commercial use requires a separate license from InventroTech. See [LICENSE](./LICENSE).
+
 
