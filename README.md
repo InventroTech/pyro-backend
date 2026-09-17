@@ -29,6 +29,6 @@ Tests use **pytest** with **pytest-django**.
 
 ## License
 
-GPL-3.0. See [LICENSE](./LICENSE).
+PolyForm Noncommercial License 1.0.0. Free for noncommercial use; commercial use requires a separate license from InventroTech. See [LICENSE](./LICENSE).
 
 
