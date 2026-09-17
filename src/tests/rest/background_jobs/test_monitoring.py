@@ -146,8 +146,8 @@ class TestRenderMetricsMonitorAlerts:
              patch("requests.get", side_effect=_render_side_effect(latency=4500.0)), \
              patch(SEND_EMAIL_PATH, return_value=(True, "ok")) as mock_send:
             result = rm.check_render_metrics()
-        assert result["latency_p99_ms"] == 4500.0
-        assert any("Latency" in c[1]["subject"] or "P99" in c[1]["subject"]
+        assert result["latency_p95_ms"] == 4500.0
+        assert any("Latency" in c[1]["subject"] or "P95" in c[1]["subject"]
                    for c in mock_send.call_args_list)
 
     def test_cooldown_suppresses_repeated_cpu_alert(self):

@@ -5,7 +5,7 @@ email alerts when key metrics cross configured thresholds.
 Metrics checked:
   - CPU usage      : max CPU % across the last 5 minutes
   - Memory usage   : max memory % across the last 5 minutes
-  - HTTP P99 latency: 99th-percentile response time in ms
+  - HTTP P95 latency: 95th-percentile response time in ms
 
 Required env vars:
   RENDER_API_KEY      — Render API key (Dashboard → Account Settings → API Keys)
@@ -15,7 +15,7 @@ Required env vars:
 Optional thresholds:
   RENDER_CPU_THRESHOLD        — % CPU before alert (default: 85)
   RENDER_MEMORY_THRESHOLD     — % Memory before alert (default: 90)
-  RENDER_LATENCY_P99_THRESHOLD — HTTP P99 latency in ms before alert (default: 3000)
+  RENDER_LATENCY_P95_THRESHOLD — HTTP P95 latency in ms before alert (default: 3000)
 """
 
 import logging
@@ -56,7 +56,7 @@ def _get_render_config() -> dict:
         "service_id":          _cfg("RENDER_SERVICE_ID"),
         "cpu_threshold":       float(_cfg("RENDER_CPU_THRESHOLD", "85")),
         "memory_threshold":    float(_cfg("RENDER_MEMORY_THRESHOLD", "90")),
-        "latency_threshold_ms": float(_cfg("RENDER_LATENCY_P99_THRESHOLD", "3000")),
+        "latency_threshold_ms": float(_cfg("RENDER_LATENCY_P95_THRESHOLD", "3000")),
     }
 
 
@@ -152,7 +152,7 @@ def fetch_memory_percent(api_key: str, service_id: str) -> Optional[float]:
         return None
 
 
-def fetch_http_latency_p99_ms(api_key: str, service_id: str) -> Optional[float]:
+def fetch_http_latency_p95_ms(api_key: str, service_id: str) -> Optional[float]:
     start, end = _time_window(minutes=5)
     try:
         resp = requests.get(
@@ -163,7 +163,7 @@ def fetch_http_latency_p99_ms(api_key: str, service_id: str) -> Optional[float]:
                 "startTime": start,
                 "endTime": end,
                 "resolutionSeconds": 60,
-                "quantile": 0.99,
+                "quantile": 0.95,
             },
             timeout=10,
         )
@@ -307,24 +307,24 @@ def check_render_metrics() -> dict:
             )
         logger.info("[RenderMonitor] Memory=%.1f%%", mem)
 
-    # HTTP P99 Latency
-    latency = fetch_http_latency_p99_ms(cfg["api_key"], cfg["service_id"])
+    # HTTP P95 Latency
+    latency = fetch_http_latency_p95_ms(cfg["api_key"], cfg["service_id"])
     if latency is not None:
-        result["latency_p99_ms"] = latency
-        logger.debug("[RenderMonitor] P99 latency=%.0fms (threshold=%.0fms)", latency, cfg["latency_threshold_ms"])
+        result["latency_p95_ms"] = latency
+        logger.debug("[RenderMonitor] P95 latency=%.0fms (threshold=%.0fms)", latency, cfg["latency_threshold_ms"])
         if latency >= cfg["latency_threshold_ms"]:
             plain, html = _build_email(
-                title="High P99 Response Time (Render)",
+                title="High P95 Response Time (Render)",
                 color="#d69e2e", icon="&#9201;",
                 rows=[
-                    ("P99 Latency", f"{latency:.0f} ms", True),
+                    ("P95 Latency", f"{latency:.0f} ms", True),
                     ("Threshold", f"{cfg['latency_threshold_ms']:.0f} ms", False),
                     ("Service", cfg["service_id"], False),
                 ],
                 timestamp=timestamp,
             )
             _send_alert(
-                subject=f"[ALERT] High P99 Latency: {latency:.0f}ms on Pyro (Render)",
+                subject=f"[ALERT] High P95 Latency: {latency:.0f}ms on Pyro (Render)",
                 plain=plain, html=html, alert_key="render_latency",
             )
 
