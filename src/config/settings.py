@@ -422,17 +422,37 @@ SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 # Staging environment flag - used to control certain behaviors like assigned_to field updates
 IS_STAGING_ENV = os.getenv("IS_STAGING_ENV", "false").lower() == "true"
 
+def sentry_traces_sampler(sampling_context):
+    """Keep span volume under Sentry quota so ingestion does not drop to zero."""
+    asgi_scope = sampling_context.get("asgi_scope") or {}
+    wsgi_environ = sampling_context.get("wsgi_environ") or {}
+    path = asgi_scope.get("path") or wsgi_environ.get("PATH_INFO") or ""
+    noisy_prefixes = (
+        "/metrics",
+        "/sentry-debug",
+        "/favicon.ico",
+        "/api/schema",
+        "/api/redoc",
+    )
+    if path == "/" or path.startswith(noisy_prefixes):
+        return 0
+    parent_sampled = sampling_context.get("parent_sampled")
+    if parent_sampled is not None:
+        return float(parent_sampled)
+    return 0.01
+
+
 if not IS_DEV and SENTRY_DSN:
     import sentry_sdk
     from sentry_sdk.integrations.django import DjangoIntegration
     sentry_sdk.init(
-    dsn=SENTRY_DSN,
-    environment=DJANGO_ENV,
-    integrations=[DjangoIntegration()],
-    send_default_pii=False,
-    traces_sampler=lambda _: 0.1,   # capture 10% of requests
-    profiles_sample_rate=1.0,       # profile 100% of sampled requests
-)
+        dsn=SENTRY_DSN,
+        environment=DJANGO_ENV,
+        integrations=[DjangoIntegration()],
+        send_default_pii=False,
+        traces_sampler=sentry_traces_sampler,
+        profiles_sample_rate=0.1,
+    )
 
 
 
