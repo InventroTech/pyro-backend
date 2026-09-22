@@ -27,20 +27,24 @@ LEAD_EVENT_TO_UPDATED_STATUS = {
 }
 
 
-def record_lead_touch_event(event_name, record, payload, tenant):
+def record_lead_touch_event(event_name, record, payload, tenant, request_user):
     """
     Writes one CALL_TOUCH row for a lead-status-update event. Does nothing if
     `event_name` isn't one of the four statuses above, or if there's no
     tenant/RM to attribute the row to.
+
+    The RM is whoever is actually authenticated on the request
+    (request.user.supabase_uid) — not a user id read out of the payload,
+    which the caller controls and could spoof another RM's attribution.
     """
     updated_status = LEAD_EVENT_TO_UPDATED_STATUS.get(event_name)
     if not updated_status or tenant is None:
         return
 
     try:
-        rm_user_id = payload.get("user_supabase_uid") or payload.get("user_id")
+        rm_user_id = getattr(request_user, "supabase_uid", None)
         if not rm_user_id:
-            logger.warning("[RmActivity] No RM user id in payload for event=%s record_id=%s", event_name, getattr(record, "id", None))
+            logger.warning("[RmActivity] No authenticated RM user id for event=%s record_id=%s", event_name, getattr(record, "id", None))
             return
 
         duration_seconds = payload.get("duration_seconds")
@@ -66,6 +70,16 @@ def record_lead_touch_event(event_name, record, payload, tenant):
             else ""
         )
 
+        # RM's own state (not the lead's) — same STATE user setting shown in
+        # the Add/Edit User screen, copied here the same way rm_name/manager_name
+        # are so the dashboard never has to join back to user_kv_settings
+        rm_state = ""
+        if membership:
+            from user_settings.services import USER_KV_STATE_KEY, kv_int_by_membership
+
+            state_value = kv_int_by_membership(tenant, [membership.id], USER_KV_STATE_KEY).get(membership.id)
+            rm_state = str(state_value) if state_value is not None else ""
+
         record_data = (getattr(record, "data", None) or {}) if record else {}
 
         RmActivityEvent.objects.create(
@@ -75,11 +89,11 @@ def record_lead_touch_event(event_name, record, payload, tenant):
                 "rm_user_id": str(rm_user_id),
                 "rm_name": rm_name,
                 "manager_name": manager_name,
-                # team/state aren't tracked on TenantMembership yet — left blank
-                # until that data exists somewhere; safe to fill in later without
+                # team isn't tracked on TenantMembership yet — left blank until
+                # that data exists somewhere; safe to fill in later without
                 # touching any of the rows written before that.
                 "team": "",
-                "state": "",
+                "state": rm_state,
                 "lead_record_id": getattr(record, "id", None),
                 "updated_status": updated_status,
                 "lead_bucket": record_data.get("lead_bucket"),

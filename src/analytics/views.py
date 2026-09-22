@@ -19,7 +19,7 @@ from support_ticket.records import (
     support_ticket_records_qs,
 )
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from django.utils import timezone
 from django.db.models import Count, Sum, Avg
 import uuid
@@ -1825,16 +1825,54 @@ class AnalyticsBoardDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class RmActivityEventPagination(MetaPageNumberPagination):
+    # date-windowed queries (see below) are already bounded to a real day
+    # range, so a generous page keeps this a one-request fetch for the
+    # common case while still capping the worst case
+    page_size = 500
+    max_page_size = 2000
+
+
 class RmActivityEventListView(TenantScopedMixin, generics.ListAPIView):
     """
-    RM PRD analytics — returns every rm_activity_events row for the current
-    tenant. The dashboard does its own grouping/summing client-side, so this
-    stays a plain list: no aggregation logic lives on the backend (yet).
+    RM PRD analytics — returns rm_activity_events rows for the current
+    tenant, windowed to a `from`/`to` date range (YYYY-MM-DD, defaults to
+    today if omitted so this never silently dumps the whole table) and
+    paginated. The dashboard does its own grouping/summing client-side, so
+    this stays a plain list per page: no aggregation logic lives on the
+    backend (yet).
     """
-    queryset = RmActivityEvent.objects.all().order_by("event_data__started_at")
+    queryset = RmActivityEvent.objects.all()
     serializer_class = RmActivityEventSerializer
+    authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
-    pagination_class = None
+    pagination_class = RmActivityEventPagination
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+
+        from_param = self.request.query_params.get("from", "").strip()
+        to_param = self.request.query_params.get("to", "").strip()
+        if not from_param and not to_param:
+            today = timezone.localdate().isoformat()
+            from_param = to_param = today
+
+        if from_param:
+            qs = qs.filter(event_data__started_at__gte=from_param)
+        if to_param:
+            # exclusive upper bound: the day after `to`, so the whole `to` day is included
+            try:
+                to_date = datetime.strptime(to_param, "%Y-%m-%d").date()
+                upper_bound = (to_date + timedelta(days=1)).isoformat()
+                qs = qs.filter(event_data__started_at__lt=upper_bound)
+            except ValueError:
+                pass
+
+        # `id` is a real indexed column (insertion order, effectively
+        # chronological); ordering by event_data__started_at is a JSON
+        # extraction that can't use rm_events_data_gin_idx and forces a sort
+        # over the whole matched set
+        return qs.order_by("id")
 
 
 class RmDailyTargetsView(APIView):
@@ -1846,6 +1884,7 @@ class RmDailyTargetsView(APIView):
     active in the events it already has, without duplicating this onto every
     rm_activity_events row.
     """
+    authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
@@ -1871,17 +1910,34 @@ class RmDailyTargetsView(APIView):
 
 class RmPrdFilterOptionsView(APIView):
     """
-    Real values for the RM PRD analytics filter bar — managers come from
-    TenantMembership (anyone who has direct reports), buckets come from
-    crm_records.Bucket, and states/parties come from what's actually on real
-    lead records (reuses the same lookup the lead-pull filters use).
+    Real values for the RM PRD analytics filter bar. Every option here must
+    match a value that actually lands in rm_activity_events.event_data,
+    since that's what the RM dashboard filters against:
+
+    - managers: TenantMembership.name (not email) — event_data.manager_name
+      is written from membership.user_parent_id.name, not email.
+    - states: each active RM's own STATE user setting (not lead data — a
+      lead's state is the customer's, not the RM's; event_data.state is the
+      RM's own state, copied at write time in rm_activity.py).
+    - parties: from the same lead-pull lookup used elsewhere — this one
+      actually matches event_data.party (copied from the lead's
+      affiliated_party at write time).
+
+    No lead_buckets: buckets are pipeline-pull slices (crm_records.Bucket /
+    UserBucketAssignment), not a field ever present on a lead's own data, so
+    event_data.lead_bucket is always empty and there is nothing real for
+    this filter to match yet.
     """
+    authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
         from authz.models import TenantMembership
-        from crm_records.models import Bucket
-        from user_settings.services import get_lead_filter_options
+        from user_settings.services import (
+            get_lead_filter_options,
+            kv_int_by_membership,
+            USER_KV_STATE_KEY,
+        )
 
         tenant = request.tenant
 
@@ -1889,24 +1945,24 @@ class RmPrdFilterOptionsView(APIView):
             TenantMembership.objects.filter(
                 tenant=tenant, is_active=True, direct_reports__isnull=False,
             )
-            .exclude(email__isnull=True)
-            .exclude(email="")
-            .values_list("email", flat=True)
-            .distinct()
-            .order_by("email")
-        )
-
-        buckets = list(
-            Bucket.objects.filter(tenant=tenant, is_active=True)
+            .exclude(name__isnull=True)
+            .exclude(name="")
             .values_list("name", flat=True)
+            .distinct()
             .order_by("name")
         )
+
+        active_membership_ids = list(
+            TenantMembership.objects.filter(tenant=tenant, is_active=True).values_list("id", flat=True)
+        )
+        state_by_membership = kv_int_by_membership(tenant, active_membership_ids, USER_KV_STATE_KEY)
+        states = sorted({str(v) for v in state_by_membership.values()})
 
         lead_options = get_lead_filter_options(tenant)
 
         return Response({
             "managers": managers,
-            "lead_buckets": buckets,
-            "states": lead_options.get("lead_states", []),
+            "lead_buckets": [],
+            "states": states,
             "parties": lead_options.get("lead_types", []),
         })
