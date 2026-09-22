@@ -26,6 +26,7 @@ from .views import (
     AnalyticsBoardView,
     AnalyticsBoardDetailView,
     RmActivityEventListView,
+    RmDailyTargetsView,
     RmPrdFilterOptionsView,
 )
 app_name = "analytics"
@@ -98,6 +99,7 @@ urlpatterns = [
 
     # RM PRD analytics — raw rm_activity_events rows for this tenant
     path("rm-activity-events/", RmActivityEventListView.as_view(), name="rm-activity-events"),
+    path("rm-daily-targets/", RmDailyTargetsView.as_view(), name="rm-daily-targets"),
     path("rm-filter-options/", RmPrdFilterOptionsView.as_view(), name="rm-filter-options"),
 
     # Saved analytics boards (one row per board, generic across analytics types)

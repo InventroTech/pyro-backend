@@ -1837,6 +1837,38 @@ class RmActivityEventListView(TenantScopedMixin, generics.ListAPIView):
     pagination_class = None
 
 
+class RmDailyTargetsView(APIView):
+    """
+    RM PRD analytics — each RM's own daily trial target, sourced from the
+    same DAILY_TARGET user setting the Team Dashboard's "Trial Target"
+    already uses (set per-RM in the Add/Edit User settings screen). Keyed by
+    rm_user_id so the frontend can look up a target for whichever RMs are
+    active in the events it already has, without duplicating this onto every
+    rm_activity_events row.
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from authz.models import TenantMembership
+        from user_settings.services import kv_int_by_membership, USER_KV_DAILY_TARGET_KEY
+
+        tenant = request.tenant
+        memberships = TenantMembership.objects.filter(
+            tenant=tenant, is_active=True, user_id__isnull=False,
+        ).values("id", "user_id")
+
+        membership_id_to_user_id = {m["id"]: str(m["user_id"]) for m in memberships}
+        target_by_membership = kv_int_by_membership(
+            tenant, list(membership_id_to_user_id.keys()), USER_KV_DAILY_TARGET_KEY
+        )
+
+        targets = {
+            membership_id_to_user_id[membership_id]: target
+            for membership_id, target in target_by_membership.items()
+        }
+        return Response(targets)
+
+
 class RmPrdFilterOptionsView(APIView):
     """
     Real values for the RM PRD analytics filter bar — managers come from
