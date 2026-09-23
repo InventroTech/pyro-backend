@@ -1837,7 +1837,9 @@ class RmActivityEventListView(TenantScopedMixin, generics.ListAPIView):
     """
     RM PRD analytics — returns rm_activity_events rows for the current
     tenant, windowed to a `from`/`to` date range (YYYY-MM-DD, defaults to
-    today if omitted so this never silently dumps the whole table) and
+    today if omitted so this never silently dumps the whole table), an
+    optional `rm_user_id` to scope to one RM (e.g. the lead-card "Your
+    Shift" panel, which has no business seeing every other RM's rows), and
     paginated. The dashboard does its own grouping/summing client-side, so
     this stays a plain list per page: no aggregation logic lives on the
     backend (yet).
@@ -1867,6 +1869,10 @@ class RmActivityEventListView(TenantScopedMixin, generics.ListAPIView):
                 qs = qs.filter(event_data__started_at__lt=upper_bound)
             except ValueError:
                 pass
+
+        rm_user_id = self.request.query_params.get("rm_user_id", "").strip()
+        if rm_user_id:
+            qs = qs.filter(event_data__rm_user_id=rm_user_id)
 
         # `id` is a real indexed column (insertion order, effectively
         # chronological); ordering by event_data__started_at is a JSON
