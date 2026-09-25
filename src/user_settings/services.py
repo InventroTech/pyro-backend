@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date as date_type, timedelta
 from typing import Iterable, Optional
 
 from django.core.cache import cache
@@ -14,7 +15,7 @@ from support_ticket.records import (
     q_record_unassigned,
     support_ticket_records_qs,
 )
-from user_settings.models import Group, TenantMemberSetting
+from user_settings.models import Group, RmDailyTarget, TenantMemberSetting
 
 _QUEUEABLE_LEADS_WHERE = """
     (
@@ -415,6 +416,76 @@ def kv_int_by_membership(tenant, membership_ids: Iterable[int], key: str) -> dic
         if coerced is not None:
             result[row.tenant_membership_id] = coerced
     return result
+
+
+def set_rm_daily_target(*, tenant, tenant_membership, target_date: date_type, target: int) -> RmDailyTarget:
+    """Upsert one RM's target for one specific calendar date."""
+    obj, _ = RmDailyTarget.objects.update_or_create(
+        tenant=tenant,
+        tenant_membership=tenant_membership,
+        date=target_date,
+        defaults={"target": target},
+    )
+    return obj
+
+
+def delete_rm_daily_target(*, tenant, tenant_membership, target_date: date_type) -> None:
+    """Remove a day's override — that day falls back to DAILY_TARGET again."""
+    RmDailyTarget.objects.filter(
+        tenant=tenant, tenant_membership=tenant_membership, date=target_date,
+    ).delete()
+
+
+def list_rm_daily_targets(
+    *, tenant, tenant_membership, date_from: date_type, date_to: date_type
+) -> dict[date_type, int]:
+    """date -> target for whichever days in [date_from, date_to] have an explicit override."""
+    rows = RmDailyTarget.objects.filter(
+        tenant=tenant,
+        tenant_membership=tenant_membership,
+        date__gte=date_from,
+        date__lte=date_to,
+    )
+    return {row.date: row.target for row in rows}
+
+
+def get_rm_daily_targets_sum(
+    tenant, membership_ids: Iterable[int], date_from: date_type, date_to: date_type
+) -> dict[int, int]:
+    """
+    tenant_membership_id -> total target summed across [date_from, date_to]
+    inclusive. Each day uses that RM's explicit RmDailyTarget override if one
+    exists for that day, otherwise falls back to their standing DAILY_TARGET
+    KV setting — so an RM nobody has scheduled day-by-day still gets a
+    sensible multi-day target (old_target * days_in_range), while a
+    day-by-day-planned RM sums their real varying values.
+    """
+    membership_ids = list(membership_ids)
+    num_days = (date_to - date_from).days + 1
+    if num_days <= 0 or not membership_ids:
+        return {}
+
+    fallback_by_membership = kv_int_by_membership(tenant, membership_ids, USER_KV_DAILY_TARGET_KEY)
+
+    overrides = RmDailyTarget.objects.filter(
+        tenant=tenant,
+        tenant_membership_id__in=membership_ids,
+        date__gte=date_from,
+        date__lte=date_to,
+    ).values("tenant_membership_id", "date", "target")
+    override_by_membership_date: dict[tuple[int, date_type], int] = {
+        (row["tenant_membership_id"], row["date"]): row["target"] for row in overrides
+    }
+
+    totals: dict[int, int] = {}
+    for membership_id in membership_ids:
+        fallback = fallback_by_membership.get(membership_id, 0)
+        total = 0
+        for offset in range(num_days):
+            day = date_from + timedelta(days=offset)
+            total += override_by_membership_date.get((membership_id, day), fallback)
+        totals[membership_id] = total
+    return totals
 
 
 def upsert_user_kv_settings(
