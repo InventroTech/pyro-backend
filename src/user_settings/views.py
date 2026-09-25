@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -5,6 +7,7 @@ from django.shortcuts import get_object_or_404
 import uuid
 
 from authz.permissions import IsTenantAuthenticated
+from config.supabase_auth import SupabaseJWTAuthentication
 
 from authz.models import TenantMembership
 from .models import Group, TenantMemberSetting
@@ -20,6 +23,9 @@ from .services import (
     count_available_fresh_leads_for_group,
     fresh_leads_counts_for_groups,
     get_lead_filter_options,
+    delete_rm_daily_target,
+    list_rm_daily_targets,
+    set_rm_daily_target,
     upsert_user_kv_settings,
     upsert_user_lead_assignment_kv,
     upsert_support_daily_limit_kv,
@@ -739,4 +745,91 @@ class GroupDetailView(APIView):
         tenant = request.tenant
         group = self.get_object(tenant, pk)
         group.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class RmDailyTargetOverridesView(APIView):
+    """
+    Per-day RM trial target overrides — lets a manager set a specific RM's
+    target for a specific calendar date (targets genuinely vary day to day
+    per RM, not just a flat DAILY_TARGET). Any day without an explicit
+    override here falls back to that RM's standing DAILY_TARGET setting —
+    see RmDailyTargetsView (analytics app) / get_rm_daily_targets_sum.
+    """
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        """List existing overrides for one RM across a date range."""
+        tenant = request.tenant
+        membership_id = request.query_params.get("tenant_membership_id", "").strip()
+        from_param = request.query_params.get("from", "").strip()
+        to_param = request.query_params.get("to", "").strip()
+
+        if not membership_id or not from_param or not to_param:
+            return Response(
+                {"error": "tenant_membership_id, from, and to are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            date_from = datetime.strptime(from_param, "%Y-%m-%d").date()
+            date_to = datetime.strptime(to_param, "%Y-%m-%d").date()
+        except ValueError:
+            return Response({"error": "Invalid date format. Use YYYY-MM-DD"}, status=status.HTTP_400_BAD_REQUEST)
+
+        tenant_membership = get_object_or_404(TenantMembership, tenant=tenant, id=membership_id)
+        overrides = list_rm_daily_targets(
+            tenant=tenant, tenant_membership=tenant_membership, date_from=date_from, date_to=date_to
+        )
+        return Response(
+            [{"date": d.isoformat(), "target": t} for d, t in sorted(overrides.items())]
+        )
+
+    def post(self, request):
+        """Upsert one day's target override for one RM."""
+        tenant = request.tenant
+        membership_id = request.data.get("tenant_membership_id")
+        date_str = request.data.get("date")
+        target = request.data.get("target")
+
+        if not membership_id or not date_str or target is None:
+            return Response(
+                {"error": "tenant_membership_id, date, and target are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            target_date = datetime.strptime(str(date_str), "%Y-%m-%d").date()
+        except ValueError:
+            return Response({"error": "Invalid date format. Use YYYY-MM-DD"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            target_int = int(target)
+            if target_int < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return Response({"error": "target must be a non-negative integer"}, status=status.HTTP_400_BAD_REQUEST)
+
+        tenant_membership = get_object_or_404(TenantMembership, tenant=tenant, id=membership_id)
+        row = set_rm_daily_target(
+            tenant=tenant, tenant_membership=tenant_membership, target_date=target_date, target=target_int
+        )
+        return Response({"date": row.date.isoformat(), "target": row.target}, status=status.HTTP_200_OK)
+
+    def delete(self, request):
+        """Remove a day's override — that day falls back to DAILY_TARGET again."""
+        tenant = request.tenant
+        membership_id = request.query_params.get("tenant_membership_id", "").strip()
+        date_str = request.query_params.get("date", "").strip()
+
+        if not membership_id or not date_str:
+            return Response(
+                {"error": "tenant_membership_id and date are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            return Response({"error": "Invalid date format. Use YYYY-MM-DD"}, status=status.HTTP_400_BAD_REQUEST)
+
+        tenant_membership = get_object_or_404(TenantMembership, tenant=tenant, id=membership_id)
+        delete_rm_daily_target(tenant=tenant, tenant_membership=tenant_membership, target_date=target_date)
         return Response(status=status.HTTP_204_NO_CONTENT)

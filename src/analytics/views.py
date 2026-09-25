@@ -1883,28 +1883,47 @@ class RmActivityEventListView(TenantScopedMixin, generics.ListAPIView):
 
 class RmDailyTargetsView(APIView):
     """
-    RM PRD analytics — each RM's own daily trial target, sourced from the
-    same DAILY_TARGET user setting the Team Dashboard's "Trial Target"
-    already uses (set per-RM in the Add/Edit User settings screen). Keyed by
-    rm_user_id so the frontend can look up a target for whichever RMs are
-    active in the events it already has, without duplicating this onto every
+    RM PRD analytics — each RM's own trial target, already summed across the
+    given `from`/`to` date range (YYYY-MM-DD, defaults to today — same
+    convention as RmActivityEventListView). Keyed by rm_user_id so the
+    frontend can look up a target for whichever RMs are active in the
+    events it already has, without duplicating this onto every
     rm_activity_events row.
+
+    Per day this uses that RM's explicit RmDailyTarget override if a
+    manager set one for that specific date, otherwise falls back to their
+    standing DAILY_TARGET user setting (the same one the Team Dashboard's
+    "Trial Target" and the Add/Edit User screen use) — see
+    user_settings.services.get_rm_daily_targets_sum.
     """
     authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
         from authz.models import TenantMembership
-        from user_settings.services import kv_int_by_membership, USER_KV_DAILY_TARGET_KEY
+        from user_settings.services import get_rm_daily_targets_sum
 
         tenant = request.tenant
+
+        from_param = request.query_params.get("from", "").strip()
+        to_param = request.query_params.get("to", "").strip()
+        if from_param and to_param:
+            try:
+                date_from = datetime.strptime(from_param, "%Y-%m-%d").date()
+                date_to = datetime.strptime(to_param, "%Y-%m-%d").date()
+            except ValueError:
+                return Response({"error": "Invalid date format. Use YYYY-MM-DD"}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            today = timezone.localdate()
+            date_from = date_to = today
+
         memberships = TenantMembership.objects.filter(
             tenant=tenant, is_active=True, user_id__isnull=False,
         ).values("id", "user_id")
 
         membership_id_to_user_id = {m["id"]: str(m["user_id"]) for m in memberships}
-        target_by_membership = kv_int_by_membership(
-            tenant, list(membership_id_to_user_id.keys()), USER_KV_DAILY_TARGET_KEY
+        target_by_membership = get_rm_daily_targets_sum(
+            tenant, list(membership_id_to_user_id.keys()), date_from, date_to
         )
 
         targets = {
@@ -1928,17 +1947,17 @@ class RmPrdFilterOptionsView(APIView):
     - parties: from the same lead-pull lookup used elsewhere — this one
       actually matches event_data.party (copied from the lead's
       affiliated_party at write time).
-
-    No lead_buckets: buckets are pipeline-pull slices (crm_records.Bucket /
-    UserBucketAssignment), not a field ever present on a lead's own data, so
-    event_data.lead_bucket is always empty and there is nothing real for
-    this filter to match yet.
+    - lead_buckets: Bucket.slug (not name) — event_data.lead_bucket is
+      resolved at write time in rm_activity.py against the RM's own
+      priority-ordered bucket assignments and stores the slug, not the
+      display name.
     """
     authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
         from authz.models import TenantMembership
+        from crm_records.models import Bucket
         from user_settings.services import (
             get_lead_filter_options,
             kv_int_by_membership,
@@ -1966,9 +1985,22 @@ class RmPrdFilterOptionsView(APIView):
 
         lead_options = get_lead_filter_options(tenant)
 
+        # matches the same entity-type rule BucketResolver uses: a bucket
+        # with no entity_type (legacy sales) or entity_type=lead applies here
+        bucket_rows = Bucket.objects.filter(tenant=tenant, is_active=True).values_list(
+            "slug", "filter_conditions"
+        )
+        lead_buckets = sorted(
+            {
+                slug
+                for slug, filter_conditions in bucket_rows
+                if (filter_conditions or {}).get("entity_type") in (None, "", "lead")
+            }
+        )
+
         return Response({
             "managers": managers,
-            "lead_buckets": [],
+            "lead_buckets": lead_buckets,
             "states": states,
             "parties": lead_options.get("lead_types", []),
         })
