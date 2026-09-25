@@ -27,6 +27,56 @@ LEAD_EVENT_TO_UPDATED_STATUS = {
 }
 
 
+def _resolve_lead_bucket_slug(tenant, request_user, record):
+    """
+    Best-effort: which of the RM's own priority-ordered buckets does this
+    lead currently match? Buckets aren't a field on the lead record itself
+    (they're pipeline-pull slices) — same resolution the real pull queue
+    uses (BucketResolver + BucketQuerysetBuilder), just checked against one
+    already-known record instead of building a queue. First bucket (in
+    priority order) whose filter_conditions the record satisfies wins.
+
+    Returns None on any failure — a lead's bucket for the dashboard filter
+    is never worth risking the touch row itself.
+    """
+    try:
+        from crm_records.lead_pipeline.bucket_resolver import BucketResolver
+        from crm_records.lead_pipeline.queryset_builder import BucketQuerysetBuilder
+        from crm_records.lead_pipeline.user_resolver import UserResolver
+
+        resolved_user = UserResolver().resolve(tenant, request_user)
+        assignments = BucketResolver().resolve(tenant, resolved_user, entity_type="lead")
+        if not assignments:
+            return None
+
+        builder = BucketQuerysetBuilder()
+        for assignment in assignments:
+            matches = (
+                builder.build(
+                    tenant=tenant,
+                    bucket_filter_conditions=assignment.filter_conditions,
+                    user_identifier=resolved_user.identifier,
+                    user_uuid=resolved_user.uuid,
+                    eligible_lead_types=resolved_user.eligible_lead_types,
+                    eligible_lead_sources=resolved_user.eligible_lead_sources,
+                    eligible_lead_statuses=resolved_user.eligible_lead_statuses,
+                    eligible_states=resolved_user.eligible_states,
+                    entity_type="lead",
+                )
+                .filter(pk=record.pk)
+                .exists()
+            )
+            if matches:
+                return assignment.bucket_slug
+        return None
+    except Exception:
+        logger.exception(
+            "[RmActivity] Failed to resolve lead bucket for record_id=%s",
+            getattr(record, "id", None),
+        )
+        return None
+
+
 def record_lead_touch_event(event_name, record, payload, tenant, request_user):
     """
     Writes one CALL_TOUCH row for a lead-status-update event. Does nothing if
@@ -81,6 +131,7 @@ def record_lead_touch_event(event_name, record, payload, tenant, request_user):
             rm_state = str(state_value) if state_value is not None else ""
 
         record_data = (getattr(record, "data", None) or {}) if record else {}
+        lead_bucket_slug = _resolve_lead_bucket_slug(tenant, request_user, record) if record else None
 
         RmActivityEvent.objects.create(
             tenant=tenant,
@@ -96,8 +147,12 @@ def record_lead_touch_event(event_name, record, payload, tenant, request_user):
                 "state": rm_state,
                 "lead_record_id": getattr(record, "id", None),
                 "updated_status": updated_status,
-                "lead_bucket": record_data.get("lead_bucket"),
+                "lead_bucket": lead_bucket_slug,
                 "party": record_data.get("affiliated_party"),
+                # only ever set today when the RM picks a "Not Interested"
+                # reason — the lead-card carousel's other 3 dispositions
+                # don't send one, so this is null/absent for them
+                "reason": payload.get("reason"),
                 "started_at": started_at.isoformat(),
                 "ended_at": ended_at.isoformat(),
                 "duration_seconds": duration_seconds,

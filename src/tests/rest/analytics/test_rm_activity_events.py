@@ -13,7 +13,7 @@ from rest_framework import status
 
 from analytics.models import RmActivityEvent
 from analytics.rm_activity import record_lead_touch_event
-from crm_records.models import Record
+from crm_records.models import Bucket, Record, UserBucketAssignment
 from tests.base.test_setup import BaseAPITestCase, MultiTenantAPITestCase
 
 
@@ -86,6 +86,57 @@ class RecordLeadTouchEventTests(BaseAPITestCase):
             self.user,
         )
         self.assertEqual(RmActivityEvent.objects.count(), before)
+
+
+class LeadBucketResolutionTests(BaseAPITestCase):
+    """
+    lead_bucket isn't a field on the lead record — it's resolved at write
+    time against the RM's own priority-ordered bucket assignments, the same
+    way the real pull pipeline resolves buckets (BucketResolver +
+    BucketQuerysetBuilder).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.bucket = Bucket.objects.create(
+            tenant=self.tenant,
+            name="My Working Leads",
+            slug="my-working-leads",
+            filter_conditions={"assigned_scope": "me"},
+            is_active=True,
+        )
+        UserBucketAssignment.objects.create(
+            tenant=self.tenant,
+            user=None,  # tenant-wide assignment
+            bucket=self.bucket,
+            priority=1,
+            is_active=True,
+        )
+
+    def test_resolves_the_bucket_slug_the_lead_currently_matches(self):
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={"assigned_to": self.supabase_uid},
+        )
+        record_lead_touch_event(
+            "lead.trial_activated", record, {"duration_seconds": 10}, self.tenant, self.user
+        )
+        row = RmActivityEvent.objects.latest("id")
+        self.assertEqual(row.event_data["lead_bucket"], "my-working-leads")
+
+    def test_no_matching_bucket_resolves_to_none(self):
+        # assigned to someone else — the "me" scope bucket must not match
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={"assigned_to": "someone-else"},
+        )
+        record_lead_touch_event(
+            "lead.trial_activated", record, {"duration_seconds": 10}, self.tenant, self.user
+        )
+        row = RmActivityEvent.objects.latest("id")
+        self.assertIsNone(row.event_data["lead_bucket"])
 
 
 class RmActivityEventListViewTenantIsolationTest(MultiTenantAPITestCase):
