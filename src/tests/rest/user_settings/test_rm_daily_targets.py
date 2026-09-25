@@ -8,7 +8,7 @@ Tests for per-day RM trial targets:
 - analytics.RmDailyTargetsView (the RM PRD dashboard's endpoint) reflects
   those overrides when summing a date range.
 """
-from datetime import date, timedelta
+from datetime import date
 
 from django.urls import reverse
 from rest_framework import status
@@ -18,9 +18,7 @@ from user_settings.models import RmDailyTarget, TenantMemberSetting
 from user_settings.services import (
     USER_KV_DAILY_TARGET_KEY,
     get_rm_daily_targets_sum,
-    list_rm_daily_targets,
     set_rm_daily_target,
-    delete_rm_daily_target,
 )
 
 
