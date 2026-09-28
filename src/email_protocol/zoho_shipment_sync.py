@@ -15,7 +15,11 @@ from django.utils import timezone
 
 from crm_records.inventory_shipment_tracking import apply_shipment_tracking_normalization
 from crm_records.models import Record
-from crm_records.shipment_email_parse import parse_shipment_email
+from crm_records.shipment_email_parse import (
+    parse_shipment_email,
+    shipment_status_from_subject,
+    subject_has_courier_awb,
+)
 
 from .models import ZohoMailConnection, ZohoMailProcessedMessage
 from .zoho_mail_client import ZohoMailClient
@@ -32,6 +36,9 @@ ITEM_NAME_FIELDS = (
     "product_name",
 )
 _MIN_ITEM_NAME_LEN = 4
+_MIN_TITLE_PREFIX_LEN = 12
+_QUOTED_TITLE_RE = re.compile(r'["“”„‟]([^"“”„‟]+)["“”„‟]')
+_TRAILING_ELLIPSIS_RE = re.compile(r"(?:\.\.\.|…)\s*$")
 _MARKETPLACE_SUFFIX_RE = re.compile(
     r"\s*[:|\-–—]\s*(amazon\.in|amazon\.com|flipkart\.com|myntra\.com|"
     r"toys\s*&\s*games|industrial\s*&\s*scientific).*$",
@@ -90,6 +97,49 @@ def _normalize_item_text(value: str) -> str:
     text = re.sub(r"[^\w\s+./-]", " ", text, flags=re.UNICODE)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def _subject_title_prefixes(subject: str) -> List[str]:
+    """Quoted Amazon-style titles, with a trailing ellipsis removed."""
+    prefixes: List[str] = []
+    seen: set[str] = set()
+    for match in _QUOTED_TITLE_RE.finditer(subject or ""):
+        raw = _TRAILING_ELLIPSIS_RE.sub("", match.group(1)).strip()
+        norm = _normalize_item_text(raw)
+        if len(norm) < _MIN_TITLE_PREFIX_LEN or norm in seen:
+            continue
+        seen.add(norm)
+        prefixes.append(norm)
+    return prefixes
+
+
+def _subject_vendor_prefix(subject: str) -> str:
+    """Leading vendor token in ``Vendor - Order ID ... is Shipped by Courier``."""
+    raw = subject or ""
+    raw = re.split(r"\s+[-–—|]\s+|\s+order\s+id\b", raw, maxsplit=1, flags=re.I)[0]
+    return _normalize_item_text(raw)
+
+
+def _vendor_names(data: Dict[str, Any]) -> List[str]:
+    names: List[str] = []
+    seen: set[str] = set()
+    for field_name in ("vendor", "default_vendor"):
+        norm = _normalize_item_text(str(data.get(field_name) or ""))
+        if len(norm) < 6 or norm in seen:
+            continue
+        seen.add(norm)
+        names.append(norm)
+    return names
+
+
+def _vendor_matches_prefix(vendor: str, prefix: str) -> bool:
+    if not vendor or not prefix:
+        return False
+    if vendor == prefix:
+        return True
+    if len(prefix) >= 6 and (vendor.startswith(prefix) or prefix.startswith(vendor)):
+        return len(vendor) >= 6
+    return False
 
 
 def _record_item_names(data: Dict[str, Any]) -> List[str]:
@@ -172,28 +222,67 @@ def ensure_account_and_inbox(connection: ZohoMailConnection, client: ZohoMailCli
         )
 
 
-def _candidate_records(tenant_id) -> List[Record]:
-    """Open inventory requests that still need tracking filled."""
+# Pipeline order. A later email must not move a request backwards.
+_SHIPMENT_STATUS_RANK = {
+    "NOT_SHIPPED": 0,
+    "ORDERED": 1,
+    "IN_TRANSIT": 2,
+    "OUT_FOR_DELIVERY": 3,
+    "DELIVERED": 4,
+}
+
+
+def _open_request_records(tenant_id) -> List[Record]:
+    """Open inventory / unmannd requests eligible for shipment email updates."""
     status_q = Q()
     for status in ELIGIBLE_STATUSES:
         status_q |= Q(data__status__iexact=status)
 
-    qs = (
+    return list(
         Record.objects.filter(tenant_id=tenant_id, entity_type__in=ENTITY_TYPES)
         .filter(status_q)
         .order_by("-updated_at")[:300]
     )
+
+
+def _record_needs_tracking(rec: Record) -> bool:
+    data = rec.data if isinstance(rec.data, dict) else {}
+    number = str(data.get("tracking_number") or "").strip()
+    link = str(data.get("tracking_link") or "").strip()
+    return not (number or link)
+
+
+def _candidate_records(tenant_id) -> List[Record]:
+    """Open inventory requests that still need tracking filled."""
     out: List[Record] = []
-    for rec in qs:
-        data = rec.data if isinstance(rec.data, dict) else {}
-        number = str(data.get("tracking_number") or "").strip()
-        link = str(data.get("tracking_link") or "").strip()
-        if number or link:
+    for rec in _open_request_records(tenant_id):
+        if not _record_needs_tracking(rec):
             continue
         out.append(rec)
         if len(out) >= 200:
             break
     return out
+
+
+def _tracking_candidates(records: List[Record]) -> List[Record]:
+    out: List[Record] = []
+    for rec in records:
+        if not _record_needs_tracking(rec):
+            continue
+        out.append(rec)
+        if len(out) >= 200:
+            break
+    return out
+
+
+def _can_advance_shipment_status(current: str, incoming: str) -> bool:
+    inc = (incoming or "").strip().upper().replace(" ", "_")
+    if inc not in _SHIPMENT_STATUS_RANK:
+        return False
+    cur = (current or "").strip().upper().replace(" ", "_")
+    if cur == "EXCEPTION":
+        return False
+    return _SHIPMENT_STATUS_RANK[inc] > _SHIPMENT_STATUS_RANK.get(cur, -1)
 
 
 def match_record_for_email(
@@ -208,8 +297,16 @@ def match_record_for_email(
     Match only by item name: the request's item name must appear in the email
     subject/body. Longer names win when several candidates match substrings
     (e.g. "Drone with Dual 4K Camera" beats "Drone"). Ambiguous ties skip.
+
+    A tracking number/link or a subject status (ordered, shipped, out for
+    delivery, delivered, and the other Amazon notice types) is required.
+    Status-only mail still matches so the request status can move.
     """
-    if not (parsed.get("tracking_number") or parsed.get("tracking_link")):
+    if not (
+        parsed.get("tracking_number")
+        or parsed.get("tracking_link")
+        or parsed.get("shipment_status")
+    ):
         return None, "no_tracking_payload"
 
     pool = candidates if candidates is not None else _candidate_records(tenant_id)
@@ -219,6 +316,7 @@ def match_record_for_email(
     if not email_blob:
         return None, "no_item_match"
 
+    prefixes = _subject_title_prefixes(str(parsed.get("subject") or ""))
     scored: List[Tuple[int, Record]] = []
     for rec in pool:
         data = rec.data if isinstance(rec.data, dict) else {}
@@ -226,10 +324,25 @@ def match_record_for_email(
         for name in _record_item_names(data):
             if name in email_blob:
                 best_len = max(best_len, len(name))
+                continue
+            for prefix in prefixes:
+                if name.startswith(prefix):
+                    best_len = max(best_len, len(prefix))
         if best_len:
             scored.append((best_len, rec))
 
     if not scored:
+        if parsed.get("tracking_number") or parsed.get("tracking_link"):
+            prefix = _subject_vendor_prefix(str(parsed.get("subject") or ""))
+            vendor_hits = []
+            for rec in pool:
+                data = rec.data if isinstance(rec.data, dict) else {}
+                if any(_vendor_matches_prefix(name, prefix) for name in _vendor_names(data)):
+                    vendor_hits.append(rec)
+            if len(vendor_hits) == 1:
+                return vendor_hits[0], "vendor_name"
+            if len(vendor_hits) > 1:
+                return None, "ambiguous_item_name"
         return None, "no_item_match"
 
     max_len = max(length for length, _ in scored)
@@ -254,7 +367,12 @@ def apply_tracking_to_record(record: Record, parsed: Dict[str, Any]) -> bool:
         data["courier_name"] = parsed["courier_name"]
     if not str(data.get("eta") or "").strip() and parsed.get("eta"):
         data["eta"] = str(parsed["eta"])[:32]
-    if not str(data.get("shipment_status") or "").strip():
+
+    incoming_status = str(parsed.get("shipment_status") or "").strip()
+    current_status = str(data.get("shipment_status") or "").strip()
+    if _can_advance_shipment_status(current_status, incoming_status):
+        data["shipment_status"] = incoming_status.strip().upper().replace(" ", "_")
+    elif not current_status and (parsed.get("tracking_number") or parsed.get("tracking_link")):
         data["shipment_status"] = "ORDERED"
 
     apply_shipment_tracking_normalization(data, previous=previous)
@@ -274,6 +392,50 @@ def _batch_message_ids(messages: List[Dict[str, Any]]) -> List[str]:
         if message_id:
             ids.append(message_id)
     return ids
+
+
+def _should_retry_processed(existing: ZohoMailProcessedMessage, subject: str) -> bool:
+    """Revisit mail skipped before subject status or vendor AWB notices were accepted."""
+    if existing.skip_reason == "no_tracking_payload":
+        return bool(shipment_status_from_subject(subject))
+    if existing.skip_reason == "not_delivery_partner":
+        return subject_has_courier_awb(subject)
+    return False
+
+
+def _save_processed(
+    *,
+    connection: ZohoMailConnection,
+    message_id: str,
+    subject: str,
+    applied: bool,
+    skip_reason: str,
+    matched_record_id=None,
+    existing: Optional[ZohoMailProcessedMessage] = None,
+) -> None:
+    if existing is not None:
+        existing.subject = subject[:512]
+        existing.applied = applied
+        existing.skip_reason = skip_reason
+        existing.matched_record_id = matched_record_id
+        existing.save(
+            update_fields=[
+                "subject",
+                "applied",
+                "skip_reason",
+                "matched_record_id",
+                "updated_at",
+            ]
+        )
+        return
+    ZohoMailProcessedMessage.objects.create(
+        connection=connection,
+        message_id=message_id,
+        subject=subject[:512],
+        matched_record_id=matched_record_id,
+        applied=applied,
+        skip_reason=skip_reason,
+    )
 
 
 def _process_message_batch(
@@ -296,15 +458,16 @@ def _process_message_batch(
         except (TypeError, ValueError):
             received_ms = 0
 
-        if ZohoMailProcessedMessage.objects.filter(
+        subject = str(msg.get("subject") or "")
+        existing = ZohoMailProcessedMessage.objects.filter(
             connection=connection, message_id=message_id
-        ).exists():
+        ).first()
+        if existing and not _should_retry_processed(existing, subject):
             stats.skipped += 1
             stats.merge_newest(received_ms)
             continue
 
         stats.scanned += 1
-        subject = str(msg.get("subject") or "")
         from_address = str(
             msg.get("fromAddress")
             or msg.get("sender")
@@ -346,75 +509,91 @@ def _process_message_batch(
                 message_id,
                 connection.tenant_id,
             )
-            ZohoMailProcessedMessage.objects.create(
+            _save_processed(
                 connection=connection,
                 message_id=message_id,
-                subject=subject[:512],
+                subject=subject,
                 applied=False,
                 skip_reason="read_error",
+                existing=existing,
             )
             stats.merge_newest(received_ms)
             continue
 
         if not parsed.get("is_shipment"):
-            ZohoMailProcessedMessage.objects.create(
+            _save_processed(
                 connection=connection,
                 message_id=message_id,
-                subject=subject[:512],
+                subject=subject,
                 applied=False,
                 skip_reason="not_delivery_partner",
+                existing=existing,
             )
             stats.merge_newest(received_ms)
             continue
 
         stats.shipment_like += 1
-        if not (parsed.get("tracking_number") or parsed.get("tracking_link")):
-            ZohoMailProcessedMessage.objects.create(
+        has_tracking = bool(parsed.get("tracking_number") or parsed.get("tracking_link"))
+        email_status = parsed.get("shipment_status")
+        if not has_tracking and not email_status:
+            _save_processed(
                 connection=connection,
                 message_id=message_id,
-                subject=subject[:512],
+                subject=subject,
                 applied=False,
                 skip_reason="no_tracking_payload",
+                existing=existing,
             )
             stats.unmatched += 1
             stats.merge_newest(received_ms)
             continue
 
-        record, reason = match_record_for_email(
-            tenant_id=connection.tenant_id,
-            parsed=parsed,
-            candidates=candidates,
-        )
+        record = None
+        reason = ""
+        if has_tracking:
+            record, reason = match_record_for_email(
+                tenant_id=connection.tenant_id,
+                parsed=parsed,
+                candidates=_tracking_candidates(candidates),
+            )
+        if not record and email_status and reason != "ambiguous_item_name":
+            record, reason = match_record_for_email(
+                tenant_id=connection.tenant_id,
+                parsed=parsed,
+                candidates=candidates,
+            )
         if not record:
-            ZohoMailProcessedMessage.objects.create(
+            _save_processed(
                 connection=connection,
                 message_id=message_id,
-                subject=subject[:512],
+                subject=subject,
                 applied=False,
                 skip_reason=reason or "no_match",
+                existing=existing,
             )
             stats.unmatched += 1
             stats.merge_newest(received_ms)
             continue
 
         changed = apply_tracking_to_record(record, parsed)
-        ZohoMailProcessedMessage.objects.create(
+        _save_processed(
             connection=connection,
             message_id=message_id,
-            subject=subject[:512],
+            subject=subject,
             matched_record_id=record.id,
             applied=changed,
             skip_reason="" if changed else "unchanged",
+            existing=existing,
         )
         if changed:
             stats.applied += 1
-            candidates = [c for c in candidates if c.id != record.id]
             logger.info(
-                "[ZohoShipmentSync] applied message_id=%s record_id=%s reason=%s awb=%s",
+                "[ZohoShipmentSync] applied message_id=%s record_id=%s reason=%s awb=%s status=%s",
                 message_id,
                 record.id,
                 reason,
                 parsed.get("tracking_number"),
+                parsed.get("shipment_status"),
             )
         else:
             stats.skipped += 1
@@ -536,7 +715,7 @@ def sync_zoho_shipment_emails(
     ensure_account_and_inbox(connection, client)
 
     stats = _SyncStats(newest_seen=connection.last_received_time_ms)
-    candidates = _candidate_records(connection.tenant_id)
+    candidates = _open_request_records(connection.tenant_id)
 
     if connection.initial_backfill_completed:
         max_per_run = max(1, min(int(max_messages or DEFAULT_INCREMENTAL_BATCH_SIZE), 200))
