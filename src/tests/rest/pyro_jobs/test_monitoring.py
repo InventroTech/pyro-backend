@@ -1,9 +1,9 @@
 """
 Tests for the Render metrics monitoring module.
-  - background_jobs.render_metrics_monitor (Render REST API polling)
+  - pyro_jobs.render_metrics_monitor (Render REST API polling)
 
 Run:
-    pytest src/tests/rest/background_jobs/test_monitoring.py -v
+    pytest src/tests/rest/pyro_jobs/test_monitoring.py -v
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import background_jobs.render_metrics_monitor as rm
+import pyro_jobs.render_metrics_monitor as rm
 
 # send_email is imported lazily inside functions, so patch at the source.
 SEND_EMAIL_PATH = "email_protocol.services.send_email"
@@ -73,7 +73,7 @@ class TestRenderMetricsMonitorGuards:
         _reset_render_monitor()
 
     def test_skips_when_api_key_missing(self):
-        with patch("background_jobs.render_metrics_monitor._get_render_config",
+        with patch("pyro_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(api_key="")), \
              patch("requests.get") as mock_get:
             result = rm.check_render_metrics()
@@ -81,7 +81,7 @@ class TestRenderMetricsMonitorGuards:
         assert result == {}
 
     def test_skips_when_service_id_missing(self):
-        with patch("background_jobs.render_metrics_monitor._get_render_config",
+        with patch("pyro_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(service_id="")), \
              patch("requests.get") as mock_get:
             result = rm.check_render_metrics()
@@ -105,7 +105,7 @@ class TestRenderMetricsMonitorAlerts:
         _reset_render_monitor()
 
     def test_no_alert_when_all_healthy(self):
-        with patch("background_jobs.render_metrics_monitor._get_render_config",
+        with patch("pyro_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg()), \
              patch("requests.get", side_effect=_render_side_effect(cpu=5.0, latency=100.0)), \
              patch(SEND_EMAIL_PATH) as mock_send:
@@ -113,7 +113,7 @@ class TestRenderMetricsMonitorAlerts:
         mock_send.assert_not_called()
 
     def test_cpu_alert_above_threshold(self):
-        with patch("background_jobs.render_metrics_monitor._get_render_config",
+        with patch("pyro_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(cpu_threshold=80.0)), \
              patch("requests.get", side_effect=_render_side_effect(cpu=90.0)), \
              patch(SEND_EMAIL_PATH, return_value=(True, "ok")) as mock_send:
@@ -122,7 +122,7 @@ class TestRenderMetricsMonitorAlerts:
         assert any("CPU" in c[1]["subject"] for c in mock_send.call_args_list)
 
     def test_cpu_below_threshold_no_alert(self):
-        with patch("background_jobs.render_metrics_monitor._get_render_config",
+        with patch("pyro_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(cpu_threshold=85.0)), \
              patch("requests.get", side_effect=_render_side_effect(cpu=50.0)), \
              patch(SEND_EMAIL_PATH) as mock_send:
@@ -131,7 +131,7 @@ class TestRenderMetricsMonitorAlerts:
 
     def test_memory_calculated_as_percentage(self):
         # 1.8 GB / 2 GB ≈ 90%
-        with patch("background_jobs.render_metrics_monitor._get_render_config",
+        with patch("pyro_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(memory_threshold=89.0)), \
              patch("requests.get", side_effect=_render_side_effect(
                  mem_usage=1_932_735_283, mem_limit=2_147_483_648)), \
@@ -141,18 +141,18 @@ class TestRenderMetricsMonitorAlerts:
         assert any("Memory" in c[1]["subject"] for c in mock_send.call_args_list)
 
     def test_latency_alert_above_threshold(self):
-        with patch("background_jobs.render_metrics_monitor._get_render_config",
+        with patch("pyro_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg()), \
              patch("requests.get", side_effect=_render_side_effect(latency=4500.0)), \
              patch(SEND_EMAIL_PATH, return_value=(True, "ok")) as mock_send:
             result = rm.check_render_metrics()
-        assert result["latency_p99_ms"] == 4500.0
-        assert any("Latency" in c[1]["subject"] or "P99" in c[1]["subject"]
+        assert result["latency_p95_ms"] == 4500.0
+        assert any("Latency" in c[1]["subject"] or "P95" in c[1]["subject"]
                    for c in mock_send.call_args_list)
 
     def test_cooldown_suppresses_repeated_cpu_alert(self):
         rm._last_render_alert_sent["render_cpu"] = time.monotonic()
-        with patch("background_jobs.render_metrics_monitor._get_render_config",
+        with patch("pyro_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(cpu_threshold=80.0)), \
              patch("requests.get", side_effect=_render_side_effect(cpu=95.0)), \
              patch(SEND_EMAIL_PATH) as mock_send:
@@ -161,7 +161,7 @@ class TestRenderMetricsMonitorAlerts:
 
     def test_alert_fires_again_after_cooldown(self):
         rm._last_render_alert_sent["render_cpu"] = time.monotonic() - rm.RENDER_ALERT_COOLDOWN - 1
-        with patch("background_jobs.render_metrics_monitor._get_render_config",
+        with patch("pyro_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(cpu_threshold=80.0)), \
              patch("requests.get", side_effect=_render_side_effect(cpu=95.0)), \
              patch(SEND_EMAIL_PATH, return_value=(True, "ok")) as mock_send:
@@ -170,17 +170,17 @@ class TestRenderMetricsMonitorAlerts:
 
     def test_api_failure_does_not_raise(self):
         import requests as req_lib
-        with patch("background_jobs.render_metrics_monitor._get_render_config",
+        with patch("pyro_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg()), \
              patch("requests.get", side_effect=req_lib.exceptions.ConnectionError("timeout")):
             rm.check_render_metrics()  # must not raise
 
     def test_cc_included_in_email(self):
-        with patch("background_jobs.render_metrics_monitor._get_render_config",
+        with patch("pyro_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(cpu_threshold=80.0)), \
-             patch("background_jobs.render_metrics_monitor._get_alert_recipients",
+             patch("pyro_jobs.render_metrics_monitor._get_alert_recipients",
                    return_value=["support@thepyro.ai"]), \
-             patch("background_jobs.render_metrics_monitor._get_alert_cc",
+             patch("pyro_jobs.render_metrics_monitor._get_alert_cc",
                    return_value=["ritam@thepyro.ai", "bibhab@thepyro.ai"]), \
              patch("requests.get", side_effect=_render_side_effect(cpu=90.0)), \
              patch(SEND_EMAIL_PATH, return_value=(True, "ok")) as mock_send:
@@ -190,7 +190,7 @@ class TestRenderMetricsMonitorAlerts:
         assert "bibhab@thepyro.ai" in cc
 
     def test_send_failure_does_not_raise(self):
-        with patch("background_jobs.render_metrics_monitor._get_render_config",
+        with patch("pyro_jobs.render_metrics_monitor._get_render_config",
                    return_value=_render_cfg(cpu_threshold=80.0)), \
              patch("requests.get", side_effect=_render_side_effect(cpu=90.0)), \
              patch(SEND_EMAIL_PATH, return_value=(False, "SMTP error")):
@@ -226,7 +226,7 @@ class TestLatestMaxValue:
 class TestAlertTimestamp:
     def test_format_alert_timestamp_uses_ist(self):
         utc_now = datetime(2026, 1, 15, 10, 30, 0, tzinfo=timezone.utc)
-        with patch("background_jobs.render_metrics_monitor.datetime") as mock_datetime:
+        with patch("pyro_jobs.render_metrics_monitor.datetime") as mock_datetime:
             mock_datetime.now.return_value = utc_now
             mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
             timestamp = rm._format_alert_timestamp()

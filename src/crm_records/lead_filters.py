@@ -37,6 +37,13 @@ class LeadFilters:
     party: Optional[str]  # RM PARTY Circle id for affiliated_party_id soft-rank
     user_uuid: Optional[uuid_module.UUID]
     tenant_membership: Optional[TenantMembership]
+    prioritize_lead_creator: bool = False
+
+
+def group_prioritizes_lead_creator(group_data) -> bool:
+    """Creator-before-day ranking only when ``group_data.prioritize_lead_creator`` is true."""
+    data = group_data if isinstance(group_data, dict) else {}
+    return data.get("prioritize_lead_creator") is True
 
 
 def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
@@ -54,6 +61,7 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
     party: Optional[str] = None
     user_uuid = None
     tenant_membership = None
+    prioritize_lead_creator = False
 
     if not tenant or not user_identifier:
         return LeadFilters(
@@ -66,6 +74,7 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
             party=party,
             user_uuid=user_uuid,
             tenant_membership=tenant_membership,
+            prioritize_lead_creator=prioritize_lead_creator,
         )
 
     try:
@@ -135,9 +144,10 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
                 eligible_lead_sources = group_data.get("lead_sources") if isinstance(group_data.get("lead_sources"), list) else []
                 eligible_lead_statuses = group_data.get("lead_statuses") if isinstance(group_data.get("lead_statuses"), list) else []
                 eligible_states = group_data.get("states") if isinstance(group_data.get("states"), list) else []
+                prioritize_lead_creator = group_prioritizes_lead_creator(group_data)
                 logger.info(
                     "[LeadFilters] From Group(%s): lead_types=%s lead_sources=%s lead_statuses=%s "
-                    "states=%s daily_limit=%s district=%s party=%s",
+                    "states=%s daily_limit=%s district=%s party=%s prioritize_lead_creator=%s",
                     group.name,
                     eligible_lead_types,
                     eligible_lead_sources or "(none)",
@@ -146,6 +156,7 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
                     daily_limit,
                     district or "(blank)",
                     party or "(blank)",
+                    prioritize_lead_creator,
                 )
             else:
                 logger.info(
@@ -170,4 +181,5 @@ def get_lead_filters_for_user(tenant, user_identifier: str) -> LeadFilters:
         party=party,
         user_uuid=user_uuid,
         tenant_membership=tenant_membership,
+        prioritize_lead_creator=prioritize_lead_creator,
     )

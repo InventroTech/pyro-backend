@@ -9,6 +9,7 @@ from crm_records.lead_pipeline.bucket_resolver import BucketResolver
 from crm_records.lead_pipeline.candidate_selector import CandidateSelector
 from crm_records.lead_pipeline.daily_limit import DailyLimitChecker
 from crm_records.lead_pipeline.lead_assigner import LeadAssigner
+from crm_records.lead_pipeline.lead_creator_order import LeadCreatorOrderApplier
 from crm_records.lead_pipeline.matrix_filter import CallAttemptMatrixFilter
 from crm_records.lead_pipeline.pull_strategy import PullStrategyApplier
 from crm_records.lead_pipeline.queryset_builder import BucketQuerysetBuilder
@@ -32,6 +33,7 @@ class LeadPipeline:
         self.bucket_resolver = BucketResolver()
         self.queryset_builder = BucketQuerysetBuilder()
         self.strategy_applier = PullStrategyApplier()
+        self.creator_order_applier = LeadCreatorOrderApplier()
         self.daily_limit_checker = DailyLimitChecker()
         self.matrix_filter = CallAttemptMatrixFilter()
         self.candidate_selector = CandidateSelector()
@@ -59,7 +61,7 @@ class LeadPipeline:
         logger.info(
             "[LeadPipeline] start tenant=%s user=%s membership_id=%s user_uuid=%s "
             "filters: affiliated_party=%s lead_source=%s lead_status=%s lead_state=%s "
-            "daily_limit=%s district=%s party=%s rm_email=%s debug=%s",
+            "daily_limit=%s district=%s party=%s rm_email=%s prioritize_lead_creator=%s debug=%s",
             _tenant_label(tenant),
             user_identifier,
             mem_id,
@@ -72,6 +74,7 @@ class LeadPipeline:
             rm_district or "(blank)",
             rm_party or "(blank)",
             rm_email or "(blank)",
+            resolved_user.prioritize_lead_creator,
             debug,
         )
 
@@ -180,9 +183,15 @@ class LeadPipeline:
                 #     now=now,
                 # )
 
-                qs = self.strategy_applier.apply(
+                strategy = dict(assignment.pull_strategy or {})
+                applier = (
+                    self.creator_order_applier
+                    if resolved_user.prioritize_lead_creator
+                    else self.strategy_applier
+                )
+                qs = applier.apply(
                     qs=qs,
-                    strategy=assignment.pull_strategy,
+                    strategy=strategy,
                     now_iso=now_iso,
                     rm_district=rm_district,
                     rm_party=rm_party,
@@ -207,7 +216,7 @@ class LeadPipeline:
                     assignment.priority,
                     scope,
                     qs_count,
-                    assignment.pull_strategy,
+                    strategy,
                 )
 
                 if debug:

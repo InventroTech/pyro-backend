@@ -159,7 +159,8 @@ class PullStrategyApplier:
     ``rm_district``: matching ``data.district_id`` sorts before lead score for
     non-referral leads (calendar day and other keys before score stay ahead).
     Referrals skip district.
-    ``rm_email``: referral sources then soft-rank ``data.lead_creator`` vs RM email after order.
+    ``rm_email``: referral sources then soft-rank ``data.lead_creator`` vs RM email
+    after score by default.
     ``rm_party``: when set, soft-ranks matching ``data.affiliated_party_id`` after that
     (non-referral only).
     """
@@ -189,7 +190,7 @@ class PullStrategyApplier:
     ) -> QuerySet:
         if require_next_call_ready:
             qs = qs.extra(where=[self._NEXT_CALL_READY_WHERE])
-        tokens = _resolve_order_tokens(strategy)
+        tokens = self._rewrite_order_tokens(_resolve_order_tokens(strategy), strategy)
         return self._apply_order_list(
             qs,
             strategy=strategy,
@@ -200,6 +201,10 @@ class PullStrategyApplier:
             rm_party=(rm_party or "").strip() or None,
             rm_email=(rm_email or "").strip() or None,
         )
+
+    def _rewrite_order_tokens(self, tokens: list[str], strategy: dict) -> list[str]:
+        """Hook for alternate orders (see ``lead_creator_order.LeadCreatorOrderApplier``)."""
+        return tokens
 
     def _apply_order_list(
         self,
@@ -219,6 +224,9 @@ class PullStrategyApplier:
         before_score: list[Any] = []
         from_score: list[Any] = []
         seen_score = False
+        seen_creator = False
+        seen_district = False
+        seen_party = False
 
         for raw in tokens:
             parsed = _parse_order_token(raw) if isinstance(raw, str) else None
@@ -226,7 +234,25 @@ class PullStrategyApplier:
                 continue
             descending, kind, field = parsed
 
-            if kind == "field" and field in _MODEL_ORDER_FIELDS:
+            if kind == "field" and field in ("creator_priority", "lead_creator"):
+                if not rm_email or "creator_priority" in select:
+                    continue
+                select["creator_priority"] = _creator_priority_sql(rm_email)
+                seen_creator = True
+                part = "creator_priority"
+            elif kind == "field" and field == "district_priority":
+                if not rm_district or "district_priority" in select:
+                    continue
+                select["district_priority"] = _district_priority_sql(rm_district)
+                seen_district = True
+                part = "district_priority"
+            elif kind == "field" and field == "party_priority":
+                if not rm_party or "party_priority" in select:
+                    continue
+                select["party_priority"] = _party_priority_sql(rm_party)
+                seen_party = True
+                part = "party_priority"
+            elif kind == "field" and field in _MODEL_ORDER_FIELDS:
                 part = f"-{field}" if descending else field
             else:
                 alias, sql = self._select_expr(
@@ -251,17 +277,18 @@ class PullStrategyApplier:
             else:
                 before_score.append(part)
 
-        # District after day/attempts, before score. Referrals skip district.
+        # Default: district after day/attempts, before score. Referrals skip district in SQL.
+        # Alternate orders can place ``district_priority`` in tokens (after score).
         geo_parts: list[Any] = []
-        if rm_district:
+        extra_parts: list[Any] = []
+        if rm_district and not seen_district:
             select["district_priority"] = _district_priority_sql(rm_district)
             geo_parts.append("district_priority")
 
-        extra_parts: list[Any] = []
-        if rm_email:
+        if rm_email and not seen_creator:
             select["creator_priority"] = _creator_priority_sql(rm_email)
             extra_parts.append("creator_priority")
-        if rm_party:
+        if rm_party and not seen_party:
             select["party_priority"] = _party_priority_sql(rm_party)
             extra_parts.append("party_priority")
 

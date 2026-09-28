@@ -10,6 +10,8 @@ from django.db.utils import InterfaceError
 logger = logging.getLogger(__name__)
 
 SCHEDULE = {
+    "check_render_metrics":                   {"every_minutes": 5},
+    "check_supabase_metrics":                 {"every_minutes": 5},
     "close_stale_self_trial_support_tickets": {"every_minutes": 15},
     "discover_entity_types":                  {"every_minutes": 5},
     "dispatch_data_sync":                     {"every_minutes": 480},

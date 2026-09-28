@@ -26,6 +26,7 @@ class ResolvedUser:
     daily_limit: Optional[int]
     district: Optional[str]
     party: Optional[str]  # affiliated_party_id match from PARTY KV
+    prioritize_lead_creator: bool = False
 
 
 class UserResolver:
@@ -56,4 +57,5 @@ class UserResolver:
             daily_limit=filters.daily_limit,
             district=filters.district,
             party=filters.party,
+            prioritize_lead_creator=filters.prioritize_lead_creator,
         )

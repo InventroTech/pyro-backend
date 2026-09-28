@@ -83,18 +83,20 @@ def _make_sales_lead_user_settings(
     daily_limit: int | None = None,
     district: str | None = "TestDistrict",
     party: str | None = None,
+    group_data_extra: dict | None = None,
 ):
     """Group/KV settings for SALES LEAD RMs (lead_statuses filter)."""
+    group_data = {
+        "party": eligible_parties if eligible_parties is not None else [],
+        "lead_sources": lead_sources if lead_sources is not None else [],
+        "lead_statuses": ["SALES LEAD"],
+    }
+    if group_data_extra:
+        group_data.update(group_data_extra)
     group, _ = Group.objects.update_or_create(
         tenant=env.tenant,
         name=f"sales-rm-group-{env.user_identifier[:8]}",
-        defaults={
-            "group_data": {
-                "party": eligible_parties if eligible_parties is not None else [],
-                "lead_sources": lead_sources if lead_sources is not None else [],
-                "lead_statuses": ["SALES LEAD"],
-            }
-        },
+        defaults={"group_data": group_data},
     )
     TenantMemberSetting.objects.update_or_create(
         tenant=env.tenant,
@@ -1022,6 +1024,96 @@ def test_pipeline_referral_blank_creator_after_other_creators(sales_lead_env):
     result = pipeline.get_next(tenant=env.tenant, request_user=env.user)
     assert result is not None
     assert result.pk == other_creator.pk
+
+
+def test_pipeline_referral_group_own_creator_beats_day0(sales_lead_env):
+    """Lead groups with prioritize_lead_creator rank own Lead Creator before Day-0."""
+    env = sales_lead_env
+    Record.objects.filter(tenant=env.tenant, entity_type="lead").delete()
+    _make_sales_lead_user_settings(
+        env,
+        eligible_parties=[],
+        lead_sources=["PREMIUM_REFERRAL", "REFERRAL_TO_RM"],
+        district=_DISTRICT_ANAKAPALLI,
+        group_data_extra={"prioritize_lead_creator": True},
+    )
+    now = timezone.now()
+    yesterday = now - timedelta(days=1)
+
+    other_today = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="OtherToday",
+            lead_stage="IN_QUEUE",
+            lead_score=90,
+            district_id=_DISTRICT_ANAKAPALLI,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="someone.else@example.com",
+        ),
+    )
+    mine_yesterday = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="MineYesterday",
+            lead_stage="IN_QUEUE",
+            lead_score=10,
+            district_id=_DISTRICT_ALLURI,
+            lead_source="REFERRAL_TO_RM",
+            lead_creator=env.membership.email,
+        ),
+    )
+    Record.objects.filter(pk=other_today.pk).update(created_at=now)
+    Record.objects.filter(pk=mine_yesterday.pk).update(created_at=yesterday)
+
+    pipeline = LeadPipeline()
+    result = pipeline.get_next(tenant=env.tenant, request_user=env.user)
+    assert result is not None
+    assert result.pk == mine_yesterday.pk
+
+
+def test_pipeline_day0_still_beats_own_creator_without_referral_group(sales_lead_env):
+    """All-source groups keep Day-0 ranking ahead of a yesterday own-creator referral."""
+    env = sales_lead_env
+    Record.objects.filter(tenant=env.tenant, entity_type="lead").delete()
+    _make_sales_lead_user_settings(
+        env, eligible_parties=[], lead_sources=[], district=_DISTRICT_ANAKAPALLI
+    )
+    now = timezone.now()
+    yesterday = now - timedelta(days=1)
+
+    other_today = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="OtherToday",
+            lead_stage="IN_QUEUE",
+            lead_score=90,
+            district_id=_DISTRICT_ANAKAPALLI,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator="someone.else@example.com",
+        ),
+    )
+    mine_yesterday = RecordFactory(
+        tenant=env.tenant,
+        entity_type="lead",
+        data=_sales_lead_data(
+            name="MineYesterday",
+            lead_stage="IN_QUEUE",
+            lead_score=10,
+            district_id=_DISTRICT_ANAKAPALLI,
+            lead_source="PREMIUM_REFERRAL",
+            lead_creator=env.membership.email,
+        ),
+    )
+    Record.objects.filter(pk=other_today.pk).update(created_at=now)
+    Record.objects.filter(pk=mine_yesterday.pk).update(created_at=yesterday)
+
+    pipeline = LeadPipeline()
+    result = pipeline.get_next(tenant=env.tenant, request_user=env.user)
+    assert result is not None
+    assert result.pk == other_today.pk
 
 
 def test_pipeline_ranks_circle_payload_district_and_party(sales_lead_env):
