@@ -25,6 +25,7 @@ from .scheduler_locks import (
     SCHEDULER_LOCK_LEAD_CRON,
     SCHEDULER_LOCK_SHIPMENT_TRACKING,
     SCHEDULER_LOCK_ZOHO_SHIPMENT_EMAILS,
+    SCHEDULER_LOCK_RM_DAILY_TARGET_SNAPSHOT,
     scheduler_lock,
 )
 from .tenant_jobs import enqueue_for_all_tenants
@@ -69,6 +70,10 @@ class JobProcessor:
         # Last time we enqueued inventory shipment tracking refresh
         self._last_shipment_tracking_enqueue_at = None
         self._last_zoho_shipment_email_enqueue_at = None
+        # Calendar date (local) we last enqueued the RM daily-target snapshot on —
+        # tracked by date, not elapsed seconds, so it fires once per real day
+        # regardless of how often the worker loop ticks
+        self._last_rm_daily_target_snapshot_date = None
         self._run_schedulers = True
         # Circuit breaker state for connection errors
         self._connection_error_count = 0
@@ -551,6 +556,37 @@ class JobProcessor:
                 exc_info=True,
             )
 
+    def _maybe_enqueue_rm_daily_target_snapshot(self):
+        """
+        Once per calendar day (not a fixed elapsed-seconds interval — a
+        real "has the date changed" check, so it survives worker
+        restarts/slow ticks without re-firing or drifting), enqueue a job
+        per tenant that freezes each RM's current DAILY_TARGET into
+        RmDailyTarget for the day that just ended. See
+        RmDailyTargetSnapshotJobHandler.
+        """
+        today = timezone.now().date()
+        if self._last_rm_daily_target_snapshot_date == today:
+            return
+        self._last_rm_daily_target_snapshot_date = today
+        try:
+            with scheduler_lock(SCHEDULER_LOCK_RM_DAILY_TARGET_SNAPSHOT) as acquired:
+                if not acquired:
+                    return
+                queue = get_queue_service()
+                jobs = enqueue_for_all_tenants(
+                    queue, job_type=JobType.SNAPSHOT_RM_DAILY_TARGETS, payload={}, priority=0
+                )
+            logger.info(
+                f"[Worker {self.worker_id}] Enqueued snapshot_rm_daily_targets for %s tenant(s)",
+                len(jobs),
+            )
+        except Exception as e:
+            logger.warning(
+                f"[Worker {self.worker_id}] Failed to enqueue RM daily target snapshot: {e}",
+                exc_info=True,
+            )
+
     def process_next_job(self, tenant_id: Optional[str] = None) -> bool:
         """
         Process the next available job.
@@ -666,6 +702,8 @@ class JobProcessor:
                     self._maybe_enqueue_zoho_shipment_email_sync()
                     # Every 5 min: poll Render API metrics and email alerts if thresholds exceeded
                     self._maybe_check_render_metrics()
+                    # Once a day: freeze each RM's DAILY_TARGET for the day that just ended
+                    self._maybe_enqueue_rm_daily_target_snapshot()
 
                 if jobs_processed > 0:
                     logger.debug(

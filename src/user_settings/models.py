@@ -85,16 +85,14 @@ class TenantMemberSetting(HistoryTrackedModel, BaseModel):
 
 class RmDailyTarget(HistoryTrackedModel, BaseModel):
     """
-    A specific RM's trial target for one specific calendar date — an
-    explicit override on top of their standing DAILY_TARGET (TenantMemberSetting).
+    A frozen snapshot of a specific RM's DAILY_TARGET (TenantMemberSetting)
+    for one specific calendar date that has already ended.
 
-    Targets genuinely vary day to day per RM (a manager may plan 10 today,
-    12 tomorrow, 34 the day after for the same RM), so a single flat
-    DAILY_TARGET can't represent a multi-day view correctly. RM PRD
-    analytics sums whichever of these rows exist across the selected date
-    range, falling back to DAILY_TARGET for any day without an explicit row
-    (see user_settings.services.get_rm_daily_targets_sum) — so RMs nobody
-    has scheduled day-by-day still get sensible multi-day targets.
+    Written automatically once a day by RmDailyTargetSnapshotJobHandler, so
+    a later edit to the flat DAILY_TARGET setting never rewrites a past
+    day's history in RM PRD analytics. Today and future days have no row
+    here yet and read DAILY_TARGET live (see
+    user_settings.services.get_rm_daily_targets_sum).
     """
 
     tenant = models.ForeignKey(

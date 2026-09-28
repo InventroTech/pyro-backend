@@ -429,36 +429,16 @@ def set_rm_daily_target(*, tenant, tenant_membership, target_date: date_type, ta
     return obj
 
 
-def delete_rm_daily_target(*, tenant, tenant_membership, target_date: date_type) -> None:
-    """Remove a day's override — that day falls back to DAILY_TARGET again."""
-    RmDailyTarget.objects.filter(
-        tenant=tenant, tenant_membership=tenant_membership, date=target_date,
-    ).delete()
-
-
-def list_rm_daily_targets(
-    *, tenant, tenant_membership, date_from: date_type, date_to: date_type
-) -> dict[date_type, int]:
-    """date -> target for whichever days in [date_from, date_to] have an explicit override."""
-    rows = RmDailyTarget.objects.filter(
-        tenant=tenant,
-        tenant_membership=tenant_membership,
-        date__gte=date_from,
-        date__lte=date_to,
-    )
-    return {row.date: row.target for row in rows}
-
-
 def get_rm_daily_targets_sum(
     tenant, membership_ids: Iterable[int], date_from: date_type, date_to: date_type
 ) -> dict[int, int]:
     """
     tenant_membership_id -> total target summed across [date_from, date_to]
-    inclusive. Each day uses that RM's explicit RmDailyTarget override if one
-    exists for that day, otherwise falls back to their standing DAILY_TARGET
-    KV setting — so an RM nobody has scheduled day-by-day still gets a
-    sensible multi-day target (old_target * days_in_range), while a
-    day-by-day-planned RM sums their real varying values.
+    inclusive. Each day uses that RM's frozen RmDailyTarget snapshot if one
+    exists for that day (past days, written nightly — see
+    RmDailyTargetSnapshotJobHandler), otherwise falls back to their current
+    standing DAILY_TARGET KV setting (today/future days, or any day never
+    snapshotted).
     """
     membership_ids = list(membership_ids)
     num_days = (date_to - date_from).days + 1
@@ -467,14 +447,14 @@ def get_rm_daily_targets_sum(
 
     fallback_by_membership = kv_int_by_membership(tenant, membership_ids, USER_KV_DAILY_TARGET_KEY)
 
-    overrides = RmDailyTarget.objects.filter(
+    snapshots = RmDailyTarget.objects.filter(
         tenant=tenant,
         tenant_membership_id__in=membership_ids,
         date__gte=date_from,
         date__lte=date_to,
     ).values("tenant_membership_id", "date", "target")
-    override_by_membership_date: dict[tuple[int, date_type], int] = {
-        (row["tenant_membership_id"], row["date"]): row["target"] for row in overrides
+    snapshot_by_membership_date: dict[tuple[int, date_type], int] = {
+        (row["tenant_membership_id"], row["date"]): row["target"] for row in snapshots
     }
 
     totals: dict[int, int] = {}
@@ -483,7 +463,7 @@ def get_rm_daily_targets_sum(
         total = 0
         for offset in range(num_days):
             day = date_from + timedelta(days=offset)
-            total += override_by_membership_date.get((membership_id, day), fallback)
+            total += snapshot_by_membership_date.get((membership_id, day), fallback)
         totals[membership_id] = total
     return totals
 

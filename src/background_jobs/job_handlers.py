@@ -1691,6 +1691,56 @@ class SyncZohoShipmentEmailsJobHandler(JobHandler):
         return delays[min(attempt - 1, len(delays) - 1)]
 
 
+class RmDailyTargetSnapshotJobHandler(JobHandler):
+    """
+    Freezes each active RM's DAILY_TARGET value for the day that just ended
+    into RmDailyTarget, so an edit to the flat DAILY_TARGET setting later
+    never rewrites a day's history once that day is over. "Today" and
+    future days keep reading DAILY_TARGET live (see
+    user_settings.services.get_rm_daily_targets_sum) — this only ever
+    writes for yesterday, once a day (see
+    JobProcessor._maybe_enqueue_rm_daily_target_snapshot).
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        from datetime import timedelta
+
+        from authz.models import TenantMembership
+        from user_settings.services import (
+            USER_KV_DAILY_TARGET_KEY,
+            kv_int_by_membership,
+            set_rm_daily_target,
+        )
+
+        tenant = job.tenant
+        if tenant is None:
+            return True
+
+        snapshot_date = timezone.now().date() - timedelta(days=1)
+        memberships = list(TenantMembership.objects.filter(tenant=tenant, is_active=True))
+        if not memberships:
+            return True
+
+        membership_ids = [m.id for m in memberships]
+        target_by_membership = kv_int_by_membership(tenant, membership_ids, USER_KV_DAILY_TARGET_KEY)
+
+        for membership in memberships:
+            target = target_by_membership.get(membership.id)
+            if target is None:
+                continue  # nothing configured for this RM — no history to freeze
+            set_rm_daily_target(
+                tenant=tenant,
+                tenant_membership=membership,
+                target_date=snapshot_date,
+                target=target,
+            )
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+
 class JobHandlerRegistry:
     """
     Registry for job handlers.
@@ -1723,6 +1773,7 @@ class JobHandlerRegistry:
         )
         # Praja handler removed - now using MixpanelService instead
         self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
+        self.register_handler(JobType.SNAPSHOT_RM_DAILY_TARGETS, RmDailyTargetSnapshotJobHandler())
     
     def register_handler(self, job_type: str, handler: JobHandler):
         """
