@@ -25,6 +25,9 @@ from .views import (
     CseTimeSeriesView,
     AnalyticsBoardView,
     AnalyticsBoardDetailView,
+    RmActivityEventListView,
+    RmDailyTargetsView,
+    RmPrdFilterOptionsView,
 )
 app_name = "analytics"
 
@@ -93,6 +96,11 @@ urlpatterns = [
     path("cse/overview/", CseOverviewView.as_view(), name="cse-overview"),
     path("cse/members/", CseMembersView.as_view(), name="cse-members"),
     path("cse/time-series/", CseTimeSeriesView.as_view(), name="cse-time-series"),
+
+    # RM PRD analytics — raw rm_activity_events rows for this tenant
+    path("rm-activity-events/", RmActivityEventListView.as_view(), name="rm-activity-events"),
+    path("rm-daily-targets/", RmDailyTargetsView.as_view(), name="rm-daily-targets"),
+    path("rm-filter-options/", RmPrdFilterOptionsView.as_view(), name="rm-filter-options"),
 
     # Saved analytics boards (one row per board, generic across analytics types)
     path("board/", AnalyticsBoardView.as_view(), name="analytics-board"),

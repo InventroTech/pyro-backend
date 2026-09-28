@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date as date_type, timedelta
 from typing import Iterable, Optional
 
 from django.core.cache import cache
@@ -14,7 +15,7 @@ from support_ticket.records import (
     q_record_unassigned,
     support_ticket_records_qs,
 )
-from user_settings.models import Group, TenantMemberSetting
+from user_settings.models import Group, RmDailyTarget, TenantMemberSetting
 
 _QUEUEABLE_LEADS_WHERE = """
     (
@@ -415,6 +416,56 @@ def kv_int_by_membership(tenant, membership_ids: Iterable[int], key: str) -> dic
         if coerced is not None:
             result[row.tenant_membership_id] = coerced
     return result
+
+
+def set_rm_daily_target(*, tenant, tenant_membership, target_date: date_type, target: int) -> RmDailyTarget:
+    """Upsert one RM's target for one specific calendar date."""
+    obj, _ = RmDailyTarget.objects.update_or_create(
+        tenant=tenant,
+        tenant_membership=tenant_membership,
+        date=target_date,
+        defaults={"target": target},
+    )
+    return obj
+
+
+def get_rm_daily_targets_sum(
+    tenant, membership_ids: Iterable[int], date_from: date_type, date_to: date_type
+) -> dict[int, int]:
+    """
+    tenant_membership_id -> total target summed across [date_from, date_to]
+    inclusive. Each day uses that RM's frozen RmDailyTarget snapshot if one
+    exists for that day (past days, written nightly — see
+    RmDailyTargetSnapshotJobHandler), otherwise falls back to their current
+    standing DAILY_TARGET KV setting (today/future days, or any day never
+    snapshotted).
+    """
+    membership_ids = list(membership_ids)
+    num_days = (date_to - date_from).days + 1
+    if num_days <= 0 or not membership_ids:
+        return {}
+
+    fallback_by_membership = kv_int_by_membership(tenant, membership_ids, USER_KV_DAILY_TARGET_KEY)
+
+    snapshots = RmDailyTarget.objects.filter(
+        tenant=tenant,
+        tenant_membership_id__in=membership_ids,
+        date__gte=date_from,
+        date__lte=date_to,
+    ).values("tenant_membership_id", "date", "target")
+    snapshot_by_membership_date: dict[tuple[int, date_type], int] = {
+        (row["tenant_membership_id"], row["date"]): row["target"] for row in snapshots
+    }
+
+    totals: dict[int, int] = {}
+    for membership_id in membership_ids:
+        fallback = fallback_by_membership.get(membership_id, 0)
+        total = 0
+        for offset in range(num_days):
+            day = date_from + timedelta(days=offset)
+            total += snapshot_by_membership_date.get((membership_id, day), fallback)
+        totals[membership_id] = total
+    return totals
 
 
 def upsert_user_kv_settings(

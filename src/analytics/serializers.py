@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from support_ticket.records import record_to_ticket_dict
+from analytics.models import RmActivityEvent
 
 
 class SupportTicketSerializer(serializers.Serializer):
@@ -107,3 +108,12 @@ class AnalyticsBoardSerializer(serializers.Serializer):
 
     board_type = serializers.CharField(max_length=64, required=False, default="cse")
     config = serializers.DictField()
+
+
+class RmActivityEventSerializer(serializers.ModelSerializer):
+    """Read-only serializer for RM PRD analytics — one row per rm_activity_events row."""
+
+    class Meta:
+        model = RmActivityEvent
+        fields = ["id", "event_type", "event_data"]
+        read_only_fields = fields

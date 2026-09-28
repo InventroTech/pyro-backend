@@ -81,3 +81,48 @@ class TenantMemberSetting(HistoryTrackedModel, BaseModel):
 
     def __str__(self) -> str:
         return f"{self.tenant_id} - {self.tenant_membership_id} - {self.key}: {self.value}"
+
+
+class RmDailyTarget(HistoryTrackedModel, BaseModel):
+    """
+    A frozen snapshot of a specific RM's DAILY_TARGET (TenantMemberSetting)
+    for one specific calendar date that has already ended.
+
+    Written automatically once a day by RmDailyTargetSnapshotJobHandler, so
+    a later edit to the flat DAILY_TARGET setting never rewrites a past
+    day's history in RM PRD analytics. Today and future days have no row
+    here yet and read DAILY_TARGET live (see
+    user_settings.services.get_rm_daily_targets_sum).
+    """
+
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        db_column="tenant_id",
+        help_text="The tenant this target belongs to",
+    )
+    tenant_membership = models.ForeignKey(
+        "authz.TenantMembership",
+        on_delete=models.CASCADE,
+        db_column="tenant_membership_id",
+        help_text="The RM this target is for",
+    )
+    date = models.DateField(help_text="Calendar date this target applies to")
+    target = models.PositiveIntegerField(help_text="Trial target for this RM on this date")
+
+    class Meta(BaseModel.Meta):
+        db_table = "rm_daily_targets"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "tenant_membership", "date"],
+                condition=alive_q(),
+                name="rm_daily_targets_tenant_mship_date_uniq_alive",
+            ),
+        ]
+        indexes = [
+            *BaseModel.Meta.indexes,
+            models.Index(fields=["tenant", "tenant_membership", "date"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"RmDailyTarget({self.tenant_id}, membership={self.tenant_membership_id}, {self.date}={self.target})"

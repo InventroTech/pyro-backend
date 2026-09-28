@@ -33,6 +33,10 @@ class JobType(models.TextChoices):
         "sync_zoho_shipment_emails",
         "Sync Zoho Shipment Emails",
     )
+    SNAPSHOT_RM_DAILY_TARGETS = (
+        "snapshot_rm_daily_targets",
+        "Snapshot RM Daily Targets",
+    )
     # Future job types can be added here:
     # SEND_EMAIL = "send_email", "Send Email"
     # GENERATE_REPORT = "generate_report", "Generate Report"
