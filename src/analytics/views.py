@@ -1856,7 +1856,7 @@ class RmActivityEventListView(TenantScopedMixin, generics.ListAPIView):
         from_param = self.request.query_params.get("from", "").strip()
         to_param = self.request.query_params.get("to", "").strip()
         if not from_param and not to_param:
-            today = timezone.localdate().isoformat()
+            today = timezone.now().date().isoformat()
             from_param = to_param = today
 
         if from_param:
@@ -1914,7 +1914,7 @@ class RmDailyTargetsView(APIView):
             except ValueError:
                 return Response({"error": "Invalid date format. Use YYYY-MM-DD"}, status=status.HTTP_400_BAD_REQUEST)
         else:
-            today = timezone.localdate()
+            today = timezone.now().date()
             date_from = date_to = today
 
         memberships = TenantMembership.objects.filter(
