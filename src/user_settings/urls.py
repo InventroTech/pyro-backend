@@ -14,7 +14,6 @@ from .views import (
     GroupListCreateView,
     GroupDetailView,
     MyLeadGroupSummaryView,
-    RmDailyTargetOverridesView,
 )
 
 urlpatterns = [
@@ -56,9 +55,4 @@ urlpatterns = [
     path("queue-types/", QueueTypesListView.as_view(), name="queue-types-list"),
     path("groups/", GroupListCreateView.as_view(), name="groups-list-create"),
     path("groups/<int:pk>/", GroupDetailView.as_view(), name="groups-detail"),
-    path(
-        "rm-daily-target-overrides/",
-        RmDailyTargetOverridesView.as_view(),
-        name="rm-daily-target-overrides",
-    ),
 ]
