@@ -27,52 +27,36 @@ LEAD_EVENT_TO_UPDATED_STATUS = {
 }
 
 
-def _resolve_lead_bucket_slug(tenant, request_user, record):
+def _resolve_lead_group_name(tenant, membership):
     """
-    Best-effort: which of the RM's own priority-ordered buckets does this
-    lead currently match? Buckets aren't a field on the lead record itself
-    (they're pipeline-pull slices) — same resolution the real pull queue
-    uses (BucketResolver + BucketQuerysetBuilder), just checked against one
-    already-known record instead of building a queue. First bucket (in
-    priority order) whose filter_conditions the record satisfies wins.
+    The RM's own assigned lead group at touch time — the same GROUP user
+    setting shown in the Add/Edit User screen and used by the Lead Groups
+    page (user_settings.Group), not a crm_records.lead_pipeline Bucket.
 
-    Returns None on any failure — a lead's bucket for the dashboard filter
-    is never worth risking the touch row itself.
+    This used to resolve a pipeline Bucket instead (testing each of the
+    RM's priority-ordered bucket assignments' filter_conditions against the
+    lead), but buckets are pull-queue slices, not the segmentation managers
+    actually organize RMs by — event_data.lead_bucket came out empty on
+    every real touch row. The RM's own GROUP assignment is simpler (one KV
+    lookup, no per-lead filter matching) and is what's actually populated.
+
+    Returns None if the RM has no GROUP set.
     """
-    try:
-        from crm_records.lead_pipeline.bucket_resolver import BucketResolver
-        from crm_records.lead_pipeline.queryset_builder import BucketQuerysetBuilder
-        from crm_records.lead_pipeline.user_resolver import UserResolver
-
-        resolved_user = UserResolver().resolve(tenant, request_user)
-        assignments = BucketResolver().resolve(tenant, resolved_user, entity_type="lead")
-        if not assignments:
-            return None
-
-        builder = BucketQuerysetBuilder()
-        for assignment in assignments:
-            matches = (
-                builder.build(
-                    tenant=tenant,
-                    bucket_filter_conditions=assignment.filter_conditions,
-                    user_identifier=resolved_user.identifier,
-                    user_uuid=resolved_user.uuid,
-                    eligible_lead_types=resolved_user.eligible_lead_types,
-                    eligible_lead_sources=resolved_user.eligible_lead_sources,
-                    eligible_lead_statuses=resolved_user.eligible_lead_statuses,
-                    eligible_states=resolved_user.eligible_states,
-                    entity_type="lead",
-                )
-                .filter(pk=record.pk)
-                .exists()
-            )
-            if matches:
-                return assignment.bucket_slug
+    if not membership:
         return None
+    try:
+        from user_settings.models import Group
+        from user_settings.services import USER_KV_GROUP_ID_KEY, kv_int_by_membership
+
+        group_id = kv_int_by_membership(tenant, [membership.id], USER_KV_GROUP_ID_KEY).get(membership.id)
+        if group_id is None:
+            return None
+        group = Group.objects.filter(tenant=tenant, id=group_id).first()
+        return group.name if group else None
     except Exception:
         logger.exception(
-            "[RmActivity] Failed to resolve lead bucket for record_id=%s",
-            getattr(record, "id", None),
+            "[RmActivity] Failed to resolve lead group for membership_id=%s",
+            getattr(membership, "id", None),
         )
         return None
 
@@ -131,7 +115,7 @@ def record_lead_touch_event(event_name, record, payload, tenant, request_user):
             rm_state = str(state_value) if state_value is not None else ""
 
         record_data = (getattr(record, "data", None) or {}) if record else {}
-        lead_bucket_slug = _resolve_lead_bucket_slug(tenant, request_user, record) if record else None
+        lead_group_name = _resolve_lead_group_name(tenant, membership)
 
         RmActivityEvent.objects.create(
             tenant=tenant,
@@ -146,8 +130,12 @@ def record_lead_touch_event(event_name, record, payload, tenant, request_user):
                 "team": "",
                 "state": rm_state,
                 "lead_record_id": getattr(record, "id", None),
+                # the human-facing id (shown on the lead in the app, e.g.
+                # "1793876") — lead_record_id above is only the internal DB
+                # row id, never shown to a manager reading this dashboard
+                "praja_id": record_data.get("praja_id"),
                 "updated_status": updated_status,
-                "lead_bucket": lead_bucket_slug,
+                "lead_group": lead_group_name,
                 "party": record_data.get("affiliated_party"),
                 # only ever set today when the RM picks a "Not Interested"
                 # reason — the lead-card carousel's other 3 dispositions
