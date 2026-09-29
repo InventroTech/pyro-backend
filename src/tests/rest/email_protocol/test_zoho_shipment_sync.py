@@ -101,6 +101,88 @@ class ZohoShipmentMatchTests(TestCase):
         self.assertIsNone(matched)
         self.assertEqual(reason, "no_item_match")
 
+    def test_matches_truncated_quoted_title(self):
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={
+                "status": "IN_SHIPPING",
+                "item_name_freeform": "Widget Cleaner Kit Extra Large Pack",
+            },
+        )
+        parsed = {
+            "shipment_status": "OUT_FOR_DELIVERY",
+            "subject": 'Out for delivery: 2 "Widget Cleaner Kit..."',
+            "email_text": 'Out for delivery: 2 "Widget Cleaner Kit..."',
+        }
+        matched, reason = match_record_for_email(tenant_id=self.tenant.id, parsed=parsed)
+        self.assertEqual(matched.id, record.id)
+        self.assertEqual(reason, "item_name")
+
+    def test_matches_shipped_subject_with_curly_quotes(self):
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={
+                "status": "IN_SHIPPING",
+                "item_name_freeform": "Widget Cleaner Kit Temperature Controlled",
+                "shipment_status": "ORDERED",
+            },
+        )
+        parsed = {
+            "shipment_status": "IN_TRANSIT",
+            "subject": "Shipped: “Widget Cleaner Kit...”",
+            "email_text": "Shipped: “Widget Cleaner Kit...”",
+        }
+        matched, reason = match_record_for_email(tenant_id=self.tenant.id, parsed=parsed)
+        self.assertEqual(matched.id, record.id)
+        self.assertEqual(reason, "item_name")
+        changed = apply_tracking_to_record(matched, parsed)
+        self.assertTrue(changed)
+        record.refresh_from_db()
+        self.assertEqual(record.data["shipment_status"], "IN_TRANSIT")
+
+    def test_matches_vendor_when_subject_has_courier_awb(self):
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={
+                "status": "IN_SHIPPING",
+                "vendor": "VendorCo",
+                "item_name_freeform": "Motor Driver Board",
+            },
+        )
+        parsed = {
+            "tracking_number": "AB10083664",
+            "shipment_status": "IN_TRANSIT",
+            "courier_name": "DTDC",
+            "subject": "VendorCo - Order ID 1135941 is Shipped by DTDC - AWB : AB10083664",
+            "email_text": "VendorCo - Order ID 1135941 is Shipped by DTDC - AWB : AB10083664",
+        }
+        matched, reason = match_record_for_email(tenant_id=self.tenant.id, parsed=parsed)
+        self.assertEqual(matched.id, record.id)
+        self.assertEqual(reason, "vendor_name")
+
+    def test_ambiguous_vendor_when_two_open_orders(self):
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={"status": "IN_SHIPPING", "vendor": "VendorCo", "item_name_freeform": "Motor A"},
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={"status": "IN_SHIPPING", "vendor": "VendorCo", "item_name_freeform": "Motor B"},
+        )
+        parsed = {
+            "tracking_number": "AB10083664",
+            "subject": "VendorCo - Order ID 1135941 is Shipped by DTDC - AWB : AB10083664",
+            "email_text": "VendorCo - Order ID 1135941 is Shipped by DTDC - AWB : AB10083664",
+        }
+        matched, reason = match_record_for_email(tenant_id=self.tenant.id, parsed=parsed)
+        self.assertIsNone(matched)
+        self.assertEqual(reason, "ambiguous_item_name")
+
     def test_apply_fills_empty_tracking_only(self):
         record = RecordFactory(
             tenant=self.tenant,
@@ -120,7 +202,37 @@ class ZohoShipmentMatchTests(TestCase):
         record.refresh_from_db()
         self.assertEqual(record.data["tracking_number"], "XYZ123456789")
         self.assertEqual(record.data["courier_name"], "FedEx")
+        self.assertEqual(record.data["shipment_status"], "ORDERED")
         self.assertTrue(record.data.get("tracking_updated_at"))
+
+    def test_apply_out_for_delivery_without_tracking(self):
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={"status": "IN_SHIPPING", "shipment_status": "ORDERED"},
+        )
+        changed = apply_tracking_to_record(
+            record,
+            {"shipment_status": "OUT_FOR_DELIVERY"},
+        )
+        self.assertTrue(changed)
+        record.refresh_from_db()
+        self.assertEqual(record.data["shipment_status"], "OUT_FOR_DELIVERY")
+        self.assertFalse(record.data.get("tracking_number"))
+
+    def test_apply_does_not_downgrade_delivered(self):
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={"status": "IN_SHIPPING", "shipment_status": "DELIVERED"},
+        )
+        changed = apply_tracking_to_record(
+            record,
+            {"shipment_status": "OUT_FOR_DELIVERY"},
+        )
+        self.assertFalse(changed)
+        record.refresh_from_db()
+        self.assertEqual(record.data["shipment_status"], "DELIVERED")
 
 
 class ZohoOAuthStateTests(TestCase):
@@ -213,6 +325,192 @@ class SyncZohoShipmentEmailsJobHandlerTests(TestCase):
         self.assertTrue(
             ZohoMailProcessedMessage.objects.filter(message_id="m1", applied=True).exists()
         )
+
+    @override_settings(
+        ZOHO_CLIENT_ID="cid",
+        ZOHO_CLIENT_SECRET="sec",
+        ZOHO_OAUTH_REDIRECT_URI="https://api.example.com/email/zoho/callback/",
+    )
+    def test_out_for_delivery_email_updates_status_without_tracking(self):
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={
+                "status": "IN_SHIPPING",
+                "item_name_freeform": "Widget Cleaner Kit",
+                "shipment_status": "ORDERED",
+            },
+        )
+        ZohoMailConnection.objects.create(
+            tenant=self.tenant,
+            refresh_token="refresh",
+            access_token="access",
+            access_token_expires_at=timezone.now() + timedelta(hours=1),
+            account_id="acc1",
+            inbox_folder_id="fold1",
+            is_active=True,
+            initial_backfill_completed=True,
+        )
+        job = BackgroundJobFactory(
+            tenant=self.tenant,
+            job_type=JobType.SYNC_ZOHO_SHIPMENT_EMAILS,
+            payload={"max_messages": 10},
+        )
+        fake_messages = [
+            {
+                "messageId": "ofd1",
+                "folderId": "fold1",
+                "subject": 'Out for delivery: 2 "Widget Cleaner Kit"',
+                "fromAddress": "Amazon.in <shipment-tracking@amazon.in>",
+                "receivedTime": str(int(timezone.now().timestamp() * 1000)),
+                "summary": "Arriving today",
+            }
+        ]
+
+        with patch("email_protocol.zoho_shipment_sync.ZohoMailClient") as MockClient, patch(
+            "email_protocol.zoho_shipment_sync.ensure_account_and_inbox"
+        ):
+            client = MagicMock()
+            MockClient.return_value = client
+            client.list_messages.return_value = fake_messages
+            client.get_message_content.return_value = {
+                "content": "<p>Your package is arriving today.</p>"
+            }
+            ok = self.handler.process(job)
+
+        self.assertTrue(ok)
+        self.assertEqual(job.result.get("applied"), 1)
+        record.refresh_from_db()
+        self.assertEqual(record.data.get("shipment_status"), "OUT_FOR_DELIVERY")
+        self.assertFalse(record.data.get("tracking_number"))
+        self.assertTrue(
+            ZohoMailProcessedMessage.objects.filter(message_id="ofd1", applied=True).exists()
+        )
+
+    @override_settings(
+        ZOHO_CLIENT_ID="cid",
+        ZOHO_CLIENT_SECRET="sec",
+        ZOHO_OAUTH_REDIRECT_URI="https://api.example.com/email/zoho/callback/",
+    )
+    def test_retries_out_for_delivery_mail_skipped_for_missing_tracking(self):
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={
+                "status": "IN_SHIPPING",
+                "item_name_freeform": "Widget Cleaner Kit",
+                "shipment_status": "IN_TRANSIT",
+            },
+        )
+        conn = ZohoMailConnection.objects.create(
+            tenant=self.tenant,
+            refresh_token="refresh",
+            access_token="access",
+            access_token_expires_at=timezone.now() + timedelta(hours=1),
+            account_id="acc1",
+            inbox_folder_id="fold1",
+            is_active=True,
+            initial_backfill_completed=True,
+        )
+        ZohoMailProcessedMessage.objects.create(
+            connection=conn,
+            message_id="ofd-retry",
+            subject='Out for delivery: 1 "Widget Cleaner Kit"',
+            applied=False,
+            skip_reason="no_tracking_payload",
+        )
+        job = BackgroundJobFactory(
+            tenant=self.tenant,
+            job_type=JobType.SYNC_ZOHO_SHIPMENT_EMAILS,
+            payload={"max_messages": 10},
+        )
+        fake_messages = [
+            {
+                "messageId": "ofd-retry",
+                "folderId": "fold1",
+                "subject": 'Out for delivery: 1 "Widget Cleaner Kit"',
+                "fromAddress": "Amazon.in <shipment-tracking@amazon.in>",
+                "receivedTime": str(int(timezone.now().timestamp() * 1000)),
+            }
+        ]
+
+        with patch("email_protocol.zoho_shipment_sync.ZohoMailClient") as MockClient, patch(
+            "email_protocol.zoho_shipment_sync.ensure_account_and_inbox"
+        ):
+            client = MagicMock()
+            MockClient.return_value = client
+            client.list_messages.return_value = fake_messages
+            client.get_message_content.return_value = {"content": "<p>Arriving today.</p>"}
+            ok = self.handler.process(job)
+
+        self.assertTrue(ok)
+        self.assertEqual(job.result.get("applied"), 1)
+        record.refresh_from_db()
+        self.assertEqual(record.data.get("shipment_status"), "OUT_FOR_DELIVERY")
+        processed = ZohoMailProcessedMessage.objects.get(message_id="ofd-retry")
+        self.assertTrue(processed.applied)
+        self.assertEqual(processed.skip_reason, "")
+        self.assertEqual(
+            ZohoMailProcessedMessage.objects.filter(message_id="ofd-retry").count(),
+            1,
+        )
+
+    @override_settings(
+        ZOHO_CLIENT_ID="cid",
+        ZOHO_CLIENT_SECRET="sec",
+        ZOHO_OAUTH_REDIRECT_URI="https://api.example.com/email/zoho/callback/",
+    )
+    def test_shipped_amazon_email_updates_status_without_tracking(self):
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={
+                "status": "IN_SHIPPING",
+                "item_name_freeform": "Widget Cleaner Kit",
+                "shipment_status": "ORDERED",
+            },
+        )
+        ZohoMailConnection.objects.create(
+            tenant=self.tenant,
+            refresh_token="refresh",
+            access_token="access",
+            access_token_expires_at=timezone.now() + timedelta(hours=1),
+            account_id="acc1",
+            inbox_folder_id="fold1",
+            is_active=True,
+            initial_backfill_completed=True,
+        )
+        job = BackgroundJobFactory(
+            tenant=self.tenant,
+            job_type=JobType.SYNC_ZOHO_SHIPMENT_EMAILS,
+            payload={"max_messages": 10},
+        )
+        fake_messages = [
+            {
+                "messageId": "ship1",
+                "folderId": "fold1",
+                "subject": 'Shipped: 1 "Widget Cleaner Kit"',
+                "fromAddress": "Amazon.in <auto-confirm@amazon.in>",
+                "receivedTime": str(int(timezone.now().timestamp() * 1000)),
+            }
+        ]
+
+        with patch("email_protocol.zoho_shipment_sync.ZohoMailClient") as MockClient, patch(
+            "email_protocol.zoho_shipment_sync.ensure_account_and_inbox"
+        ):
+            client = MagicMock()
+            MockClient.return_value = client
+            client.list_messages.return_value = fake_messages
+            client.get_message_content.return_value = {
+                "content": "<p>Your package was handed to the carrier.</p>"
+            }
+            ok = self.handler.process(job)
+
+        self.assertTrue(ok)
+        self.assertEqual(job.result.get("applied"), 1)
+        record.refresh_from_db()
+        self.assertEqual(record.data.get("shipment_status"), "IN_TRANSIT")
+        self.assertFalse(record.data.get("tracking_number"))
 
     @override_settings(
         ZOHO_CLIENT_ID="cid",
