@@ -112,10 +112,11 @@ class RmActivityEvent(BaseModel):
     event_type) plus one JSONB event_data blob holding everything else,
     instead of a dedicated column per field. event_data keys:
     rm_user_id, rm_name, manager_name, team, state, lead_record_id,
-    updated_status, lead_bucket, party, started_at, ended_at, duration_seconds.
+    praja_id, updated_status, lead_group, party, started_at, ended_at,
+    duration_seconds.
 
-    Only the keys relevant to CALL_TOUCH rows (lead_record_id, updated_status,
-    lead_bucket, party) are filled in for that event_type — they're absent
+    Only the keys relevant to CALL_TOUCH rows (lead_record_id, praja_id,
+    updated_status, lead_group, party) are filled in for that event_type — they're absent
     for LOGIN/LOGOUT/BREAK_START/BREAK_END rows, which is expected, not a
     data-quality problem.
 

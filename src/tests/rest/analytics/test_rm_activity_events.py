@@ -13,8 +13,10 @@ from rest_framework import status
 
 from analytics.models import RmActivityEvent
 from analytics.rm_activity import record_lead_touch_event
-from crm_records.models import Bucket, Record, UserBucketAssignment
+from crm_records.models import Record
 from tests.base.test_setup import BaseAPITestCase, MultiTenantAPITestCase
+from user_settings.models import Group, TenantMemberSetting
+from user_settings.services import USER_KV_GROUP_ID_KEY
 
 
 class RecordLeadTouchEventTests(BaseAPITestCase):
@@ -25,7 +27,7 @@ class RecordLeadTouchEventTests(BaseAPITestCase):
         self.record = Record.objects.create(
             tenant=self.tenant,
             entity_type="lead",
-            data={"lead_bucket": "hot", "affiliated_party": "BJP"},
+            data={"lead_bucket": "hot", "affiliated_party": "BJP", "praja_id": "1793876"},
         )
 
     def test_disposition_events_each_write_one_call_touch_row(self):
@@ -51,6 +53,7 @@ class RecordLeadTouchEventTests(BaseAPITestCase):
                 self.assertEqual(row.event_type, "CALL_TOUCH")
                 self.assertEqual(row.event_data["updated_status"], expected_status)
                 self.assertEqual(row.event_data["rm_user_id"], str(self.supabase_uid))
+                self.assertEqual(row.event_data["praja_id"], "1793876")
 
     def test_non_disposition_event_writes_nothing(self):
         before = RmActivityEvent.objects.count()
@@ -88,55 +91,40 @@ class RecordLeadTouchEventTests(BaseAPITestCase):
         self.assertEqual(RmActivityEvent.objects.count(), before)
 
 
-class LeadBucketResolutionTests(BaseAPITestCase):
+class LeadGroupResolutionTests(BaseAPITestCase):
     """
-    lead_bucket isn't a field on the lead record — it's resolved at write
-    time against the RM's own priority-ordered bucket assignments, the same
-    way the real pull pipeline resolves buckets (BucketResolver +
-    BucketQuerysetBuilder).
+    lead_group isn't a field on the lead record — it's the touching RM's own
+    GROUP assignment (user_settings.Group), resolved at write time from the
+    same GROUP user setting the Add/Edit User screen and Lead Groups page
+    use — not a crm_records.lead_pipeline Bucket (a lead's Bucket match was
+    never a reliable proxy for "which group is this RM working in").
     """
 
     def setUp(self):
         super().setUp()
-        self.bucket = Bucket.objects.create(
-            tenant=self.tenant,
-            name="My Working Leads",
-            slug="my-working-leads",
-            filter_conditions={"assigned_scope": "me"},
-            is_active=True,
-        )
-        UserBucketAssignment.objects.create(
-            tenant=self.tenant,
-            user=None,  # tenant-wide assignment
-            bucket=self.bucket,
-            priority=1,
-            is_active=True,
-        )
-
-    def test_resolves_the_bucket_slug_the_lead_currently_matches(self):
-        record = Record.objects.create(
+        self.record = Record.objects.create(
             tenant=self.tenant,
             entity_type="lead",
             data={"assigned_to": self.supabase_uid},
         )
-        record_lead_touch_event(
-            "lead.trial_activated", record, {"duration_seconds": 10}, self.tenant, self.user
-        )
-        row = RmActivityEvent.objects.latest("id")
-        self.assertEqual(row.event_data["lead_bucket"], "my-working-leads")
 
-    def test_no_matching_bucket_resolves_to_none(self):
-        # assigned to someone else — the "me" scope bucket must not match
-        record = Record.objects.create(
-            tenant=self.tenant,
-            entity_type="lead",
-            data={"assigned_to": "someone-else"},
+    def test_resolves_the_touching_rms_own_group_name(self):
+        group = Group.objects.create(tenant=self.tenant, name="Tamil Nadu Group")
+        TenantMemberSetting.objects.create(
+            tenant=self.tenant, tenant_membership=self.membership, key=USER_KV_GROUP_ID_KEY, value=group.id,
         )
         record_lead_touch_event(
-            "lead.trial_activated", record, {"duration_seconds": 10}, self.tenant, self.user
+            "lead.trial_activated", self.record, {"duration_seconds": 10}, self.tenant, self.user
         )
         row = RmActivityEvent.objects.latest("id")
-        self.assertIsNone(row.event_data["lead_bucket"])
+        self.assertEqual(row.event_data["lead_group"], "Tamil Nadu Group")
+
+    def test_no_group_assigned_resolves_to_none(self):
+        record_lead_touch_event(
+            "lead.trial_activated", self.record, {"duration_seconds": 10}, self.tenant, self.user
+        )
+        row = RmActivityEvent.objects.latest("id")
+        self.assertIsNone(row.event_data["lead_group"])
 
 
 class RmActivityEventListViewTenantIsolationTest(MultiTenantAPITestCase):
@@ -157,7 +145,7 @@ class RmActivityEventListViewTenantIsolationTest(MultiTenantAPITestCase):
                     "state": "",
                     "lead_record_id": 1,
                     "updated_status": "TRIAL_ACTIVATED",
-                    "lead_bucket": None,
+                    "lead_group": None,
                     "party": None,
                     "started_at": now.isoformat(),
                     "ended_at": now.isoformat(),
