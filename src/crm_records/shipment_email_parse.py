@@ -1,8 +1,9 @@
 """
 Parse shipment / courier emails for tracking fields and record match keys.
 
-Shipment emails are identified by **From** address (known delivery / logistics
-partners), not by keyword guessing in the body.
+Shipment emails are identified by a known delivery-partner From address, or by
+a subject that names a courier and an airway bill (vendor notices such as
+"Shipped by DTDC - AWB : ...").
 """
 
 from __future__ import annotations
@@ -233,15 +234,83 @@ def extract_match_keys(text: str) -> Dict[str, Any]:
     return keys
 
 
+# Checked before the generic mapper so "partially delivered" does not become DELIVERED.
+_SUBJECT_STATUS_OVERRIDES: Tuple[Tuple[str, re.Pattern[str]], ...] = (
+    ("IN_TRANSIT", re.compile(r"\bpartially\s+delivered\b", re.I)),
+    (
+        "EXCEPTION",
+        re.compile(
+            r"\b(?:delivery\s+attempted|attempted\s+delivery|"
+            r"couldn.?t\s+deliver|unable\s+to\s+deliver)\b",
+            re.I,
+        ),
+    ),
+)
+
+# Amazon subjects the generic carrier mapper does not cover ("Shipped:", "Ordered:").
+_SUBJECT_STATUS_FALLBACKS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
+    ("OUT_FOR_DELIVERY", re.compile(r"\b(?:now\s+arriving|arriving\s+today)\b", re.I)),
+    (
+        "IN_TRANSIT",
+        re.compile(
+            r"\b(?:shipped|dispatched|on\s+the\s+way|on\s+its\s+way|arriving\s+tomorrow|delayed)\b",
+            re.I,
+        ),
+    ),
+    (
+        "ORDERED",
+        re.compile(r"^\s*ordered\b|\border\s+(?:confirmed|received|placed)\b", re.I),
+    ),
+)
+
+
+def shipment_status_from_subject(subject: str) -> Optional[str]:
+    """
+    Map a courier subject line onto a canonical shipment status.
+
+    Subject only: marketing HTML often says "delivered" in footers and would
+    override a "Shipped" or "Out for delivery" subject. Amazon notices such as
+    Ordered, Shipped, Arriving today, Out for delivery, and Delivered all map.
+    """
+    from crm_records.inventory_shipment_live_track import map_status_text
+
+    text = subject or ""
+    for status, pattern in _SUBJECT_STATUS_OVERRIDES:
+        if pattern.search(text):
+            return status
+    mapped = map_status_text(text)
+    if mapped:
+        return mapped
+    for status, pattern in _SUBJECT_STATUS_FALLBACKS:
+        if pattern.search(text):
+            return status
+    return None
+
+
+def subject_has_courier_awb(subject: str) -> bool:
+    """
+    True when the subject itself names a courier and a tracking number.
+
+    Used for vendor mail ("Shipped by DTDC - AWB : ...") whose From address
+    is the store, not the courier. The body is ignored so a forwarded AWB
+    in a normal thread does not qualify.
+    """
+    text = subject or ""
+    if not _COURIER_RE.search(text):
+        return False
+    found = extract_tracking_from_text(text)
+    return bool(found.get("tracking_number") or found.get("tracking_link"))
+
+
 def looks_like_shipment_email(
     subject: str,
     body: str,
     *,
     from_address: Optional[str] = None,
 ) -> bool:
-    """True when From is a known delivery / logistics partner."""
+    """True when From is a known delivery / logistics partner, or the subject has a courier AWB."""
     ok, _ = is_delivery_partner_sender(from_address)
-    return ok
+    return ok or subject_has_courier_awb(subject)
 
 
 def parse_shipment_email(
@@ -255,6 +324,7 @@ def parse_shipment_email(
     tracking = extract_tracking_from_text(combined)
     match_keys = extract_match_keys(combined)
     is_partner, partner_label = is_delivery_partner_sender(from_address)
+    is_shipment = is_partner or subject_has_courier_awb(subject or "")
 
     courier = tracking.get("courier_name")
     if not courier and partner_label and not _domain_matches_partner(partner_label):
@@ -262,7 +332,7 @@ def parse_shipment_email(
         courier = partner_label
 
     return {
-        "is_shipment": is_partner,
+        "is_shipment": is_shipment,
         "from_address": extract_email_address(from_address or "") or (from_address or ""),
         "delivery_partner": partner_label,
         "subject": subject or "",
@@ -272,5 +342,6 @@ def parse_shipment_email(
         "tracking_link": tracking.get("tracking_link"),
         "courier_name": courier,
         "eta": tracking.get("eta"),
+        "shipment_status": shipment_status_from_subject(subject or ""),
         "match_keys": match_keys,
     }
