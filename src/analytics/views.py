@@ -1941,23 +1941,27 @@ class RmPrdFilterOptionsView(APIView):
 
     - managers: TenantMembership.name (not email) — event_data.manager_name
       is written from membership.user_parent_id.name, not email.
-    - states: each active RM's own STATE user setting (not lead data — a
-      lead's state is the customer's, not the RM's; event_data.state is the
-      RM's own state, copied at write time in rm_activity.py).
+    - states: each active RM's own STATE user setting, as {value, label} —
+      value is the raw Circle ID (matches event_data.state, which is that
+      same ID copied at write time in rm_activity.py — not lead data, a
+      lead's state is the customer's, not the RM's); label is the resolved
+      Circle name for display, falling back to the raw ID for any value
+      geo_party_catalog doesn't recognize.
     - parties: from the same lead-pull lookup used elsewhere — this one
       actually matches event_data.party (copied from the lead's
       affiliated_party at write time).
-    - lead_buckets: Bucket.slug (not name) — event_data.lead_bucket is
-      resolved at write time in rm_activity.py against the RM's own
-      priority-ordered bucket assignments and stores the slug, not the
-      display name.
+    - lead_groups: user_settings.Group.name — event_data.lead_group is the
+      touching RM's own GROUP assignment, resolved at write time in
+      rm_activity.py (the same grouping the Add/Edit User screen and Lead
+      Groups page use, not a crm_records.lead_pipeline Bucket).
     """
     authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
 
     def get(self, request):
         from authz.models import TenantMembership
-        from crm_records.models import Bucket
+        from user_settings.geo_party_catalog import resolve_catalog_name
+        from user_settings.models import Group
         from user_settings.services import (
             get_lead_filter_options,
             kv_int_by_membership,
@@ -1981,26 +1985,25 @@ class RmPrdFilterOptionsView(APIView):
             TenantMembership.objects.filter(tenant=tenant, is_active=True).values_list("id", flat=True)
         )
         state_by_membership = kv_int_by_membership(tenant, active_membership_ids, USER_KV_STATE_KEY)
-        states = sorted({str(v) for v in state_by_membership.values()})
+        state_ids = sorted({v for v in state_by_membership.values()})
+        states = [
+            {"value": str(state_id), "label": resolve_catalog_name("states", state_id) or str(state_id)}
+            for state_id in state_ids
+        ]
 
         lead_options = get_lead_filter_options(tenant)
 
-        # matches the same entity-type rule BucketResolver uses: a bucket
-        # with no entity_type (legacy sales) or entity_type=lead applies here
-        bucket_rows = Bucket.objects.filter(tenant=tenant, is_active=True).values_list(
-            "slug", "filter_conditions"
-        )
-        lead_buckets = sorted(
-            {
-                slug
-                for slug, filter_conditions in bucket_rows
-                if (filter_conditions or {}).get("entity_type") in (None, "", "lead")
-            }
+        lead_groups = sorted(
+            Group.objects.filter(tenant=tenant)
+            .exclude(name__isnull=True)
+            .exclude(name="")
+            .values_list("name", flat=True)
+            .distinct()
         )
 
         return Response({
             "managers": managers,
-            "lead_buckets": lead_buckets,
+            "lead_groups": lead_groups,
             "states": states,
             "parties": lead_options.get("lead_types", []),
         })

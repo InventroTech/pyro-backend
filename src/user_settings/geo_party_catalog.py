@@ -38,6 +38,27 @@ def format_catalog_label(name: str, item_id: int) -> str:
     return f"{name} ({item_id})"
 
 
+def resolve_catalog_name(kind: str, item_id: Any) -> Optional[str]:
+    """
+    Bare catalog name for one ID (e.g. "Tamil Nadu" for state 72631), for
+    display contexts that already show the ID elsewhere in the same row and
+    don't want catalog_options' "Name (id)" combined label.
+
+    kind: "states" | "districts" | "parties". Returns None if item_id
+    doesn't resolve (not a valid int, or not present in the catalog) — the
+    ID is never a name, so callers should fall back to the raw ID string,
+    same as showing nothing better than what's on record.
+    """
+    numeric_id = _as_int(item_id)
+    if numeric_id is None:
+        return None
+    for item in load_geo_party_catalog().get(kind) or []:
+        if _as_int(item.get("id")) == numeric_id:
+            name = str(item.get("name") or "").strip()
+            return name or None
+    return None
+
+
 def catalog_options(
     kind: str,
     *,
