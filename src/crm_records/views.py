@@ -79,6 +79,10 @@ from crm_records.lead_assignment_tracking import merge_first_assignment_today_an
 from crm_records.lead_pipeline.pipeline import LeadPipeline
 from crm_records.lead_pipeline.post_assignment import PostAssignmentActions
 from crm_records.lead_pipeline.queryset_builder import id_or_legacy_name_q
+from crm_records.mixpanel_properties import (
+    lead_created_mixpanel_properties,
+    lead_mixpanel_properties,
+)
 
 
 def _parse_lead_stage_param(value):
@@ -1281,16 +1285,7 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
                 logger.info(f"   Properties Count: {len(lead_data) + 5}")  # +5 for base properties
                 logger.info("=" * 80)
                 
-                properties = {
-                    'lead_id': record.id,
-                    'tenant_id': str(record.tenant.id) if record.tenant else None,
-                    'entity_type': record.entity_type,
-                    'created_at': record.created_at.isoformat() if record.created_at else None,
-                    'updated_at': record.updated_at.isoformat() if record.updated_at else None,
-                }
-                properties.update(lead_data)
-                if record.pyro_data:
-                    properties.update(record.pyro_data)
+                properties = lead_created_mixpanel_properties(record)
                 
                 # Enqueue background job (single send; do not also send sync to avoid duplicate Mixpanel events)
                 queue_service = get_queue_service()
@@ -1722,16 +1717,7 @@ class EntityProxyView(TenantScopedMixin, generics.ListCreateAPIView):
                 logger.info(f"   Lead Score: {lead_data.get('lead_score', 'N/A')}")
                 logger.info("=" * 80)
                 
-                properties = {
-                    'lead_id': record.id,
-                    'tenant_id': str(record.tenant.id) if record.tenant else None,
-                    'entity_type': record.entity_type,
-                    'created_at': record.created_at.isoformat() if record.created_at else None,
-                    'updated_at': record.updated_at.isoformat() if record.updated_at else None,
-                }
-                properties.update(lead_data)
-                if record.pyro_data:
-                    properties.update(record.pyro_data)
+                properties = lead_created_mixpanel_properties(record)
                 
                 # Enqueue background job (single send; do not also send sync to avoid duplicate Mixpanel events)
                 queue_service = get_queue_service()
@@ -4259,16 +4245,7 @@ class PrajaLeadsAPIView(APIView):
                     logger.info(f"   Lead Score: {lead_data.get('lead_score', 'N/A')}")
                     logger.info("=" * 80)
 
-                    properties = {
-                        'lead_id': record.id,
-                        'tenant_id': str(record.tenant.id) if record.tenant else None,
-                        'entity_type': record.entity_type,
-                        'created_at': record.created_at.isoformat() if record.created_at else None,
-                        'updated_at': record.updated_at.isoformat() if record.updated_at else None,
-                    }
-                    properties.update(lead_data)
-                    if record.pyro_data:
-                        properties.update(record.pyro_data)
+                    properties = lead_created_mixpanel_properties(record)
 
                     queue_service = get_queue_service()
                     queue_service.enqueue_job(
@@ -5763,18 +5740,17 @@ class LeadAssignmentWebhookProxyView(TenantScopedMixin, APIView):
                             logger.warning(f"[Mixpanel] No praja_id found in lead_data, falling back to user_id={mixpanel_user_id}")
                         
                         mixpanel_service = MixpanelService()
-                        mixpanel_properties = {
-                            'lead_id': lead_data.get('id'),
-                            'lead_name': lead_data.get('name'),
-                            'lead_status': lead_data.get('lead_status'),
-                            'lead_score': lead_data.get('lead_score'),
-                            'lead_type': lead_data.get('lead_type'),
-                            'assigned_to': lead_data.get('assigned_to'),
-                            'assignment_time': payload.get('assignment_time'),
-                            'timestamp': payload.get('timestamp'),
-                        }
-                        # Add all lead attributes to Mixpanel properties
-                        mixpanel_properties.update(lead_data)
+                        mixpanel_properties = lead_mixpanel_properties(
+                            lead_data,
+                            lead_id=lead_data.get('id'),
+                            lead_name=lead_data.get('name'),
+                            lead_status=lead_data.get('lead_status'),
+                            lead_score=lead_data.get('lead_score'),
+                            lead_type=lead_data.get('lead_type'),
+                            assigned_to=lead_data.get('assigned_to'),
+                            assignment_time=payload.get('assignment_time'),
+                            timestamp=payload.get('timestamp'),
+                        )
                         
                         logger.info(f"[Mixpanel] Calling send_to_mixpanel_sync with event='pyro_crm_rm_assigned_backend', user_id={mixpanel_user_id} (original={user_id})")
                         mixpanel_result = mixpanel_service.send_to_mixpanel_sync(
