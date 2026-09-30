@@ -692,8 +692,6 @@ class JobProcessor:
                     self._maybe_enqueue_shipment_tracking_refresh()
                     # Every 15 min: Zoho ops inbox → auto-fill tracking (connected tenants only)
                     self._maybe_enqueue_zoho_shipment_email_sync()
-                    # Every 5 min: poll Render API metrics and email alerts if thresholds exceeded
-                    self._maybe_check_render_metrics()
                     # Once a day: freeze each RM's DAILY_TARGET for the day that just ended
                     self._maybe_enqueue_rm_daily_target_snapshot()
 
