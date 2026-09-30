@@ -18,6 +18,7 @@ from django.db.models import Q
 
 from .models import RuleSet, RuleExecutionLog, Record
 from crm_records.lead_assignment_tracking import merge_first_assignment_today_anchor
+from crm_records.mixpanel_properties import apply_lead_mixpanel_attributes
 from background_jobs.queue_service import get_queue_service
 from background_jobs.models import JobType
 from object_history.engine import get_request_context
@@ -473,6 +474,9 @@ def action_send_mixpanel_event(
         logger.info(f"[rm_email] Added rm_email={actor_label} to Mixpanel event for record {record.id}")
     else:
         logger.info(f"[rm_email] No actor_label found in request context for record {record.id} (actor_user={request_context.get('actor_user')})")
+
+    if record.entity_type == "lead":
+        apply_lead_mixpanel_attributes(mixpanel_properties)
 
     try:
         # Enqueue job for async processing - send ALL data (complete mixpanel_properties)
