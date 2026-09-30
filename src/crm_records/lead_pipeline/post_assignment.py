@@ -10,6 +10,7 @@ from background_jobs.queue_service import get_queue_service
 from background_jobs.models import JobType
 from django.utils import timezone
 
+from crm_records.mixpanel_properties import lead_mixpanel_properties
 from crm_records.models import EventLog, Record
 
 logger = logging.getLogger(__name__)
@@ -181,17 +182,17 @@ class PostAssignmentActions:
                     mixpanel_user_id = str(praja_id) if praja_id else None
 
                 if mixpanel_user_id:
-                    mixpanel_properties = {
-                        "lead_id": record.id,
-                        "lead_name": lead_name,
-                        "lead_status": lead_data.get("lead_stage", "ASSIGNED"),
-                        "lead_score": lead_data.get("lead_score"),
-                        "lead_type": lead_data.get("affiliated_party"),
-                        "assigned_to": assignee_identifier,
-                        "praja_id": praja_id,
-                        "rm_email": rm_email,
-                    }
-                    mixpanel_properties.update(lead_data)
+                    mixpanel_properties = lead_mixpanel_properties(
+                        lead_data,
+                        lead_id=record.id,
+                        lead_name=lead_name,
+                        lead_status=lead_data.get("lead_stage", "ASSIGNED"),
+                        lead_score=lead_data.get("lead_score"),
+                        lead_type=lead_data.get("affiliated_party"),
+                        assigned_to=assignee_identifier,
+                        praja_id=praja_id,
+                        rm_email=rm_email,
+                    )
 
                     job = queue_service.enqueue_job(
                         job_type=JobType.SEND_MIXPANEL_EVENT,
