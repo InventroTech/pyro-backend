@@ -1940,7 +1940,15 @@ class RmPrdFilterOptionsView(APIView):
     since that's what the RM dashboard filters against:
 
     - managers: TenantMembership.name (not email) — event_data.manager_name
-      is written from membership.user_parent_id.name, not email.
+      is written from membership.user_parent_id.name, not email. Scoped to
+      active memberships whose role.key is in the `manager_role_keys` query
+      param (comma-separated — see RM PRD config's managerRoles, set via the
+      Page Builder config panel, whose options come from GET /membership/
+      roles/). Tenants have several manager-shaped roles, so this is
+      explicit rather than inferred. Omit/empty falls back to "anyone with
+      a direct report" for pages that haven't set the config yet — picks up
+      wrong/unexpected names whenever someone outside a true manager role
+      happens to have a report, which is the whole reason this param exists.
     - states: each active RM's own STATE user setting, as {value, label} —
       value is the raw Circle ID (matches event_data.state, which is that
       same ID copied at write time in rm_activity.py — not lead data, a
@@ -1970,10 +1978,19 @@ class RmPrdFilterOptionsView(APIView):
 
         tenant = request.tenant
 
+        manager_role_keys = [
+            key.strip() for key in request.query_params.get("manager_role_keys", "").split(",") if key.strip()
+        ]
+        manager_qs = TenantMembership.objects.filter(tenant=tenant, is_active=True)
+        if manager_role_keys:
+            manager_qs = manager_qs.filter(role__key__in=manager_role_keys)
+        else:
+            # no roles configured yet — old heuristic, kept only so a page
+            # saved before managerRoles existed doesn't show an empty filter
+            manager_qs = manager_qs.filter(direct_reports__isnull=False)
+
         managers = list(
-            TenantMembership.objects.filter(
-                tenant=tenant, is_active=True, direct_reports__isnull=False,
-            )
+            manager_qs
             .exclude(name__isnull=True)
             .exclude(name="")
             .values_list("name", flat=True)
