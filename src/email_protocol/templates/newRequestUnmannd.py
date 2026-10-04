@@ -5,7 +5,7 @@ from .open_request_link import build_open_request_url
 
 def build_new_request_unmannd_email(context: Dict[str, Any]) -> Tuple[str, str, str]:
     """
-    Returns (subject, text_body, html_body) for new inventory / UNMANND request notifications.
+    Returns (subject, text_body, html_body) for a new request notification.
     """
     request_id = context.get("request_id", "N/A")
     requester_name = context.get("requester_name", "Requestor")
@@ -18,7 +18,7 @@ def build_new_request_unmannd_email(context: Dict[str, Any]) -> Tuple[str, str, 
     open_request_url = build_open_request_url(redirect_url, request_id)
     tenant_name = context.get("tenant_name", "Pyro")
 
-    subject = f"[Pyro] New UNMANND Request #{request_id} - {requester_name}"
+    subject = f"[Pyro] New Request #{request_id} - {requester_name}"
 
     text_body = (
         f"New inventory request created in {tenant_name}.\n\n"
@@ -49,7 +49,7 @@ def build_new_request_unmannd_email(context: Dict[str, Any]) -> Tuple[str, str, 
               <td style="padding:18px 22px;background:linear-gradient(135deg,#111827 0%,#1f2937 100%);">
                 <div style="font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:#93c5fd;">Pyro Notifications</div>
                 <div style="margin-top:8px;font-size:22px;line-height:1.3;color:#ffffff;font-weight:700;">
-                  New UNMANND Request Created
+                  New Request Created
                 </div>
               </td>
             </tr>
