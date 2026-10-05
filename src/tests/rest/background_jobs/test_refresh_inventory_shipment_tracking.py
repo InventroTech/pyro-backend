@@ -64,6 +64,109 @@ class RefreshInventoryShipmentTrackingJobHandlerTests(TestCase):
         self.assertEqual(job.result["updated"], 1)
         self.assertEqual(job.result["checked"], 1)
 
+    def test_delivered_track_moves_request_status(self):
+        record = self._make_in_shipping_record(status="ORDERED", status_text="Ordered")
+        job = BackgroundJobFactory(
+            tenant=self.tenant,
+            job_type=JobType.REFRESH_INVENTORY_SHIPMENT_TRACKING,
+            payload={},
+        )
+        with patch(
+            "crm_records.inventory_shipment_live_track.track_shipment",
+            return_value={"ok": True, "shipment_status": "DELIVERED"},
+        ):
+            self.handler.process(job)
+
+        record.refresh_from_db()
+        self.assertEqual(record.data.get("status"), "DELIVERED")
+        self.assertEqual(record.data.get("status_text"), "Delivered")
+        self.assertEqual(record.data.get("shipment_status"), "DELIVERED")
+
+    def test_legacy_in_shipping_rows_still_polled(self):
+        record = self._make_in_shipping_record()
+        job = BackgroundJobFactory(
+            tenant=self.tenant,
+            job_type=JobType.REFRESH_INVENTORY_SHIPMENT_TRACKING,
+            payload={},
+        )
+        with patch(
+            "crm_records.inventory_shipment_live_track.track_shipment",
+            return_value={"ok": True, "shipment_status": "IN_TRANSIT"},
+        ):
+            self.handler.process(job)
+
+        record.refresh_from_db()
+        self.assertEqual(record.data.get("status"), "ORDERED")
+        self.assertEqual(record.data.get("shipment_status"), "IN_TRANSIT")
+
+    def test_exception_track_moves_request_status(self):
+        record = self._make_in_shipping_record(status="ORDERED", status_text="Ordered")
+        job = BackgroundJobFactory(
+            tenant=self.tenant,
+            job_type=JobType.REFRESH_INVENTORY_SHIPMENT_TRACKING,
+            payload={},
+        )
+        with patch(
+            "crm_records.inventory_shipment_live_track.track_shipment",
+            return_value={"ok": True, "shipment_status": "EXCEPTION"},
+        ):
+            self.handler.process(job)
+
+        record.refresh_from_db()
+        self.assertEqual(record.data.get("status"), "EXCEPTION")
+        self.assertEqual(record.data.get("status_text"), "Exception")
+
+    def test_in_flight_track_keeps_ordered(self):
+        record = self._make_in_shipping_record(status="ORDERED", status_text="Ordered")
+        job = BackgroundJobFactory(
+            tenant=self.tenant,
+            job_type=JobType.REFRESH_INVENTORY_SHIPMENT_TRACKING,
+            payload={},
+        )
+        with patch(
+            "crm_records.inventory_shipment_live_track.track_shipment",
+            return_value={"ok": True, "shipment_status": "OUT_FOR_DELIVERY"},
+        ):
+            self.handler.process(job)
+
+        record.refresh_from_db()
+        self.assertEqual(record.data.get("status"), "ORDERED")
+        self.assertEqual(record.data.get("shipment_status"), "OUT_FOR_DELIVERY")
+
+    def test_unmannd_request_rows_polled(self):
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={"status": "ORDERED", "tracking_number": "AWB1", "shipment_status": "ORDERED"},
+        )
+        job = BackgroundJobFactory(
+            tenant=self.tenant,
+            job_type=JobType.REFRESH_INVENTORY_SHIPMENT_TRACKING,
+            payload={},
+        )
+        with patch(
+            "crm_records.inventory_shipment_live_track.track_shipment",
+            return_value={"ok": True, "shipment_status": "DELIVERED"},
+        ):
+            self.handler.process(job)
+
+        record.refresh_from_db()
+        self.assertEqual(record.data.get("status"), "DELIVERED")
+
+    def test_pre_order_and_finished_rows_not_polled(self):
+        for status in ("APPROVED", "IN_CART", "DELIVERED", "EXCEPTION", "NEW_REQUEST"):
+            self._make_in_shipping_record(status=status, shipment_status="IN_TRANSIT")
+        job = BackgroundJobFactory(
+            tenant=self.tenant,
+            job_type=JobType.REFRESH_INVENTORY_SHIPMENT_TRACKING,
+            payload={},
+        )
+        with patch("crm_records.inventory_shipment_live_track.track_shipment") as mocked:
+            self.handler.process(job)
+
+        mocked.assert_not_called()
+        self.assertEqual(job.result["checked"], 0)
+
     def test_skips_when_track_not_ok(self):
         record = self._make_in_shipping_record()
         job = BackgroundJobFactory(

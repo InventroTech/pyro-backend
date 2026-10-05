@@ -81,15 +81,34 @@ class RecordSerializer(serializers.ModelSerializer):
         if self.instance is not None and isinstance(getattr(self.instance, "data", None), dict):
             previous = self.instance.data
         if entity_type in ("inventory_request", "unmannd_request") and isinstance(data, dict):
+            from crm_records.inventory_shipment_tracking import apply_shipment_tracking_normalization
+            from crm_records.inventory_status import (
+                get_tenant_status_config,
+                status_labels,
+                sync_request_status,
+                validate_request_status,
+            )
             from crm_records.inventory_workflow import apply_inventory_cart_status_side_effects
 
+            status_config = get_tenant_status_config(self._resolve_tenant(), entity_type)
+            data = sync_request_status(dict(data), previous, labels=status_labels(status_config))
             data = apply_inventory_cart_status_side_effects(data, previous=previous)
+            data = apply_shipment_tracking_normalization(data, previous=previous)
+            if status_config.get("is_custom"):
+                error = validate_request_status(data.get("status"), status_config)
+                if error:
+                    raise serializers.ValidationError({"data": {"status": error}})
             attrs["data"] = data
-        if entity_type in ("inventory_request", "unmannd_request") and isinstance(data, dict):
-            from crm_records.inventory_shipment_tracking import apply_shipment_tracking_normalization
-
-            attrs["data"] = apply_shipment_tracking_normalization(data, previous=previous)
         return attrs
+
+    def _resolve_tenant(self):
+        tenant = getattr(self.instance, "tenant", None) if self.instance is not None else None
+        if tenant is None:
+            tenant = self.context.get("tenant")
+        if tenant is None:
+            request = self.context.get("request")
+            tenant = getattr(request, "tenant", None) if request is not None else None
+        return tenant
     
     def validate_pyro_data(self, value):
         """
@@ -313,6 +332,7 @@ class EntityTypeSchemaSerializer(serializers.ModelSerializer):
             "entity_type",
             "attributes",
             "rules",
+            "status_config",
             "description",
             "created_at",
             "updated_at"
@@ -323,6 +343,32 @@ class EntityTypeSchemaSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at"
         ]
+
+    def validate_status_config(self, value):
+        """Validate the request status config shape: {pages: [...], statuses: [...]}."""
+        if value in (None, ""):
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("status_config must be an object.")
+        for key in ("pages", "statuses"):
+            items = value.get(key)
+            if items is None:
+                continue
+            if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
+                raise serializers.ValidationError(f"status_config.{key} must be a list of objects.")
+        for page in value.get("pages") or []:
+            if not str(page.get("id") or "").strip():
+                raise serializers.ValidationError("Every page needs an 'id'.")
+        page_ids = {str(p.get("id")).strip() for p in value.get("pages") or []}
+        for status_item in value.get("statuses") or []:
+            if not str(status_item.get("value") or "").strip():
+                raise serializers.ValidationError("Every status needs a 'value'.")
+            page = status_item.get("page")
+            if page and value.get("pages") and str(page).strip() not in page_ids:
+                raise serializers.ValidationError(
+                    f"Status '{status_item.get('value')}' points to unknown page '{page}'."
+                )
+        return value
     
     def validate_entity_type(self, value):
         """Validate entity_type is not empty and has reasonable length."""

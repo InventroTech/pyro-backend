@@ -1484,10 +1484,11 @@ class ReleaseLeadsAfter12hJobHandler(JobHandler):
 
 class RefreshInventoryShipmentTrackingJobHandler(JobHandler):
     """
-    Re-poll carrier status for in-shipping inventory / unmannd requests that still
+    Re-poll carrier status for ordered inventory / unmannd requests that still
     have a tracking number/link and are not yet DELIVERED / EXCEPTION.
 
-    Updates ``data.shipment_status`` (and related fields) when live track returns ok.
+    Updates ``data.shipment_status`` (and related fields) when live track returns ok;
+    a DELIVERED / EXCEPTION result also moves ``data.status`` there.
     """
 
     ENTITY_TYPES = ("inventory_request", "unmannd_request")
@@ -1499,6 +1500,7 @@ class RefreshInventoryShipmentTrackingJobHandler(JobHandler):
             ShipmentTrackError,
             track_shipment,
         )
+        from crm_records.inventory_status import sync_request_status
 
         payload = job.payload or {}
         max_per_run = int(payload.get("max_per_run") or self.DEFAULT_MAX_PER_RUN)
@@ -1507,7 +1509,7 @@ class RefreshInventoryShipmentTrackingJobHandler(JobHandler):
         qs = _filter_records_by_job_tenant(
             Record.objects.filter(entity_type__in=self.ENTITY_TYPES).extra(
                 where=[
-                    "UPPER(COALESCE(data->>'status','')) = 'IN_SHIPPING'",
+                    "UPPER(COALESCE(data->>'status','')) IN ('ORDERED', 'IN_SHIPPING')",
                     """
                     (
                       TRIM(COALESCE(data->>'tracking_number', '')) != ''
@@ -1599,12 +1601,14 @@ class RefreshInventoryShipmentTrackingJobHandler(JobHandler):
                 continue
 
             data["tracking_updated_at"] = timezone.now().isoformat()
+            data = sync_request_status(data, previous=record.data if isinstance(record.data, dict) else None)
             record.data = data
             record.save(update_fields=["data", "updated_at"])
             updated += 1
             logger.info(
-                "[RefreshShipmentTracking] updated record_id=%s shipment_status=%s",
+                "[RefreshShipmentTracking] updated record_id=%s status=%s shipment_status=%s",
                 record.id,
+                data.get("status"),
                 data.get("shipment_status"),
             )
 
