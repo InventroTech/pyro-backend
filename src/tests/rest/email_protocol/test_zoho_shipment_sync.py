@@ -235,6 +235,73 @@ class ZohoShipmentMatchTests(TestCase):
         self.assertEqual(record.data["shipment_status"], "DELIVERED")
 
 
+    def test_apply_tracking_on_approved_marks_ordered(self):
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={"status": "APPROVED", "status_text": "Approved"},
+        )
+        changed = apply_tracking_to_record(record, {"tracking_number": "AWB123456789"})
+        self.assertTrue(changed)
+        record.refresh_from_db()
+        self.assertEqual(record.data["shipment_status"], "ORDERED")
+        self.assertEqual(record.data["status"], "ORDERED")
+        self.assertEqual(record.data["status_text"], "Ordered")
+
+    def test_apply_delivered_moves_ordered_request(self):
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={"status": "ORDERED", "status_text": "Ordered", "shipment_status": "IN_TRANSIT"},
+        )
+        changed = apply_tracking_to_record(record, {"shipment_status": "DELIVERED"})
+        self.assertTrue(changed)
+        record.refresh_from_db()
+        self.assertEqual(record.data["status"], "DELIVERED")
+        self.assertEqual(record.data["status_text"], "Delivered")
+
+    def test_apply_in_flight_on_legacy_row_normalizes_status(self):
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={"status": "IN_SHIPPING", "shipment_status": "ORDERED"},
+        )
+        changed = apply_tracking_to_record(record, {"shipment_status": "IN_TRANSIT"})
+        self.assertTrue(changed)
+        record.refresh_from_db()
+        self.assertEqual(record.data["status"], "ORDERED")
+
+    def test_apply_without_changes_does_not_rewrite_legacy_row(self):
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={"status": "IN_SHIPPING", "shipment_status": "DELIVERED"},
+        )
+        changed = apply_tracking_to_record(record, {"shipment_status": "IN_TRANSIT"})
+        self.assertFalse(changed)
+        record.refresh_from_db()
+        self.assertEqual(record.data["status"], "IN_SHIPPING")
+
+    def test_match_includes_new_status_codes(self):
+        record = RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={"status": "ORDERED", "item_name_freeform": "Thermal Camera Module"},
+        )
+        RecordFactory(
+            tenant=self.tenant,
+            entity_type="inventory_request",
+            data={"status": "DELIVERED", "item_name_freeform": "Thermal Camera Module Pro"},
+        )
+        parsed = {
+            "tracking_number": "AWB555666777",
+            "email_text": "Your Thermal Camera Module has shipped",
+        }
+        matched, reason = match_record_for_email(tenant_id=self.tenant.id, parsed=parsed)
+        self.assertEqual(matched.id, record.id)
+        self.assertEqual(reason, "item_name")
+
+
 class ZohoOAuthStateTests(TestCase):
     def test_state_roundtrip(self):
         state = build_oauth_state(

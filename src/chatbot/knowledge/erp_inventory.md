@@ -4,7 +4,7 @@ Pyro ERP-style inventory uses the same universal `records` table with ERP entity
 
 ## Entity types
 - `inventory_item` — stock on hand (available_quantity, allocated_quantity, total_quantity, part_number_or_sku / name).
-- `inventory_request` — requests / receiving flow (quantity, part_number_or_sku, status such as IN_SHIPPING).
+- `inventory_request` — requests / receiving flow (quantity, part_number_or_sku, status such as ORDERED).
 
 ## Receiving flow
 - When a shipment is received, the `receive_add_to_inventory` rule action adds quantity to a matching inventory_item (by SKU or name), or creates a new item.
