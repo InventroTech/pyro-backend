@@ -15,6 +15,7 @@ from core.models import Tenant
 from authz import service as authz_service
 from authz.models import Role, TenantMembership
 from crm_records.models import Record
+from pages.models import Page
 
 User = get_user_model()
 
@@ -487,6 +488,22 @@ class InventoryRequestFormBackendTests(TestCase):
     @patch("crm_records.views.send_email")
     def test_create_unmannd_request_sends_email_with_app_redirect(self, mock_send_email):
         mock_send_email.return_value = (True, "ok")
+        new_request_page = Page.objects.create(
+            tenant=self.tenant,
+            user_id=self.team_lead_user.supabase_uid,
+            name="New Request",
+            role=self.team_lead_role,
+            display_order=0,
+            config=[{"id": "form", "type": "inventoryRequestForm", "config": {}}],
+        )
+        all_requests_page = Page.objects.create(
+            tenant=self.tenant,
+            user_id=self.team_lead_user.supabase_uid,
+            name="All Requests",
+            role=self.team_lead_role,
+            display_order=2,
+            config=[{"id": "table", "type": "procurementTable", "config": {}}],
+        )
         payload = {
             "entity_type": "unmannd_request",
             "data": {
@@ -516,12 +533,12 @@ class InventoryRequestFormBackendTests(TestCase):
             "teamlead@example.com",
         )
         team_lead_href = (
-            "https://app.thepyro.ai/app/unmannd/pages/"
-            "cca4ebe2-58b8-489c-a686-65559f2a58aa"
-            f"?entity_type=unmannd_request&page=1&page_size=10&record_id={created_id}"
+            f"https://app.thepyro.ai/app/{self.tenant.slug}/pages/{all_requests_page.id}"
+            f"?entity_type=unmannd_request&record_id={created_id}"
         )
         html_message = mock_send_email.call_args.kwargs.get("html_message", "")
         self.assertIn(team_lead_href, html_message)
+        self.assertNotIn(str(new_request_page.id), html_message)
 
     def test_create_inventory_request_with_empty_optional_fields(self):
         """Optional fields can be empty string; record still created."""
