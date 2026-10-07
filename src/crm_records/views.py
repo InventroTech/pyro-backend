@@ -152,14 +152,31 @@ def _normalize_status_value(raw_status):
     )
 
 
-# Unmannd Page Builder pages used by Open Request email buttons.
-_UNMANND_OPEN_REQUEST_PAGES = {
-    # Team lead all-requests table
-    "team_lead_all_requests": "cca4ebe2-58b8-489c-a686-65559f2a58aa",
-    # Requester My Requests / requestor inbox
-    "my_requests": "0f28de54-a4b3-44c4-95d4-933b3ecac9e4",
-    # PM / manager all-requests table
-    "pm_all_requests": "d5bc8615-4962-4124-82f4-c16dd56819a0",
+# Request-list widgets an Open Request email can land on.
+# Forms are excluded so the link does not open "New Request".
+_REQUEST_TABLE_WIDGETS = frozenset({
+    "procurementTable",
+    "inventoryTable",
+})
+_OPEN_REQUEST_PAGE_NAMES = {
+    "team_lead_all_requests": (
+        "all requests",
+        "all request",
+        "pending approvals",
+        "my requests",
+    ),
+    "pm_all_requests": (
+        "all requests",
+        "all request",
+        "approved items",
+        "my requests",
+    ),
+    "my_requests": (
+        "my requests",
+        "all requests",
+        "all request",
+        "pending approvals",
+    ),
 }
 
 
@@ -171,14 +188,82 @@ def _frontend_origin(frontend_base: str) -> str:
     return base or "https://app.thepyro.ai"
 
 
+def _page_widget_types(page):
+    config = getattr(page, "config", None)
+    if not isinstance(config, list):
+        return []
+    types = []
+    for item in config:
+        if not isinstance(item, dict):
+            continue
+        widget_type = str(item.get("type") or "").strip()
+        if widget_type:
+            types.append(widget_type)
+    return types
+
+
+def _is_request_table_page(page):
+    return any(widget in _REQUEST_TABLE_WIDGETS for widget in _page_widget_types(page))
+
+
+def _membership_for_ref(tenant, membership_ref):
+    """Active membership from id or user id, including role."""
+    if tenant is None or membership_ref in (None, ""):
+        return None
+    ref_str = str(membership_ref).strip()
+    if not ref_str:
+        return None
+    try:
+        membership_id = int(ref_str)
+    except (TypeError, ValueError):
+        membership_id = None
+    qs = TenantMembership.objects.filter(tenant=tenant, is_active=True)
+    if membership_id is not None:
+        membership = qs.filter(id=membership_id).first()
+        if membership:
+            return membership
+    return qs.filter(user_id=ref_str).first()
+
+
+def _find_open_request_page(tenant, membership_ref, open_page: str):
+    """
+    Live request-list page for the recipient's role.
+
+    Hardcoded Unmannd page ids pointed at deleted pages, and the app then
+    fell through to that role's first nav item (the New Request form).
+    """
+    from pages.models import Page
+
+    membership = _membership_for_ref(tenant, membership_ref)
+    role_id = getattr(membership, "role_id", None) if membership else None
+    if not tenant or not role_id:
+        return None
+    pages = [
+        page
+        for page in Page.objects.filter(tenant=tenant, role_id=role_id).order_by(
+            "display_order", "name"
+        )
+        if _is_request_table_page(page)
+    ]
+    if not pages:
+        return None
+    by_name = {}
+    for page in pages:
+        by_name.setdefault(str(page.name or "").strip().lower(), page)
+    for preferred in _OPEN_REQUEST_PAGE_NAMES.get(open_page, ()):
+        match = by_name.get(preferred)
+        if match:
+            return match
+    return pages[0]
+
+
 def _record_app_redirect_url(request, record, *, open_page: str | None = None):
     """
     Base URL for Open Request email buttons.
 
-    For Unmannd (slug ``unmannd`` or entity ``unmannd_request``), ``open_page``
-    selects a fixed Page Builder page:
-    - ``team_lead_all_requests`` — team lead all-requests table
-    - ``pm_all_requests`` — PM / manager all-requests table
+    ``open_page`` picks a live request-list page for the recipient's role:
+    - ``team_lead_all_requests`` — team lead All Requests (or Pending Approvals)
+    - ``pm_all_requests`` — procurement manager All Requests
     - ``my_requests`` — requestor My Requests
 
     Templates then append ``?record_id=`` / ``&record_id=`` via ``build_open_request_url``.
@@ -187,16 +272,21 @@ def _record_app_redirect_url(request, record, *, open_page: str | None = None):
     frontend_base = (os.environ.get("PYRO_FRONTEND_URL") or os.environ.get("FRONTEND_URL") or "").strip().rstrip("/")
     tenant_slug = str(getattr(tenant, "slug", "") or "").strip() if tenant else ""
     entity_type = str(getattr(record, "entity_type", "") or "").strip()
-    is_unmannd = tenant_slug.lower() == "unmannd" or entity_type == "unmannd_request"
 
-    if is_unmannd and open_page:
-        page_id = _UNMANND_OPEN_REQUEST_PAGES.get(open_page)
-        if page_id:
+    if tenant and open_page and tenant_slug:
+        data = record.data if isinstance(getattr(record, "data", None), dict) else {}
+        if open_page == "team_lead_all_requests":
+            audience_ref = _resolve_team_lead_membership_id(tenant, data)
+        elif open_page == "pm_all_requests":
+            audience_ref = _resolve_manager_membership_id(tenant, data)
+        else:
+            requester = _resolve_requester_membership(tenant, data)
+            audience_ref = getattr(requester, "id", None)
+        page = _find_open_request_page(tenant, audience_ref, open_page)
+        if page:
             origin = _frontend_origin(frontend_base)
-            return (
-                f"{origin}/app/unmannd/pages/{page_id}"
-                f"?entity_type=unmannd_request&page=1&page_size=10"
-            )
+            query = f"?entity_type={entity_type}" if entity_type else ""
+            return f"{origin}/app/{tenant_slug}/pages/{page.id}{query}"
 
     if frontend_base and "/app/" in frontend_base:
         return frontend_base
