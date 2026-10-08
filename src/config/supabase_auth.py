@@ -1,11 +1,11 @@
-import os
-import jwt
-from jwt import ExpiredSignatureError, InvalidTokenError
+from django.conf import settings
 from django.contrib.auth import get_user_model
+from jwt import ExpiredSignatureError, InvalidTokenError
 from rest_framework.authentication import BaseAuthentication
 from rest_framework import exceptions
 
-SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")
+from authentication.tokens import TokenConfigurationError, verify_access_token
+
 User = get_user_model()
 
 def _get_bearer(request):
@@ -15,11 +15,10 @@ def _get_bearer(request):
     return auth.split(" ", 1)[1].strip()
 
 def _verify_jwt(token: str) -> dict:
-    if not SUPABASE_JWT_SECRET:
-        raise exceptions.AuthenticationFailed("JWT secret not configured")
     try:
-        # Supabase tokens have aud='authenticated'; we’re not enforcing audience.
-        return jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"], options={"verify_aud": False})
+        return verify_access_token(token)
+    except TokenConfigurationError:
+        raise exceptions.AuthenticationFailed("JWT secret not configured")
     except ExpiredSignatureError:
         raise exceptions.AuthenticationFailed("Token expired")
     except InvalidTokenError as e:
@@ -30,6 +29,14 @@ def _get_or_create_profile(claims):
     if not sub:
         raise exceptions.AuthenticationFailed("Token missing 'sub'")
     email = (claims.get("email") or "").lower() or None
+
+    if claims.get("iss") == settings.AUTH_JWT_ISSUER:
+        # Our own tokens are only issued for existing users; a deleted or disabled
+        # user's leftover token must not recreate the account.
+        user = User.objects.filter(supabase_uid=sub, is_active=True).first()
+        if user is None:
+            raise exceptions.AuthenticationFailed("User not found")
+        return user
 
     # Mirror user locally (no password; identity of record is Supabase)
     user, created = User.objects.get_or_create(

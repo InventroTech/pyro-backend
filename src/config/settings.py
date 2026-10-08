@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import environ
 from corsheaders.defaults import default_headers
+from django.core.exceptions import ImproperlyConfigured
 
 env = environ.Env()
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -299,6 +300,16 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+# Customer signup / change / reset follow Supabase Auth's default policy (6+ characters, any
+# characters) so moving off Supabase doesn't change what customers may choose. Admin and
+# management commands keep AUTH_PASSWORD_VALIDATORS above.
+AUTH_USER_PASSWORD_VALIDATORS = [
+    {
+        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+        'OPTIONS': {'min_length': 6},
+    },
+]
+
 
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
@@ -334,6 +345,32 @@ CORS_ALLOW_ALL_ORIGINS = True # for dev only not to be added in prod
 AUTH_USER_MODEL = 'authentication.User'
 SUPABASE_JWT_SECRET = env("SUPABASE_JWT_SECRET")
 
+# Access tokens minted by this backend (see authentication/tokens.py). Supabase-issued
+# tokens stay valid until AUTH_ACCEPT_SUPABASE_TOKENS is turned off.
+AUTH_JWT_SECRET = env("AUTH_JWT_SECRET", default="")
+AUTH_JWT_ISSUER = env("AUTH_JWT_ISSUER", default="pyro-backend")
+AUTH_ACCESS_TOKEN_TTL_SECONDS = env.int("AUTH_ACCESS_TOKEN_TTL_SECONDS", default=3600)
+AUTH_ACCEPT_SUPABASE_TOKENS = env.bool("AUTH_ACCEPT_SUPABASE_TOKENS", default=True)
+AUTH_REFRESH_TOKEN_TTL_SECONDS = env.int("AUTH_REFRESH_TOKEN_TTL_SECONDS", default=30 * 24 * 3600)
+AUTH_REFRESH_REUSE_GRACE_SECONDS = env.int("AUTH_REFRESH_REUSE_GRACE_SECONDS", default=10)
+# Which system owns passwords and login accounts for password reset and user deletion:
+# "supabase" (Supabase Auth Admin API) or "django" (authentication.User). Switch to
+# "django" only once the frontend logs in through /auth/login/.
+AUTH_PROVIDER = env("AUTH_PROVIDER", default="supabase")
+if AUTH_PROVIDER not in ("supabase", "django"):
+    raise ImproperlyConfigured("AUTH_PROVIDER must be 'supabase' or 'django'")
+
+# PBKDF2 hashes new passwords; BCryptPasswordHasher verifies hashes imported from
+# Supabase Auth (stored as "bcrypt$<supabase hash>") and upgrades them on next login.
+PASSWORD_HASHERS = [
+    "django.contrib.auth.hashers.PBKDF2PasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher",
+    "django.contrib.auth.hashers.Argon2PasswordHasher",
+    "django.contrib.auth.hashers.BCryptSHA256PasswordHasher",
+    "django.contrib.auth.hashers.BCryptPasswordHasher",
+    "django.contrib.auth.hashers.ScryptPasswordHasher",
+]
+
 # Pyro secret for external API access (used in X-Secret-Pyro header)
 # If this secret is used, it will route to DEFAULT_TENANT_SLUG
 # For client-specific secret keys, use the ApiSecretKey model in the database (crm_records.ApiSecretKey)
@@ -354,6 +391,12 @@ REST_FRAMEWORK = {
         'config.supabase_auth.SupabaseJWTAuthentication',
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'DEFAULT_THROTTLE_RATES': {
+        'auth_login': env("AUTH_LOGIN_THROTTLE_RATE", default="10/min"),
+        'auth_refresh': env("AUTH_REFRESH_THROTTLE_RATE", default="60/min"),
+        'auth_signup': env("AUTH_SIGNUP_THROTTLE_RATE", default="5/min"),
+        'auth_verify': env("AUTH_VERIFY_THROTTLE_RATE", default="20/min"),
+    },
 }
 
 if DEBUG:
@@ -463,6 +506,32 @@ else:
         "CORS_ALLOWED_ORIGINS",
         default=_default_cors_origins,
     )
+
+# Sign-up confirmation links only redirect to these origins; anything else falls
+# back to AUTH_SITE_URL (same idea as Supabase "Site URL" + "Redirect URLs").
+AUTH_ALLOWED_REDIRECT_ORIGINS = env.list(
+    "AUTH_ALLOWED_REDIRECT_ORIGINS",
+    default=(
+        ["http://localhost:8080", "http://127.0.0.1:8080", "http://localhost:3000"]
+        if IS_DEV
+        else CORS_ALLOWED_ORIGINS
+    ),
+)
+AUTH_SITE_URL = env(
+    "AUTH_SITE_URL",
+    default=AUTH_ALLOWED_REDIRECT_ORIGINS[0] if AUTH_ALLOWED_REDIRECT_ORIGINS else "",
+)
+AUTH_EMAIL_CONFIRM_TTL_SECONDS = env.int("AUTH_EMAIL_CONFIRM_TTL_SECONDS", default=24 * 3600)
+
+# Google / Zoho sign-in. A provider is enabled when its client id and secret are set.
+# The provider's allowed redirect URI must be <AUTH_PUBLIC_BASE_URL>/auth/oauth/<provider>/callback/
+# (AUTH_PUBLIC_BASE_URL defaults to the URL the request came in on).
+AUTH_PUBLIC_BASE_URL = env("AUTH_PUBLIC_BASE_URL", default="")
+GOOGLE_LOGIN_CLIENT_ID = env("GOOGLE_LOGIN_CLIENT_ID", default="")
+GOOGLE_LOGIN_CLIENT_SECRET = env("GOOGLE_LOGIN_CLIENT_SECRET", default="")
+ZOHO_LOGIN_CLIENT_ID = env("ZOHO_LOGIN_CLIENT_ID", default="")
+ZOHO_LOGIN_CLIENT_SECRET = env("ZOHO_LOGIN_CLIENT_SECRET", default="")
+ZOHO_LOGIN_ACCOUNTS_URL = env("ZOHO_LOGIN_ACCOUNTS_URL", default="https://accounts.zoho.in")
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
     "X-Tenant-Slug",  # custom tenant header

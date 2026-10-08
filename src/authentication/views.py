@@ -3,7 +3,7 @@ import re
 import secrets
 from datetime import timedelta
 
-import requests
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
@@ -12,14 +12,17 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from authentication.client_email_templates import apply_otp_to_client_email, ensure_single_otp_placeholder
-from authentication.models import PasswordResetOTP
-from authentication.supabase_env import supabase_anon_key, supabase_api_base_url
+from authentication.account_views import validate_user_password
+from authentication.models import PasswordResetOTP, User
 from authentication.password_reset import (
     OTP_TTL_SECONDS,
     admin_update_user_password,
+    auth_provider_is_django,
+    find_django_user_id_for_password_reset,
     find_supabase_user_id_for_password_reset,
     otp_codes_match,
     otp_hmac_digest,
+    set_django_user_password,
     _email_log_tag,
 )
 
@@ -27,8 +30,18 @@ from email_protocol.services import send_email
 
 logger = logging.getLogger(__name__)
 
-SUPABASE_PROJECT_URL = supabase_api_base_url() or None
-SUPABASE_ANON_KEY = supabase_anon_key() or None
+
+def _find_reset_user_id(normalized_email: str) -> tuple[str | None, bool]:
+    """``(user_id, lookup_failed)`` from whichever system owns login accounts."""
+    if auth_provider_is_django():
+        return find_django_user_id_for_password_reset(normalized_email), False
+    return find_supabase_user_id_for_password_reset(normalized_email)
+
+
+def _set_reset_password(user_id: str, password: str) -> tuple[bool, str]:
+    if auth_provider_is_django():
+        return set_django_user_password(user_id, password)
+    return admin_update_user_password(user_id, password)
 
 
 def _client_correlation_id(request) -> str:
@@ -41,58 +54,6 @@ def _client_correlation_id(request) -> str:
     if rid:
         return str(rid).strip()[:200]
     return "no-client-request-id"
-
-
-class SupabaseAuthCheckView(APIView):
-    """
-    Authenticates with Supabase using email & password.
-    Returns user info if valid, else error.
-    """
-
-    authentication_classes = []
-    permission_classes = [AllowAny]
-
-    def post(self, request):
-        email = request.data.get("email")
-        password = request.data.get("password")
-        if not email or not password:
-            return Response({"error": "Email and password are required."}, status=status.HTTP_400_BAD_REQUEST)
-
-        url = f"{SUPABASE_PROJECT_URL}/auth/v1/token?grant_type=password"
-        headers = {
-            "apikey": SUPABASE_ANON_KEY,
-            "Content-Type": "application/json",
-        }
-        data = {"email": email, "password": password}
-        try:
-            r = requests.post(url, json=data, headers=headers)
-        except Exception as e:
-            logger.exception("Failed to call Supabase: %s", e)
-            return Response({"error": "Failed to connect to Supabase."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-
-        if r.status_code == 200:
-            out = r.json()
-            return Response(
-                {
-                    "valid": True,
-                    "user_id": out.get("user", {}).get("id"),
-                    "access_token": out.get("access_token"),
-                    "email": out.get("user", {}).get("email"),
-                }
-            )
-        error_body = {}
-        try:
-            error_body = r.json()
-        except Exception:
-            pass
-        return Response(
-            {
-                "valid": False,
-                "error": error_body.get("error", "Login failed"),
-                "message": error_body.get("msg") or error_body.get("message"),
-            },
-            status=status.HTTP_401_UNAUTHORIZED,
-        )
 
 
 def _generate_six_digit_otp() -> str:
@@ -156,7 +117,7 @@ class SupabasePasswordRecoverView(APIView):
             _email_log_tag(normalized),
         )
 
-        uid, lookup_failed = find_supabase_user_id_for_password_reset(normalized)
+        uid, lookup_failed = _find_reset_user_id(normalized)
         if lookup_failed:
             logger.error(
                 "[PasswordReset][forgot-password] resolve_failed_503 rid=%s %s "
@@ -239,7 +200,8 @@ class SupabasePasswordRecoverView(APIView):
 
 class PasswordResetConfirmView(APIView):
     """
-    Confirms email + OTP + new password; updates Supabase Auth user password via Admin API.
+    Confirms email + OTP + new password; updates the password in Supabase Auth (Admin API)
+    or in Django, depending on AUTH_PROVIDER.
     """
 
     authentication_classes = []
@@ -269,6 +231,11 @@ class PasswordResetConfirmView(APIView):
                 {"error": "Passwords do not match."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if auth_provider_is_django():
+            try:
+                validate_user_password(password, User(email=email))
+            except ValidationError as exc:
+                return Response({"error": " ".join(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
 
         logger.info(
             "[PasswordReset][confirm-password] start rid=%s %s",
@@ -276,7 +243,7 @@ class PasswordResetConfirmView(APIView):
             _email_log_tag(email),
         )
 
-        uid, lookup_failed = find_supabase_user_id_for_password_reset(email)
+        uid, lookup_failed = _find_reset_user_id(email)
         if lookup_failed:
             logger.error(
                 "[PasswordReset][confirm-password] resolve_failed_503 rid=%s %s",
@@ -317,7 +284,7 @@ class PasswordResetConfirmView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        success, err_msg = admin_update_user_password(uid, password)
+        success, err_msg = _set_reset_password(uid, password)
         PasswordResetOTP.objects.filter(email__iexact=email).delete()
 
         if not success:

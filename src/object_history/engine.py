@@ -4,10 +4,10 @@ import logging
 import threading
 from typing import Any, Dict, Optional
 
+from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
 from django.db import IntegrityError, router, transaction
 
-from accounts.models import SupabaseAuthUser
 from core.models import TenantSettings
 
 from .models import ObjectHistory
@@ -90,17 +90,20 @@ class HistoryEngine:
     @staticmethod
     def _normalize_actor_user(actor_user):
         """
-        Normalize actor_user to SupabaseAuthUser, because callers may pass
-        accounts.User instances in tests/scripts.
+        Normalize actor_user to the Django user, because callers may pass other
+        user-like objects (anything with ``supabase_uid`` or a UUID ``id``).
         """
         if not actor_user:
             return None
-        if isinstance(actor_user, SupabaseAuthUser):
+        User = get_user_model()
+        if isinstance(actor_user, User):
             return actor_user
 
         candidate_id = getattr(actor_user, "supabase_uid", None) or getattr(actor_user, "id", None)
+        if not candidate_id:
+            return None
         try:
-            return SupabaseAuthUser.objects.filter(id=candidate_id).first()
+            return User.objects.filter(supabase_uid=str(candidate_id)).first()
         except Exception:
             logger.warning("HistoryEngine: unable to normalize actor_user %r", actor_user)
             return None
@@ -122,7 +125,7 @@ class HistoryEngine:
             return False
 
         same_actor_user_id = (latest.actor_user_id or None) == (
-            getattr(actor_user, "id", None) if actor_user else None
+            getattr(actor_user, "supabase_uid", None) if actor_user else None
         )
         same_after = latest.after_state == (after_state if include_after else None)
         return (

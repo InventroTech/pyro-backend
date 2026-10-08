@@ -1,12 +1,15 @@
 import logging
 from typing import Optional, Tuple
 
+from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 
 from accounts.models import SupabaseAuthUser
 from accounts.services.supabase_session import revoke_supabase_sessions_globally
+from authentication.models import RefreshToken, User
 from authz.models import TenantMembership, Role as AuthZRole
 from authz.service import drop_permissions_cache
 
@@ -69,8 +72,9 @@ def _build_membership_queryset(*, tenant, resolved_uid=None, email=None):
 
 def _force_logout_and_clear_caches(*, tenant, resolved_uid=None, email=None) -> list[dict]:
     """
-    Revoke Supabase sessions globally and clear permission/tenant caches for
-  every uid tied to memberships about to be deleted.
+    Revoke login sessions (Django refresh tokens, plus Supabase sessions while Supabase
+    owns logins) and clear permission/tenant caches for every uid tied to memberships
+    about to be deleted.
     """
     tm_q = _build_membership_queryset(tenant=tenant, resolved_uid=resolved_uid, email=email)
     uids_to_revoke: set[str] = set()
@@ -89,7 +93,13 @@ def _force_logout_and_clear_caches(*, tenant, resolved_uid=None, email=None) -> 
 
     results = []
     for uid in uids_to_revoke:
-        results.append(revoke_supabase_sessions_globally(uid))
+        django_revoked = RefreshToken.objects.filter(
+            user__supabase_uid=uid, revoked_at__isnull=True
+        ).update(revoked_at=timezone.now())
+        if settings.AUTH_PROVIDER == "django":
+            results.append({"user_id": uid, "revoked": True, "django_sessions_revoked": django_revoked})
+        else:
+            results.append(revoke_supabase_sessions_globally(uid))
     return results
 
 
@@ -133,8 +143,9 @@ def _reassign_reports_before_delete(*, tenant, tm_q) -> int:
 def delete_user_everywhere(*, tenant, uid=None, email=None, role_id=None):
     """
     Deletes rows for a user across:
-      - Supabase Auth sessions (global sign-out on all devices)
-      - auth.users (Supabase)
+      - login sessions (global sign-out on all devices)
+      - the login account: auth.users (AUTH_PROVIDER="supabase") or
+        authentication.User (AUTH_PROVIDER="django")
       - public.authz_tenantmembership (TenantMembership)
 
     Idempotent: if nothing exists, returns '0' in counts.
@@ -195,11 +206,23 @@ def delete_user_everywhere(*, tenant, uid=None, email=None, role_id=None):
         },
     )
 
-    # 4) Delete from auth.users when we have a uid
+    # 4) Delete the login account when we have a uid
     if resolved_uid:
-        au_deleted, _ = SupabaseAuthUser.objects.filter(id=resolved_uid).delete()
+        if settings.AUTH_PROVIDER == "django":
+            users = list(User.objects.filter(supabase_uid=resolved_uid))
+            for user in users:
+                user.delete()  # instance delete so object history records it
+            au_deleted = len(users)
+            account_table = "authentication.User"
+        else:
+            au_deleted, _ = SupabaseAuthUser.objects.filter(id=resolved_uid).delete()
+            account_table = "auth.users"
         report["deleted"]["auth_users"] = au_deleted
-        logger.info("auth.users deleted", extra={"count": au_deleted, "tenant_id": str(tenant.id), "uid": resolved_uid})
+        logger.info(
+            "%s deleted",
+            account_table,
+            extra={"count": au_deleted, "tenant_id": str(tenant.id), "uid": resolved_uid},
+        )
 
     if not resolved_uid and email and report["deleted"]["auth_users"] == 0:
         report["notes"].append("Skipped deleting auth.users by email-only for safety (cross-tenant risk).")
