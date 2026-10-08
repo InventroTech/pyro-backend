@@ -689,6 +689,49 @@ class CurrentUserRoleView(APIView):
         }, status=status.HTTP_200_OK)
 
 
+class MyTeamView(APIView):
+    """
+    Returns just the caller's own sibling group — every active member
+    sharing the caller's manager, including the caller — not the full
+    tenant membership directory (names, emails, every reporting line).
+
+    Used by views that need "my team" to scope a query (e.g. the lead-card
+    leaderboard) without first downloading every member in the tenant just
+    to filter it down to one manager's reports client-side.
+
+    No manager set for the caller -> empty rm_user_ids (nothing to scope
+    to), never "everyone." Spoofing swaps the JWT identity apiClient sends
+    (see bob/src/lib/auth/accessTokenProvider.ts), so this already resolves
+    the spoofed user's own team during a spoofed session, same as
+    CurrentUserRoleView's "me".
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        tenant = request.tenant
+        supabase_uid = getattr(request.user, "supabase_uid", None)
+        if not supabase_uid:
+            return Response({"rm_user_ids": []}, status=status.HTTP_200_OK)
+
+        my_membership = TenantMembership.objects.filter(
+            tenant=tenant, user_id=supabase_uid, is_active=True,
+        ).first()
+        if not my_membership or my_membership.user_parent_id_id is None:
+            return Response({"rm_user_ids": []}, status=status.HTTP_200_OK)
+
+        sibling_user_ids = TenantMembership.objects.filter(
+            tenant=tenant,
+            user_parent_id_id=my_membership.user_parent_id_id,
+            is_active=True,
+            user_id__isnull=False,
+        ).values_list("user_id", flat=True)
+
+        return Response(
+            {"rm_user_ids": [str(uid) for uid in sibling_user_ids]},
+            status=status.HTTP_200_OK,
+        )
+
+
 class UpdateUserHierarchyView(APIView):
     """
     PATCH /api/membership/users/hierarchy
