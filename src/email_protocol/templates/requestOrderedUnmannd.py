@@ -11,7 +11,7 @@ def build_request_ordered_unmannd_email(context: Dict[str, Any]) -> Tuple[str, s
     recipient_name = context.get("recipient_name", "there")
     requester_name = context.get("requester_name", "Requester")
     item_name = context.get("item_name", "N/A")
-    status_text = context.get("status_text", "IN_SHIPPING")
+    status_text = context.get("status_text", "Ordered")
     redirect_url = context.get("redirect_url", "#")
     open_request_url = build_open_request_url(redirect_url, request_id)
     tenant_name = context.get("tenant_name", "Pyro")

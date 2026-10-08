@@ -14,6 +14,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from crm_records.inventory_shipment_tracking import apply_shipment_tracking_normalization
+from crm_records.inventory_status import sync_request_status
 from crm_records.models import Record
 from crm_records.shipment_email_parse import (
     parse_shipment_email,
@@ -379,6 +380,7 @@ def apply_tracking_to_record(record: Record, parsed: Dict[str, Any]) -> bool:
 
     if data == previous:
         return False
+    sync_request_status(data, previous=previous)
 
     record.data = data
     record.save(update_fields=["data", "updated_at"])

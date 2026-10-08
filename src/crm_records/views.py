@@ -110,19 +110,22 @@ def _legacy_get_next_lead_assignees_match(stored, requester: str) -> bool:
 
 
 REQUEST_NOTIFICATION_ENTITY_TYPES = frozenset({"inventory_request", "unmannd_request"})
-# Manager Approve button (inventoryWorkflow) sets VENDOR_IDENTIFIED.
-MANAGER_APPROVED_STATUSES = frozenset({"VENDOR_IDENTIFIED"})
+REQUEST_STATUS_ENTITY_TYPES = REQUEST_NOTIFICATION_ENTITY_TYPES
+# Statuses below are compared after normalize_request_status, so legacy
+# VENDOR_IDENTIFIED / IN_SHIPPING arrive here as APPROVED / ORDERED.
+# Manager Approve button (inventoryWorkflow) sets APPROVED.
+MANAGER_APPROVED_STATUSES = frozenset({"APPROVED"})
 MANAGER_APPROVE_FROM_STATUSES = frozenset({
     "",
     "NEW_REQUEST",
     "ON_HOLD",
     "REQ_TO_VERIFY",
 })
-# Team Lead Order button sets IN_SHIPPING (from cart, or legacy vendor-identified).
-TEAM_LEAD_ORDERED_STATUSES = frozenset({"IN_SHIPPING"})
+# Team Lead Order button sets ORDERED (from cart, or straight from approved).
+TEAM_LEAD_ORDERED_STATUSES = frozenset({"ORDERED"})
 TEAM_LEAD_ORDER_FROM_STATUSES = frozenset({
     "IN_CART",
-    "VENDOR_IDENTIFIED",
+    "APPROVED",
     # "PAYMENT_PENDING",
 })
 # Requestor role may edit their own request only while it is still pending approval.
@@ -141,15 +144,18 @@ REQUESTER_SHIPMENT_STATUS_EDIT_DENIED_MESSAGE = (
 
 
 def _normalize_status_value(raw_status):
+    from crm_records.inventory_status import LEGACY_STATUS_ALIASES
+
     if raw_status is None:
         return ""
-    return (
+    code = (
         str(raw_status)
         .strip()
         .upper()
         .replace("-", "_")
         .replace(" ", "_")
     )
+    return LEGACY_STATUS_ALIASES.get(code, code)
 
 
 # Request-list widgets an Open Request email can land on.
@@ -467,7 +473,7 @@ def _is_current_user_request_requester(request, record) -> bool:
 def _reject_requester_edit_if_locked(request, record, *, incoming_data=None):
     """
     Requestor role may edit their own request until it is approved
-    (VENDOR_IDENTIFIED and later). Team lead / PM updates stay allowed.
+    (APPROVED and later). Team lead / PM updates stay allowed.
     """
     if getattr(record, "entity_type", None) not in REQUEST_NOTIFICATION_ENTITY_TYPES:
         return
@@ -730,7 +736,7 @@ def _notify_team_lead_for_inventory_request(request, record):
 
 def _notify_on_manager_approved(request, record, previous_status):
     """
-    Approve (VENDOR_IDENTIFIED) emails go to the requestor only via
+    Approve (APPROVED) emails go to the requestor only via
     ``_notify_requester_on_status_change`` — Team Lead / approver are not emailed.
     """
     return
@@ -868,7 +874,7 @@ def _notify_requester_when_on_hold(request, record, previous_status):
 
 def _notify_on_team_lead_ordered(request, record, previous_status):
     """
-    Ordered (IN_SHIPPING) emails go to the requestor only via
+    Ordered (ORDERED) emails go to the requestor only via
     ``_notify_requester_on_status_change`` — no extra TL/PM recipients.
     """
     return
@@ -1132,6 +1138,43 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
             'created_at__gte', 'created_at__lte', 'exclude_events', 'include_count',
         }
         data_filters = {k: v for k, v in query_params.items() if k not in model_fields}
+
+        # Procurement / inventory requests: ?stage=<page id> resolves to the statuses
+        # mapped to that page in the tenant status config; status filters also match
+        # legacy codes (VENDOR_IDENTIFIED / IN_SHIPPING) on rows not yet migrated.
+        stage_status_q = None
+        if entity_type in REQUEST_STATUS_ENTITY_TYPES:
+            from crm_records.inventory_status import (
+                get_tenant_status_config,
+                legacy_codes_for,
+                normalize_request_status,
+                stage_filter_values,
+            )
+
+            stage_param = (data_filters.pop('stage', None) or '').strip()
+            if stage_param:
+                status_config = get_tenant_status_config(self.request.tenant, entity_type)
+                stage_values = stage_filter_values(
+                    status_config, [s for s in stage_param.split(',') if s.strip()]
+                )
+                if not stage_values:
+                    return queryset.none()
+                stage_status_q = Q()
+                for value in stage_values:
+                    stage_status_q |= json_field_contains_q('status', value)
+
+            status_param = data_filters.get('status')
+            if status_param:
+                expanded = []
+                for raw in str(status_param).split(','):
+                    code = normalize_request_status(raw)
+                    if not code:
+                        continue
+                    for value in [code, *sorted(legacy_codes_for(code))]:
+                        if value not in expanded:
+                            expanded.append(value)
+                if expanded:
+                    data_filters['status'] = ','.join(expanded)
         
         # Build Q objects for JSON field filtering
         # When listing "not connected" / retry leads (lead_stage=NOT_CONNECTED etc.), include unassigned leads too
@@ -1203,6 +1246,9 @@ class RecordListCreateView(TenantScopedMixin, generics.ListCreateAPIView):
             else:
                 # Single value - exact match (uses @> operator → GIN index)
                 q_objects &= json_field_contains_q(field_name, field_value)
+
+        if stage_status_q is not None:
+            q_objects &= stage_status_q
         
         if q_objects:
             queryset = queryset.filter(q_objects)
@@ -5020,6 +5066,30 @@ class EntityTypeSchemaDetailView(TenantScopedMixin, generics.RetrieveUpdateDestr
     def get_queryset(self):
         """Return schemas filtered by tenant."""
         return EntityTypeSchema.objects.filter(tenant=self.request.tenant)
+
+
+class RequestStatusConfigView(TenantScopedMixin, APIView):
+    """
+    Request status options + pages for a procurement / inventory entity type.
+
+    GET /crm-records/status-config/?entity_type=unmannd_request
+    → {entity_type, is_custom, pages: [{id, label, order}],
+       statuses: [{value, label, color, background, page, order, active, builtin}]}
+
+    Built-in defaults are returned when the tenant has no ``EntityTypeSchema.status_config``.
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from crm_records.inventory_status import REQUEST_ENTITY_TYPES, get_tenant_status_config
+
+        entity_type = (request.query_params.get("entity_type") or "").strip()
+        if entity_type not in REQUEST_ENTITY_TYPES:
+            return Response(
+                {"error": f"entity_type must be one of: {', '.join(sorted(REQUEST_ENTITY_TYPES))}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(get_tenant_status_config(request.tenant, entity_type), status=status.HTTP_200_OK)
 
 
 class EntityTypeSchemaByTypeView(TenantScopedMixin, APIView):

@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RecordListCreateView, RecordDistinctFieldValuesView, RecordDetailView, RecordHistoryView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, TenantEntityTypeListView, LeadScoringView, GetMyCurrentLeadView, PartnerEventsView, PartnerLeadView, CallAttemptMatrixListCreateView, CallAttemptMatrixDetailView, CallAttemptMatrixByLeadTypeView, LeadAssignmentWebhookProxyView, RMAssignedMixpanelView, ScoringRuleListCreateView, ScoringRuleDetailView, ApiSecretKeySetView, ApiSecretKeyUpdateView, ShipmentTrackView, ShipmentCouriersView, ProductLinkExtractView
+from .views import RecordListCreateView, RecordDistinctFieldValuesView, RecordDetailView, RecordHistoryView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, TenantEntityTypeListView, LeadScoringView, GetMyCurrentLeadView, PartnerEventsView, PartnerLeadView, CallAttemptMatrixListCreateView, CallAttemptMatrixDetailView, CallAttemptMatrixByLeadTypeView, LeadAssignmentWebhookProxyView, RMAssignedMixpanelView, ScoringRuleListCreateView, ScoringRuleDetailView, ApiSecretKeySetView, ApiSecretKeyUpdateView, ShipmentTrackView, ShipmentCouriersView, ProductLinkExtractView, RequestStatusConfigView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 from .public_views import PublicJobsView, PublicJobApplicationView
 
@@ -51,6 +51,8 @@ urlpatterns = [
     path("entity-schemas/<int:pk>/", EntityTypeSchemaDetailView.as_view(), name="entity-schema-detail"),
     path("entity-schemas/by-type/", EntityTypeSchemaByTypeView.as_view(), name="entity-schema-by-type"),
     path("entity-attributes/", EntityTypeAttributesView.as_view(), name="entity-attributes"),
+    # Procurement / inventory request status options + pages
+    path("status-config/", RequestStatusConfigView.as_view(), name="request-status-config"),
     
     # Call Attempt Matrix endpoints
     path("call-attempt-matrix/", CallAttemptMatrixListCreateView.as_view(), name="call-attempt-matrix-list-create"),

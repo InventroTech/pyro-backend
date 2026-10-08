@@ -11,7 +11,7 @@ def build_request_approved_unmannd_email(context: Dict[str, Any]) -> Tuple[str, 
     recipient_name = context.get("recipient_name", "there")
     requester_name = context.get("requester_name", "Requester")
     item_name = context.get("item_name", "N/A")
-    status_text = context.get("status_text", "VENDOR_IDENTIFIED")
+    status_text = context.get("status_text", "Approved")
     redirect_url = context.get("redirect_url", "#")
     open_request_url = build_open_request_url(redirect_url, request_id)
     tenant_name = context.get("tenant_name", "Pyro")

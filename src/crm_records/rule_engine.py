@@ -566,7 +566,7 @@ def action_receive_add_to_inventory(
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """
-    For an inventory_request (e.g. status IN_SHIPPING): add received quantity to inventory.
+    For an inventory_request (e.g. status ORDERED): add received quantity to inventory.
     - If an inventory_item exists with matching part_number_or_sku (or name), add quantity to
       that item's available_quantity.
     - If no matching inventory_item exists, create a new inventory_item with data from the
