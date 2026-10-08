@@ -171,6 +171,14 @@ class EntityTypeSchema(HistoryTrackedModel, BaseModel):
         blank=True,
         help_text="List of scoring rules for this entity type. Each rule has 'attr', 'operator', 'value', and 'weight'."
     )
+    status_config = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Request status options and pages: {'pages': [{id, label, order}], "
+            "'statuses': [{value, label, color, page, order, active}]}. Merged over built-in defaults."
+        ),
+    )
     description = models.TextField(null=True, blank=True, help_text="Optional description of this entity type schema")
     
     class Meta:

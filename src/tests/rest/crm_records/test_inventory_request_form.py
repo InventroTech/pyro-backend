@@ -638,7 +638,8 @@ class InventoryRequestFormBackendTests(TestCase):
         )
         self.assertEqual(response.status_code, 200, response.data)
         record.refresh_from_db()
-        self.assertEqual(record.data["status"], "IN_SHIPPING")
+        self.assertEqual(record.data["status"], "ORDERED")
+        self.assertEqual(record.data["shipment_status"], "ORDERED")
 
     def test_team_lead_can_update_tracking_on_own_approved_request(self):
         """TL who created the request may still update tracking after approval."""
@@ -732,7 +733,7 @@ class InventoryRequestFormBackendTests(TestCase):
         record.refresh_from_db()
         self.assertEqual(record.data["item_name_freeform"], "Mouse")
 
-    def test_remove_from_cart_sets_vendor_identified_and_clears_cart_id(self):
+    def test_remove_from_cart_sets_approved_and_clears_cart_id(self):
         record = Record.objects.create(
             tenant=self.tenant,
             entity_type="unmannd_request",
@@ -748,13 +749,36 @@ class InventoryRequestFormBackendTests(TestCase):
         )
         response = self._patch_request(
             record,
+            {**record.data, "status": "APPROVED", "status_text": "IN_CART"},
+            user=self.team_lead_user,
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        record.refresh_from_db()
+        self.assertEqual(record.data["status"], "APPROVED")
+        self.assertEqual(record.data["status_text"], "Approved")
+        self.assertIsNone(record.data.get("cart_id"))
+
+    def test_legacy_vendor_identified_patch_saved_as_approved(self):
+        record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="unmannd_request",
+            data={
+                "status": "NEW_REQUEST",
+                "requester_id": str(self.user.supabase_uid),
+                "item_name_freeform": "Drone",
+                "quantity_required": 1,
+                "team_lead": self.team_lead_membership.id,
+            },
+        )
+        response = self._patch_request(
+            record,
             {**record.data, "status": "VENDOR_IDENTIFIED", "status_text": "VENDOR_IDENTIFIED"},
             user=self.team_lead_user,
         )
         self.assertEqual(response.status_code, 200, response.data)
         record.refresh_from_db()
-        self.assertEqual(record.data["status"], "VENDOR_IDENTIFIED")
-        self.assertIsNone(record.data.get("cart_id"))
+        self.assertEqual(record.data["status"], "APPROVED")
+        self.assertEqual(record.data["status_text"], "Approved")
 
     def test_team_lead_can_add_vendor_identified_item_to_cart(self):
         record = Record.objects.create(
