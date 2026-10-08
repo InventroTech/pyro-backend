@@ -214,12 +214,37 @@ class OAuthLoginTests(TestCase):
         response, _ = self._authorize("zoho")
         self.assertEqual(urlsplit(response["Location"]).netloc, "accounts.zoho.in")
 
-        self.userinfo = {"sub": "zoho-9", "email": "z@example.com", "name": "Zed"}
+        self.userinfo = {"sub": "zoho-9", "email": "z@example.com", "email_verified": "true", "name": "Zed"}
         login = self._full_login("zoho")
 
         self.assertEqual(login.status_code, 200)
         self.assertEqual(self.post.call_args.args[0], "https://accounts.zoho.in/oauth/v2/token")
         self.assertTrue(OAuthIdentity.objects.filter(provider="zoho", subject="zoho-9").exists())
+
+    def test_zoho_without_verified_flag_cannot_take_over_password_account(self):
+        owner = User.objects.create_user(
+            supabase_uid=str(uuid.uuid4()), email="z@example.com", password="Correct-Horse-42",
+            email_verified_at=timezone.now(),
+        )
+        self.userinfo = {"sub": "zoho-attacker", "email": "z@example.com", "name": "Zed"}
+
+        _, state = self._authorize("zoho")
+        params = self._frontend_params(self._callback(state, "zoho"))
+
+        self.assertEqual(params["error"], "access_denied")
+        self.assertFalse(OAuthIdentity.objects.filter(subject="zoho-attacker").exists())
+        owner.refresh_from_db()
+        self.assertTrue(owner.check_password("Correct-Horse-42"))
+
+    def test_already_linked_zoho_login_works_without_verified_flag(self):
+        user = User.objects.create_user(supabase_uid=str(uuid.uuid4()), email="z@example.com")
+        OAuthIdentity.objects.create(user=user, provider="zoho", subject="zoho-9", email="z@example.com")
+        self.userinfo = {"sub": "zoho-9", "email": "z@example.com", "name": "Zed"}
+
+        login = self._full_login("zoho")
+
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(login.json()["user"]["id"], user.supabase_uid)
 
     def test_zoho_other_data_centre_only_if_trusted(self):
         self._full_login("zoho", **{"accounts-server": "https://accounts.zoho.eu"})

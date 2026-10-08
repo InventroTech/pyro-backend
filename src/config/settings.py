@@ -396,6 +396,12 @@ REST_FRAMEWORK = {
         'auth_refresh': env("AUTH_REFRESH_THROTTLE_RATE", default="60/min"),
         'auth_signup': env("AUTH_SIGNUP_THROTTLE_RATE", default="5/min"),
         'auth_verify': env("AUTH_VERIFY_THROTTLE_RATE", default="20/min"),
+        'auth_password_reset': env("AUTH_PASSWORD_RESET_THROTTLE_RATE", default="5/min"),
+        'auth_password_reset_email': env("AUTH_PASSWORD_RESET_EMAIL_THROTTLE_RATE", default="3/min"),
+        'auth_password_reset_confirm': env("AUTH_PASSWORD_RESET_CONFIRM_THROTTLE_RATE", default="10/min"),
+        'auth_password_reset_confirm_email': env(
+            "AUTH_PASSWORD_RESET_CONFIRM_EMAIL_THROTTLE_RATE", default="5/min"
+        ),
     },
 }
 

@@ -1,13 +1,20 @@
 """Password reset and user deletion with AUTH_PROVIDER="django" (no Supabase calls)."""
+import time
 import uuid
 from datetime import timedelta
 from unittest.mock import patch
 
+import jwt
+from django.conf import settings
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.test import APIClient
 
+from accounts.models import SupabaseAuthUser
 from accounts.services.delete_user_everywhere import delete_user_everywhere
+from config.supabase_auth import _get_or_create_profile
 from authentication.models import PasswordResetOTP, RefreshToken, User
 from authentication.password_reset import otp_hmac_digest
 from tests.factories import RoleFactory, TenantFactory, TenantMembershipFactory
@@ -30,6 +37,7 @@ def _refresh_row(user):
 @patch("authentication.views.find_supabase_user_id_for_password_reset", side_effect=AssertionError("Supabase called"))
 class DjangoPasswordResetTests(TestCase):
     def setUp(self):
+        cache.clear()
         self.client = APIClient()
         self.uid = str(uuid.uuid4())
         self.user = User.objects.create_user(supabase_uid=self.uid, email="reset@example.com", password="Old-Pass-123")
@@ -104,6 +112,123 @@ class DjangoPasswordResetTests(TestCase):
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password("123456"))
 
+    def test_reset_changes_only_the_account_with_that_email_in_any_case(self, *_):
+        other = User.objects.create_user(
+            supabase_uid=str(uuid.uuid4()), email="other@example.com", password="Other-Pass-123"
+        )
+        PasswordResetOTP.objects.create(
+            email="reset@example.com",
+            otp_hash=otp_hmac_digest("reset@example.com", "123456"),
+            expires_at=timezone.now() + timedelta(minutes=4),
+        )
+
+        response = self.client.post(
+            "/auth/reset-password/confirm/",
+            {"email": "RESET@Example.com", "otp": "123456", "password": NEW_PASSWORD, "password_confirm": NEW_PASSWORD},
+            format="json",
+        )
+
+        self.assertEqual(response.json(), {"ok": True})
+        self.user.refresh_from_db()
+        other.refresh_from_db()
+        self.assertTrue(self.user.check_password(NEW_PASSWORD))
+        self.assertTrue(other.check_password("Other-Pass-123"))
+
+    @patch("authentication.views.send_email", return_value=(True, "sent"))
+    def test_forgot_password_is_rate_limited_per_email_and_per_ip(self, *_):
+        for _attempt in range(3):
+            self.assertEqual(self._forgot("reset@example.com").status_code, 200)
+        self.assertEqual(self._forgot("Reset@Example.com").status_code, 429)
+
+        cache.clear()
+        for n in range(5):
+            self.assertEqual(self._forgot(f"person{n}@example.com").status_code, 200)
+        self.assertEqual(self._forgot("someone-else@example.com").status_code, 429)
+
+    def test_confirm_code_guessing_is_rate_limited_per_email(self, *_):
+        for n in range(5):
+            self.assertEqual(self._confirm(code=f"00000{n}").status_code, 400)
+
+        # Even the right code is refused once the limit is hit, and from another IP too.
+        response = self.client.post(
+            "/auth/reset-password/confirm/",
+            {"email": "reset@example.com", "otp": "123456", "password": NEW_PASSWORD, "password_confirm": NEW_PASSWORD},
+            format="json",
+            REMOTE_ADDR="203.0.113.9",
+        )
+        self.assertEqual(response.status_code, 429)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("Old-Pass-123"))
+
+
+def _supabase_token(uid, email, **claims):
+    return jwt.encode(
+        {
+            "sub": uid,
+            "email": email,
+            "aud": "authenticated",
+            "role": "authenticated",
+            "iss": "https://project.supabase.co/auth/v1",
+            "session_id": str(uuid.uuid4()),
+            "exp": int(time.time()) + 3600,
+            **claims,
+        },
+        settings.SUPABASE_JWT_SECRET,
+        algorithm="HS256",
+    )
+
+
+@override_settings(AUTH_PROVIDER="django", AUTH_ACCEPT_SUPABASE_TOKENS=True)
+@patch("accounts.services.delete_user_everywhere.revoke_supabase_sessions_globally", return_value={"revoked": True})
+class LeftoverSupabaseTokenTests(TestCase):
+    """A Supabase token issued before a user was deleted or disabled must not get them back in."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.tenant = TenantFactory()
+        self.role = RoleFactory(tenant=self.tenant)
+        self.uid = str(uuid.uuid4())
+        self.user = User.objects.create_user(supabase_uid=self.uid, email="gone@example.com", password="Pass-Word-77")
+        TenantMembershipFactory(
+            tenant=self.tenant, role=self.role, email="gone@example.com", user_id=self.uid, is_active=True
+        )
+        self.token = _supabase_token(self.uid, "gone@example.com")
+        self.spoof_token = jwt.encode(
+            {"sub": self.uid, "email": "gone@example.com", "role": "authenticated"},
+            settings.SUPABASE_JWT_SECRET,
+            algorithm="HS256",
+        )
+
+    def _me(self, token):
+        return self.client.get("/auth/me/", HTTP_AUTHORIZATION=f"Bearer {token}")
+
+    def _assert_locked_out(self):
+        for token in (self.token, self.spoof_token):
+            self.assertIn(self._me(token).status_code, (401, 403))
+        exchange = self.client.post("/auth/token/from-supabase/", {"access_token": self.token}, format="json")
+        self.assertEqual(exchange.status_code, 400)
+
+    def test_token_works_while_the_account_is_active(self, _):
+        self.assertEqual(self._me(self.token).status_code, 200)
+        exchange = self.client.post("/auth/token/from-supabase/", {"access_token": self.token}, format="json")
+        self.assertEqual(exchange.status_code, 200)
+
+    def test_deleted_user_cannot_log_back_in_or_be_recreated(self, _):
+        delete_user_everywhere(tenant=self.tenant, uid=self.uid)
+
+        self._assert_locked_out()
+        self.assertFalse(User.objects.filter(supabase_uid=self.uid).exists())
+        self.assertFalse(User.objects.filter(email__iexact="gone@example.com").exists())
+
+    def test_disabled_user_cannot_log_back_in(self, _):
+        self.user.is_active = False
+        self.user.save(update_fields=["is_active"])
+
+        self._assert_locked_out()
+        self.assertEqual(User.objects.filter(email__iexact="gone@example.com").count(), 1)
+        self.assertFalse(User.objects.get(supabase_uid=self.uid).is_active)
+
 
 class DeleteUserLoginAccountTests(TestCase):
     def setUp(self):
@@ -117,15 +242,44 @@ class DeleteUserLoginAccountTests(TestCase):
         )
 
     @override_settings(AUTH_PROVIDER="django")
-    @patch("accounts.services.delete_user_everywhere.revoke_supabase_sessions_globally")
-    def test_django_provider_deletes_django_account_without_supabase(self, mock_supabase_revoke):
+    @patch(
+        "accounts.services.delete_user_everywhere.revoke_supabase_sessions_globally",
+        return_value={"revoked": True},
+    )
+    def test_django_provider_deletes_django_account_and_leftover_supabase_login(self, mock_supabase_revoke):
+        SupabaseAuthUser.objects.create(id=self.uid, email="gone@example.com")
+
         report = delete_user_everywhere(tenant=self.tenant, uid=self.uid)
 
-        mock_supabase_revoke.assert_not_called()
+        mock_supabase_revoke.assert_called_once_with(self.uid)
         self.assertEqual(report["deleted"]["auth_users"], 1)
         self.assertEqual(report["sessions_revoked"][0]["django_sessions_revoked"], 1)
         self.assertFalse(User.objects.filter(supabase_uid=self.uid).exists())
         self.assertFalse(RefreshToken.objects.filter(pk=self.session.pk).exists())
+        self.assertFalse(SupabaseAuthUser.objects.filter(id=self.uid).exists())
+
+    @override_settings(AUTH_PROVIDER="django")
+    @patch(
+        "accounts.services.delete_user_everywhere.revoke_supabase_sessions_globally",
+        return_value={"revoked": True},
+    )
+    def test_django_provider_delete_works_without_supabase_account(self, _):
+        report = delete_user_everywhere(tenant=self.tenant, uid=self.uid)
+
+        self.assertEqual(report["deleted"]["auth_users"], 1)
+        self.assertFalse(User.objects.filter(supabase_uid=self.uid).exists())
+
+    @override_settings(AUTH_PROVIDER="django", AUTH_ACCEPT_SUPABASE_TOKENS=True)
+    @patch(
+        "accounts.services.delete_user_everywhere.revoke_supabase_sessions_globally",
+        return_value={"revoked": True},
+    )
+    def test_leftover_supabase_token_cannot_recreate_deleted_user(self, _):
+        delete_user_everywhere(tenant=self.tenant, uid=self.uid)
+
+        with self.assertRaises(AuthenticationFailed):
+            _get_or_create_profile({"sub": self.uid, "email": "gone@example.com", "iss": "supabase"})
+        self.assertFalse(User.objects.filter(supabase_uid=self.uid).exists())
 
     @patch(
         "accounts.services.delete_user_everywhere.revoke_supabase_sessions_globally",

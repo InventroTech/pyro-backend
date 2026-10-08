@@ -2,6 +2,7 @@ import uuid
 
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
+from django.db.models.functions import Lower
 from object_history.tracking import HistoryTrackedModel
 
 class UserManager(BaseUserManager):
@@ -35,8 +36,18 @@ class User(HistoryTrackedModel, AbstractBaseUser, PermissionsMixin):
     USERNAME_FIELD = 'supabase_uid'
     REQUIRED_FIELDS = ['email']
 
+    class Meta:
+        constraints = [
+            # Login, sign-up, OAuth and password reset all look accounts up by email.
+            models.UniqueConstraint(
+                Lower("email"),
+                condition=models.Q(email__isnull=False) & ~models.Q(email=""),
+                name="auth_user_email_ci_unique",
+            ),
+        ]
+
     def __str__(self):
-        return self.email
+        return self.email or self.supabase_uid
 
 
 class PasswordResetOTP(HistoryTrackedModel, models.Model):

@@ -3,6 +3,7 @@ Password login, token refresh and logout. Response bodies mirror Supabase Auth
 sessions (``access_token``, ``refresh_token``, ``expires_in``, ``user``…) so the
 frontend can switch providers with minimal changes.
 """
+import hashlib
 import logging
 import time
 
@@ -41,6 +42,18 @@ class AuthRateThrottle(ScopedRateThrottle):
     # REST_FRAMEWORK being loaded (e.g. under pytest); read the rate per request instead.
     def get_rate(self):
         return settings.REST_FRAMEWORK.get("DEFAULT_THROTTLE_RATES", {}).get(self.scope)
+
+
+class AuthEmailRateThrottle(AuthRateThrottle):
+    """Limit per target email (scope from ``email_throttle_scope``), so rotating IPs can't keep guessing."""
+
+    scope_attr = "email_throttle_scope"
+
+    def get_cache_key(self, request, view):
+        email = (request.data.get("email") or "").strip().lower()
+        if not email:
+            return None
+        return self.cache_format % {"scope": self.scope, "ident": hashlib.sha256(email.encode()).hexdigest()}
 
 
 def _client_ip(request):

@@ -3,7 +3,8 @@ from typing import Optional, Tuple
 
 from django.conf import settings
 from django.core.cache import cache
-from django.db import transaction
+from django.core.exceptions import ValidationError
+from django.db import DatabaseError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -97,7 +98,16 @@ def _force_logout_and_clear_caches(*, tenant, resolved_uid=None, email=None) -> 
             user__supabase_uid=uid, revoked_at__isnull=True
         ).update(revoked_at=timezone.now())
         if settings.AUTH_PROVIDER == "django":
-            results.append({"user_id": uid, "revoked": True, "django_sessions_revoked": django_revoked})
+            # Leftover Supabase sessions too, while Supabase tokens are still accepted.
+            supabase_result = revoke_supabase_sessions_globally(uid)
+            results.append(
+                {
+                    "user_id": uid,
+                    "revoked": True,
+                    "django_sessions_revoked": django_revoked,
+                    "supabase": supabase_result,
+                }
+            )
         else:
             results.append(revoke_supabase_sessions_globally(uid))
     return results
@@ -140,6 +150,21 @@ def _reassign_reports_before_delete(*, tenant, tm_q) -> int:
 
 
 @transaction.atomic
+def _delete_legacy_supabase_account(uid: str) -> int:
+    """
+    Remove the user's old Supabase auth.users row so neither a leftover Supabase token
+    nor a re-run of import_supabase_users can bring the account back.
+    """
+    try:
+        with transaction.atomic():
+            deleted, _ = SupabaseAuthUser.objects.filter(id=uid).delete()
+    except (DatabaseError, ValueError, ValidationError):
+        # No auth.users table (database not hosted by Supabase) or a non-UUID uid.
+        logger.info("No Supabase auth.users row removed for uid=%s", uid)
+        return 0
+    return deleted
+
+
 def delete_user_everywhere(*, tenant, uid=None, email=None, role_id=None):
     """
     Deletes rows for a user across:
@@ -214,6 +239,9 @@ def delete_user_everywhere(*, tenant, uid=None, email=None, role_id=None):
                 user.delete()  # instance delete so object history records it
             au_deleted = len(users)
             account_table = "authentication.User"
+            legacy_deleted = _delete_legacy_supabase_account(resolved_uid)
+            if legacy_deleted:
+                report["notes"].append(f"Also deleted {legacy_deleted} leftover auth.users row(s).")
         else:
             au_deleted, _ = SupabaseAuthUser.objects.filter(id=resolved_uid).delete()
             account_table = "auth.users"

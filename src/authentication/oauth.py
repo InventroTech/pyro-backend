@@ -20,7 +20,7 @@ from urllib.parse import urlencode, urlsplit
 import requests
 from django.conf import settings
 from django.core import signing
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from authentication.models import OAuthIdentity, OAuthLoginCode, User
@@ -182,8 +182,8 @@ def fetch_profile(provider: Provider, *, code: str, redirect_uri: str) -> Profil
     return Profile(
         subject=str(info["sub"]),
         email=(info.get("email") or "").strip().lower(),
-        # Zoho only lists verified addresses and may omit the flag.
-        email_verified=bool(info.get("email_verified", provider.name == "zoho")),
+        # A missing flag is not proof of ownership; it would let the login take over a password account.
+        email_verified=str(info.get("email_verified")).lower() == "true",
         metadata=metadata,
     )
 
@@ -210,15 +210,22 @@ def resolve_user(provider_name: str, profile: Profile) -> User:
         if not profile.email or not profile.email_verified:
             raise OAuthError(f"Your {provider_name} email address is not verified", "access_denied")
 
-        user = User.objects.filter(email__iexact=profile.email).order_by("pk").first()
+        user = User.objects.filter(email__iexact=profile.email).first()
+        created = False
         if user is None:
-            user = User.objects.create_user(
-                supabase_uid=str(uuid.uuid4()),
-                email=profile.email,
-                email_verified_at=now,
-                user_metadata=profile.metadata,
-            )
-        else:
+            try:
+                with transaction.atomic():
+                    user = User.objects.create_user(
+                        supabase_uid=str(uuid.uuid4()),
+                        email=profile.email,
+                        email_verified_at=now,
+                        user_metadata=profile.metadata,
+                    )
+                created = True
+            except IntegrityError:
+                # A concurrent sign-up or login created the account with this email first.
+                user = User.objects.get(email__iexact=profile.email)
+        if not created:
             if not user.is_active:
                 raise OAuthError("This account has been disabled", "access_denied")
             if user.email_verified_at is None:

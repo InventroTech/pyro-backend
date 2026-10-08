@@ -84,12 +84,22 @@ def import_rows(users: list[dict], identities: list[dict], *, overwrite_password
         for row in users:
             user = User.objects.filter(supabase_uid=row["id"]).first()
             created = user is None
+            email_owner = (
+                User.objects.filter(email__iexact=row["email"]).exclude(supabase_uid=row["id"]).first()
+                if row["email"]
+                else None
+            )
+            if created and email_owner is not None:
+                report.skipped.append(
+                    f"user {row['id']}: email {row['email']} already belongs to user {email_owner.supabase_uid}"
+                )
+                continue
             if created:
                 user = User(supabase_uid=row["id"], email=row["email"], is_active=True)
                 user.set_unusable_password()
             changed = set()
 
-            if not user.email:
+            if not user.email and email_owner is None:
                 user.email = row["email"]
                 changed.add("email")
             password = _django_password(row["encrypted_password"])

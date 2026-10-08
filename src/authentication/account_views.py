@@ -10,7 +10,7 @@ from django.conf import settings
 from django.contrib.auth.password_validation import get_password_validators, validate_password
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -105,7 +105,6 @@ class SignupView(APIView):
             200: SignupResponseSerializer,
             400: AuthErrorSerializer,
             429: OpenApiResponse(description="Too many attempts"),
-            503: OpenApiResponse(AuthErrorSerializer, description="Confirmation email could not be sent"),
         },
     )
     def post(self, request):
@@ -124,19 +123,23 @@ class SignupView(APIView):
         if error:
             return error
 
-        existing = User.objects.filter(email__iexact=email).order_by("pk").first()
+        existing = User.objects.filter(email__iexact=email).first()
+        user = None
         if existing is None:
-            with transaction.atomic():
-                user = User.objects.create_user(
-                    supabase_uid=str(uuid.uuid4()), email=email, password=password, user_metadata=data
-                )
+            try:
+                with transaction.atomic():
+                    user = User.objects.create_user(
+                        supabase_uid=str(uuid.uuid4()), email=email, password=password, user_metadata=data
+                    )
+            except IntegrityError:
+                # A concurrent sign-up with the same email won; answer as for an existing account.
+                existing = User.objects.filter(email__iexact=email).first()
+        if user is not None:
             if not send_confirmation_email(user, redirect_to):
-                return _error(
-                    "email_send_failed",
-                    "Error sending confirmation email",
-                    status.HTTP_503_SERVICE_UNAVAILABLE,
-                )
-        elif _can_receive_confirmation(existing):
+                # Same reply as for an existing account, so the response never reveals that the
+                # address was free; signing up again (or "resend") retries the email.
+                logger.error("[Auth][signup] confirmation email failed for new user pk=%s", user.pk)
+        elif existing is not None and _can_receive_confirmation(existing):
             # Re-signing up never changes the stored password; it only re-sends the link.
             send_confirmation_email(existing, redirect_to)
 
@@ -194,7 +197,7 @@ class ResendConfirmationView(APIView):
     def post(self, request):
         email = (request.data.get("email") or "").strip().lower()
         if email:
-            user = User.objects.filter(email__iexact=email).order_by("pk").first()
+            user = User.objects.filter(email__iexact=email).first()
             if user is not None and _can_receive_confirmation(user):
                 send_confirmation_email(user, request.data.get("redirect_to"))
         return Response({"ok": True})

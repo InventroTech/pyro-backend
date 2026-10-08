@@ -13,6 +13,7 @@ from rest_framework.views import APIView
 
 from authentication.client_email_templates import apply_otp_to_client_email, ensure_single_otp_placeholder
 from authentication.account_views import validate_user_password
+from authentication.session_views import AuthEmailRateThrottle, AuthRateThrottle
 from authentication.models import PasswordResetOTP, User
 from authentication.password_reset import (
     OTP_TTL_SECONDS,
@@ -73,6 +74,9 @@ class SupabasePasswordRecoverView(APIView):
 
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [AuthRateThrottle, AuthEmailRateThrottle]
+    throttle_scope = "auth_password_reset"
+    email_throttle_scope = "auth_password_reset_email"
 
     MAX_TEMPLATE_LEN = 400_000
 
@@ -206,6 +210,9 @@ class PasswordResetConfirmView(APIView):
 
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [AuthRateThrottle, AuthEmailRateThrottle]
+    throttle_scope = "auth_password_reset_confirm"
+    email_throttle_scope = "auth_password_reset_confirm_email"
 
     def post(self, request):
         email = (request.data.get("email") or "").strip().lower()

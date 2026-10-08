@@ -142,11 +142,16 @@ class SignupTests(TestCase):
         response = self._signup(email="not-an-email")
         self.assertEqual(response.json()["error"], "invalid_email")
 
-    def test_email_failure_returns_503(self):
+    def test_email_failure_looks_the_same_as_an_existing_account(self):
+        User.objects.create_user(supabase_uid=str(uuid.uuid4()), email="taken@example.com", password=PASSWORD)
+        existing = self._signup(email="taken@example.com")
+
         self.send_email.return_value = (False, "smtp down")
-        response = self._signup()
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["error"], "email_send_failed")
+        new = self._signup()
+
+        self.assertEqual(new.status_code, existing.status_code)
+        self.assertEqual(new.json(), existing.json())
+        self.assertTrue(User.objects.filter(email="new@example.com").exists())
 
     def test_resend_confirmation(self):
         self._signup()
