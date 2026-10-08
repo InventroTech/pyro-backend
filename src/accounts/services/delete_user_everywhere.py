@@ -149,7 +149,6 @@ def _reassign_reports_before_delete(*, tenant, tm_q) -> int:
     return reassigned
 
 
-@transaction.atomic
 def _delete_legacy_supabase_account(uid: str) -> int:
     """
     Remove the user's old Supabase auth.users row so neither a leftover Supabase token
@@ -165,6 +164,7 @@ def _delete_legacy_supabase_account(uid: str) -> int:
     return deleted
 
 
+@transaction.atomic
 def delete_user_everywhere(*, tenant, uid=None, email=None, role_id=None):
     """
     Deletes rows for a user across:

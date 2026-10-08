@@ -17,6 +17,7 @@ from accounts.services.delete_user_everywhere import delete_user_everywhere
 from config.supabase_auth import _get_or_create_profile
 from authentication.models import PasswordResetOTP, RefreshToken, User
 from authentication.password_reset import otp_hmac_digest
+from authz.models import TenantMembership
 from tests.factories import RoleFactory, TenantFactory, TenantMembershipFactory
 
 OTP_SLOT = "%%PYRO_OTP%%"
@@ -257,6 +258,23 @@ class DeleteUserLoginAccountTests(TestCase):
         self.assertFalse(User.objects.filter(supabase_uid=self.uid).exists())
         self.assertFalse(RefreshToken.objects.filter(pk=self.session.pk).exists())
         self.assertFalse(SupabaseAuthUser.objects.filter(id=self.uid).exists())
+
+    @override_settings(AUTH_PROVIDER="django")
+    @patch(
+        "accounts.services.delete_user_everywhere.revoke_supabase_sessions_globally",
+        return_value={"revoked": True},
+    )
+    def test_failed_account_delete_rolls_everything_back(self, _):
+        with patch.object(User, "delete", side_effect=RuntimeError("db down")):
+            with self.assertRaises(RuntimeError):
+                delete_user_everywhere(tenant=self.tenant, uid=self.uid)
+
+        membership = TenantMembership.objects.get(tenant=self.tenant, email="gone@example.com")
+        self.assertTrue(membership.is_active)
+        self.assertEqual(str(membership.user_id), self.uid)
+        self.assertTrue(User.objects.filter(supabase_uid=self.uid, is_active=True).exists())
+        self.session.refresh_from_db()
+        self.assertIsNone(self.session.revoked_at)
 
     @override_settings(AUTH_PROVIDER="django")
     @patch(
