@@ -1839,10 +1839,12 @@ class RmActivityEventListView(TenantScopedMixin, generics.ListAPIView):
     tenant, windowed to a `from`/`to` date range (YYYY-MM-DD, defaults to
     today if omitted so this never silently dumps the whole table), an
     optional `rm_user_id` to scope to one RM (e.g. the lead-card "Your
-    Shift" panel, which has no business seeing every other RM's rows), and
-    paginated. The dashboard does its own grouping/summing client-side, so
-    this stays a plain list per page: no aggregation logic lives on the
-    backend (yet).
+    Shift" panel, which has no business seeing every other RM's rows), an
+    optional `rm_user_ids` (comma-separated) to scope to a known set of RMs
+    (e.g. the lead-card leaderboard's "my manager's team" — a sibling group,
+    not just one RM), and paginated. The dashboard does its own
+    grouping/summing client-side, so this stays a plain list per page: no
+    aggregation logic lives on the backend (yet).
     """
     queryset = RmActivityEvent.objects.all()
     serializer_class = RmActivityEventSerializer
@@ -1874,6 +1876,11 @@ class RmActivityEventListView(TenantScopedMixin, generics.ListAPIView):
         if rm_user_id:
             qs = qs.filter(event_data__rm_user_id=rm_user_id)
 
+        rm_user_ids_param = self.request.query_params.get("rm_user_ids", "").strip()
+        if rm_user_ids_param:
+            rm_user_ids = [v.strip() for v in rm_user_ids_param.split(",") if v.strip()]
+            qs = qs.filter(event_data__rm_user_id__in=rm_user_ids)
+
         # `id` is a real indexed column (insertion order, effectively
         # chronological); ordering by event_data__started_at is a JSON
         # extraction that can't use rm_events_data_gin_idx and forces a sort
@@ -1895,6 +1902,10 @@ class RmDailyTargetsView(APIView):
     standing DAILY_TARGET user setting (the same one the Team Dashboard's
     "Trial Target" and the Add/Edit User screen use) — see
     user_settings.services.get_rm_daily_targets_sum.
+
+    Optional `rm_user_ids` (comma-separated) scopes the response to a known
+    set of RMs instead of every active member in the tenant — e.g. the
+    lead-card leaderboard only needs targets for one manager's team.
     """
     authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
@@ -1920,6 +1931,11 @@ class RmDailyTargetsView(APIView):
         memberships = TenantMembership.objects.filter(
             tenant=tenant, is_active=True, user_id__isnull=False,
         ).values("id", "user_id")
+
+        rm_user_ids_param = request.query_params.get("rm_user_ids", "").strip()
+        if rm_user_ids_param:
+            rm_user_ids = {v.strip() for v in rm_user_ids_param.split(",") if v.strip()}
+            memberships = memberships.filter(user_id__in=rm_user_ids)
 
         membership_id_to_user_id = {m["id"]: str(m["user_id"]) for m in memberships}
         target_by_membership = get_rm_daily_targets_sum(
