@@ -39,7 +39,6 @@ from user_settings.services import (
 )
 from authz.permissions import IsTenantAuthenticated
 from authz.models import TenantMembership
-from accounts.models import SupabaseAuthUser
 from datetime import date, datetime, timezone as dt_timezone
 from .records import (
     apply_record_data_updates,
@@ -1141,9 +1140,8 @@ class GetNextTicketView(APIView):
             logger.info(f"User ID: {user_id}")
             logger.info(f"User Email: {user_email}")
 
-            # Ensure current user exists in auth.users (FK target for assigned_to) before assigning
             try:
-                user_uuid = UUID(str(user_id))
+                UUID(str(user_id))
             except (ValueError, AttributeError, TypeError):
                 logger.warning(
                     "[GetNextTicketView] Invalid user supabase_uid; cannot assign ticket",
@@ -1152,30 +1150,6 @@ class GetNextTicketView(APIView):
                 response = Response(
                     {
                         "error": "Your account could not be verified. Please sign out and sign in again, or contact support.",
-                    },
-                    status=status.HTTP_403_FORBIDDEN,
-                )
-                response["Access-Control-Allow-Origin"] = "*"
-                return response
-
-            if not SupabaseAuthUser.objects.filter(id=user_uuid).exists():
-                logger.warning(
-                    "[GetNextTicketView] User not found in auth.users (assignee would violate FK); refusing to assign",
-                    extra={
-                        "user_id": str(user_uuid),
-                        "user_email": user_email,
-                        "assignee_in_auth_users": False,
-                    },
-                )
-                try:
-                    import sentry_sdk
-                    sentry_sdk.set_user({"id": str(user_uuid), "email": user_email or ""})
-                    sentry_sdk.set_tag("get_next_ticket_assigned_to_fk", "assignee_not_in_auth_users")
-                except Exception:
-                    pass
-                response = Response(
-                    {
-                        "error": "Your account is not found in the auth system. Please sign out and sign in again, or contact support.",
                     },
                     status=status.HTTP_403_FORBIDDEN,
                 )
@@ -1215,7 +1189,7 @@ class GetNextTicketView(APIView):
             user_id_ctx = getattr(request.user, "supabase_uid", None)
             user_email_ctx = getattr(request.user, "email", None)
             logger.error(
-                "get-next-ticket: database constraint violation (e.g. assigned_to FK); assignee may not exist in auth.users",
+                "get-next-ticket: database constraint violation",
                 exc_info=True,
                 extra={
                     "user_id": str(user_id_ctx) if user_id_ctx else None,
