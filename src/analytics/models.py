@@ -144,6 +144,12 @@ class RmActivityEvent(BaseModel):
 
     class Meta(BaseModel.Meta):
         db_table = "rm_activity_events"
+        # RmActivityEventListView's date-range/rm_user_id filters are served by
+        # two expression indexes on event_data, added via raw SQL (CONCURRENTLY)
+        # in migration 0019 — not declared here, same as this codebase's other
+        # JSONB query indexes (see crm_records' records_support_ticket_*_idx /
+        # event_logs_tenant_*_idx), since Django can't build them without
+        # locking the table and a declared Index always does a plain CREATE INDEX.
         indexes = [
             *BaseModel.Meta.indexes,
             models.Index(fields=["tenant", "event_type"], name="rm_events_tenant_type_idx"),
