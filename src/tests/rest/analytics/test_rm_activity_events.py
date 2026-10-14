@@ -13,8 +13,8 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 
-from analytics.models import RmActivityEvent
-from analytics.rm_activity import record_lead_touch_event
+from analytics.models import RmActivityEvent, RmCallSession
+from analytics.rm_activity import record_call_started, record_lead_touch_event
 from crm_records.models import Record
 from tests.base.test_setup import BaseAPITestCase, MultiTenantAPITestCase
 from tests.factories import TenantMembershipFactory
@@ -92,6 +92,76 @@ class RecordLeadTouchEventTests(BaseAPITestCase):
             self.user,
         )
         self.assertEqual(RmActivityEvent.objects.count(), before)
+
+
+class RecordCallStartedTests(BaseAPITestCase):
+    """
+    record_call_started() stamps the real call-start time server-side the
+    instant the RM taps Call; record_lead_touch_event() must then prefer it
+    over the client-supplied duration_seconds when computing a disposition's
+    duration — the whole point being that the server-side timestamp survives
+    the browser tab backgrounding for the length of the real call, unlike
+    the client-side clock it replaces.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={"praja_id": "1793876"},
+        )
+
+    def test_only_acts_on_call_started_event(self):
+        before = RmCallSession.objects.count()
+        record_call_started("lead.trial_activated", self.record, self.tenant, self.user)
+        self.assertEqual(RmCallSession.objects.count(), before)
+
+    def test_stamps_a_session_for_call_started(self):
+        record_call_started("lead.call_started", self.record, self.tenant, self.user)
+        session = RmCallSession.objects.get(
+            tenant=self.tenant, rm_user_id=self.supabase_uid, lead_record=self.record
+        )
+        self.assertAlmostEqual(session.started_at, timezone.now(), delta=timedelta(seconds=5))
+
+    def test_retapping_call_overwrites_the_existing_session_instead_of_duplicating(self):
+        record_call_started("lead.call_started", self.record, self.tenant, self.user)
+        first = RmCallSession.objects.get(tenant=self.tenant, lead_record=self.record)
+        first.started_at = timezone.now() - timedelta(minutes=10)
+        first.save(update_fields=["started_at"])
+
+        record_call_started("lead.call_started", self.record, self.tenant, self.user)
+
+        self.assertEqual(RmCallSession.objects.filter(tenant=self.tenant, lead_record=self.record).count(), 1)
+        refreshed = RmCallSession.objects.get(tenant=self.tenant, lead_record=self.record)
+        self.assertGreater(refreshed.started_at, first.started_at)
+
+    def test_disposition_uses_the_server_recorded_start_not_the_client_clock(self):
+        # the exact bug this fixes: the client reports a tiny duration
+        # because its own tab was backgrounded for the real call, but the
+        # server-recorded start says the call actually ran ~37.5 minutes
+        started_at = timezone.now() - timedelta(minutes=37, seconds=28)
+        RmCallSession.objects.create(
+            tenant=self.tenant, rm_user_id=self.supabase_uid, lead_record=self.record, started_at=started_at,
+        )
+        record_lead_touch_event(
+            "lead.trial_activated", self.record, {"duration_seconds": 2}, self.tenant, self.user,
+        )
+        row = RmActivityEvent.objects.latest("id")
+        self.assertGreaterEqual(row.event_data["duration_seconds"], 37 * 60)
+        self.assertFalse(
+            RmCallSession.objects.filter(tenant=self.tenant, lead_record=self.record).exists(),
+            "the session must be consumed (deleted) once its disposition is logged",
+        )
+
+    def test_falls_back_to_client_duration_when_no_session_was_recorded(self):
+        # a disposition logged without the RM ever tapping Call in-app (no
+        # lead.call_started was ever sent) — must not crash or zero itself out
+        record_lead_touch_event(
+            "lead.trial_activated", self.record, {"duration_seconds": 42}, self.tenant, self.user,
+        )
+        row = RmActivityEvent.objects.latest("id")
+        self.assertEqual(row.event_data["duration_seconds"], 42)
 
 
 class LeadGroupResolutionTests(BaseAPITestCase):
