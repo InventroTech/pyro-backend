@@ -12,7 +12,7 @@ import logging
 
 from django.utils import timezone
 
-from analytics.models import RmActivityEvent
+from analytics.models import RmActivityEvent, RmCallSession
 from authz.models import TenantMembership
 
 logger = logging.getLogger(__name__)
@@ -61,6 +61,40 @@ def _resolve_lead_group_name(tenant, membership):
         return None
 
 
+def record_call_started(event_name, record, tenant, request_user):
+    """
+    Called for every event the lead card carousel sends; only acts on
+    "lead.call_started", fired the instant the RM taps Call (see
+    bob/.../useLeadCardCarousel.ts handleCallLead) — before the native Phone
+    app takes over and the tab backgrounds for the rest of the call.
+
+    Stamps that moment here, server-side, synchronously, so it survives the
+    tab being backgrounded/reclaimed. record_lead_touch_event reads this row
+    back when the RM later logs a disposition, instead of trusting a
+    client-side clock that resets if that happens. Deliberately fails
+    silently like record_lead_touch_event below — a bug here must never
+    block the RM's actual call or disposition.
+    """
+    if event_name != "lead.call_started" or tenant is None or record is None:
+        return
+
+    try:
+        rm_user_id = getattr(request_user, "supabase_uid", None)
+        if not rm_user_id:
+            return
+        RmCallSession.objects.update_or_create(
+            tenant=tenant,
+            rm_user_id=rm_user_id,
+            lead_record=record,
+            defaults={"started_at": timezone.now()},
+        )
+    except Exception:
+        logger.exception(
+            "[RmActivity] Failed to record call start for record_id=%s",
+            getattr(record, "id", None),
+        )
+
+
 def record_lead_touch_event(event_name, record, payload, tenant, request_user):
     """
     Writes one CALL_TOUCH row for a lead-status-update event. Does nothing if
@@ -88,7 +122,28 @@ def record_lead_touch_event(event_name, record, payload, tenant, request_user):
             duration_seconds = None
 
         ended_at = timezone.now()
-        started_at = ended_at - timezone.timedelta(seconds=duration_seconds) if duration_seconds else ended_at
+
+        # Prefer the server-recorded call start (stamped the instant the RM
+        # tapped Call — see record_call_started) over the client-supplied
+        # duration above: a client-side clock resets if the tab gets
+        # backgrounded/reclaimed for the length of the call (the normal case
+        # — dialing hands off to the native Phone app), which was silently
+        # truncating real call durations down to a few seconds. Only fall
+        # back to the client value when no session was recorded (e.g. a
+        # disposition logged without ever tapping Call in-app).
+        call_session = (
+            RmCallSession.objects.filter(tenant=tenant, rm_user_id=rm_user_id, lead_record=record)
+            .order_by("-started_at")
+            .first()
+            if record is not None
+            else None
+        )
+        if call_session is not None:
+            started_at = call_session.started_at
+            duration_seconds = max(0, int((ended_at - started_at).total_seconds()))
+            call_session.delete()
+        else:
+            started_at = ended_at - timezone.timedelta(seconds=duration_seconds) if duration_seconds else ended_at
 
         # names are copied onto the row at write time so a dashboard query
         # never has to join back to the membership table (see RmActivityEvent docstring)
