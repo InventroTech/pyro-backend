@@ -159,3 +159,37 @@ class RmActivityEvent(BaseModel):
     def __str__(self):
         data = self.event_data or {}
         return f"RmActivityEvent({data.get('rm_name')}:{self.event_type}:{data.get('started_at')})"
+
+
+class RmCallSession(BaseModel):
+    """
+    Marks the real instant an RM tapped Call on a lead — written
+    synchronously at that moment (see rm_activity.record_call_started), so
+    it survives the browser tab being backgrounded or reclaimed for the
+    length of the actual phone call (dialing hands off to the native Phone
+    app; the RM PRD dashboard previously measured "time on lead" with a
+    client-side JS clock that silently reset whenever that happened,
+    truncating real call durations down to a few seconds).
+
+    record_lead_touch_event reads the matching row back (by tenant +
+    rm_user_id + lead_record) when the RM logs a disposition, uses it as the
+    authoritative call start instead of the client-supplied duration, and
+    deletes it — so a row only exists between "RM tapped Call" and "RM
+    logged the outcome" for that lead.
+    """
+
+    rm_user_id = models.UUIDField(db_index=True, help_text="Supabase user id of the RM who tapped Call.")
+    lead_record = models.ForeignKey(
+        "crm_records.Record", on_delete=models.CASCADE, related_name="rm_call_sessions"
+    )
+    started_at = models.DateTimeField()
+
+    class Meta(BaseModel.Meta):
+        db_table = "rm_call_sessions"
+        indexes = [
+            *BaseModel.Meta.indexes,
+            models.Index(fields=["tenant", "rm_user_id", "lead_record"], name="rm_call_sessions_lookup_idx"),
+        ]
+
+    def __str__(self):
+        return f"RmCallSession(rm={self.rm_user_id}:lead={self.lead_record_id}:started={self.started_at})"
