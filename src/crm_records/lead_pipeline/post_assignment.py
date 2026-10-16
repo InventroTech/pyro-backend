@@ -4,7 +4,7 @@ import logging
 from typing import Any, Optional
 from uuid import UUID
 
-from accounts.models import SupabaseAuthUser
+from authentication.models import User
 from authz.models import TenantMembership
 from background_jobs.queue_service import get_queue_service
 from background_jobs.models import JobType
@@ -42,7 +42,7 @@ def _resolve_rm_email(
         return None
 
     auth_email = (
-        SupabaseAuthUser.objects.filter(id=assignee_uuid)
+        User.objects.filter(supabase_uid=str(assignee_uuid))
         .values_list("email", flat=True)
         .first()
     )
