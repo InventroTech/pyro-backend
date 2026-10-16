@@ -3,6 +3,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -26,6 +27,7 @@ def _valid_email_payload(email: str) -> dict:
 
 class SupabasePasswordRecoverOTPTests(TestCase):
     def setUp(self):
+        cache.clear()
         self.client = APIClient()
 
     @patch("authentication.views.send_email")
@@ -115,6 +117,7 @@ class SupabasePasswordRecoverOTPTests(TestCase):
 
 class PasswordResetConfirmOTPTests(TestCase):
     def setUp(self):
+        cache.clear()
         self.client = APIClient()
 
     @patch.dict(

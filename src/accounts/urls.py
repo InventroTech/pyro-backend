@@ -6,6 +6,7 @@ from .views import (
     AssigneesByRoleView,
     DeleteUserEverywhereView,
     SetupNewTenantView,
+    TenantBySlugView,
 )
 
 urlpatterns = [
@@ -15,4 +16,5 @@ urlpatterns = [
     path("link-user-uid/", LinkUserUidView.as_view(), name="link_user_uid"),
     path("delete-user/", DeleteUserEverywhereView.as_view(), name="delete-user-everywhere"),
     path("setup-new-tenant/", SetupNewTenantView.as_view(), name="setup-new-tenant"),
+    path("tenant-by-slug/", TenantBySlugView.as_view(), name="tenant-by-slug"),
 ]

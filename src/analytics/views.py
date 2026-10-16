@@ -1906,6 +1906,10 @@ class RmDailyTargetsView(APIView):
     standing DAILY_TARGET user setting (the same one the Team Dashboard's
     "Trial Target" and the Add/Edit User screen use) — see
     user_settings.services.get_rm_daily_targets_sum.
+
+    Optional `rm_user_ids` (comma-separated) scopes the response to a known
+    set of RMs instead of every active member in the tenant — e.g. the
+    lead-card leaderboard only needs targets for one manager's team.
     """
     authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
@@ -1931,6 +1935,11 @@ class RmDailyTargetsView(APIView):
         memberships = TenantMembership.objects.filter(
             tenant=tenant, is_active=True, user_id__isnull=False,
         ).values("id", "user_id")
+
+        rm_user_ids_param = request.query_params.get("rm_user_ids", "").strip()
+        if rm_user_ids_param:
+            rm_user_ids = {v.strip() for v in rm_user_ids_param.split(",") if v.strip()}
+            memberships = memberships.filter(user_id__in=rm_user_ids)
 
         membership_id_to_user_id = {m["id"]: str(m["user_id"]) for m in memberships}
         target_by_membership = get_rm_daily_targets_sum(
