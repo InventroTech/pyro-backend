@@ -61,21 +61,22 @@ def _resolve_lead_group_name(tenant, membership):
         return None
 
 
-def record_call_started(event_name, record, tenant, request_user):
+def record_lead_opened(event_name, record, tenant, request_user):
     """
     Called for every event the lead card carousel sends; only acts on
-    "lead.call_started", fired the instant the RM taps Call (see
-    bob/.../useLeadCardCarousel.ts handleCallLead) — before the native Phone
-    app takes over and the tab backgrounds for the rest of the call.
+    "lead.opened", fired the instant a lead becomes the RM's current lead
+    card (see bob/.../utils.ts markLeadOpened) — covers the whole time the
+    RM has the lead open, not just the phone call itself.
 
     Stamps that moment here, server-side, synchronously, so it survives the
-    tab being backgrounded/reclaimed. record_lead_touch_event reads this row
-    back when the RM later logs a disposition, instead of trusting a
-    client-side clock that resets if that happens. Deliberately fails
-    silently like record_lead_touch_event below — a bug here must never
-    block the RM's actual call or disposition.
+    tab being backgrounded/reclaimed (e.g. while the native Phone app has
+    focus during the call). record_lead_touch_event reads this row back when
+    the RM later logs a disposition, instead of trusting a client-side clock
+    that resets if that happens. Deliberately fails silently like
+    record_lead_touch_event below — a bug here must never block the RM's
+    actual call or disposition.
     """
-    if event_name != "lead.call_started" or tenant is None or record is None:
+    if event_name != "lead.opened" or tenant is None or record is None:
         return
 
     try:
@@ -123,9 +124,9 @@ def record_lead_touch_event(event_name, record, payload, tenant, request_user):
 
         ended_at = timezone.now()
 
-        # Prefer the server-recorded call start (stamped the instant the RM
-        # tapped Call — see record_call_started) over the client-supplied
-        # duration above: a client-side clock resets if the tab gets
+        # Prefer the server-recorded open time (stamped the instant the lead
+        # became the RM's current lead — see record_lead_opened) over the
+        # client-supplied duration above: a client-side clock resets if the tab gets
         # backgrounded/reclaimed for the length of the call (the normal case
         # — dialing hands off to the native Phone app), which was silently
         # truncating real call durations down to a few seconds. Only fall
