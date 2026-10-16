@@ -163,9 +163,9 @@ class RmActivityEvent(BaseModel):
 
 class RmCallSession(BaseModel):
     """
-    Marks the real instant an RM tapped Call on a lead — written
-    synchronously at that moment (see rm_activity.record_call_started), so
-    it survives the browser tab being backgrounded or reclaimed for the
+    Marks the real instant a lead became an RM's current lead card —
+    written synchronously at that moment (see rm_activity.record_lead_opened),
+    so it survives the browser tab being backgrounded or reclaimed for the
     length of the actual phone call (dialing hands off to the native Phone
     app; the RM PRD dashboard previously measured "time on lead" with a
     client-side JS clock that silently reset whenever that happened,
@@ -173,12 +173,12 @@ class RmCallSession(BaseModel):
 
     record_lead_touch_event reads the matching row back (by tenant +
     rm_user_id + lead_record) when the RM logs a disposition, uses it as the
-    authoritative call start instead of the client-supplied duration, and
-    deletes it — so a row only exists between "RM tapped Call" and "RM
+    authoritative start time instead of the client-supplied duration, and
+    deletes it — so a row only exists between "RM opened the lead" and "RM
     logged the outcome" for that lead.
     """
 
-    rm_user_id = models.UUIDField(db_index=True, help_text="Supabase user id of the RM who tapped Call.")
+    rm_user_id = models.UUIDField(db_index=True, help_text="Supabase user id of the RM who opened this lead.")
     lead_record = models.ForeignKey(
         "crm_records.Record", on_delete=models.CASCADE, related_name="rm_call_sessions"
     )
