@@ -4,6 +4,8 @@ Tests for the RM PRD analytics activity log:
   disposition events, never for anything else, and attributes it to whoever
   is actually authenticated (not a user id read out of the payload).
 - RmActivityEventListView never leaks another tenant's rows.
+- RmActivityEventListView's manager_user_id param (RM PRD's ASM "my team"
+  view) scopes to the signed-in manager's own hierarchy, not the whole tenant.
 """
 from datetime import timedelta
 
@@ -15,6 +17,7 @@ from analytics.models import RmActivityEvent
 from analytics.rm_activity import record_lead_touch_event
 from crm_records.models import Record
 from tests.base.test_setup import BaseAPITestCase, MultiTenantAPITestCase
+from tests.factories import TenantMembershipFactory
 from user_settings.models import Group, TenantMemberSetting
 from user_settings.services import USER_KV_GROUP_ID_KEY
 
@@ -182,3 +185,69 @@ class RmActivityEventListViewTenantIsolationTest(MultiTenantAPITestCase):
         rm_names = {row["event_data"]["rm_name"] for row in rows}
         self.assertIn("Other", rm_names)
         self.assertNotIn("Mine", rm_names)
+
+
+class RmActivityEventListViewManagerScopingTest(BaseAPITestCase):
+    """manager_user_id (RM PRD's ASM 'my team' view) scopes to the signed-in
+    manager's own hierarchy via TenantMembership, not a manager_name text
+    match — two managers sharing a display name must not leak into each
+    other's view."""
+
+    def setUp(self):
+        super().setUp()
+        self.url = reverse("analytics:rm-activity-events")
+        now = timezone.now()
+
+        # self.membership (BaseAPITestCase) is the signed-in "ASM" for this test.
+        self.direct_report = TenantMembershipFactory(
+            tenant=self.tenant, user_parent_id=self.membership,
+        )
+        self.outside_rm = TenantMembershipFactory(tenant=self.tenant)
+
+        def make_event(rm_user_id, rm_name):
+            RmActivityEvent.objects.create(
+                tenant=self.tenant,
+                event_type="CALL_TOUCH",
+                event_data={
+                    "rm_user_id": rm_user_id,
+                    "rm_name": rm_name,
+                    "manager_name": "",
+                    "team": "",
+                    "state": "",
+                    "lead_record_id": 1,
+                    "updated_status": "TRIAL_ACTIVATED",
+                    "lead_group": None,
+                    "party": None,
+                    "started_at": now.isoformat(),
+                    "ended_at": now.isoformat(),
+                    "duration_seconds": 60,
+                },
+            )
+
+        make_event(self.direct_report.user_id, "In Team")
+        make_event(self.outside_rm.user_id, "Outside Team")
+
+        self.wide_window = {
+            "from": (now - timedelta(days=1)).strftime("%Y-%m-%d"),
+            "to": (now + timedelta(days=1)).strftime("%Y-%m-%d"),
+        }
+
+    def test_manager_user_id_scopes_to_own_hierarchy_only(self):
+        response = self.client.get(
+            self.url,
+            data={**self.wide_window, "manager_user_id": self.supabase_uid},
+            **self.auth_headers,
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        rm_names = {row["event_data"]["rm_name"] for row in response.data["data"]}
+        self.assertIn("In Team", rm_names)
+        self.assertNotIn("Outside Team", rm_names)
+
+    def test_without_manager_user_id_returns_whole_tenant(self):
+        response = self.client.get(self.url, data=self.wide_window, **self.auth_headers)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        rm_names = {row["event_data"]["rm_name"] for row in response.data["data"]}
+        self.assertIn("In Team", rm_names)
+        self.assertIn("Outside Team", rm_names)

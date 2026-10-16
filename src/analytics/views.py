@@ -1840,11 +1840,11 @@ class RmActivityEventListView(TenantScopedMixin, generics.ListAPIView):
     today if omitted so this never silently dumps the whole table), an
     optional `rm_user_id` to scope to one RM (e.g. the lead-card "Your
     Shift" panel, which has no business seeing every other RM's rows), an
-    optional `rm_user_ids` (comma-separated) to scope to a known set of RMs
-    (e.g. the lead-card leaderboard's "my manager's team" — a sibling group,
-    not just one RM), and paginated. The dashboard does its own
-    grouping/summing client-side, so this stays a plain list per page: no
-    aggregation logic lives on the backend (yet).
+    optional `manager_user_id` to scope to one manager's own hierarchy (RM
+    PRD's ASM view — "my team" rather than the whole tenant), and
+    paginated. The dashboard does its own grouping/summing client-side, so
+    this stays a plain list per page: no aggregation logic lives on the
+    backend (yet).
     """
     queryset = RmActivityEvent.objects.all()
     serializer_class = RmActivityEventSerializer
@@ -1876,10 +1876,14 @@ class RmActivityEventListView(TenantScopedMixin, generics.ListAPIView):
         if rm_user_id:
             qs = qs.filter(event_data__rm_user_id=rm_user_id)
 
-        rm_user_ids_param = self.request.query_params.get("rm_user_ids", "").strip()
-        if rm_user_ids_param:
-            rm_user_ids = [v.strip() for v in rm_user_ids_param.split(",") if v.strip()]
-            qs = qs.filter(event_data__rm_user_id__in=rm_user_ids)
+        # ASM view: narrow to the signed-in manager's own hierarchy (direct +
+        # indirect reports), resolved the same way Team Analytics resolves
+        # "my team" — not a manager_name text match, which could collide
+        # across two managers who happen to share a display name.
+        manager_user_id = self.request.query_params.get("manager_user_id", "").strip()
+        if manager_user_id:
+            team_user_ids = TeamResolver.get_team_user_ids(manager_user_id, self.request.tenant)
+            qs = qs.filter(event_data__rm_user_id__in=team_user_ids)
 
         # `id` is a real indexed column (insertion order, effectively
         # chronological); ordering by event_data__started_at is a JSON
