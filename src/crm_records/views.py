@@ -55,7 +55,7 @@ from .serializers import (
 from .mixins import TenantScopedMixin
 from .events import dispatch_event
 from .scoring import calculate_and_update_lead_score
-from analytics.rm_activity import record_lead_touch_event
+from analytics.rm_activity import record_lead_opened, record_lead_touch_event
 from .tenant_entity_type_attributes import attributes_from_tenant_entity_type
 from .permissions import HasAPISecret
 from support_ticket.services import MixpanelService, RMAssignedMixpanelService
@@ -2050,8 +2050,10 @@ class RecordEventView(TenantScopedMixin, APIView):
             if not dispatch_success:
                 logger.warning("[EventAPI] Event dispatch returned False for event=%s record_id=%s", event_name, record.id)
 
-            # RM PRD analytics: log a touch row for the 4 disposition events.
-            # Never raises — see analytics/rm_activity.py.
+            # RM PRD analytics: stamp the real lead-open time ("lead.opened"
+            # only; a no-op for every other event) and log a touch row for the 4
+            # disposition events. Neither raises — see analytics/rm_activity.py.
+            record_lead_opened(event_name, record, request.tenant, request.user)
             record_lead_touch_event(event_name, record, payload, request.tenant, request.user)
 
             return Response({
