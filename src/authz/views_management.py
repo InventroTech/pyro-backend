@@ -1,11 +1,13 @@
 from calendar import monthrange
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from uuid import UUID
 import json
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from django.core.exceptions import ValidationError
 from django.db.models import Q
 from django.db.models.functions import Lower
 from django.conf import settings
@@ -642,6 +644,24 @@ class CurrentUserRoleView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
+    @staticmethod
+    def _empty_role_response(error, tenant=None, membership=None):
+        payload = {
+            'role_key': None,
+            'role_name': None,
+            'role_id': None,
+            'tenant_id': str(tenant.id) if tenant is not None else None,
+            'department': getattr(membership, 'department', None),
+            'error': error,
+        }
+        if tenant is not None:
+            payload['tenant_slug'] = tenant.slug
+        if membership is not None:
+            payload['is_active'] = membership.is_active
+            payload['tenant_membership_id'] = membership.id
+            payload['user_parent_id'] = membership.user_parent_id_id
+        return Response(payload, status=status.HTTP_200_OK)
+
     def get(self, request):
         user = request.user
         tenant = request.tenant
@@ -656,30 +676,42 @@ class CurrentUserRoleView(APIView):
             return Response({
                 'error': 'User supabase_uid not found'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Get the membership from TenantMembership (same source backend uses)
-        membership = TenantMembership.objects.filter(
-            tenant=tenant,
-            user_id=supabase_uid,
-            is_active=True
-        ).select_related('role').first()
+
+        try:
+            user_uuid = UUID(str(supabase_uid))
+        except (ValueError, AttributeError, TypeError):
+            return self._empty_role_response('No active tenant membership found')
+
+        try:
+            # Do not select_related('role'): Role's default manager hides
+            # soft-deleted rows, which can 500 on membership.role.key.
+            membership = TenantMembership.objects.filter(
+                tenant=tenant,
+                user_id=user_uuid,
+                is_active=True,
+            ).first()
+        except (ValidationError, ValueError):
+            return self._empty_role_response('No active tenant membership found')
         
         if not membership:
-            return Response({
-                'role_key': None,
-                'role_name': None,
-                'role_id': None,
-                'tenant_id': None,
-                'department': None,
-                'error': 'No active tenant membership found'
-            }, status=status.HTTP_200_OK)
+            return self._empty_role_response('No active tenant membership found')
+
+        role = None
+        if membership.role_id:
+            role = Role.all_objects.filter(pk=membership.role_id).first()
+        if role is None:
+            return self._empty_role_response(
+                'Role not found for tenant membership',
+                tenant=tenant,
+                membership=membership,
+            )
 
         # Expose tenant_membership_id and user_parent_id for team_lead: use user_parent_id_id if set, else own membership id
         user_parent_id_value = membership.user_parent_id_id  # FK to parent TenantMembership (integer)
         return Response({
-            'role_key': membership.role.key,
-            'role_name': membership.role.name,
-            'role_id': str(membership.role.id),
+            'role_key': role.key,
+            'role_name': role.name,
+            'role_id': str(role.id),
             'tenant_id': str(tenant.id),
             'tenant_slug': tenant.slug,
             'is_active': membership.is_active,
