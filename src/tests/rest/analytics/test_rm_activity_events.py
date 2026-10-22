@@ -124,7 +124,12 @@ class RecordLeadOpenedTests(BaseAPITestCase):
         )
         self.assertAlmostEqual(session.started_at, timezone.now(), delta=timedelta(seconds=5))
 
-    def test_reopening_lead_overwrites_the_existing_session_instead_of_duplicating(self):
+    def test_reopening_a_fresh_session_does_not_push_started_at_forward(self):
+        # the exact bug seen in production: a spurious duplicate "lead.opened"
+        # (e.g. the frontend's own duplicate-open guard losing track of an
+        # already-open lead after a discarded/reloaded tab) must not reset
+        # the clock — the eventual duration_seconds has to measure from the
+        # real first open, not from whenever the duplicate event arrived.
         record_lead_opened("lead.opened", self.record, self.tenant, self.user)
         first = RmCallSession.objects.get(tenant=self.tenant, lead_record=self.record)
         first.started_at = timezone.now() - timedelta(minutes=10)
@@ -133,8 +138,24 @@ class RecordLeadOpenedTests(BaseAPITestCase):
         record_lead_opened("lead.opened", self.record, self.tenant, self.user)
 
         self.assertEqual(RmCallSession.objects.filter(tenant=self.tenant, lead_record=self.record).count(), 1)
+        unchanged = RmCallSession.objects.get(tenant=self.tenant, lead_record=self.record)
+        self.assertEqual(unchanged.started_at, first.started_at)
+
+    def test_reopening_a_stale_session_overwrites_it_with_a_fresh_start(self):
+        # an abandoned lead (RM opened it, never dispositioned it, walked
+        # away) genuinely reopened later must start its own fresh timer —
+        # otherwise it'd eventually compute an absurd multi-day duration_seconds
+        stale_started_at = timezone.now() - timedelta(hours=13)
+        RmCallSession.objects.create(
+            tenant=self.tenant, rm_user_id=self.supabase_uid, lead_record=self.record, started_at=stale_started_at,
+        )
+
+        record_lead_opened("lead.opened", self.record, self.tenant, self.user)
+
+        self.assertEqual(RmCallSession.objects.filter(tenant=self.tenant, lead_record=self.record).count(), 1)
         refreshed = RmCallSession.objects.get(tenant=self.tenant, lead_record=self.record)
-        self.assertGreater(refreshed.started_at, first.started_at)
+        self.assertGreater(refreshed.started_at, stale_started_at)
+        self.assertAlmostEqual(refreshed.started_at, timezone.now(), delta=timedelta(seconds=5))
 
     def test_disposition_uses_the_server_recorded_open_time_not_the_client_clock(self):
         # the exact bug this fixes: the client reports a tiny duration

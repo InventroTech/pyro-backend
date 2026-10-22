@@ -9,6 +9,7 @@ must never stop an RM's call outcome from being saved.
 """
 
 import logging
+from datetime import timedelta
 
 from django.utils import timezone
 
@@ -16,6 +17,14 @@ from analytics.models import RmActivityEvent, RmCallSession
 from authz.models import TenantMembership
 
 logger = logging.getLogger(__name__)
+
+# How long an unconsumed RmCallSession stays authoritative. Mirrors the
+# frontend's own staleness cutoff (LEAD_START_TIME_MAX_AGE_MS in
+# bob/.../lead-card-carousel/utils.ts) — long enough that no single lead
+# legitimately stays open this long, short enough that a lead abandoned
+# mid-shift and genuinely reopened later starts a fresh, accurate session
+# instead of eventually computing a multi-day duration_seconds.
+LEAD_OPEN_SESSION_MAX_AGE = timedelta(hours=12)
 
 # the four status-updating events the lead card carousel already sends today —
 # see bob/src/components/page-builder/lead-card-carousel/useLeadCardCarousel.ts
@@ -75,6 +84,18 @@ def record_lead_opened(event_name, record, tenant, request_user):
     that resets if that happens. Deliberately fails silently like
     record_lead_touch_event below — a bug here must never block the RM's
     actual call or disposition.
+
+    Idempotent while a session is still fresh: repeated "lead.opened" events
+    for the same (tenant, rm_user_id, lead_record) — a parent re-render, a
+    same-lead realtime re-fetch, or the frontend's own duplicate-open guard
+    losing track of an already-open lead (e.g. a discarded/reloaded tab) —
+    do NOT push started_at forward. Production showed this happening
+    intermittently (the client-side guard alone wasn't reliable enough), and
+    each spurious re-stamp was silently corrupting the eventual
+    duration_seconds to measure from the restart instead of the real open
+    time. Only a genuinely stale session (older than
+    LEAD_OPEN_SESSION_MAX_AGE, i.e. an abandoned lead) gets overwritten with
+    a fresh start.
     """
     if event_name != "lead.opened" or tenant is None or record is None:
         return
@@ -82,6 +103,11 @@ def record_lead_opened(event_name, record, tenant, request_user):
     try:
         rm_user_id = getattr(request_user, "supabase_uid", None)
         if not rm_user_id:
+            return
+        existing = RmCallSession.objects.filter(
+            tenant=tenant, rm_user_id=rm_user_id, lead_record=record
+        ).first()
+        if existing is not None and timezone.now() - existing.started_at <= LEAD_OPEN_SESSION_MAX_AGE:
             return
         RmCallSession.objects.update_or_create(
             tenant=tenant,
