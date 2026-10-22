@@ -654,9 +654,9 @@ class CurrentUserRoleView(APIView):
             'department': getattr(membership, 'department', None),
             'error': error,
         }
-        if tenant is not None:
+        if tenant:
             payload['tenant_slug'] = tenant.slug
-        if membership is not None:
+        if membership:
             payload['is_active'] = membership.is_active
             payload['tenant_membership_id'] = membership.id
             payload['user_parent_id'] = membership.user_parent_id_id
