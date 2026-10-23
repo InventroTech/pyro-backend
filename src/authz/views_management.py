@@ -13,6 +13,7 @@ from django.utils import timezone
 import jwt
 
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from authentication.tokens import TokenConfigurationError, sign_access_token
 from authz.permissions import IsTenantAuthenticated, HasPermissionKey
 from authz.models import Role, TenantMembership
 from .serializers import RoleListSerializer, CreateSyncedRoleSerializer, TenantMembershipUserSerializer
@@ -579,8 +580,9 @@ class SpoofTenantUserTokenView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        signs_own_tokens = settings.AUTH_PROVIDER == "django"
         jwt_secret = getattr(settings, "SUPABASE_JWT_SECRET", None)
-        if not jwt_secret:
+        if not signs_own_tokens and not jwt_secret:
             return Response(
                 {"error": "SUPABASE_JWT_SECRET is not configured"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -604,9 +606,19 @@ class SpoofTenantUserTokenView(APIView):
             },
         }
 
-        token = jwt.encode(payload, jwt_secret, algorithm="HS256")
-        if isinstance(token, bytes):
-            token = token.decode("utf-8")
+        if signs_own_tokens:
+            # Expires like a normal login (AUTH_ACCESS_TOKEN_TTL_SECONDS); no refresh token.
+            try:
+                token = sign_access_token(payload)
+            except TokenConfigurationError:
+                return Response(
+                    {"error": "AUTH_JWT_SECRET is not configured"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+        else:
+            token = jwt.encode(payload, jwt_secret, algorithm="HS256")
+            if isinstance(token, bytes):
+                token = token.decode("utf-8")
 
         # Lightweight audit metadata in the response for the caller; full audit should go to logs.
         audit_meta = {

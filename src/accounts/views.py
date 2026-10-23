@@ -444,6 +444,29 @@ def _slugify_tenant_slug(raw: str) -> str:
     return re.sub(r"-+", "-", s).strip("-") or ""
 
 
+class TenantBySlugView(APIView):
+    """
+    Resolve a tenant from the application database by slug.
+
+    The SPA used to read public.tenants through Supabase PostgREST. That table
+    is not the AWS database this API uses.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        slug = _slugify_tenant_slug(request.query_params.get("slug") or "")
+        if not slug:
+            return Response({"error": "slug is required"}, status=status.HTTP_400_BAD_REQUEST)
+        tenant = Tenant.objects.filter(slug=slug).only("id", "slug", "name").first()
+        if tenant is None:
+            return Response({"error": "Tenant not found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(
+            {"id": str(tenant.id), "slug": tenant.slug, "name": tenant.name},
+            status=status.HTTP_200_OK,
+        )
+
+
 class SetupNewTenantView(APIView):
     """
     Signup flow: create tenant → PYRO_ADMIN role → TenantMembership.
