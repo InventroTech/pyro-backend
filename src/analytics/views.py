@@ -18,7 +18,7 @@ from support_ticket.records import (
     support_ticket_records_qs,
 )
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from django.utils import timezone
 from django.db.models import Count, Sum, Avg
 import uuid
@@ -65,7 +65,9 @@ from .serializers import (
     CseMemberBreakdownSerializer,
     CseFilterOptionsSerializer,
     CseTimeSeriesSerializer,
+    RmActivityEventSerializer,
 )
+from .models import RmActivityEvent
 
 
 # "How many support tickets did each executive resolve last week?"
@@ -1800,3 +1802,165 @@ class AnalyticsBoardDetailView(APIView):
             report_id=str(report_id),
         ).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class RmActivityEventPagination(MetaPageNumberPagination):
+    page_size = 500
+    max_page_size = 2000
+
+
+class RmActivityEventListView(TenantScopedMixin, ListAPIView):
+    """RM PRD analytics — rm_activity_events rows for the current tenant."""
+
+    queryset = RmActivityEvent.objects.all()
+    serializer_class = RmActivityEventSerializer
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated]
+    pagination_class = RmActivityEventPagination
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+
+        from_param = self.request.query_params.get("from", "").strip()
+        to_param = self.request.query_params.get("to", "").strip()
+        if not from_param and not to_param:
+            today = timezone.now().date().isoformat()
+            from_param = to_param = today
+
+        if from_param:
+            qs = qs.filter(event_data__started_at__gte=from_param)
+        if to_param:
+            try:
+                to_date = datetime.strptime(to_param, "%Y-%m-%d").date()
+                upper_bound = (to_date + timedelta(days=1)).isoformat()
+                qs = qs.filter(event_data__started_at__lt=upper_bound)
+            except ValueError:
+                pass
+
+        rm_user_id = self.request.query_params.get("rm_user_id", "").strip()
+        if rm_user_id:
+            qs = qs.filter(event_data__rm_user_id=rm_user_id)
+
+        manager_user_id = self.request.query_params.get("manager_user_id", "").strip()
+        if manager_user_id:
+            team_user_ids = TeamResolver.get_team_user_ids(manager_user_id, self.request.tenant)
+            qs = qs.filter(event_data__rm_user_id__in=team_user_ids)
+
+        return qs.order_by("id")
+
+
+class RmDailyTargetsView(APIView):
+    """RM PRD analytics — each RM's trial target summed across from/to dates."""
+
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from authz.models import TenantMembership
+        from user_settings.services import USER_KV_DAILY_TARGET_KEY, kv_int_by_membership
+
+        tenant = request.tenant
+
+        from_param = request.query_params.get("from", "").strip()
+        to_param = request.query_params.get("to", "").strip()
+        if from_param and to_param:
+            try:
+                date_from = datetime.strptime(from_param, "%Y-%m-%d").date()
+                date_to = datetime.strptime(to_param, "%Y-%m-%d").date()
+            except ValueError:
+                return Response(
+                    {"error": "Invalid date format. Use YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            today = timezone.now().date()
+            date_from = date_to = today
+
+        memberships = TenantMembership.objects.filter(
+            tenant=tenant, is_active=True, user_id__isnull=False,
+        ).values("id", "user_id")
+
+        rm_user_ids_param = request.query_params.get("rm_user_ids", "").strip()
+        if rm_user_ids_param:
+            rm_user_ids = {v.strip() for v in rm_user_ids_param.split(",") if v.strip()}
+            memberships = memberships.filter(user_id__in=rm_user_ids)
+
+        membership_id_to_user_id = {m["id"]: str(m["user_id"]) for m in memberships}
+        membership_ids = list(membership_id_to_user_id.keys())
+        num_days = (date_to - date_from).days + 1
+        if num_days <= 0 or not membership_ids:
+            return Response({})
+
+        fallback_by_membership = kv_int_by_membership(
+            tenant, membership_ids, USER_KV_DAILY_TARGET_KEY
+        )
+        targets = {
+            membership_id_to_user_id[membership_id]: fallback_by_membership.get(membership_id, 0) * num_days
+            for membership_id in membership_ids
+        }
+        return Response(targets)
+
+
+class RmPrdFilterOptionsView(APIView):
+    """Real values for the RM PRD analytics filter bar."""
+
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from authz.models import TenantMembership
+        from user_settings.geo_party_catalog import resolve_catalog_name
+        from user_settings.models import Group
+        from user_settings.services import (
+            USER_KV_STATE_KEY,
+            get_lead_filter_options,
+            kv_int_by_membership,
+        )
+
+        tenant = request.tenant
+
+        manager_role_keys = [
+            key.strip()
+            for key in request.query_params.get("manager_role_keys", "").split(",")
+            if key.strip()
+        ]
+        manager_qs = TenantMembership.objects.filter(tenant=tenant, is_active=True)
+        if manager_role_keys:
+            manager_qs = manager_qs.filter(role__key__in=manager_role_keys)
+        else:
+            manager_qs = manager_qs.filter(direct_reports__isnull=False)
+
+        managers = list(
+            manager_qs
+            .exclude(name__isnull=True)
+            .exclude(name="")
+            .values_list("name", flat=True)
+            .distinct()
+            .order_by("name")
+        )
+
+        active_membership_ids = list(
+            TenantMembership.objects.filter(tenant=tenant, is_active=True).values_list("id", flat=True)
+        )
+        state_by_membership = kv_int_by_membership(tenant, active_membership_ids, USER_KV_STATE_KEY)
+        state_ids = sorted({v for v in state_by_membership.values()})
+        states = [
+            {"value": str(state_id), "label": resolve_catalog_name("states", state_id) or str(state_id)}
+            for state_id in state_ids
+        ]
+
+        lead_options = get_lead_filter_options(tenant)
+        lead_groups = sorted(
+            Group.objects.filter(tenant=tenant)
+            .exclude(name__isnull=True)
+            .exclude(name="")
+            .values_list("name", flat=True)
+            .distinct()
+        )
+
+        return Response({
+            "managers": managers,
+            "lead_groups": lead_groups,
+            "states": states,
+            "parties": lead_options.get("lead_types", []),
+        })

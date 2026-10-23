@@ -41,6 +41,7 @@ urlpatterns = [
     path('support-ticket/', include('support_ticket.urls')),
     path('user-settings/', include('user_settings.urls')),
     path('pages/', include('pages.urls')),
+    path('notifications/', include('notifications.urls')),
     path('openai/', include('openai_api.urls')),
     path('email/', include('email_protocol.urls')),
     path('whatsapp/', include('whatsapp.urls')),

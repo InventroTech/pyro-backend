@@ -1,4 +1,5 @@
 import uuid
+from django.contrib.postgres.indexes import GinIndex
 from django.db import models
 
 from core.models import BaseModel
@@ -96,3 +97,32 @@ class AnalyticsRunCore(HistoryTrackedModel, BaseModel):
             models.Index(fields=["user_id", "created_at"]),
             models.Index(fields=["status"]),
         ]
+
+
+class RmActivityEvent(BaseModel):
+    """
+    One row per RM activity (call touch, login/logout, break). RM PRD reads this table.
+    """
+
+    EVENT_TYPE_CHOICES = [
+        ("CALL_TOUCH", "Call touch"),
+        ("LOGIN", "Login"),
+        ("LOGOUT", "Logout"),
+        ("BREAK_START", "Break start"),
+        ("BREAK_END", "Break end"),
+    ]
+
+    event_type = models.CharField(max_length=20, choices=EVENT_TYPE_CHOICES, db_index=True)
+    event_data = models.JSONField(default=dict, blank=True)
+
+    class Meta(BaseModel.Meta):
+        db_table = "rm_activity_events"
+        indexes = [
+            *BaseModel.Meta.indexes,
+            models.Index(fields=["tenant", "event_type"], name="rm_events_tenant_type_idx"),
+            GinIndex(fields=["event_data"], name="rm_events_data_gin_idx"),
+        ]
+
+    def __str__(self):
+        data = self.event_data or {}
+        return f"RmActivityEvent({data.get('rm_name')}:{self.event_type}:{data.get('started_at')})"

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from django.conf import settings
 from django.db import models
 from django.contrib.contenttypes.models import ContentType
 
-from accounts.models import SupabaseAuthUser
 from core.models import BaseModel
 from core.soft_delete import (
     alive_q,
@@ -47,8 +47,12 @@ class ObjectHistory(BaseModel):
     object_id = models.TextField()
     object_repr = models.TextField()
     action = models.CharField(max_length=32)
+    # Keyed on the user's UUID (supabase_uid). No DB constraint: older rows may reference
+    # accounts that no longer exist, and the audit trail must survive that.
     actor_user = models.ForeignKey(
-        SupabaseAuthUser,
+        settings.AUTH_USER_MODEL,
+        to_field="supabase_uid",
+        db_constraint=False,
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
