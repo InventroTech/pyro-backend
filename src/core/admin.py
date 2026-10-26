@@ -10,7 +10,7 @@ class TenantSettingsAdmin(admin.ModelAdmin):
         "persistent_object_history",
         "chatbot_page_owner_email",
         "inactive_emails_enabled",
-        "inactive_login_days",
+        "inactive_login_hours",
     )
     list_filter = ("persistent_object_history", "inactive_emails_enabled")
     search_fields = ("tenant_id", "chatbot_page_owner_email")
@@ -19,5 +19,5 @@ class TenantSettingsAdmin(admin.ModelAdmin):
         "persistent_object_history",
         "chatbot_page_owner_email",
         "inactive_emails_enabled",
-        "inactive_login_days",
+        "inactive_login_hours",
     )

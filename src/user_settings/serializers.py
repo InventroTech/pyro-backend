@@ -157,8 +157,8 @@ class InactiveEmailPolicySerializer(serializers.Serializer):
     """Settings-page payload for the inactive-email rule."""
 
     enabled = serializers.BooleanField(required=False)
-    inactive_after_days = serializers.IntegerField(
+    inactive_after_hours = serializers.IntegerField(
         required=False,
         min_value=1,
-        max_value=3650,
+        max_value=8760,
     )

@@ -74,14 +74,14 @@ class TenantSettings(HistoryTrackedModel, models.Model):
     inactive_emails_enabled = models.BooleanField(
         default=True,
         help_text=(
-            "When enabled, an email with no login for inactive_login_days "
-            "consecutive days is marked inactive."
+            "When enabled, the settings user list counts an email as inactive "
+            "after inactive_login_hours without a login. Memberships stay active."
         ),
     )
-    inactive_login_days = models.PositiveIntegerField(
+    inactive_login_hours = models.PositiveIntegerField(
         default=72,
-        validators=[MinValueValidator(1), MaxValueValidator(3650)],
-        help_text="Consecutive days without a login before an email is marked inactive.",
+        validators=[MinValueValidator(1), MaxValueValidator(8760)],
+        help_text="Consecutive hours without a login before the settings list counts an email as inactive.",
     )
 
     class Meta:

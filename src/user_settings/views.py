@@ -745,8 +745,8 @@ class GroupDetailView(APIView):
 
 class InactiveEmailPolicyView(APIView):
     """
-    Settings-page control for marking emails inactive after consecutive days
-    without a login. Default is 72 days, and the rule is on until changed.
+    Settings-page hour threshold for who counts as inactive. Default is 72 hours.
+    This does not turn memberships off.
     Sign-in time shown on the user list is auth.users.last_sign_in_at, or
     authentication.User.last_login when AUTH_PROVIDER is django.
     """
@@ -770,6 +770,6 @@ class InactiveEmailPolicyView(APIView):
             save_inactive_email_policy(
                 request.tenant,
                 enabled=data.get("enabled"),
-                inactive_after_days=data.get("inactive_after_days"),
+                inactive_after_hours=data.get("inactive_after_hours"),
             )
         )

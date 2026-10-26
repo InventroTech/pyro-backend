@@ -1,31 +1,25 @@
 """
-Mark a tenant email inactive after a stretch of days with no sign-in.
+Hour threshold and last sign-in time for the settings user list.
 
-The settings page reads that time on the user list and edits the day threshold
-here. Supabase stores it on auth.users.last_sign_in_at. Django auth
-(AUTH_PROVIDER=django) stores it on authentication.User.last_login.
+Nothing here turns a membership off. Supabase stores the time on
+auth.users.last_sign_in_at. Django auth (AUTH_PROVIDER=django) stores it on
+authentication.User.last_login.
 """
 from __future__ import annotations
 
-import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from django.conf import settings
 from django.db.models import Q
 from django.db.models.functions import Lower
-from django.utils import timezone
 
 from accounts.models import SupabaseAuthUser
 from authentication.models import User
-from authz.models import TenantMembership
-from authz.service import drop_permissions_cache
 from core.models import TenantSettings
 
-logger = logging.getLogger(__name__)
-
-DEFAULT_INACTIVE_LOGIN_DAYS = 72
-MIN_INACTIVE_LOGIN_DAYS = 1
-MAX_INACTIVE_LOGIN_DAYS = 3650
+DEFAULT_INACTIVE_LOGIN_HOURS = 72
+MIN_INACTIVE_LOGIN_HOURS = 1
+MAX_INACTIVE_LOGIN_HOURS = 8760
 
 
 def _uses_django_login() -> bool:
@@ -33,35 +27,35 @@ def _uses_django_login() -> bool:
 
 
 def inactive_email_policy(tenant) -> dict:
-    """Current policy for the settings page. Missing rows use the 72-day default."""
+    """Current policy for the settings page. Missing rows use the 72-hour default."""
     row = None
     if tenant is not None and getattr(tenant, "pk", None) is not None:
         row = TenantSettings.objects.filter(pk=tenant.pk).first()
     if row is None:
         return {
             "enabled": True,
-            "inactive_after_days": DEFAULT_INACTIVE_LOGIN_DAYS,
+            "inactive_after_hours": DEFAULT_INACTIVE_LOGIN_HOURS,
         }
-    days = row.inactive_login_days
-    if not isinstance(days, int) or days < MIN_INACTIVE_LOGIN_DAYS:
-        days = DEFAULT_INACTIVE_LOGIN_DAYS
-    if days > MAX_INACTIVE_LOGIN_DAYS:
-        days = MAX_INACTIVE_LOGIN_DAYS
+    hours = row.inactive_login_hours
+    if not isinstance(hours, int) or hours < MIN_INACTIVE_LOGIN_HOURS:
+        hours = DEFAULT_INACTIVE_LOGIN_HOURS
+    if hours > MAX_INACTIVE_LOGIN_HOURS:
+        hours = MAX_INACTIVE_LOGIN_HOURS
     return {
         "enabled": bool(row.inactive_emails_enabled),
-        "inactive_after_days": days,
+        "inactive_after_hours": hours,
     }
 
 
-def save_inactive_email_policy(tenant, *, enabled=None, inactive_after_days=None) -> dict:
+def save_inactive_email_policy(tenant, *, enabled=None, inactive_after_hours=None) -> dict:
     row, _created = TenantSettings.objects.get_or_create(tenant=tenant)
     update_fields = []
     if enabled is not None:
         row.inactive_emails_enabled = bool(enabled)
         update_fields.append("inactive_emails_enabled")
-    if inactive_after_days is not None:
-        row.inactive_login_days = int(inactive_after_days)
-        update_fields.append("inactive_login_days")
+    if inactive_after_hours is not None:
+        row.inactive_login_hours = int(inactive_after_hours)
+        update_fields.append("inactive_login_hours")
     if update_fields:
         row.save(update_fields=update_fields)
     return inactive_email_policy(tenant)
@@ -159,40 +153,3 @@ def last_sign_in_at_by_membership_id(memberships) -> dict[int, datetime | None]:
         membership_id: signed_in_at
         for membership_id, (signed_in_at, _anchor) in _login_times(memberships).items()
     }
-
-
-def deactivate_inactive_emails(*, tenant) -> int:
-    """
-    Mark active memberships inactive when the last sign-in is at least
-    inactive_after_days ago.
-
-    An email that has never signed in is measured from auth.users.created_at
-    on Supabase, or from the membership created_at on Django auth and when
-    there is no auth row.
-    """
-    policy = inactive_email_policy(tenant)
-    if not policy["enabled"]:
-        return 0
-
-    cutoff = timezone.now() - timedelta(days=policy["inactive_after_days"])
-    memberships = list(TenantMembership.objects.filter(tenant=tenant, is_active=True))
-    times = _login_times(memberships)
-    count = 0
-    for membership in memberships:
-        signed_in_at, anchor = times.get(membership.id, (None, membership.created_at))
-        reference = signed_in_at if signed_in_at is not None else anchor
-        if reference is None or reference > cutoff:
-            continue
-        membership.is_active = False
-        membership.save(update_fields=["is_active"])
-        if membership.user_id:
-            drop_permissions_cache(str(membership.user_id), tenant)
-        count += 1
-    if count:
-        logger.info(
-            "Marked %s email(s) inactive for tenant %s after %s days without a sign-in",
-            count,
-            tenant.pk,
-            policy["inactive_after_days"],
-        )
-    return count
