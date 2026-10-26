@@ -14,6 +14,7 @@ from .views import (
     GroupListCreateView,
     GroupDetailView,
     MyLeadGroupSummaryView,
+    InactiveEmailPolicyView,
 )
 
 urlpatterns = [
@@ -53,6 +54,11 @@ urlpatterns = [
     ),
     path("lead-filter-options/", LeadFilterOptionsView.as_view(), name="lead-filter-options"),
     path("queue-types/", QueueTypesListView.as_view(), name="queue-types-list"),
+    path(
+        "inactive-email-policy/",
+        InactiveEmailPolicyView.as_view(),
+        name="inactive-email-policy",
+    ),
     path("groups/", GroupListCreateView.as_view(), name="groups-list-create"),
     path("groups/<int:pk>/", GroupDetailView.as_view(), name="groups-detail"),
 ]
