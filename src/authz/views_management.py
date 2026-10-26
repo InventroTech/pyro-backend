@@ -19,6 +19,7 @@ from .serializers import RoleListSerializer, CreateSyncedRoleSerializer, TenantM
 from .service import create_or_sync_role
 from user_settings.geo_party_catalog import load_geo_party_catalog
 from user_settings.models import Group, TenantMemberSetting
+from user_settings.inactivity import last_sign_in_at_by_membership_id
 from user_settings.services import (
     USER_KV_DISTRICT_KEY,
     USER_KV_GROUP_ID_KEY,
@@ -373,9 +374,12 @@ class ListTenantUsersView(APIView):
                 for g in Group.objects.filter(tenant=request.tenant, id__in=group_ids).only("id", "name")
             }
         
+        sign_in_at = last_sign_in_at_by_membership_id(memberships)
+
         # Add name and company_name fields to each result (from TenantMembership)
         for i, item in enumerate(data):
             membership = memberships[i]
+            item["last_sign_in_at"] = sign_in_at.get(membership.id)
             # Use TenantMembership.name directly (migrated from LegacyUser)
             item['name'] = membership.name or ''
             # Include company_name if serializer doesn't already include it
