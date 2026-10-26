@@ -14,6 +14,7 @@ from .serializers import (
     LeadTypeAssignmentSerializer,
     UserCoreKVSettingsPatchSerializer,
     GroupSerializer,
+    InactiveEmailPolicySerializer,
 )
 from .services import (
     coerce_kv_int,
@@ -740,3 +741,35 @@ class GroupDetailView(APIView):
         group = self.get_object(tenant, pk)
         group.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class InactiveEmailPolicyView(APIView):
+    """
+    Settings-page control for marking emails inactive after consecutive days
+    without a login. Default is 72 days, and the rule is on until changed.
+    Sign-in time shown on the user list is auth.users.last_sign_in_at, or
+    authentication.User.last_login when AUTH_PROVIDER is django.
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from user_settings.inactivity import inactive_email_policy
+
+        return Response(inactive_email_policy(request.tenant))
+
+    def patch(self, request):
+        from user_settings.inactivity import inactive_email_policy, save_inactive_email_policy
+
+        serializer = InactiveEmailPolicySerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        if not data:
+            return Response(inactive_email_policy(request.tenant))
+        return Response(
+            save_inactive_email_policy(
+                request.tenant,
+                enabled=data.get("enabled"),
+                inactive_after_days=data.get("inactive_after_days"),
+            )
+        )

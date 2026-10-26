@@ -37,6 +37,10 @@ class JobType(models.TextChoices):
         "snapshot_rm_daily_targets",
         "Snapshot RM Daily Targets",
     )
+    DEACTIVATE_INACTIVE_EMAILS = (
+        "deactivate_inactive_emails",
+        "Deactivate Inactive Emails",
+    )
     # Future job types can be added here:
     # SEND_EMAIL = "send_email", "Send Email"
     # GENERATE_REPORT = "generate_report", "Generate Report"

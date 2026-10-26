@@ -26,6 +26,7 @@ from .scheduler_locks import (
     SCHEDULER_LOCK_SHIPMENT_TRACKING,
     SCHEDULER_LOCK_ZOHO_SHIPMENT_EMAILS,
     SCHEDULER_LOCK_RM_DAILY_TARGET_SNAPSHOT,
+    SCHEDULER_LOCK_INACTIVE_EMAILS,
     scheduler_lock,
 )
 from .tenant_jobs import enqueue_for_all_tenants
@@ -74,6 +75,8 @@ class JobProcessor:
         # tracked by date, not elapsed seconds, so it fires once per real day
         # regardless of how often the worker loop ticks
         self._last_rm_daily_target_snapshot_date = None
+        # Calendar date we last enqueued the inactive-email scan.
+        self._last_inactive_email_scan_date = None
         self._run_schedulers = True
         # Circuit breaker state for connection errors
         self._connection_error_count = 0
@@ -587,6 +590,36 @@ class JobProcessor:
                 exc_info=True,
             )
 
+    def _maybe_enqueue_inactive_email_scan(self):
+        """
+        Once per calendar day, enqueue a job per tenant that marks emails
+        inactive after the configured stretch without a login (default 72 days).
+        """
+        today = timezone.now().date()
+        if self._last_inactive_email_scan_date == today:
+            return
+        self._last_inactive_email_scan_date = today
+        try:
+            with scheduler_lock(SCHEDULER_LOCK_INACTIVE_EMAILS) as acquired:
+                if not acquired:
+                    return
+                queue = get_queue_service()
+                jobs = enqueue_for_all_tenants(
+                    queue,
+                    job_type=JobType.DEACTIVATE_INACTIVE_EMAILS,
+                    payload={},
+                    priority=0,
+                )
+            logger.info(
+                f"[Worker {self.worker_id}] Enqueued deactivate_inactive_emails for %s tenant(s)",
+                len(jobs),
+            )
+        except Exception as e:
+            logger.warning(
+                f"[Worker {self.worker_id}] Failed to enqueue inactive email scan: {e}",
+                exc_info=True,
+            )
+
     def process_next_job(self, tenant_id: Optional[str] = None) -> bool:
         """
         Process the next available job.
@@ -694,6 +727,8 @@ class JobProcessor:
                     self._maybe_enqueue_zoho_shipment_email_sync()
                     # Once a day: freeze each RM's DAILY_TARGET for the day that just ended
                     self._maybe_enqueue_rm_daily_target_snapshot()
+                    # Once a day: mark emails inactive after the configured days without a login
+                    self._maybe_enqueue_inactive_email_scan()
 
                 if jobs_processed > 0:
                     logger.debug(

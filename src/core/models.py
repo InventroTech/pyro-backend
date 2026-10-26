@@ -1,7 +1,7 @@
 import uuid
 from django.db import models
 from django.utils import timezone
-from django.core.validators import RegexValidator
+from django.core.validators import MaxValueValidator, MinValueValidator, RegexValidator
 
 from core.soft_delete import SoftDeleteMixin
 from object_history.tracking import HistoryTrackedModel
@@ -70,6 +70,18 @@ class TenantSettings(HistoryTrackedModel, models.Model):
             "Must match an active tenant membership with a linked user_id. "
             "Falls back to env CHATBOT_PAGE_OWNER_EMAIL if empty."
         ),
+    )
+    inactive_emails_enabled = models.BooleanField(
+        default=True,
+        help_text=(
+            "When enabled, an email with no login for inactive_login_days "
+            "consecutive days is marked inactive."
+        ),
+    )
+    inactive_login_days = models.PositiveIntegerField(
+        default=72,
+        validators=[MinValueValidator(1), MaxValueValidator(3650)],
+        help_text="Consecutive days without a login before an email is marked inactive.",
     )
 
     class Meta:

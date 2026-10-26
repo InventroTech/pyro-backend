@@ -380,6 +380,8 @@ register(
     track_fields=[
         "tenant_id",
         "persistent_object_history",
+        "inactive_emails_enabled",
+        "inactive_login_days",
     ],
     redact_fields=set(),
     snapshot_strategy="minimal",

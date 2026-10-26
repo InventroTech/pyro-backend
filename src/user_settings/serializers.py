@@ -151,3 +151,14 @@ class GroupSerializer(serializers.ModelSerializer):
         if not isinstance(value, dict):
             raise serializers.ValidationError("group_data must be a JSON object")
         return value
+
+
+class InactiveEmailPolicySerializer(serializers.Serializer):
+    """Settings-page payload for the inactive-email rule."""
+
+    enabled = serializers.BooleanField(required=False)
+    inactive_after_days = serializers.IntegerField(
+        required=False,
+        min_value=1,
+        max_value=3650,
+    )

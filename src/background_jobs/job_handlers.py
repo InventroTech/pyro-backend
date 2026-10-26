@@ -1745,6 +1745,30 @@ class RmDailyTargetSnapshotJobHandler(JobHandler):
         return delays[min(attempt - 1, len(delays) - 1)]
 
 
+class DeactivateInactiveEmailsJobHandler(JobHandler):
+    """
+    Marks tenant emails inactive when they have not logged in for the
+    number of consecutive days configured on the settings page (default 72).
+    Sign-in time is auth.users.last_sign_in_at, or User.last_login when
+    AUTH_PROVIDER is django.
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        from user_settings.inactivity import deactivate_inactive_emails
+
+        tenant = job.tenant
+        if tenant is None:
+            job.result = {"deactivated": 0}
+            return True
+        count = deactivate_inactive_emails(tenant=tenant)
+        job.result = {"deactivated": count}
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+
 class JobHandlerRegistry:
     """
     Registry for job handlers.
@@ -1778,6 +1802,10 @@ class JobHandlerRegistry:
         # Praja handler removed - now using MixpanelService instead
         self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
         self.register_handler(JobType.SNAPSHOT_RM_DAILY_TARGETS, RmDailyTargetSnapshotJobHandler())
+        self.register_handler(
+            JobType.DEACTIVATE_INACTIVE_EMAILS,
+            DeactivateInactiveEmailsJobHandler(),
+        )
     
     def register_handler(self, job_type: str, handler: JobHandler):
         """
