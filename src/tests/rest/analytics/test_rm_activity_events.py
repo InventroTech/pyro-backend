@@ -114,15 +114,20 @@ class RecordLeadOpenedTests(BaseAPITestCase):
 
     def test_only_acts_on_lead_opened_event(self):
         before = RmCallSession.objects.count()
-        record_lead_opened("lead.trial_activated", self.record, self.tenant, self.user)
+        record_lead_opened("lead.trial_activated", self.record, {}, self.tenant, self.user)
         self.assertEqual(RmCallSession.objects.count(), before)
 
     def test_stamps_a_session_for_lead_opened(self):
-        record_lead_opened("lead.opened", self.record, self.tenant, self.user)
+        record_lead_opened("lead.opened", self.record, {}, self.tenant, self.user)
         session = RmCallSession.objects.get(
             tenant=self.tenant, rm_user_id=self.supabase_uid, lead_record=self.record
         )
         self.assertAlmostEqual(session.started_at, timezone.now(), delta=timedelta(seconds=5))
+
+    def test_stamps_opened_from_the_payload(self):
+        record_lead_opened("lead.opened", self.record, {"opened_from": "Pending Leads"}, self.tenant, self.user)
+        session = RmCallSession.objects.get(tenant=self.tenant, lead_record=self.record)
+        self.assertEqual(session.opened_from, "Pending Leads")
 
     def test_reopening_a_fresh_session_does_not_push_started_at_forward(self):
         # the exact bug seen in production: a spurious duplicate "lead.opened"
@@ -130,16 +135,19 @@ class RecordLeadOpenedTests(BaseAPITestCase):
         # already-open lead after a discarded/reloaded tab) must not reset
         # the clock — the eventual duration_seconds has to measure from the
         # real first open, not from whenever the duplicate event arrived.
-        record_lead_opened("lead.opened", self.record, self.tenant, self.user)
+        record_lead_opened("lead.opened", self.record, {"opened_from": "All Leads"}, self.tenant, self.user)
         first = RmCallSession.objects.get(tenant=self.tenant, lead_record=self.record)
         first.started_at = timezone.now() - timedelta(minutes=10)
         first.save(update_fields=["started_at"])
 
-        record_lead_opened("lead.opened", self.record, self.tenant, self.user)
+        # a duplicate open arriving from a DIFFERENT page must not steal
+        # attribution from the page that genuinely opened it first either
+        record_lead_opened("lead.opened", self.record, {"opened_from": "Pending Leads"}, self.tenant, self.user)
 
         self.assertEqual(RmCallSession.objects.filter(tenant=self.tenant, lead_record=self.record).count(), 1)
         unchanged = RmCallSession.objects.get(tenant=self.tenant, lead_record=self.record)
         self.assertEqual(unchanged.started_at, first.started_at)
+        self.assertEqual(unchanged.opened_from, "All Leads")
 
     def test_reopening_a_stale_session_overwrites_it_with_a_fresh_start(self):
         # an abandoned lead (RM opened it, never dispositioned it, walked
@@ -148,14 +156,16 @@ class RecordLeadOpenedTests(BaseAPITestCase):
         stale_started_at = timezone.now() - timedelta(hours=13)
         RmCallSession.objects.create(
             tenant=self.tenant, rm_user_id=self.supabase_uid, lead_record=self.record, started_at=stale_started_at,
+            opened_from="All Leads",
         )
 
-        record_lead_opened("lead.opened", self.record, self.tenant, self.user)
+        record_lead_opened("lead.opened", self.record, {"opened_from": "Pending Leads"}, self.tenant, self.user)
 
         self.assertEqual(RmCallSession.objects.filter(tenant=self.tenant, lead_record=self.record).count(), 1)
         refreshed = RmCallSession.objects.get(tenant=self.tenant, lead_record=self.record)
         self.assertGreater(refreshed.started_at, stale_started_at)
         self.assertAlmostEqual(refreshed.started_at, timezone.now(), delta=timedelta(seconds=5))
+        self.assertEqual(refreshed.opened_from, "Pending Leads")
 
     def test_disposition_uses_the_server_recorded_open_time_not_the_client_clock(self):
         # the exact bug this fixes: the client reports a tiny duration
@@ -164,16 +174,29 @@ class RecordLeadOpenedTests(BaseAPITestCase):
         started_at = timezone.now() - timedelta(minutes=37, seconds=28)
         RmCallSession.objects.create(
             tenant=self.tenant, rm_user_id=self.supabase_uid, lead_record=self.record, started_at=started_at,
+            opened_from="All Leads",
         )
         record_lead_touch_event(
             "lead.trial_activated", self.record, {"duration_seconds": 2}, self.tenant, self.user,
         )
         row = RmActivityEvent.objects.latest("id")
         self.assertGreaterEqual(row.event_data["duration_seconds"], 37 * 60)
+        self.assertEqual(row.event_data["opened_from"], "All Leads")
         self.assertFalse(
             RmCallSession.objects.filter(tenant=self.tenant, lead_record=self.record).exists(),
             "the session must be consumed (deleted) once its disposition is logged",
         )
+
+    def test_disposition_falls_back_to_payload_opened_from_when_no_session_exists(self):
+        # a disposition logged without the lead ever going through
+        # record_lead_opened — the touch row should still carry whatever the
+        # disposition-time payload itself says, rather than crash/omit it
+        record_lead_touch_event(
+            "lead.trial_activated", self.record, {"duration_seconds": 42, "opened_from": "Pending Leads"},
+            self.tenant, self.user,
+        )
+        row = RmActivityEvent.objects.latest("id")
+        self.assertEqual(row.event_data["opened_from"], "Pending Leads")
 
     def test_falls_back_to_client_duration_when_no_session_was_recorded(self):
         # a disposition logged without the lead ever being opened in-app (no

@@ -2053,7 +2053,7 @@ class RecordEventView(TenantScopedMixin, APIView):
             # RM PRD analytics: stamp the real lead-open time ("lead.opened"
             # only; a no-op for every other event) and log a touch row for the 4
             # disposition events. Neither raises — see analytics/rm_activity.py.
-            record_lead_opened(event_name, record, request.tenant, request.user)
+            record_lead_opened(event_name, record, payload, request.tenant, request.user)
             record_lead_touch_event(event_name, record, payload, request.tenant, request.user)
 
             return Response({
