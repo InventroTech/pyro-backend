@@ -70,7 +70,7 @@ def _resolve_lead_group_name(tenant, membership):
         return None
 
 
-def record_lead_opened(event_name, record, tenant, request_user):
+def record_lead_opened(event_name, record, payload, tenant, request_user):
     """
     Called for every event the lead card carousel sends; only acts on
     "lead.opened", fired the instant a lead becomes the RM's current lead
@@ -96,6 +96,14 @@ def record_lead_opened(event_name, record, tenant, request_user):
     time. Only a genuinely stale session (older than
     LEAD_OPEN_SESSION_MAX_AGE, i.e. an abandoned lead) gets overwritten with
     a fresh start.
+
+    `payload.opened_from` is the page/carousel title the lead was opened
+    from (e.g. "All Leads", "Pending Leads") — stashed here and carried onto
+    the eventual CALL_TOUCH row by record_lead_touch_event, the same way
+    started_at is. Not updated when an existing fresh session is reused
+    (the idempotent-return above), so it stays whichever page genuinely
+    opened the lead first, not wherever a later re-render happened to fire
+    from.
     """
     if event_name != "lead.opened" or tenant is None or record is None:
         return
@@ -109,11 +117,12 @@ def record_lead_opened(event_name, record, tenant, request_user):
         ).first()
         if existing is not None and timezone.now() - existing.started_at <= LEAD_OPEN_SESSION_MAX_AGE:
             return
+        opened_from = (payload or {}).get("opened_from") or ""
         RmCallSession.objects.update_or_create(
             tenant=tenant,
             rm_user_id=rm_user_id,
             lead_record=record,
-            defaults={"started_at": timezone.now()},
+            defaults={"started_at": timezone.now(), "opened_from": opened_from},
         )
     except Exception:
         logger.exception(
@@ -167,10 +176,15 @@ def record_lead_touch_event(event_name, record, payload, tenant, request_user):
         )
         if call_session is not None:
             started_at = call_session.started_at
+            opened_from = call_session.opened_from
             duration_seconds = max(0, int((ended_at - started_at).total_seconds()))
             call_session.delete()
         else:
             started_at = ended_at - timezone.timedelta(seconds=duration_seconds) if duration_seconds else ended_at
+            # no session was recorded (e.g. a disposition logged without the
+            # lead ever going through record_lead_opened) — fall back to
+            # whatever the disposition-time payload itself says, if anything
+            opened_from = payload.get("opened_from") or ""
 
         # names are copied onto the row at write time so a dashboard query
         # never has to join back to the membership table (see RmActivityEvent docstring)
@@ -226,6 +240,7 @@ def record_lead_touch_event(event_name, record, payload, tenant, request_user):
                 "started_at": started_at.isoformat(),
                 "ended_at": ended_at.isoformat(),
                 "duration_seconds": duration_seconds,
+                "opened_from": opened_from,
             },
         )
     except Exception:
