@@ -2,8 +2,7 @@ from django.utils.deprecation import MiddlewareMixin
 from django.core.cache import cache
 from django.conf import settings
 from core.models import Tenant
-import jwt
-from jwt import ExpiredSignatureError, InvalidTokenError
+from authentication.tokens import verify_access_token
 
 SKIP_PATH_PREFIXES = ("/admin", "/health", "/_health", "/metrics", "/docs", "/schema",
                       "/auth", "/authentication", "/api/auth", "/sentry", "/favicon.ico",
@@ -27,12 +26,8 @@ def _get_tenant_id_from_jwt(request) -> str | None:
     if not token:
         return None
     
-    jwt_secret = getattr(settings, "SUPABASE_JWT_SECRET", None)
-    if not jwt_secret:
-        return None
-    
     try:
-        claims = jwt.decode(token, jwt_secret, algorithms=["HS256"], options={"verify_aud": False})
+        claims = verify_access_token(token)
         user_data = claims.get("user_data", {})
         tenant_id = user_data.get("tenant_id")
         if tenant_id:
@@ -57,7 +52,7 @@ def _get_tenant_id_from_jwt(request) -> str | None:
                 tid = str(membership)
                 cache.set(cache_key, tid, CACHE_TTL)
                 return tid
-    except (ExpiredSignatureError, InvalidTokenError, Exception):
+    except Exception:
         pass
     
     return None
