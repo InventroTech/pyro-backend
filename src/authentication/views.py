@@ -291,18 +291,17 @@ class PasswordResetConfirmView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        success, err_msg = _set_reset_password(uid, password)
+        success, _ = _set_reset_password(uid, password)
         PasswordResetOTP.objects.filter(email__iexact=email).delete()
 
         if not success:
             logger.error(
-                "[PasswordReset][confirm-password] admin_set_password_failed rid=%s %s err=%s",
+                "[PasswordReset][confirm-password] admin_set_password_failed rid=%s %s",
                 rid,
                 _email_log_tag(email),
-                err_msg,
             )
             return Response(
-                {"error": err_msg or "Could not update password."},
+                {"error": "Could not update password."},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 

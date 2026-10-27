@@ -180,8 +180,8 @@ class TokenRefreshView(APIView):
                 ip_address=_client_ip(request),
                 user_agent=_user_agent(request),
             )
-        except InvalidRefreshToken as exc:
-            return _error("invalid_grant", str(exc), status.HTTP_400_BAD_REQUEST)
+        except InvalidRefreshToken:
+            return _error("invalid_grant", "Invalid refresh token", status.HTTP_400_BAD_REQUEST)
         except TokenConfigurationError:
             logger.error("[Auth][refresh] AUTH_JWT_SECRET is not configured")
             return _error("auth_not_configured", "Login is not available", status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -216,8 +216,8 @@ class SupabaseSessionExchangeView(APIView):
         except TokenConfigurationError:
             logger.error("[Auth][supabase-exchange] JWT secret is not configured")
             return _error("auth_not_configured", "Login is not available", status.HTTP_503_SERVICE_UNAVAILABLE)
-        except jwt.InvalidTokenError as exc:
-            return _error("invalid_grant", f"Invalid token: {exc}", status.HTTP_400_BAD_REQUEST)
+        except jwt.InvalidTokenError:
+            return _error("invalid_grant", "Invalid token", status.HTTP_400_BAD_REQUEST)
 
         # Real Supabase logins carry exp + session_id; spoof tokens and our own tokens don't qualify.
         if claims.get("iss") == settings.AUTH_JWT_ISSUER or not claims.get("exp") or not claims.get("session_id"):

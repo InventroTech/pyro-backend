@@ -169,8 +169,12 @@ class VerifyEmailView(APIView):
     def post(self, request):
         try:
             user = confirm_email((request.data.get("token") or "").strip())
-        except InvalidVerificationToken as exc:
-            return _error("invalid_token", str(exc), status.HTTP_400_BAD_REQUEST)
+        except InvalidVerificationToken:
+            return _error(
+                "invalid_token",
+                "Confirmation link is invalid or has expired",
+                status.HTTP_400_BAD_REQUEST,
+            )
         try:
             session = start_session(user, ip_address=_client_ip(request), user_agent=_user_agent(request))
         except TokenConfigurationError:

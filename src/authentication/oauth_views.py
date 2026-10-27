@@ -156,7 +156,7 @@ class OAuthExchangeView(APIView):
         try:
             user = redeem_login_code((request.data.get("code") or "").strip())
         except OAuthError as exc:
-            return _error(exc.code, str(exc), status.HTTP_400_BAD_REQUEST)
+            return _error(exc.code, "Login code is invalid or expired", status.HTTP_400_BAD_REQUEST)
         try:
             session = start_session(user, ip_address=_client_ip(request), user_agent=_user_agent(request))
         except TokenConfigurationError:
