@@ -167,6 +167,61 @@ class RecordLeadOpenedTests(BaseAPITestCase):
         self.assertAlmostEqual(refreshed.started_at, timezone.now(), delta=timedelta(seconds=5))
         self.assertEqual(refreshed.opened_from, "Pending Leads")
 
+    def test_opening_a_different_lead_always_succeeds_and_does_not_disturb_the_other_ones_session(self):
+        # opening a lead must NEVER be blocked by another lead still being
+        # open, AND must not delete that other lead's session either — an
+        # RM can legitimately have two leads' sessions open at once (two
+        # tabs); any real overlap between them is resolved honestly later,
+        # at the aggregation layer (merged-interval Handling Time), not by
+        # discarding one of their sessions here.
+        other_record = Record.objects.create(
+            tenant=self.tenant, entity_type="lead", data={"praja_id": "2222222"},
+        )
+        record_lead_opened("lead.opened", self.record, {"opened_from": "All Leads"}, self.tenant, self.user)
+
+        record_lead_opened("lead.opened", other_record, {"opened_from": "Pending Leads"}, self.tenant, self.user)
+
+        sessions = RmCallSession.objects.filter(tenant=self.tenant, rm_user_id=self.supabase_uid)
+        self.assertEqual(sessions.count(), 2)
+        self.assertEqual(
+            {s.lead_record_id for s in sessions},
+            {self.record.id, other_record.id},
+        )
+
+    def test_a_lead_left_open_while_another_opens_still_gets_its_own_real_measured_duration(self):
+        # lead A opened, RM moves to lead B without dispositioning A — A's
+        # session must still be there, untouched, when A is eventually
+        # dispositioned, so its duration is a real server-measured span
+        # (however long that genuinely was), not silently discarded to
+        # "unknown". Whether that real span overlapped with B's is a
+        # Handling-Time aggregation concern (merged intervals), not
+        # something record_lead_touch_event itself needs to hide.
+        other_record = Record.objects.create(
+            tenant=self.tenant, entity_type="lead", data={"praja_id": "3333333"},
+        )
+        record_lead_opened("lead.opened", self.record, {"opened_from": "All Leads"}, self.tenant, self.user)
+        record_lead_opened("lead.opened", other_record, {"opened_from": "Pending Leads"}, self.tenant, self.user)
+
+        # the RM dispositions the still-open lead, self-reporting a
+        # suspiciously tiny duration — must be ignored either way, but the
+        # real point here is the session survives and gets used
+        record_lead_touch_event(
+            "lead.call_back_later", self.record, {"duration_seconds": 15}, self.tenant, self.user,
+        )
+
+        row = RmActivityEvent.objects.latest("id")
+        self.assertIsNotNone(row.event_data["duration_seconds"])
+        self.assertGreaterEqual(row.event_data["duration_seconds"], 0)
+        self.assertNotEqual(row.event_data["duration_seconds"], 15)
+        self.assertFalse(
+            RmCallSession.objects.filter(tenant=self.tenant, lead_record=self.record).exists(),
+            "the session must be consumed (deleted) once its disposition is logged",
+        )
+        # lead B's own session is untouched by A's disposition
+        self.assertTrue(
+            RmCallSession.objects.filter(tenant=self.tenant, lead_record=other_record).exists(),
+        )
+
     def test_disposition_uses_the_server_recorded_open_time_not_the_client_clock(self):
         # the exact bug this fixes: the client reports a tiny duration
         # because its own tab was backgrounded for the real call, but the
@@ -198,14 +253,15 @@ class RecordLeadOpenedTests(BaseAPITestCase):
         row = RmActivityEvent.objects.latest("id")
         self.assertEqual(row.event_data["opened_from"], "Pending Leads")
 
-    def test_falls_back_to_client_duration_when_no_session_was_recorded(self):
+    def test_does_not_trust_client_duration_when_no_session_was_recorded(self):
         # a disposition logged without the lead ever being opened in-app (no
-        # lead.opened was ever sent) — must not crash or zero itself out
+        # lead.opened was ever sent), or after its session was evicted — the
+        # client-supplied duration is never used; must not crash either
         record_lead_touch_event(
             "lead.trial_activated", self.record, {"duration_seconds": 42}, self.tenant, self.user,
         )
         row = RmActivityEvent.objects.latest("id")
-        self.assertEqual(row.event_data["duration_seconds"], 42)
+        self.assertIsNone(row.event_data["duration_seconds"])
 
 
 class LeadGroupResolutionTests(BaseAPITestCase):
