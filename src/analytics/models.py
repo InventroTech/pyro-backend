@@ -183,6 +183,12 @@ class RmCallSession(BaseModel):
         "crm_records.Record", on_delete=models.CASCADE, related_name="rm_call_sessions"
     )
     started_at = models.DateTimeField()
+    opened_from = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Page/carousel title the RM opened this lead from (e.g. 'All Leads', 'Pending Leads') — copied onto the CALL_TOUCH row's event_data when the disposition is logged.",
+    )
 
     class Meta(BaseModel.Meta):
         db_table = "rm_call_sessions"
