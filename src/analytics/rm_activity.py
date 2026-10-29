@@ -100,10 +100,11 @@ def record_lead_opened(event_name, record, payload, tenant, request_user):
     of this function deleted the other lead's session the moment a new one
     opened, to force at most one session per RM — that meant the deleted
     lead's eventual disposition had no session to read back, so its
-    duration had to be recorded as unknown rather than guessed from the
-    client. Merging overlapping intervals at the aggregation layer gets the
-    same "no inflated Handling Time" result without ever losing a real,
-    server-measured duration for any individual touch.)
+    duration had to be recorded as unknown (or, in a later iteration,
+    skipped as a touch entirely) rather than its own real measured span.
+    Merging overlapping intervals at the aggregation layer gets the same
+    "no inflated Handling Time" result without ever losing a real,
+    server-measured duration — or the touch itself — for any individual lead.)
 
     Re-opening the SAME lead is idempotent (keeps the original started_at,
     so a parent re-render / same-lead realtime re-fetch / discarded-and-
@@ -169,8 +170,8 @@ def record_lead_touch_event(event_name, record, payload, tenant, request_user):
         ended_at = timezone.now()
 
         # The server-recorded session (stamped the instant the lead became
-        # the RM's current lead — see record_lead_opened, which now keeps
-        # every lead's session independent) is the ONLY trusted source for
+        # the RM's current lead — see record_lead_opened, which keeps every
+        # lead's session independent) is the ONLY trusted source for
         # duration_seconds. We deliberately do NOT fall back to a client-
         # supplied duration: that number comes straight from the RM's own
         # browser (payload.duration_seconds) and is trivially editable via
