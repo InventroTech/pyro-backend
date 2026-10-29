@@ -12,7 +12,7 @@ from core.models import TenantSettings
 from crm_records.models import Record
 from object_history.engine import HistoryEngine, set_manual_context, clear_request_context
 from object_history.models import ObjectHistory
-from tests.factories import RecordFactory, SupabaseAuthUserFactory, TenantFactory, UserFactory
+from tests.factories import RecordFactory, TenantFactory, UserFactory
 
 
 @pytest.fixture
@@ -191,7 +191,6 @@ def test_snapshot_correctness(model_instance):
 def test_actor_metadata(model_instance):
     tenant = model_instance.tenant
     user = UserFactory(tenant_id=str(tenant.id))
-    SupabaseAuthUserFactory(id=uuid.UUID(user.supabase_uid), email=user.email)
 
     set_manual_context(
         actor_user=user,
@@ -205,9 +204,43 @@ def test_actor_metadata(model_instance):
 
     hist = ObjectHistory.objects.filter(object_id=str(model_instance.pk)).first()
     assert str(hist.actor_user_id) == user.supabase_uid
+    assert hist.actor_user == user
     assert hist.actor_label == "test-user"
     assert hist.metadata["source"] == "unit-test"
     assert hist.metadata["operation"] == "history-write"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_actor_resolved_from_uid_like_object(model_instance):
+    user = UserFactory(tenant_id=str(model_instance.tenant.id))
+
+    class UidOnly:
+        id = uuid.UUID(user.supabase_uid)
+
+    set_manual_context(actor_user=UidOnly(), actor_label="by-uid")
+    HistoryEngine.capture_before(model_instance)
+    model_instance.data["name"] = "changed"
+    HistoryEngine.capture_after(model_instance)
+
+    hist = ObjectHistory.objects.filter(object_id=str(model_instance.pk)).first()
+    assert hist.actor_user == user
+
+
+@pytest.mark.django_db(transaction=True)
+def test_history_api_payload_uses_django_user(model_instance):
+    from crm_records.serializers import RecordHistoryEntrySerializer
+
+    user = UserFactory(tenant_id=str(model_instance.tenant.id), user_metadata={"full_name": "Asha Rao"})
+    set_manual_context(actor_user=user, actor_label=user.email)
+    HistoryEngine.capture_before(model_instance)
+    model_instance.data["name"] = "changed"
+    HistoryEngine.capture_after(model_instance)
+
+    hist = ObjectHistory.objects.select_related("actor_user").get(object_id=str(model_instance.pk))
+    actor = RecordHistoryEntrySerializer(hist).data["actor"]
+    assert actor["id"] == user.supabase_uid
+    assert actor["email"] == user.email
+    assert actor["name"] == "Asha Rao"
 
 
 @pytest.mark.django_db(transaction=True)

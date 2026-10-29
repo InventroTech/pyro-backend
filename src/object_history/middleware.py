@@ -4,9 +4,9 @@ import logging
 import uuid
 from typing import Any, Dict, Optional
 
+from django.contrib.auth import get_user_model
 from django.utils.deprecation import MiddlewareMixin
 
-from accounts.models import SupabaseAuthUser
 from .engine import clear_request_context, set_request_context
 
 logger = logging.getLogger(__name__)
@@ -55,65 +55,37 @@ class HistoryMiddleware(MiddlewareMixin):
         clear_request_context()
         return None
 
-    def _resolve_actor_user(self, request) -> Optional[SupabaseAuthUser]:
+    def _resolve_actor_user(self, request):
         """
-        Resolve SupabaseAuthUser from request.user or JWT claims.
+        Resolve the Django user from request.user or JWT claims.
         
         Since DRF authentication happens after middleware, we also check JWT claims
         directly from the Authorization header as a fallback.
         """
-        # First, try to get from request.user (if already authenticated)
+        User = get_user_model()
         user = getattr(request, "user", None)
-        supabase_uid = None
-        
-        if user and getattr(user, "is_authenticated", False):
-            supabase_uid = getattr(user, "supabase_uid", None)
-            if supabase_uid:
-                logger.debug(f"HistoryMiddleware._resolve_actor_user: Got supabase_uid from request.user: {supabase_uid}")
-        
-        # If not found, try to extract from JWT token directly (for DRF views)
+        if isinstance(user, User) and user.is_authenticated:
+            return user
+
+        supabase_uid = self._extract_supabase_uid_from_jwt(request)
         if not supabase_uid:
-            supabase_uid = self._extract_supabase_uid_from_jwt(request)
-            if supabase_uid:
-                logger.debug(f"HistoryMiddleware._resolve_actor_user: Got supabase_uid from JWT: {supabase_uid}")
-        
-        if not supabase_uid:
-            if user:
-                logger.debug(f"HistoryMiddleware._resolve_actor_user: User exists but no supabase_uid (user={user}, is_authenticated={getattr(user, 'is_authenticated', False)})")
-            else:
-                logger.debug("HistoryMiddleware._resolve_actor_user: No request.user found and no JWT supabase_uid")
             return None
-        
+
         try:
-            # SupabaseAuthUser mirrors auth.users table (unmanaged model)
-            # The id field is a UUID that matches supabase_uid
-            logger.debug(f"HistoryMiddleware._resolve_actor_user: Looking up SupabaseAuthUser for supabase_uid={supabase_uid}")
-            actor_user = SupabaseAuthUser.objects.filter(id=supabase_uid).first()
-            
-            if actor_user:
-                logger.info(
-                    f"HistoryMiddleware._resolve_actor_user: Found SupabaseAuthUser | "
-                    f"id={actor_user.id} | email={getattr(actor_user, 'email', 'N/A')}"
-                )
-            else:
-                # Log for debugging - this might happen if the user exists in authentication.User
-                # but not yet in SupabaseAuthUser (unmanaged mirror of auth.users)
-                user_email = getattr(user, "email", None) if user else None
-                logger.warning(
-                    f"HistoryMiddleware._resolve_actor_user: SupabaseAuthUser NOT found | "
-                    f"supabase_uid={supabase_uid} | "
-                    f"user_email={user_email} | "
-                    f"This user exists in authentication.User but not in SupabaseAuthUser (unmanaged mirror)"
-                )
-            
-            return actor_user
+            actor_user = User.objects.filter(supabase_uid=str(supabase_uid)).first()
         except Exception as e:
             logger.error(
-                f"HistoryMiddleware._resolve_actor_user: Exception resolving SupabaseAuthUser | "
+                f"HistoryMiddleware._resolve_actor_user: Exception resolving user | "
                 f"supabase_uid={supabase_uid} | error={e}",
                 exc_info=True
             )
             return None
+
+        if not actor_user:
+            logger.warning(
+                f"HistoryMiddleware._resolve_actor_user: user NOT found | supabase_uid={supabase_uid}"
+            )
+        return actor_user
     
     def _extract_supabase_uid_from_jwt(self, request) -> Optional[str]:
         """
@@ -144,10 +116,9 @@ class HistoryMiddleware(MiddlewareMixin):
         Build actor identifier string. Always returns something if user is authenticated.
         Priority: actor_user email > user email > JWT email > supabase_uid > service name
         """
-        # If we found a SupabaseAuthUser, use its email
         actor_user = getattr(request, "_actor_user", None)
         if actor_user:
-            return getattr(actor_user, "email", None) or str(actor_user.id)
+            return getattr(actor_user, "email", None) or str(actor_user.supabase_uid)
         
         # Fallback to authentication.User email/uid
         user = getattr(request, "user", None)
