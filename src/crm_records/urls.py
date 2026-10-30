@@ -1,4 +1,5 @@
 from django.urls import path
+from .make_fresh import MakeLeadsFreshView
 from .views import RecordListCreateView, RecordDistinctFieldValuesView, RecordDetailView, RecordHistoryView, EntityProxyView, RecordEventView, EventLogListView, EventLogCountView, GetNextLeadView, LeadStatsView, EntityTypeSchemaListCreateView, EntityTypeSchemaDetailView, EntityTypeSchemaByTypeView, EntityTypeAttributesView, TenantEntityTypeListView, LeadScoringView, GetMyCurrentLeadView, PartnerEventsView, PartnerLeadView, CallAttemptMatrixListCreateView, CallAttemptMatrixDetailView, CallAttemptMatrixByLeadTypeView, LeadAssignmentWebhookProxyView, RMAssignedMixpanelView, ScoringRuleListCreateView, ScoringRuleDetailView, ApiSecretKeySetView, ApiSecretKeyUpdateView, ShipmentTrackView, ShipmentCouriersView, ProductLinkExtractView, RequestStatusConfigView
 from .admin_views import RuleSetListCreateView, RuleExecutionLogListView
 from .public_views import PublicJobsView, PublicJobApplicationView
@@ -28,6 +29,8 @@ urlpatterns = [
     
     # Get next lead endpoint
     path("leads/next/", GetNextLeadView.as_view(), name="get-next-lead"),
+    # Bulk return selected leads to the fresh pool
+    path("leads/make-fresh/", MakeLeadsFreshView.as_view(), name="make-leads-fresh"),
     
     # Get my current assigned lead (always from DB, no cache)
     path("leads/current/", GetMyCurrentLeadView.as_view(), name="get-my-current-lead"),
