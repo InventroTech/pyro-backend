@@ -1745,6 +1745,49 @@ class RmDailyTargetSnapshotJobHandler(JobHandler):
         return delays[min(attempt - 1, len(delays) - 1)]
 
 
+class RmCallSessionCleanupJobHandler(JobHandler):
+    """
+    Nightly sweep (see JobProcessor._maybe_enqueue_rm_call_session_cleanup,
+    fires once a day around 1am IST) that discards any RmCallSession still
+    open from earlier that day or before — an RM who opened a lead and never
+    logged a disposition before logging off for the day.
+
+    record_lead_touch_event (rm_activity.py) has no staleness guard of its
+    own: if a session like this survived untouched and got dispositioned
+    days later, it would compute a multi-day duration_seconds and silently
+    wreck that day's ACHT/Handling Time/breach stats. Discarding it here
+    instead means tomorrow starts clean — reopening that same lead just
+    starts a fresh, honest session (see record_lead_opened).
+
+    1 hour of slack rather than a hard "anything from today" cutoff, so an
+    RM still genuinely on a lead right up to 1am isn't discarded out from
+    under them mid-call.
+    """
+
+    def process(self, job: BackgroundJob) -> bool:
+        from datetime import timedelta
+
+        from analytics.models import RmCallSession
+
+        tenant = job.tenant
+        if tenant is None:
+            return True
+
+        cutoff = timezone.now() - timedelta(hours=1)
+        deleted_count, _ = RmCallSession.objects.filter(tenant=tenant, started_at__lt=cutoff).delete()
+        if deleted_count:
+            logger.info(
+                "[RmCallSessionCleanup] Discarded %s stale open lead session(s) for tenant=%s",
+                deleted_count,
+                tenant.id,
+            )
+        return True
+
+    def get_retry_delay(self, attempt: int) -> int:
+        delays = [60, 300, 900]
+        return delays[min(attempt - 1, len(delays) - 1)]
+
+
 class JobHandlerRegistry:
     """
     Registry for job handlers.
@@ -1778,6 +1821,7 @@ class JobHandlerRegistry:
         # Praja handler removed - now using MixpanelService instead
         self.register_handler(JobType.SEND_TO_PRAJA, PrajaJobHandler())
         self.register_handler(JobType.SNAPSHOT_RM_DAILY_TARGETS, RmDailyTargetSnapshotJobHandler())
+        self.register_handler(JobType.DISCARD_STALE_RM_CALL_SESSIONS, RmCallSessionCleanupJobHandler())
     
     def register_handler(self, job_type: str, handler: JobHandler):
         """
