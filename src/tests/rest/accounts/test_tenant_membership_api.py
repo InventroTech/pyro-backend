@@ -9,10 +9,13 @@ Run:
 """
 
 import uuid
+from unittest import mock
 
+from django.db.utils import OperationalError
 from django.urls import NoReverseMatch, reverse
 from django.test import TestCase
 
+from accounts import views as accounts_views
 from authz import service as authz_service
 from authz.models import TenantMembership
 from tests.base.test_setup import BaseAPITestCase
@@ -292,3 +295,66 @@ class TenantMembershipUpdateAPITests(BaseAPITestCase):
         self.assertEqual(row["district"], 90290)
         self.assertEqual(row["user_parent_email"], manager.email)
         self.assertEqual(row["manager_email"], manager.email)
+
+    def _update_payload(self, name):
+        return {
+            "name": name,
+            "email": self.subject.email,
+            "role_id": str(self.role.id),
+            "original_email": self.subject.email,
+            "original_role_id": str(self.role.id),
+        }
+
+    def test_update_retries_once_when_db_connection_drops(self):
+        real_apply = accounts_views._apply_group_and_assignment
+        calls = {"n": 0}
+
+        def flaky_apply(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OperationalError("SSL connection has been closed unexpectedly")
+            return real_apply(*args, **kwargs)
+
+        # close_old_connections would drop the test-case transaction; the real
+        # call only matters on a genuinely broken connection.
+        with mock.patch.object(accounts_views, "_apply_group_and_assignment", side_effect=flaky_apply), \
+                mock.patch.object(accounts_views, "close_old_connections") as close_conns:
+            resp = self.client.post(
+                self.url, self._update_payload("Retried Name"), format="json", **self.auth_headers
+            )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(calls["n"], 2)
+        close_conns.assert_called_once()
+        self.subject.refresh_from_db()
+        self.assertEqual(self.subject.name, "Retried Name")
+
+    def test_update_returns_500_when_retry_also_fails(self):
+        with mock.patch.object(
+            accounts_views,
+            "_apply_group_and_assignment",
+            side_effect=OperationalError("SSL connection has been closed unexpectedly"),
+        ) as apply, mock.patch.object(accounts_views, "close_old_connections"):
+            resp = self.client.post(
+                self.url, self._update_payload("Never Saved"), format="json", **self.auth_headers
+            )
+
+        self.assertEqual(resp.status_code, 500, resp.data)
+        self.assertIn("Failed to update user", resp.data["error"])
+        self.assertEqual(apply.call_count, 2)
+        self.subject.refresh_from_db()
+        self.assertEqual(self.subject.name, "Before")
+
+    def test_update_does_not_retry_other_errors(self):
+        with mock.patch.object(
+            accounts_views,
+            "_apply_group_and_assignment",
+            side_effect=ValueError("boom"),
+        ) as apply, mock.patch.object(accounts_views, "close_old_connections") as close_conns:
+            resp = self.client.post(
+                self.url, self._update_payload("Never Saved"), format="json", **self.auth_headers
+            )
+
+        self.assertEqual(resp.status_code, 500, resp.data)
+        self.assertEqual(apply.call_count, 1)
+        close_conns.assert_not_called()
