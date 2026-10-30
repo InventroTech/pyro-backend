@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from django.contrib.contenttypes.models import ContentType
 from django.db import IntegrityError, router, transaction
+from django.db.models import Max
 
 from accounts.models import SupabaseAuthUser
 from core.models import TenantSettings
@@ -222,6 +223,161 @@ class HistoryEngine:
         )
 
     @staticmethod
+    def _snapshots(
+        before_state: Dict[str, Any],
+        after_state: Optional[Dict[str, Any]],
+        changes: Dict[str, Dict[str, Any]],
+        config,
+        *,
+        include_after: bool,
+    ):
+        before_snapshot = before_state
+        after_snapshot = after_state or {}
+        if config.snapshot_strategy == "minimal":
+            changed_fields = set(changes.keys())
+
+            # Helper function to find a field whether it's at the top level OR inside 'data'
+            def get_val(state, field):
+                if field in state:
+                    return state[field]
+                if "data" in state and isinstance(state["data"], dict) and field in state["data"]:
+                    return state["data"][field]
+                return None
+
+            def has_field(state, field):
+                if field in state:
+                    return True
+                if "data" in state and isinstance(state["data"], dict) and field in state["data"]:
+                    return True
+                return False
+
+            before_snapshot = {
+                field: get_val(before_state, field)
+                for field in changed_fields
+                if has_field(before_state, field)
+            }
+
+            # Use a temporary reference so we don't overwrite after_snapshot while looping
+            after_temp = after_snapshot
+            after_snapshot = {
+                field: get_val(after_temp, field)
+                for field in changed_fields
+                if has_field(after_temp, field)
+            }
+
+        redacted_before = redact_payload(before_snapshot, config.redact_fields)
+        redacted_after = (
+            redact_payload(after_snapshot, config.redact_fields) if include_after else None
+        )
+        return redacted_before, redacted_after
+
+    @staticmethod
+    def bulk_capture_updates(
+        entries: List[Tuple[Any, Dict[str, Any]]],
+        *,
+        action: str,
+        actor_user=None,
+        actor: Optional[str] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Write one history row per changed instance with a few queries in total.
+
+        ``entries`` pairs each saved instance with ``serialize_instance`` output taken
+        before it changed. Use this after ``bulk_update``, which skips ``save()``.
+        All instances must share one model and one tenant.
+        """
+        if not entries:
+            return
+        model = entries[0][0].__class__
+        config = get_config(model)
+        if not config:
+            return
+
+        request_ctx = get_request_context()
+        resolved_actor_user = HistoryEngine._normalize_actor_user(
+            actor_user or request_ctx.get("actor_user")
+        )
+        actor_label = actor or request_ctx.get("actor_label")
+        if resolved_actor_user and not actor_label:
+            actor_label = getattr(resolved_actor_user, "email", None) or str(resolved_actor_user.id)
+        metadata = dict(request_ctx.get("metadata") or {})
+        if extra_metadata:
+            metadata.update(extra_metadata)
+
+        db_alias = router.db_for_write(ObjectHistory, instance=entries[0][0])
+        tenant = getattr(entries[0][0], "tenant", None)
+        persistent_history = TenantSettings.object_history_should_persist(tenant)
+        content_type = ContentType.objects.db_manager(db_alias).get_for_model(model)
+
+        pending = []
+        for instance, before in entries:
+            after = serialize_instance(instance, config)
+            changes = compute_diff(before, after, config.redact_fields)
+            if not changes:
+                continue
+            redacted_before, redacted_after = HistoryEngine._snapshots(
+                before, after, changes, config, include_after=True
+            )
+            pending.append((instance, changes, redacted_before, redacted_after))
+        if not pending:
+            return
+
+        object_ids = [str(instance.pk) for instance, *_ in pending]
+        try:
+            with transaction.atomic(using=db_alias):
+                latest_versions = dict(
+                    ObjectHistory.objects.using(db_alias)
+                    .filter(content_type=content_type, object_id__in=object_ids)
+                    .values("object_id")
+                    .annotate(latest=Max("version"))
+                    .values_list("object_id", "latest")
+                )
+                ObjectHistory.objects.using(db_alias).bulk_create(
+                    [
+                        ObjectHistory(
+                            tenant=tenant,
+                            content_type=content_type,
+                            object_id=str(instance.pk),
+                            object_repr=str(instance),
+                            action=action,
+                            actor_user=resolved_actor_user,
+                            actor_label=actor_label,
+                            version=latest_versions.get(str(instance.pk), 0) + 1,
+                            changes=changes,
+                            before_state=redacted_before,
+                            after_state=redacted_after,
+                            metadata=metadata,
+                            persistent_history=persistent_history,
+                        )
+                        for instance, changes, redacted_before, redacted_after in pending
+                    ]
+                )
+                return
+        except IntegrityError as exc:
+            if "object_hist_unique_version" not in str(exc):
+                raise
+            logger.warning(
+                "Bulk history version conflict for %s; writing %s rows one by one",
+                content_type.model,
+                len(pending),
+            )
+
+        for instance, changes, redacted_before, redacted_after in pending:
+            HistoryEngine._write_history(
+                instance,
+                action=action,
+                actor_user=resolved_actor_user,
+                actor_label=actor_label,
+                metadata=metadata,
+                before_state=redacted_before,
+                after_state=redacted_after,
+                changes=changes,
+                config=config,
+                include_after=True,
+            )
+
+    @staticmethod
     def _write_history(
         instance,
         *,
@@ -249,43 +405,8 @@ class HistoryEngine:
         object_repr = str(instance)
         object_id = instance.pk
 
-        before_snapshot = before_state
-        after_snapshot = after_state or {}
-        if config.snapshot_strategy == "minimal":
-            changed_fields = set(changes.keys())
-            
-            # Helper function to find a field whether it's at the top level OR inside 'data'
-            def get_val(state, field):
-                if field in state:
-                    return state[field]
-                if "data" in state and isinstance(state["data"], dict) and field in state["data"]:
-                    return state["data"][field]
-                return None
-                
-            def has_field(state, field):
-                if field in state:
-                    return True
-                if "data" in state and isinstance(state["data"], dict) and field in state["data"]:
-                    return True
-                return False
-
-            before_snapshot = {
-                field: get_val(before_state, field)
-                for field in changed_fields
-                if has_field(before_state, field)
-            }
-            
-            # Use a temporary reference so we don't overwrite after_snapshot while looping
-            after_temp = after_snapshot 
-            after_snapshot = {
-                field: get_val(after_temp, field)
-                for field in changed_fields
-                if has_field(after_temp, field)
-            }
-
-        redacted_before = redact_payload(before_snapshot, config.redact_fields)
-        redacted_after = (
-            redact_payload(after_snapshot, config.redact_fields) if include_after else None
+        redacted_before, redacted_after = HistoryEngine._snapshots(
+            before_state, after_state, changes, config, include_after=include_after
         )
 
         max_attempts = 6  # handle bursty concurrent writes creating same next version
