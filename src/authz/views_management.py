@@ -13,6 +13,7 @@ from django.utils import timezone
 import jwt
 
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from authentication.tokens import TokenConfigurationError, sign_access_token
 from authz.permissions import IsTenantAuthenticated, HasPermissionKey
 from authz.models import Role, TenantMembership
 from .serializers import RoleListSerializer, CreateSyncedRoleSerializer, TenantMembershipUserSerializer
@@ -583,8 +584,9 @@ class SpoofTenantUserTokenView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        signs_own_tokens = settings.AUTH_PROVIDER == "django"
         jwt_secret = getattr(settings, "SUPABASE_JWT_SECRET", None)
-        if not jwt_secret:
+        if not signs_own_tokens and not jwt_secret:
             return Response(
                 {"error": "SUPABASE_JWT_SECRET is not configured"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -608,9 +610,19 @@ class SpoofTenantUserTokenView(APIView):
             },
         }
 
-        token = jwt.encode(payload, jwt_secret, algorithm="HS256")
-        if isinstance(token, bytes):
-            token = token.decode("utf-8")
+        if signs_own_tokens:
+            # Expires like a normal login (AUTH_ACCESS_TOKEN_TTL_SECONDS); no refresh token.
+            try:
+                token = sign_access_token(payload)
+            except TokenConfigurationError:
+                return Response(
+                    {"error": "AUTH_JWT_SECRET is not configured"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+        else:
+            token = jwt.encode(payload, jwt_secret, algorithm="HS256")
+            if isinstance(token, bytes):
+                token = token.decode("utf-8")
 
         # Lightweight audit metadata in the response for the caller; full audit should go to logs.
         audit_meta = {
@@ -691,6 +703,49 @@ class CurrentUserRoleView(APIView):
             'tenant_membership_id': membership.id,
             'user_parent_id': user_parent_id_value,
         }, status=status.HTTP_200_OK)
+
+
+class MyTeamView(APIView):
+    """
+    Returns just the caller's own sibling group — every active member
+    sharing the caller's manager, including the caller — not the full
+    tenant membership directory (names, emails, every reporting line).
+
+    Used by views that need "my team" to scope a query (e.g. the lead-card
+    leaderboard) without first downloading every member in the tenant just
+    to filter it down to one manager's reports client-side.
+
+    No manager set for the caller -> empty rm_user_ids (nothing to scope
+    to), never "everyone." Spoofing swaps the JWT identity apiClient sends
+    (see bob/src/lib/auth/accessTokenProvider.ts), so this already resolves
+    the spoofed user's own team during a spoofed session, same as
+    CurrentUserRoleView's "me".
+    """
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        tenant = request.tenant
+        supabase_uid = getattr(request.user, "supabase_uid", None)
+        if not supabase_uid:
+            return Response({"rm_user_ids": []}, status=status.HTTP_200_OK)
+
+        my_membership = TenantMembership.objects.filter(
+            tenant=tenant, user_id=supabase_uid, is_active=True,
+        ).first()
+        if not my_membership or my_membership.user_parent_id_id is None:
+            return Response({"rm_user_ids": []}, status=status.HTTP_200_OK)
+
+        sibling_user_ids = TenantMembership.objects.filter(
+            tenant=tenant,
+            user_parent_id_id=my_membership.user_parent_id_id,
+            is_active=True,
+            user_id__isnull=False,
+        ).values_list("user_id", flat=True)
+
+        return Response(
+            {"rm_user_ids": [str(uid) for uid in sibling_user_ids]},
+            status=status.HTTP_200_OK,
+        )
 
 
 class UpdateUserHierarchyView(APIView):
