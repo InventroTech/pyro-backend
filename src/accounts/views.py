@@ -1,7 +1,8 @@
 import re
 import uuid
 from typing import Optional
-from django.db import transaction, connection
+from django.db import transaction, connection, close_old_connections
+from django.db.utils import InterfaceError, OperationalError
 from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -80,6 +81,22 @@ def _apply_group_and_assignment(
     )
 
     return group
+
+
+def _run_atomic_with_connection_retry(fn, *, label: str):
+    """
+    Run ``fn`` in a transaction; if the DB connection drops (e.g. the Supabase pooler
+    closes it mid-request), open a fresh connection and run it once more. ``fn`` must be
+    safe to repeat: the failed attempt is rolled back by Postgres.
+    """
+    try:
+        with transaction.atomic():
+            return fn()
+    except (InterfaceError, OperationalError) as e:
+        logger.warning(f"DB connection lost during {label}; retrying once: {e}")
+        close_old_connections()
+        with transaction.atomic():
+            return fn()
 
 
 def _resolve_manager_membership(tenant, manager_email: Optional[str], *, self_membership_id=None):
@@ -287,81 +304,86 @@ class TenantMembershipUpdateView(APIView):
         update_manager = "manager_email" in ser.validated_data
         manager_email = ser.validated_data.get("manager_email") if update_manager else None
 
-        with transaction.atomic():
+        def save_membership():
             try:
+                authz_role = Role.objects.get(id=role_id, tenant=tenant)
+            except Role.DoesNotExist:
                 try:
-                    authz_role = Role.objects.get(id=role_id, tenant=tenant)
-                except Role.DoesNotExist:
-                    try:
-                        authz_role = get_authz_role_from_legacy_role(role_id, tenant)
-                    except Exception as e:
-                        logger.error(f"Failed to find role {role_id} for tenant {tenant.id}: {e}")
-                        return Response({
-                            "error": f"Role with ID {role_id} not found for this tenant"
-                        }, status=status.HTTP_400_BAD_REQUEST)
+                    authz_role = get_authz_role_from_legacy_role(role_id, tenant)
+                except Exception as e:
+                    logger.error(f"Failed to find role {role_id} for tenant {tenant.id}: {e}")
+                    return Response({
+                        "error": f"Role with ID {role_id} not found for this tenant"
+                    }, status=status.HTTP_400_BAD_REQUEST)
 
-                parent_membership = None
-                if update_manager:
-                    try:
-                        parent_membership = _resolve_manager_membership(
-                            tenant,
-                            manager_email,
-                            self_membership_id=membership.id,
-                        )
-                    except serializers.ValidationError as ve:
-                        return Response(ve.detail, status=status.HTTP_400_BAD_REQUEST)
+            parent_membership = None
+            if update_manager:
+                try:
+                    parent_membership = _resolve_manager_membership(
+                        tenant,
+                        manager_email,
+                        self_membership_id=membership.id,
+                    )
+                except serializers.ValidationError as ve:
+                    return Response(ve.detail, status=status.HTTP_400_BAD_REQUEST)
 
-                membership.name = name
-                membership.email = email
-                membership.department = department
-                membership.role = authz_role
-                if update_manager:
-                    membership.user_parent_id = parent_membership
-                membership.save()
+            membership.name = name
+            membership.email = email
+            membership.department = department
+            membership.role = authz_role
+            if update_manager:
+                membership.user_parent_id = parent_membership
+            membership.save()
 
-                group = _apply_group_and_assignment(
-                    tenant=tenant,
-                    membership=membership,
-                    lead_group_name=lead_group_name,
-                    daily_target=daily_target,
-                    daily_limit=daily_limit,
-                    state=state,
-                    district=district,
-                    party=party,
-                    update_group=update_group,
-                    update_daily_target=update_daily_target,
-                    update_daily_limit=update_daily_limit,
-                    update_state=update_state,
-                    update_district=update_district,
-                    update_party=update_party,
-                )
+            group = _apply_group_and_assignment(
+                tenant=tenant,
+                membership=membership,
+                lead_group_name=lead_group_name,
+                daily_target=daily_target,
+                daily_limit=daily_limit,
+                state=state,
+                district=district,
+                party=party,
+                update_group=update_group,
+                update_daily_target=update_daily_target,
+                update_daily_limit=update_daily_limit,
+                update_state=update_state,
+                update_district=update_district,
+                update_party=update_party,
+            )
 
-                if membership.user_id:
-                    drop_permissions_cache(str(membership.user_id), membership.tenant)
+            if membership.user_id:
+                drop_permissions_cache(str(membership.user_id), membership.tenant)
 
-                geo = _read_geo_kv(tenant, membership)
-                return Response({
-                    "id": str(membership.id),
-                    "name": membership.name,
-                    "email": membership.email,
-                    "tenant_id": str(tenant.id),
-                    "department": membership.department,
-                    "role_id": str(membership.role.id),
-                    "uid": str(membership.user_id) if membership.user_id else None,
-                    "is_active": membership.is_active,
-                    "lead_group_id": group.id if group else None,
-                    "lead_group_name": group.name if group else None,
-                    "state": geo["state"],
-                    "district": geo["district"],
-                    "party": geo["party"],
-                    "manager_email": membership.user_parent_id.email if membership.user_parent_id else None,
-                    "updated": True
-                }, status=status.HTTP_200_OK)
-            except Exception as e:
-                logger.error(f"Failed to update TenantMembership {membership.id}: {str(e)}", exc_info=True)
-                return Response({
-                    "error": f"Failed to update user: {str(e)}"
-                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            geo = _read_geo_kv(tenant, membership)
+            return Response({
+                "id": str(membership.id),
+                "name": membership.name,
+                "email": membership.email,
+                "tenant_id": str(tenant.id),
+                "department": membership.department,
+                "role_id": str(membership.role.id),
+                "uid": str(membership.user_id) if membership.user_id else None,
+                "is_active": membership.is_active,
+                "lead_group_id": group.id if group else None,
+                "lead_group_name": group.name if group else None,
+                "state": geo["state"],
+                "district": geo["district"],
+                "party": geo["party"],
+                "manager_email": membership.user_parent_id.email if membership.user_parent_id else None,
+                "updated": True
+            }, status=status.HTTP_200_OK)
+
+        try:
+            return _run_atomic_with_connection_retry(
+                save_membership,
+                label=f"update TenantMembership {membership.id}",
+            )
+        except Exception as e:
+            logger.error(f"Failed to update TenantMembership {membership.id}: {str(e)}", exc_info=True)
+            return Response({
+                "error": f"Failed to update user: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
 
 
