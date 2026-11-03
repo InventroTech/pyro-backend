@@ -112,6 +112,27 @@ class OAuthLoginTests(TestCase):
         self.assertTrue(user.check_password("Correct-Horse-42"))
         self.assertEqual(User.objects.filter(email__iexact="person@example.com").count(), 1)
 
+    def test_linked_account_with_blank_email_receives_verified_profile_email(self):
+        linked = User(
+            supabase_uid=str(uuid.uuid4()), email=None, is_active=True, email_verified_at=timezone.now()
+        )
+        linked.set_unusable_password()
+        linked.save()
+        OAuthIdentity.objects.create(user=linked, provider="google", subject="google-123", email="")
+        holder = User.objects.create_user(
+            supabase_uid=str(uuid.uuid4()), email="person@example.com", password="Unused-Pass-1"
+        )
+
+        response = self._full_login()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["user"]["email"], "person@example.com")
+        linked.refresh_from_db()
+        holder.refresh_from_db()
+        self.assertEqual(linked.email, "person@example.com")
+        self.assertIsNone(holder.email)
+        self.assertFalse(holder.has_usable_password())
+
     def test_second_login_uses_identity_even_if_email_changed(self):
         self._full_login()
         self.userinfo["email"] = "renamed@example.com"

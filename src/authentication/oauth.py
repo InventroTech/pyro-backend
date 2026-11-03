@@ -188,6 +188,29 @@ def fetch_profile(provider: Provider, *, code: str, redirect_uri: str) -> Profil
     )
 
 
+def _give_user_profile_email(user: User, email: str, now) -> None:
+    """Put a verified provider email on ``user`` when that column is empty.
+
+    An unverified password row that merely reserved the address gives it up. A
+    confirmed account, or one already linked to a provider, keeps it.
+    """
+    owner = User.objects.select_for_update().filter(email__iexact=email).exclude(pk=user.pk).first()
+    if owner is not None:
+        if owner.email_verified_at or owner.oauth_identities.exists():
+            return
+        if owner.has_usable_password():
+            owner.set_unusable_password()
+            revoke_all_sessions(owner)
+        owner.email = None
+        owner.save(update_fields=["email", "password"])
+    user.email = email
+    update_fields = ["email"]
+    if user.email_verified_at is None:
+        user.email_verified_at = now
+        update_fields.append("email_verified_at")
+    user.save(update_fields=update_fields)
+
+
 def resolve_user(provider_name: str, profile: Profile) -> User:
     """Return the user for this provider account, linking or creating one by email."""
     now = timezone.now()
@@ -205,6 +228,10 @@ def resolve_user(provider_name: str, profile: Profile) -> User:
             if profile.email:
                 identity.email = profile.email
             identity.save(update_fields=["last_login_at", "email"])
+            # The provider link can sit on an account whose email column was never filled.
+            # The login page treats a session with no email as a failed sign-in.
+            if not identity.user.email and profile.email and profile.email_verified:
+                _give_user_profile_email(identity.user, profile.email, now)
             return identity.user
 
         if not profile.email or not profile.email_verified:
