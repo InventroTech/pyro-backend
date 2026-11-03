@@ -447,6 +447,10 @@ LOG_RETENTION_DAYS = env.int("LOG_RETENTION_DAYS", default=30)
 LOG_RETENTION_CHUNK_SIZE = env.int("LOG_RETENTION_CHUNK_SIZE", default=1000)
 LOG_RETENTION_MAX_RUNTIME_SECONDS = env.int("LOG_RETENTION_MAX_RUNTIME_SECONDS", default=300)
 
+# Lead group whose matching leads stay assigned through automatic unassign jobs.
+# Leave blank to keep the current unassign behavior for every group.
+STICKY_ASSIGNMENT_GROUP_NAME = env("STICKY_ASSIGNMENT_GROUP_NAME", default="").strip()
+
 # General background jobs (Gunicorn web service). Set EXCLUDE_JOB_TYPES when Mixpanel worker is deployed.
 BACKGROUND_JOB_WORKER_THREADS = env.int("BACKGROUND_JOB_WORKER_THREADS", default=1)
 BACKGROUND_JOB_POLL_INTERVAL = float(env("BACKGROUND_JOB_POLL_INTERVAL", default="1"))

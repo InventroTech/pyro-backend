@@ -18,6 +18,7 @@ class Record(HistoryTrackedModel, BaseModel):
     - ``first_assigned_today_at``: ISO timestamp when the lead was assigned in the current
       stint (unassigned→assigned). Used with ``ReleaseLeadsAfter12hJobHandler``: 12h after
       this moment, NOT_CONNECTED leads are unassigned but stay NOT_CONNECTED.
+      Leads matching the group named by ``STICKY_ASSIGNMENT_GROUP_NAME`` are not unassigned by that job.
     - ``first_assignment_today_date``: Local calendar date (``YYYY-MM-DD``) when the anchor
       was set (audit / debugging).
     - ``first_assigned_at`` / ``first_assigned_to``: Original fresh assignment (daily limit);
