@@ -44,6 +44,20 @@ from background_jobs.job_handlers import (
     UnassignSnoozedLeadsJobHandler,
 )
 from tests.factories import TenantFactory, RecordFactory, BackgroundJobFactory
+from user_settings.models import Group
+
+
+def _election_contestants_group(tenant, **group_data):
+    """Group whose filters mark leads that must stay assigned."""
+    return Group.objects.create(
+        tenant=tenant,
+        name="Election Contestants",
+        group_data=group_data
+        or {
+            "party": ["BJP"],
+            "lead_sources": ["CONTESTANT_FORM"],
+        },
+    )
 
 
 class UnassignSnoozedLeadsJobHandlerTests(TestCase):
@@ -158,6 +172,69 @@ class UnassignSnoozedLeadsJobHandlerTests(TestCase):
         self.assertEqual(self.handler.get_retry_delay(2), 300)
         self.assertEqual(self.handler.get_retry_delay(3), 900)
         self.assertEqual(self.handler.get_retry_delay(5), 900)
+
+    def test_election_contestants_stay_assigned(self):
+        """Leads matching the Election Contestants group are not unassigned. Other leads are."""
+        _election_contestants_group(self.tenant)
+        now = timezone.now()
+        past = (now - timedelta(hours=1)).isoformat()
+        sticky = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_stage": "SNOOZED",
+                "lead_status": "SALES LEAD",
+                "affiliated_party": "BJP",
+                "lead_source": "CONTESTANT_FORM",
+                "assigned_to": "rm-election",
+                "snooze_unassign_at": past,
+                "call_attempts": 1,
+            },
+        )
+        partial = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_stage": "SNOOZED",
+                "affiliated_party": "BJP",
+                "lead_source": "OTHER",
+                "assigned_to": "rm-other",
+                "snooze_unassign_at": past,
+                "call_attempts": 1,
+            },
+        )
+        job = self._make_job()
+        self.handler.process(job)
+
+        sticky.refresh_from_db()
+        partial.refresh_from_db()
+        self.assertEqual(sticky.data.get("assigned_to"), "rm-election")
+        self.assertEqual(sticky.data.get("lead_stage"), "SNOOZED")
+        self.assertEqual(sticky.data.get("snooze_unassign_at"), past)
+        self.assertIsNone(partial.data.get("assigned_to"))
+        self.assertEqual(job.result["unassigned_count"], 1)
+
+    def test_election_contestants_with_no_filters_are_still_unassigned(self):
+        """An Election Contestants group with empty filters does not protect every lead."""
+        _election_contestants_group(self.tenant, party=[], lead_sources=[])
+        now = timezone.now()
+        past = (now - timedelta(hours=1)).isoformat()
+        lead = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_stage": "SNOOZED",
+                "assigned_to": "rm-uuid",
+                "snooze_unassign_at": past,
+                "call_attempts": 1,
+            },
+        )
+        job = self._make_job()
+        self.handler.process(job)
+
+        lead.refresh_from_db()
+        self.assertIsNone(lead.data.get("assigned_to"))
+        self.assertEqual(job.result["unassigned_count"], 1)
 
 
 class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
@@ -358,6 +435,46 @@ class ReleaseLeadsAfter12hJobHandlerTests(TestCase):
         for lead in Record.objects.filter(tenant=self.tenant, entity_type="lead", data__lead_stage="NOT_CONNECTED"):
             self.assertFalse(lead.data.get("assigned_to"), msg=f"Lead {lead.id} should have assigned_to cleared")
             self.assertNotIn("first_assigned_today_at", lead.data)
+
+    def test_election_contestants_stay_assigned(self):
+        """Leads matching the Election Contestants group are not released. Other leads are."""
+        _election_contestants_group(self.tenant)
+        now = timezone.now()
+        anchor = (now - timedelta(hours=13)).isoformat()
+        sticky = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_stage": "NOT_CONNECTED",
+                "affiliated_party": "BJP",
+                "lead_source": "CONTESTANT_FORM",
+                "assigned_to": "rm-election",
+                "first_assigned_today_at": anchor,
+                "call_attempts": 2,
+            },
+        )
+        other = RecordFactory(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={
+                "lead_stage": "NOT_CONNECTED",
+                "affiliated_party": "BJP",
+                "lead_source": "OTHER",
+                "assigned_to": "rm-other",
+                "first_assigned_today_at": anchor,
+                "call_attempts": 2,
+            },
+        )
+        job = self._make_job()
+        self.handler.process(job)
+
+        sticky.refresh_from_db()
+        other.refresh_from_db()
+        self.assertEqual(sticky.data.get("assigned_to"), "rm-election")
+        self.assertEqual(sticky.data.get("lead_stage"), "NOT_CONNECTED")
+        self.assertEqual(sticky.data.get("first_assigned_today_at"), anchor)
+        self.assertIsNone(other.data.get("assigned_to"))
+        self.assertEqual(job.result["released_count"], 1)
 
     def test_get_retry_delay_returns_expected_delays(self):
         """get_retry_delay returns 60, 300, 900 for attempts 1, 2, 3+."""
