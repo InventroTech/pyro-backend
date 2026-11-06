@@ -1892,254 +1892,6 @@ class RmActivityEventListView(TenantScopedMixin, generics.ListAPIView):
         return qs.order_by("id")
 
 
-class RmPerformanceSummaryView(APIView):
-    """
-    RM PRD analytics — the Performance tab's per-RM numbers (touches,
-    unique leads, each lead's latest-touch disposition counts, trials
-    achieved), computed server-side instead of shipping every raw
-    CALL_TOUCH row to the browser for it to sum. A single busy tenant can
-    log 15-20k+ touches in one calendar day; a multi-day range downloaded
-    to the browser and summed in JS was taking 10+ minutes end to end and
-    sometimes timing out outright. The same GROUP BY/DISTINCT ON work
-    here takes low-single-digit milliseconds in Postgres.
-
-    Same from/to/rm_user_id/manager_user_id scoping and date-range
-    defaulting as RmActivityEventListView — see its docstring. Also takes
-    optional manager_name/lead_group/state/party — exact-match refinements
-    on the matching event_data field, same semantics as the filter bar's
-    client-side filters over the raw events feed (RmPrdAnalyticsComponent's
-    visibleEvents). These must mirror each other exactly: Adherence still
-    reads from that client-filtered raw feed, so if these params here ever
-    drifted from what the filter bar sends, Performance/Leaderboard would
-    silently show different numbers than Adherence for the same filter
-    selection.
-
-    "Latest touch per lead" (for disposition counts) is resolved with
-    DISTINCT ON, partitioned per (rm_user_id, lead_record_id), ordered by
-    started_at DESC then id ASC — the id ASC tiebreak matches the
-    frontend's old client-side latestTouchPerLead exactly: on an exact
-    started_at tie it keeps whichever touch was inserted first (lowest
-    id), not an arbitrary one. Verified to produce identical per-RM
-    touches/uniqueLeads/disposition-count numbers against the old
-    client-side aggregation, row for row, against real tenant data,
-    before this replaced it.
-
-    rm_name/manager_name/state come from whichever CALL_TOUCH row (within
-    the same filtered range) has the lowest id per RM — mirrors the old
-    client-side code's `rmEvents[0]`, just scoped to CALL_TOUCH rows
-    specifically rather than every event type that RM has in range (a
-    LOGIN/BREAK_* row carries the same fields in practice, so this only
-    theoretically differs, never in a way that affects the real numbers
-    above — only which literal display string shows if those ever drift
-    apart for one RM, which they shouldn't).
-
-    Response: `{"by_rm": [...one row per RM as above...], "team": {...}}`.
-    `team` is NOT simply a sum of the by_rm rows: if the same lead was
-    touched by two different RMs in this range (a reassignment), the old
-    client-side computeTeamTotals' "latest touch per lead" dedups across
-    every RM combined, not per RM — so that lead counts once at the team
-    level even though it appears in two different RMs' own rows above.
-    `team` replicates that exact global-dedup semantics so the "Outcome ·
-    Team Total" cards stay numerically identical to what they showed
-    before this endpoint existed.
-    """
-
-    authentication_classes = [SupabaseJWTAuthentication]
-    permission_classes = [IsTenantAuthenticated]
-
-    def get(self, request):
-        tenant = request.tenant
-
-        from_param = request.query_params.get("from", "").strip()
-        to_param = request.query_params.get("to", "").strip()
-        if not from_param and not to_param:
-            today = timezone.now().date().isoformat()
-            from_param = to_param = today
-        if not from_param:
-            from_param = "0001-01-01"
-        if to_param:
-            try:
-                to_date = datetime.strptime(to_param, "%Y-%m-%d").date()
-                to_upper = (to_date + timedelta(days=1)).isoformat()
-            except ValueError:
-                to_upper = "9999-12-31"
-        else:
-            to_upper = "9999-12-31"
-
-        rm_user_id = request.query_params.get("rm_user_id", "").strip()
-        manager_user_id = request.query_params.get("manager_user_id", "").strip()
-        # Same free-text refinements the dashboard's filter bar applies
-        # client-side to the raw events feed (see RmPrdAnalyticsComponent's
-        # visibleEvents) — must be honored here too, or switching one of
-        # these while on the Performance/Leaderboard tab would silently show
-        # UNFILTERED numbers while Adherence (still built from the raw,
-        # client-filtered event list) correctly narrows down, a confusing
-        # and wrong inconsistency between tabs.
-        manager_name = request.query_params.get("manager_name", "").strip()
-        lead_group = request.query_params.get("lead_group", "").strip()
-        state = request.query_params.get("state", "").strip()
-        party = request.query_params.get("party", "").strip()
-
-        sql = """
-            WITH closed AS (
-                SELECT
-                    id,
-                    event_data->>'rm_user_id' AS rm_user_id,
-                    NULLIF(event_data->>'rm_name', '') AS rm_name,
-                    NULLIF(event_data->>'manager_name', '') AS manager_name,
-                    NULLIF(event_data->>'state', '') AS state,
-                    NULLIF(event_data->>'lead_record_id', '')::bigint AS lead_record_id,
-                    NULLIF(event_data->>'updated_status', '') AS updated_status,
-                    event_data->>'started_at' AS started_at
-                FROM rm_activity_events
-                WHERE tenant_id = %(tenant_id)s
-                    AND is_deleted = false AND deleted_at IS NULL
-                    AND event_type = 'CALL_TOUCH'
-                    AND event_data->>'ended_at' IS NOT NULL
-                    AND (event_data -> 'started_at') >= %(from)s::jsonb
-                    AND (event_data -> 'started_at') <  %(to)s::jsonb
-                    AND (%(rm_user_id)s = '' OR event_data->>'rm_user_id' = %(rm_user_id)s)
-                    AND (%(team_user_ids)s::text[] IS NULL OR event_data->>'rm_user_id' = ANY(%(team_user_ids)s::text[]))
-                    AND (%(manager_name)s = '' OR event_data->>'manager_name' = %(manager_name)s)
-                    AND (%(lead_group)s = '' OR event_data->>'lead_group' = %(lead_group)s)
-                    AND (%(state)s = '' OR event_data->>'state' = %(state)s)
-                    AND (%(party)s = '' OR event_data->>'party' = %(party)s)
-            ),
-            first_row AS (
-                SELECT DISTINCT ON (rm_user_id) rm_user_id, rm_name, manager_name, state
-                FROM closed
-                ORDER BY rm_user_id, id ASC
-            ),
-            touches_agg AS (
-                SELECT rm_user_id, count(*) AS touches, count(DISTINCT lead_record_id) AS unique_leads
-                FROM closed
-                GROUP BY rm_user_id
-            ),
-            latest AS (
-                SELECT DISTINCT ON (rm_user_id, lead_record_id) rm_user_id, updated_status
-                FROM closed
-                WHERE lead_record_id IS NOT NULL
-                ORDER BY rm_user_id, lead_record_id, started_at DESC, id ASC
-            ),
-            disp AS (
-                SELECT rm_user_id, updated_status, count(*) AS cnt
-                FROM latest
-                WHERE updated_status IS NOT NULL
-                GROUP BY rm_user_id, updated_status
-            )
-            SELECT
-                t.rm_user_id,
-                f.rm_name,
-                f.manager_name,
-                f.state,
-                t.touches,
-                t.unique_leads,
-                COALESCE(
-                    jsonb_object_agg(d.updated_status, d.cnt) FILTER (WHERE d.updated_status IS NOT NULL),
-                    '{}'::jsonb
-                ) AS disposition_counts
-            FROM touches_agg t
-            JOIN first_row f ON f.rm_user_id = t.rm_user_id
-            LEFT JOIN disp d ON d.rm_user_id = t.rm_user_id
-            GROUP BY t.rm_user_id, f.rm_name, f.manager_name, f.state, t.touches, t.unique_leads
-        """
-
-        # Team-total numbers are NOT just a sum of the per-RM rows above: if
-        # the same lead got touched by two different RMs in this range (a
-        # reassignment), the old client-side computeTeamTotals' "latest
-        # touch per lead" dedups across EVERY RM combined, not per RM — so
-        # that lead counts once at the team level even though it'd appear
-        # in two different RMs' own per-RM rows above. This mirrors that
-        # exact global-dedup semantics instead of approximating it.
-        team_sql = """
-            WITH closed AS (
-                SELECT
-                    id,
-                    NULLIF(event_data->>'lead_record_id', '')::bigint AS lead_record_id,
-                    NULLIF(event_data->>'updated_status', '') AS updated_status,
-                    event_data->>'started_at' AS started_at
-                FROM rm_activity_events
-                WHERE tenant_id = %(tenant_id)s
-                    AND is_deleted = false AND deleted_at IS NULL
-                    AND event_type = 'CALL_TOUCH'
-                    AND event_data->>'ended_at' IS NOT NULL
-                    AND (event_data -> 'started_at') >= %(from)s::jsonb
-                    AND (event_data -> 'started_at') <  %(to)s::jsonb
-                    AND (%(rm_user_id)s = '' OR event_data->>'rm_user_id' = %(rm_user_id)s)
-                    AND (%(team_user_ids)s::text[] IS NULL OR event_data->>'rm_user_id' = ANY(%(team_user_ids)s::text[]))
-                    AND (%(manager_name)s = '' OR event_data->>'manager_name' = %(manager_name)s)
-                    AND (%(lead_group)s = '' OR event_data->>'lead_group' = %(lead_group)s)
-                    AND (%(state)s = '' OR event_data->>'state' = %(state)s)
-                    AND (%(party)s = '' OR event_data->>'party' = %(party)s)
-            ),
-            global_latest AS (
-                SELECT DISTINCT ON (lead_record_id) updated_status
-                FROM closed
-                WHERE lead_record_id IS NOT NULL
-                ORDER BY lead_record_id, started_at DESC, id ASC
-            )
-            SELECT
-                (SELECT count(*) FROM closed) AS touches,
-                (SELECT count(DISTINCT lead_record_id) FROM closed) AS unique_leads,
-                (
-                    SELECT COALESCE(jsonb_object_agg(updated_status, cnt), '{}'::jsonb)
-                    FROM (
-                        SELECT updated_status, count(*) AS cnt
-                        FROM global_latest
-                        WHERE updated_status IS NOT NULL
-                        GROUP BY updated_status
-                    ) counts
-                ) AS disposition_counts
-        """
-
-        team_user_ids = None
-        if manager_user_id:
-            team_user_ids = list(TeamResolver.get_team_user_ids(manager_user_id, tenant))
-
-        params = {
-            "tenant_id": str(tenant.id),
-            "from": json.dumps(from_param),
-            "to": json.dumps(to_upper),
-            "rm_user_id": rm_user_id,
-            "team_user_ids": team_user_ids,
-            "manager_name": manager_name,
-            "lead_group": lead_group,
-            "state": state,
-            "party": party,
-        }
-
-        with connection.cursor() as cursor:
-            cursor.execute(sql, params)
-            columns = [col[0] for col in cursor.description]
-            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
-
-            cursor.execute(team_sql, params)
-            team_columns = [col[0] for col in cursor.description]
-            team_row = dict(zip(team_columns, cursor.fetchone()))
-
-        return Response({
-            "by_rm": [
-                {
-                    "rm_user_id": row["rm_user_id"],
-                    "rm_name": row["rm_name"] or "",
-                    "manager_name": row["manager_name"] or "",
-                    "state": row["state"] or "",
-                    "touches": row["touches"],
-                    "unique_leads": row["unique_leads"],
-                    # jsonb_object_agg comes back from the raw cursor as a
-                    # JSON string, not auto-decoded like Django's JSONField
-                    "disposition_counts": json.loads(row["disposition_counts"]),
-                }
-                for row in rows
-            ],
-            "team": {
-                "touches": team_row["touches"],
-                "unique_leads": team_row["unique_leads"],
-                "disposition_counts": json.loads(team_row["disposition_counts"]),
-            },
-        })
-
-
 class RmActiveSessionsView(APIView):
     """
     RM PRD analytics — which RMs have a lead open *right now*: an
@@ -2286,14 +2038,6 @@ class RmPrdFilterOptionsView(APIView):
     authentication_classes = [SupabaseJWTAuthentication]
     permission_classes = [IsTenantAuthenticated]
 
-    # Every one of these (managers, states, groups) only changes when
-    # someone edits a role/membership/setting — not something that needs to
-    # be live to the second, unlike the dashboard's actual event data. This
-    # view alone costs 3-4 DB round trips; caching the whole response per
-    # (tenant, manager_role_keys) turns every repeat page load/tab revisit
-    # within the window into zero queries instead of re-running all of them.
-    _CACHE_TTL_SECONDS = 60
-
     def get(self, request):
         from authz.models import TenantMembership
         from user_settings.geo_party_catalog import resolve_catalog_name
@@ -2305,55 +2049,50 @@ class RmPrdFilterOptionsView(APIView):
         )
 
         tenant = request.tenant
+
         manager_role_keys = [
             key.strip() for key in request.query_params.get("manager_role_keys", "").split(",") if key.strip()
         ]
-        cache_key = f"rm_prd_filter_options:{tenant.id}:{','.join(sorted(manager_role_keys))}"
+        manager_qs = TenantMembership.objects.filter(tenant=tenant, is_active=True)
+        if manager_role_keys:
+            manager_qs = manager_qs.filter(role__key__in=manager_role_keys)
+        else:
+            # no roles configured yet — old heuristic, kept only so a page
+            # saved before managerRoles existed doesn't show an empty filter
+            manager_qs = manager_qs.filter(direct_reports__isnull=False)
 
-        def compute():
-            manager_qs = TenantMembership.objects.filter(tenant=tenant, is_active=True)
-            if manager_role_keys:
-                manager_qs = manager_qs.filter(role__key__in=manager_role_keys)
-            else:
-                # no roles configured yet — old heuristic, kept only so a page
-                # saved before managerRoles existed doesn't show an empty filter
-                manager_qs = manager_qs.filter(direct_reports__isnull=False)
+        managers = list(
+            manager_qs
+            .exclude(name__isnull=True)
+            .exclude(name="")
+            .values_list("name", flat=True)
+            .distinct()
+            .order_by("name")
+        )
 
-            managers = list(
-                manager_qs
-                .exclude(name__isnull=True)
-                .exclude(name="")
-                .values_list("name", flat=True)
-                .distinct()
-                .order_by("name")
-            )
+        active_membership_ids = list(
+            TenantMembership.objects.filter(tenant=tenant, is_active=True).values_list("id", flat=True)
+        )
+        state_by_membership = kv_int_by_membership(tenant, active_membership_ids, USER_KV_STATE_KEY)
+        state_ids = sorted({v for v in state_by_membership.values()})
+        states = [
+            {"value": str(state_id), "label": resolve_catalog_name("states", state_id) or str(state_id)}
+            for state_id in state_ids
+        ]
 
-            active_membership_ids = list(
-                TenantMembership.objects.filter(tenant=tenant, is_active=True).values_list("id", flat=True)
-            )
-            state_by_membership = kv_int_by_membership(tenant, active_membership_ids, USER_KV_STATE_KEY)
-            state_ids = sorted({v for v in state_by_membership.values()})
-            states = [
-                {"value": str(state_id), "label": resolve_catalog_name("states", state_id) or str(state_id)}
-                for state_id in state_ids
-            ]
+        lead_options = get_lead_filter_options(tenant)
 
-            lead_options = get_lead_filter_options(tenant)
+        lead_groups = sorted(
+            Group.objects.filter(tenant=tenant)
+            .exclude(name__isnull=True)
+            .exclude(name="")
+            .values_list("name", flat=True)
+            .distinct()
+        )
 
-            lead_groups = sorted(
-                Group.objects.filter(tenant=tenant)
-                .exclude(name__isnull=True)
-                .exclude(name="")
-                .values_list("name", flat=True)
-                .distinct()
-            )
-
-            return {
-                "managers": managers,
-                "lead_groups": lead_groups,
-                "states": states,
-                "parties": lead_options.get("lead_types", []),
-            }
-
-        payload = cache.get_or_set(cache_key, compute, timeout=self._CACHE_TTL_SECONDS)
-        return Response(payload)
+        return Response({
+            "managers": managers,
+            "lead_groups": lead_groups,
+            "states": states,
+            "parties": lead_options.get("lead_types", []),
+        })
