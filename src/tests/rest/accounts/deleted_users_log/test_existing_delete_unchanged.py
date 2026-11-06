@@ -17,6 +17,7 @@ REVOKE = "accounts.services.delete_user_everywhere.revoke_supabase_sessions_glob
 class ExistingDeleteUnchangedTests(BaseAPITestCase):
     def setUp(self):
         super().setUp()
+        self.client.force_authenticate(user=self.user)
         self.rm_role = RoleFactory(tenant=self.tenant, key="rm", name="RM")
         self.subject = TenantMembershipFactory(
             tenant=self.tenant, role=self.rm_role, email="rm-leaving@example.com", user_id=uuid.uuid4()

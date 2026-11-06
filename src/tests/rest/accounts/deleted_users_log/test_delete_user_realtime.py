@@ -18,6 +18,7 @@ BROADCAST = "accounts.deleted_users_log.broadcast_to_tenant"
 class DeleteUserRealtimeTests(BaseAPITestCase):
     def setUp(self):
         super().setUp()
+        self.client.force_authenticate(user=self.user)
         self.rm_role = RoleFactory(tenant=self.tenant, key="rm", name="RM")
         self.subject = TenantMembershipFactory(
             tenant=self.tenant, role=self.rm_role, email="rm-leaving@example.com", user_id=uuid.uuid4()
