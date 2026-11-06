@@ -48,7 +48,6 @@ class DeletedUserLog(models.Model):
     account_created_at = models.DateTimeField(null=True, blank=True)
     deleted_at = models.DateTimeField(db_index=True)
     deleted_by = models.CharField(max_length=255, blank=True, default="")
-    reason = models.TextField(blank=True, default="")
 
     class Meta:
         db_table = "accounts_deleted_user_log"

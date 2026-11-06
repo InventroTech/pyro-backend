@@ -1,5 +1,5 @@
 """
-Deleted-users log (who removed a user, when, and why).
+Deleted-users log (who removed a user, and when).
 
 Wraps the existing delete flow instead of changing it:
 DELETE /accounts/delete-user-with-log/ snapshots the user, calls the unchanged
@@ -44,14 +44,6 @@ def _broadcast_user_deleted(tenant_id, membership_ids: list[int]) -> None:
                 "data": {"deleted": True},
             },
         )
-
-REASON_MAX_LENGTH = 500
-
-
-class DeleteReasonSerializer(serializers.Serializer):
-    reason = serializers.CharField(
-        required=False, allow_blank=True, allow_null=True, max_length=REASON_MAX_LENGTH, trim_whitespace=True
-    )
 
 
 def _actor(request) -> str:
@@ -118,7 +110,7 @@ def _logged_deletions(tenant) -> list[DeletedUserLog]:
 class DeleteUserWithLogView(APIView):
     """
     DELETE /accounts/delete-user-with-log/
-    Body: same as /accounts/delete-user/ plus an optional "reason" (max 500 characters).
+    Body: same as /accounts/delete-user/.
     """
 
     permission_classes = [IsTenantAuthenticated]
@@ -127,14 +119,11 @@ class DeleteUserWithLogView(APIView):
         try:
             ser = DeleteUserEverywhereSerializer(data=request.data, context={"request": request})
             ser.is_valid(raise_exception=True)
-            reason_ser = DeleteReasonSerializer(data=request.data)
-            reason_ser.is_valid(raise_exception=True)
 
             tenant = ser.validated_data["_tenant"]
             uid = ser.validated_data.get("uid")
             email = ser.validated_data.get("email")
             role_id = ser.validated_data.get("role_id")
-            reason = (reason_ser.validated_data.get("reason") or "").strip()
             deleted_by = _actor(request)
 
             with transaction.atomic():
@@ -148,7 +137,6 @@ class DeleteUserWithLogView(APIView):
                             tenant=tenant,
                             deleted_at=membership.deleted_at or now,
                             deleted_by=deleted_by,
-                            reason=reason,
                             **snapshots[membership.id],
                         )
                         for membership in removed
@@ -195,7 +183,6 @@ def _log_row(log: DeletedUserLog) -> dict:
         "created_at": log.account_created_at,
         "deleted_at": log.deleted_at,
         "deleted_by": log.deleted_by or None,
-        "deletion_reason": log.reason or None,
     }
 
 

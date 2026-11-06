@@ -71,7 +71,7 @@ class DeleteUserRealtimeTests(BaseAPITestCase):
         with patch(BROADCAST) as broadcast, self.captureOnCommitCallbacks(execute=True):
             response = self.client.delete(
                 URL,
-                {"email": self.subject.email, "role_id": str(self.rm_role.id), "reason": "x" * 501},
+                {"email": self.subject.email, "role_id": "not-a-uuid"},
                 format="json",
                 **self.auth_headers,
             )

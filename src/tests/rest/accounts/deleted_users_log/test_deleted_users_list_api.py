@@ -39,7 +39,6 @@ class DeletedUsersListApiTests(BaseAPITestCase):
             account_created_at=timezone.now() - timedelta(days=90),
             deleted_at=deleted_at or timezone.now(),
             deleted_by=extra.pop("deleted_by", "admin@praja.in"),
-            reason=extra.pop("reason", "Left the company"),
             **extra,
         )
 
@@ -70,16 +69,23 @@ class DeletedUsersListApiTests(BaseAPITestCase):
         self.assertIsNotNone(row["created_at"])
         self.assertIsNotNone(row["deleted_at"])
         self.assertEqual(row["deleted_by"], "admin@praja.in")
-        self.assertEqual(row["deletion_reason"], "Left the company")
 
-    def test_empty_reason_and_manager_come_back_as_null(self):
-        self.log("gone@example.com", reason="", manager_name="", manager_email="")
+    def test_rows_have_no_reason_field(self):
+        self.log("gone@example.com")
 
         row = self.get_list().data["results"][0]
 
-        self.assertIsNone(row["deletion_reason"])
+        self.assertNotIn("deletion_reason", row)
+        self.assertNotIn("reason", row)
+
+    def test_empty_manager_and_deleted_by_come_back_as_null(self):
+        self.log("gone@example.com", manager_name="", manager_email="", deleted_by="")
+
+        row = self.get_list().data["results"][0]
+
         self.assertIsNone(row["manager_name"])
         self.assertIsNone(row["manager_email"])
+        self.assertIsNone(row["deleted_by"])
 
     def test_does_not_list_users_deleted_before_the_log_existed(self):
         self.legacy_deleted("old@example.com", name="Old User", user_parent_id=self.manager)
@@ -137,14 +143,14 @@ class DeletedUsersListApiTests(BaseAPITestCase):
                 self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
     @patch(REVOKE, return_value={"revoked": True})
-    def test_a_user_deleted_with_a_reason_appears_in_the_list(self, _revoke):
+    def test_a_deleted_user_appears_in_the_list(self, _revoke):
         subject = TenantMembershipFactory(
             tenant=self.tenant, role=self.rm_role, email="rm-leaving@example.com", user_id=uuid.uuid4()
         )
 
         self.client.delete(
             DELETE_URL,
-            {"email": subject.email, "role_id": str(self.rm_role.id), "reason": "Moved to another team"},
+            {"email": subject.email, "role_id": str(self.rm_role.id)},
             format="json",
             **self.auth_headers,
         )
@@ -152,7 +158,6 @@ class DeletedUsersListApiTests(BaseAPITestCase):
 
         self.assertEqual(row["email"], "rm-leaving@example.com")
         self.assertEqual(row["deleted_by"], self.email)
-        self.assertEqual(row["deletion_reason"], "Moved to another team")
 
     def test_count_matches_the_logged_rows_and_ignores_older_deletions(self):
         self.log("logged-1@example.com")
