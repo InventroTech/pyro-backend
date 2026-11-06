@@ -21,6 +21,7 @@ REVOKE = "accounts.services.delete_user_everywhere.revoke_supabase_sessions_glob
 class DeletedUsersListApiTests(BaseAPITestCase):
     def setUp(self):
         super().setUp()
+        self.client.force_authenticate(user=self.user)
         self.rm_role = RoleFactory(tenant=self.tenant, key="rm", name="RM")
         self.manager = TenantMembershipFactory(
             tenant=self.tenant, role=self.rm_role, email="boss@example.com", name="Big Boss"
@@ -33,8 +34,8 @@ class DeletedUsersListApiTests(BaseAPITestCase):
             name=extra.pop("name", "Gone User"),
             role_id=self.rm_role.id,
             role_name="RM",
-            manager_name="Big Boss",
-            manager_email="boss@example.com",
+            manager_name=extra.pop("manager_name", "Big Boss"),
+            manager_email=extra.pop("manager_email", "boss@example.com"),
             account_created_at=timezone.now() - timedelta(days=90),
             deleted_at=deleted_at or timezone.now(),
             deleted_by=extra.pop("deleted_by", "admin@praja.in"),
@@ -124,6 +125,7 @@ class DeletedUsersListApiTests(BaseAPITestCase):
         self.assertEqual(self.get_list().data["results"], [])
 
     def test_rejects_a_request_without_login(self):
+        self.client.force_authenticate(user=None)
         response = self.client.get(LIST_URL, **self.make_unauthenticated_headers())
 
         self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))

@@ -22,6 +22,7 @@ REVOKE = "accounts.services.delete_user_everywhere.revoke_supabase_sessions_glob
 class DeleteUserWithLogApiTests(BaseAPITestCase):
     def setUp(self):
         super().setUp()
+        self.client.force_authenticate(user=self.user)
         self.rm_role = RoleFactory(tenant=self.tenant, key="rm", name="RM")
         self.manager = TenantMembershipFactory(
             tenant=self.tenant, role=self.rm_role, email="boss@example.com", name="Big Boss"
@@ -119,6 +120,7 @@ class DeleteUserWithLogApiTests(BaseAPITestCase):
         self.assertFalse(DeletedUserLog.objects.exists())
 
     def test_rejects_a_request_without_login(self, _revoke):
+        self.client.force_authenticate(user=None)
         response = self.client.delete(
             URL,
             {"email": self.subject.email, "role_id": str(self.rm_role.id)},
