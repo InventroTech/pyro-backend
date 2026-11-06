@@ -28,7 +28,6 @@ from .views import (
     RmActivityEventListView,
     RmActiveSessionsView,
     RmDailyTargetsView,
-    RmPerformanceSummaryView,
     RmPrdFilterOptionsView,
 )
 app_name = "analytics"
@@ -102,7 +101,6 @@ urlpatterns = [
     # RM PRD analytics — raw rm_activity_events rows for this tenant
     path("rm-activity-events/", RmActivityEventListView.as_view(), name="rm-activity-events"),
     path("rm-active-sessions/", RmActiveSessionsView.as_view(), name="rm-active-sessions"),
-    path("rm-performance-summary/", RmPerformanceSummaryView.as_view(), name="rm-performance-summary"),
     path("rm-daily-targets/", RmDailyTargetsView.as_view(), name="rm-daily-targets"),
     path("rm-filter-options/", RmPrdFilterOptionsView.as_view(), name="rm-filter-options"),
 
