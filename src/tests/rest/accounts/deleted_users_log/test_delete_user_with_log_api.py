@@ -79,42 +79,15 @@ class DeleteUserWithLogApiTests(BaseAPITestCase):
         self.assertEqual(log.deleted_by, self.email)
         self.assertEqual(log.deleted_at, archived.deleted_at)
 
-    def test_log_records_the_reason(self, _revoke):
-        self.delete_subject(reason="Left the company")
+    def test_a_reason_sent_by_an_older_client_is_ignored(self, _revoke):
+        response = self.delete_subject(reason="Left the company")
 
-        self.assertEqual(self.only_log().reason, "Left the company")
-
-    def test_trims_the_reason(self, _revoke):
-        self.delete_subject(reason="   Left the company   ")
-
-        self.assertEqual(self.only_log().reason, "Left the company")
-
-    def test_reason_is_optional(self, _revoke):
-        for extra in ({}, {"reason": ""}, {"reason": "   "}, {"reason": None}):
-            with self.subTest(extra=extra):
-                subject = TenantMembershipFactory(tenant=self.tenant, role=self.rm_role, user_id=uuid.uuid4())
-                body = {"email": subject.email, "role_id": str(self.rm_role.id), **extra}
-
-                response = self.client.delete(URL, body, format="json", **self.auth_headers)
-
-                self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
-                self.assertEqual(DeletedUserLog.objects.get(membership_id=subject.id).reason, "")
-
-    def test_accepts_a_500_character_reason(self, _revoke):
-        response = self.delete_subject(reason="x" * 500)
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(self.only_log().reason), 500)
-
-    def test_rejects_a_reason_over_500_characters_and_deletes_nothing(self, _revoke):
-        response = self.delete_subject(reason="x" * 501)
-
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertTrue(TenantMembership.objects.filter(id=self.subject.id).exists())
-        self.assertFalse(DeletedUserLog.objects.exists())
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data["logged"], 1)
+        self.assertFalse(hasattr(self.only_log(), "reason"))
 
     def test_rejects_a_request_without_user_details(self, _revoke):
-        response = self.client.delete(URL, {"reason": "Left"}, format="json", **self.auth_headers)
+        response = self.client.delete(URL, {}, format="json", **self.auth_headers)
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(DeletedUserLog.objects.exists())
@@ -145,7 +118,7 @@ class DeleteUserWithLogApiTests(BaseAPITestCase):
         with patch(
             "accounts.deleted_users_log.delete_user_everywhere", side_effect=RuntimeError("database went away")
         ):
-            response = self.delete_subject(reason="Left")
+            response = self.delete_subject()
 
         self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
         self.assertFalse(DeletedUserLog.objects.exists())
@@ -180,13 +153,13 @@ class DeleteUserWithLogApiTests(BaseAPITestCase):
         self.assertEqual(log.manager_email, "")
 
     def test_deleting_twice_logs_once(self, _revoke):
-        self.delete_subject(reason="First")
-        second = self.delete_subject(reason="Second")
+        first = self.delete_subject()
+        second = self.delete_subject()
 
+        self.assertEqual(first.data["logged"], 1)
         self.assertEqual(second.status_code, status.HTTP_200_OK)
         self.assertEqual(second.data["logged"], 0)
         self.assertEqual(DeletedUserLog.objects.count(), 1)
-        self.assertEqual(self.only_log().reason, "First")
 
     def test_only_delete_is_allowed(self, _revoke):
         for method in ("get", "post", "put", "patch"):
@@ -195,14 +168,12 @@ class DeleteUserWithLogApiTests(BaseAPITestCase):
                 self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
     def test_deletes_by_uid_and_logs_it(self, _revoke):
-        response = self.client.delete(URL, {"uid": str(self.subject.user_id), "reason": "By uid"}, format="json", **self.auth_headers)
+        response = self.client.delete(URL, {"uid": str(self.subject.user_id)}, format="json", **self.auth_headers)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
         self.assertEqual(response.data["matched_by"], "uid")
         self.assertEqual(response.data["logged"], 1)
-        log = self.only_log()
-        self.assertEqual(log.email, "rm-leaving@example.com")
-        self.assertEqual(log.reason, "By uid")
+        self.assertEqual(self.only_log().email, "rm-leaving@example.com")
 
     def test_logs_every_membership_removed_for_the_same_email(self, _revoke):
         gm_role = RoleFactory(tenant=self.tenant, key="gm", name="GM")
@@ -246,7 +217,7 @@ class DeleteUserWithLogApiTests(BaseAPITestCase):
     def test_deletes_the_user_even_when_the_log_cannot_be_saved(self, _revoke):
         missing_table = ProgrammingError('relation "accounts_deleted_user_log" does not exist')
         with patch.object(DeletedUserLog.objects, "bulk_create", side_effect=missing_table):
-            response = self.delete_subject(reason="Left")
+            response = self.delete_subject()
 
         self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
         self.assertTrue(response.data["success"])
