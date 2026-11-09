@@ -1,5 +1,5 @@
 from django.urls import path
-from .deleted_users_log import DeletedUsersListView, DeleteUserWithLogView
+from user_settings.views import DeletedUsersListView, DeleteUserWithLogView
 from .views import (
     LinkUserUidView,
     TenantMembershipCreateView,
