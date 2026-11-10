@@ -421,3 +421,55 @@ class RmActivityEventListViewManagerScopingTest(BaseAPITestCase):
         rm_names = {row["event_data"]["rm_name"] for row in response.data["data"]}
         self.assertIn("In Team", rm_names)
         self.assertIn("Outside Team", rm_names)
+
+
+class RmActivityEventListViewPaginationCountTest(BaseAPITestCase):
+    """
+    The frontend only ever reads page_meta.next_page_link to decide whether
+    to keep paging (see bob's rmActivityApi.fetchEventWindow) — never
+    total_count/number_of_pages. Skipping the COUNT(*) by default removes a
+    second full query (over the whole matched date range) that used to run
+    on every single page request, same optimization RecordListPagination
+    already applies for lead lists.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.url = reverse("analytics:rm-activity-events")
+        now = timezone.now()
+        RmActivityEvent.objects.create(
+            tenant=self.tenant,
+            event_type="CALL_TOUCH",
+            event_data={
+                "rm_user_id": "rm-1", "rm_name": "Asha", "manager_name": "", "team": "",
+                "state": "", "lead_record_id": 1, "updated_status": "TRIAL_ACTIVATED",
+                "lead_group": None, "party": None, "started_at": now.isoformat(),
+                "ended_at": now.isoformat(), "duration_seconds": 60,
+            },
+        )
+        self.wide_window = {
+            "from": (now - timedelta(days=1)).strftime("%Y-%m-%d"),
+            "to": (now + timedelta(days=1)).strftime("%Y-%m-%d"),
+        }
+
+    def test_total_count_is_none_by_default(self):
+        response = self.client.get(self.url, data=self.wide_window, **self.auth_headers)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["page_meta"]["total_count"])
+        self.assertIsNone(response.data["page_meta"]["number_of_pages"])
+
+    def test_next_page_link_still_works_without_the_count(self):
+        response = self.client.get(
+            self.url, data={**self.wide_window, "page_size": 1}, **self.auth_headers
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["data"]), 1)
+        # only one row exists in this test's fixture — no next page
+        self.assertIsNone(response.data["page_meta"]["next_page_link"])
+
+    def test_explicit_include_count_true_still_runs_the_count(self):
+        response = self.client.get(
+            self.url, data={**self.wide_window, "include_count": "true"}, **self.auth_headers
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["page_meta"]["total_count"], 1)

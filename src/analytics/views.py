@@ -1832,6 +1832,20 @@ class RmActivityEventPagination(MetaPageNumberPagination):
     page_size = 500
     max_page_size = 2000
 
+    # The frontend only ever reads page_meta.next_page_link to decide
+    # whether to keep paging (see rmActivityApi's fetchEventWindow) — it
+    # never reads total_count/number_of_pages. The base class's default
+    # (_include_count=True) was running a full COUNT(*) over the matched
+    # date range on EVERY page request though — for a ~19k-row day split
+    # into ~38 pages of 500, that's 38 wasted COUNT queries per day per
+    # load. Same fix RecordListPagination already applies for lead lists;
+    # still honors an explicit ?include_count=true if anything ever needs it.
+    def _include_count(self, request, view=None):
+        raw = request.query_params.get("include_count")
+        if raw is not None:
+            return raw.strip().lower() not in ("0", "false", "no")
+        return False
+
 
 class RmActivityEventListView(TenantScopedMixin, generics.ListAPIView):
     """
