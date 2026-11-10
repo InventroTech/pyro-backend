@@ -1,6 +1,7 @@
 """
-Password reset helpers: resolve Supabase user id, admin password update, and OTP hashing.
-Updates Supabase Auth password via Admin API (GoTrue hashes stored_password — encrypted_password in DB).
+Password reset helpers: resolve the user id, update the password, and OTP hashing.
+With AUTH_PROVIDER="supabase" the password is updated via the Supabase Admin API (GoTrue
+hashes it into auth.users.encrypted_password); with "django" on authentication.User.
 """
 
 from __future__ import annotations
@@ -16,8 +17,10 @@ from urllib.parse import urlparse
 import requests
 from django.conf import settings
 from django.db import connection as django_connection
+from django.utils import timezone
 
 from authentication.models import User
+from authentication.sessions import revoke_all_sessions
 from authentication.supabase_env import supabase_api_base_url, supabase_service_role_key
 from authz.models import TenantMembership
 
@@ -407,9 +410,44 @@ def admin_update_user_password(user_id: str, new_password: str) -> Tuple[bool, s
     return False, msg if isinstance(msg, str) else str(msg)
 
 
+def auth_provider_is_django() -> bool:
+    return settings.AUTH_PROVIDER == "django"
+
+
+def find_django_user_id_for_password_reset(normalized_email: str) -> Optional[str]:
+    """Login account id (``supabase_uid``) for an active Django user with this email."""
+    user = (
+        User.objects.filter(email__iexact=normalized_email.strip(), is_active=True)
+        .order_by("pk")
+        .first()
+    )
+    return str(user.supabase_uid) if user else None
+
+
+def set_django_user_password(user_id: str, new_password: str) -> Tuple[bool, str]:
+    """
+    Set the password, confirm the email (the OTP proved ownership) and log out every
+    existing session.
+    """
+    user = User.objects.filter(supabase_uid=user_id, is_active=True).first()
+    if user is None:
+        return False, "Account not found."
+    user.set_password(new_password)
+    update_fields = ["password"]
+    if user.email_verified_at is None:
+        user.email_verified_at = timezone.now()
+        update_fields.append("email_verified_at")
+    user.save(update_fields=update_fields)
+    revoke_all_sessions(user)
+    return True, "ok"
+
+
 __all__ = [
     "OTP_TTL_SECONDS",
     "admin_update_user_password",
+    "auth_provider_is_django",
+    "find_django_user_id_for_password_reset",
+    "set_django_user_password",
     "find_supabase_user_id_for_email",
     "find_supabase_user_id_for_password_reset",
     "otp_codes_match",

@@ -7,6 +7,7 @@ from .views import (
     AssigneesByRoleView,
     DeleteUserEverywhereView,
     SetupNewTenantView,
+    TenantBySlugView,
 )
 
 urlpatterns = [
@@ -18,4 +19,5 @@ urlpatterns = [
     path("delete-user-with-log/", DeleteUserWithLogView.as_view(), name="delete-user-with-log"),
     path("deleted-users/", DeletedUsersListView.as_view(), name="deleted-users"),
     path("setup-new-tenant/", SetupNewTenantView.as_view(), name="setup-new-tenant"),
+    path("tenant-by-slug/", TenantBySlugView.as_view(), name="tenant-by-slug"),
 ]

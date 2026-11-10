@@ -368,7 +368,10 @@ _SUPPORT_PATCH_KEYS = (
 )
 
 
-def _core_kv_key_q():
+_CORE_KV_KEY_FILTER = Q(key__in=_CORE_KV_SETTING_KEYS) | ~Q(key__in=USER_KV_RESERVED_KEYS)
+
+
+def _core_kv_queryset(tenant, tenant_membership):
     """Core keys plus bare User Management custom field keys (e.g. STATE)."""
     return Q(key__in=_CORE_KV_SETTING_KEYS) | ~Q(key__in=USER_KV_RESERVED_KEYS)
 
@@ -379,9 +382,30 @@ def _core_kv_queryset(tenant, tenant_membership):
             tenant=tenant,
             tenant_membership=tenant_membership,
         )
-        .filter(_core_kv_key_q())
+        .filter(_CORE_KV_KEY_FILTER)
         .order_by("key")
     )
+
+
+class TenantCoreKVSettingsView(APIView):
+    """
+    Core KV settings for every member of the tenant in one response, grouped by
+    tenant membership id. Same rows as ``UserCoreKVSettingsView`` GET returns per
+    member, so the Settings page can load all users with one request instead of one each.
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        rows = (
+            TenantMemberSetting.objects.filter(tenant=request.tenant)
+            .filter(_CORE_KV_KEY_FILTER)
+            .order_by("tenant_membership_id", "key")
+        )
+        results: dict[str, list] = {}
+        for row in TenantMemberSettingSerializer(rows, many=True).data:
+            results.setdefault(str(row["tenant_membership"]), []).append(row)
+        return Response({"results": results}, status=status.HTTP_200_OK)
 
 
 def _resolve_tenant_membership_for_settings(tenant, user_id):

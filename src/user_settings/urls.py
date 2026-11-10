@@ -3,6 +3,7 @@ from .views import (
     LeadTypeAssignmentView,
     UserLeadTypesView,
     UserCoreKVSettingsView,
+    TenantCoreKVSettingsView,
     UserLeadsCountView,
     LeadTypesListView,
     LeadSourcesListView,
@@ -32,6 +33,11 @@ urlpatterns = [
         "users/<str:user_id>/core-kv-settings/",
         UserCoreKVSettingsView.as_view(),
         name="user-core-kv-settings",
+    ),
+    path(
+        "core-kv-settings/",
+        TenantCoreKVSettingsView.as_view(),
+        name="tenant-core-kv-settings",
     ),
     path(
         "users/<uuid:user_id>/leads-count/",
