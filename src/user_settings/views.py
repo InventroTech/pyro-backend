@@ -542,26 +542,6 @@ class UserCoreKVSettingsView(APIView):
         return Response(TenantMemberSettingSerializer(qs, many=True).data, status=status.HTTP_200_OK)
 
 
-class TenantCoreKVSettingsView(APIView):
-    """
-    GET core KV settings for every membership in the tenant, in one query.
-
-    Same rows as ``UserCoreKVSettingsView.get`` (group each by ``tenant_membership``).
-    User Management lists all members, so a per-member request would send one call
-    per user at page load.
-    """
-
-    permission_classes = [IsTenantAuthenticated]
-
-    def get(self, request):
-        qs = (
-            TenantMemberSetting.objects.filter(tenant=request.tenant)
-            .filter(_core_kv_key_q())
-            .order_by("tenant_membership_id", "key")
-        )
-        return Response(TenantMemberSettingSerializer(qs, many=True).data, status=status.HTTP_200_OK)
-
-
 class UserLeadsCountView(APIView):
     """Get count of leads assigned to a specific user"""
     permission_classes = [IsTenantAuthenticated]
