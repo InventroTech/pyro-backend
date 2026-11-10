@@ -784,8 +784,7 @@ class InactiveEmailPolicyView(APIView):
     """
     Settings-page hour threshold for who counts as inactive. Default is 72 hours.
     This does not turn memberships off.
-    Sign-in time shown on the user list is auth.users.last_sign_in_at, or
-    authentication.User.last_login when AUTH_PROVIDER is django.
+    Sign-in time shown on the user list is authentication.User.last_login.
     """
 
     permission_classes = [IsTenantAuthenticated]
