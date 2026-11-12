@@ -321,11 +321,11 @@ class PasswordResetConfirmView(APIView):
         PasswordResetOTP.objects.filter(email__iexact=email).delete()
 
         if not success:
+            # err_msg can come from the auth service's reply to the password change; not logged.
             logger.error(
-                "[PasswordReset][confirm-password] admin_set_password_failed rid=%s %s err=%s",
+                "[PasswordReset][confirm-password] admin_set_password_failed rid=%s %s",
                 rid,
                 _email_log_tag(email),
-                err_msg,
             )
             return Response(
                 {"error": err_msg or "Could not update password."},
