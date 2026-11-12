@@ -426,6 +426,9 @@ class TenantCoreKVSettingsView(APIView):
             TenantMemberSetting.objects.filter(
                 tenant=request.tenant,
                 tenant_membership_id__in=membership_ids,
+                # Deleted members keep their settings rows; their ids are skipped like unknown ones.
+                tenant_membership__is_deleted=False,
+                tenant_membership__deleted_at__isnull=True,
             )
             .filter(_CORE_KV_KEY_FILTER)
             .order_by("tenant_membership_id", "key")
