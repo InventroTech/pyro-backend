@@ -388,22 +388,21 @@ def admin_update_user_password(user_id: str, new_password: str) -> Tuple[bool, s
         msg = f"{msg} ({hint})"
     elif isinstance(hint, str) and hint and not msg:
         msg = hint
-    if not msg:
-        msg = (details.get("body_snippet") or r.text or "")[:500] or f"HTTP {r.status_code}"
 
     code = details.get("code") or details.get("error_code")
-    raw = (details.get("body_snippet") or "")[:1200]
+    # The raw body answers a request that carried the new password, so it is never logged.
     logger.warning(
         "[PasswordReset][admin_update_password] failed host=%s http_status=%s user_id_prefix=%s "
-        "error_id=%s code=%s msg=%s raw_response_body=%r",
+        "error_id=%s code=%s msg=%s",
         host,
         r.status_code,
         uid_pfx,
         err_id,
         code,
         msg,
-        raw,
     )
+    if not msg:
+        msg = (details.get("body_snippet") or r.text or "")[:500] or f"HTTP {r.status_code}"
     return False, msg if isinstance(msg, str) else str(msg)
 
 
