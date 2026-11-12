@@ -8,7 +8,7 @@ from django.db import ProgrammingError
 from django.test import SimpleTestCase
 from rest_framework import status
 
-from user_settings.views import _actor
+from accounts.views import _actor
 from accounts.models import DeletedUserLog
 from authz.models import TenantMembership
 from tests.base.test_setup import BaseAPITestCase
@@ -116,7 +116,7 @@ class DeleteUserWithLogApiTests(BaseAPITestCase):
 
     def test_logs_nothing_and_keeps_the_user_when_the_delete_fails(self, _revoke):
         with patch(
-            "user_settings.views.delete_user_everywhere", side_effect=RuntimeError("database went away")
+            "accounts.views.delete_user_everywhere", side_effect=RuntimeError("database went away")
         ):
             response = self.delete_subject()
 
