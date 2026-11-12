@@ -1,11 +1,12 @@
 from django.urls import path
-from user_settings.views import DeletedUsersListView, DeleteUserWithLogView
 from .views import (
     LinkUserUidView,
     TenantMembershipCreateView,
     TenantMembershipUpdateView,
     AssigneesByRoleView,
     DeleteUserEverywhereView,
+    DeleteUserWithLogView,
+    DeletedUsersListView,
     SetupNewTenantView,
     TenantBySlugView,
 )

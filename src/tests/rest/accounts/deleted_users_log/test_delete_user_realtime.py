@@ -11,7 +11,7 @@ from tests.factories import RoleFactory, TenantMembershipFactory
 
 URL = "/accounts/delete-user-with-log/"
 REVOKE = "accounts.services.delete_user_everywhere.revoke_supabase_sessions_globally"
-BROADCAST = "user_settings.views.broadcast_to_tenant"
+BROADCAST = "accounts.views.broadcast_to_tenant"
 
 
 @patch(REVOKE, return_value={"revoked": True})
@@ -60,7 +60,7 @@ class DeleteUserRealtimeTests(BaseAPITestCase):
 
     def test_does_not_broadcast_when_the_delete_fails(self, _revoke):
         with patch(BROADCAST) as broadcast, patch(
-            "user_settings.views.delete_user_everywhere", side_effect=RuntimeError("db down")
+            "accounts.views.delete_user_everywhere", side_effect=RuntimeError("db down")
         ), self.captureOnCommitCallbacks(execute=True):
             response = self.delete()
 
