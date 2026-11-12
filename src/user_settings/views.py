@@ -359,6 +359,9 @@ _SUPPORT_PATCH_KEYS = (
 )
 
 
+_CORE_KV_KEY_FILTER = Q(key__in=_CORE_KV_SETTING_KEYS) | ~Q(key__in=USER_KV_RESERVED_KEYS)
+
+
 def _core_kv_queryset(tenant, tenant_membership):
     """Core keys plus bare User Management custom field keys (e.g. STATE)."""
     return (
@@ -366,9 +369,62 @@ def _core_kv_queryset(tenant, tenant_membership):
             tenant=tenant,
             tenant_membership=tenant_membership,
         )
-        .filter(Q(key__in=_CORE_KV_SETTING_KEYS) | ~Q(key__in=USER_KV_RESERVED_KEYS))
+        .filter(_CORE_KV_KEY_FILTER)
         .order_by("key")
     )
+
+
+CORE_KV_SETTINGS_BATCH_LIMIT = 60
+
+
+class TenantCoreKVSettingsView(APIView):
+    """
+    Core KV settings for a batch of tenant members in one request.
+
+    GET ?membership_ids=67,68,... (at most ``CORE_KV_SETTINGS_BATCH_LIMIT`` ids) returns
+    ``{"results": {"67": {"DAILY_TARGET": 10, ...}, ...}}`` — the same keys
+    ``UserCoreKVSettingsView`` returns per member, as a compact key -> value map. The
+    Settings page loads all users in batches of this size instead of one request each.
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        raw_ids = request.query_params.get("membership_ids", "")
+        try:
+            membership_ids = sorted({int(part) for part in raw_ids.split(",") if part.strip()})
+        except ValueError:
+            return Response(
+                {"error": "membership_ids must be a comma-separated list of integers"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not membership_ids:
+            return Response(
+                {"error": "membership_ids is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(membership_ids) > CORE_KV_SETTINGS_BATCH_LIMIT:
+            return Response(
+                {"error": f"At most {CORE_KV_SETTINGS_BATCH_LIMIT} membership_ids per request"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        rows = (
+            TenantMemberSetting.objects.filter(
+                tenant=request.tenant,
+                tenant_membership_id__in=membership_ids,
+                # Deleted members keep their settings rows; their ids are skipped like unknown ones.
+                tenant_membership__is_deleted=False,
+                tenant_membership__deleted_at__isnull=True,
+            )
+            .filter(_CORE_KV_KEY_FILTER)
+            .order_by("tenant_membership_id", "key")
+            .values_list("tenant_membership_id", "key", "value")
+        )
+        results: dict[str, dict] = {}
+        for membership_id, key, value in rows:
+            results.setdefault(str(membership_id), {})[key] = value
+        return Response({"results": results}, status=status.HTTP_200_OK)
 
 
 def _resolve_tenant_membership_for_settings(tenant, user_id):
