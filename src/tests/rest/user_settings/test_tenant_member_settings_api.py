@@ -305,6 +305,17 @@ class TenantCoreKVSettingsAPITests(BaseAPITestCase):
 
         self.assertEqual(set(results), {str(self.membership.id)})
 
+    def test_skips_deleted_members(self):
+        self.second.delete()
+
+        results = self._get([self.membership.id, self.second.id])
+
+        self.assertEqual(set(results), {str(self.membership.id)})
+        self.assertTrue(
+            TenantMemberSetting.objects.filter(tenant_membership_id=self.second.id).exists(),
+            "the deleted member's settings rows still exist; the API must hide them",
+        )
+
     def test_rejects_missing_membership_ids(self):
         response = self.client.get(self.url, **self.auth_headers)
         self.assertEqual(response.status_code, 400, response.data)
