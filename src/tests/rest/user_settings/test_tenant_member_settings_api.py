@@ -230,7 +230,7 @@ class UserCoreKVSettingsAPITests(BaseAPITestCase):
 
 
 class TenantCoreKVSettingsAPITests(BaseAPITestCase):
-    """GET /user-settings/core-kv-settings/ — every member's core KV settings in one response."""
+    """GET /user-settings/core-kv-settings/?membership_ids=... — a batch of members in one request."""
 
     def setUp(self):
         super().setUp()
@@ -251,66 +251,97 @@ class TenantCoreKVSettingsAPITests(BaseAPITestCase):
             defaults={"value": value},
         )
 
-    def _get(self):
-        response = self.client.get(self.url, **self.auth_headers)
+    def _request(self, membership_ids):
+        return self.client.get(
+            self.url,
+            {"membership_ids": ",".join(str(i) for i in membership_ids)},
+            **self.auth_headers,
+        )
+
+    def _get(self, membership_ids):
+        response = self._request(membership_ids)
         self.assertEqual(response.status_code, 200, response.data)
         return response.data["results"]
 
-    def test_returns_every_members_settings_grouped_by_membership_id(self):
-        results = self._get()
+    def test_returns_requested_members_as_key_value_maps(self):
+        results = self._get([self.membership.id, self.second.id])
 
-        first = {row["key"]: row["value"] for row in results[str(self.membership.id)]}
-        second = {row["key"]: row["value"] for row in results[str(self.second.id)]}
-        self.assertEqual(first, {USER_KV_DAILY_TARGET_KEY: 10, USER_KV_DAILY_LIMIT_KEY: 50})
-        self.assertEqual(second, {USER_KV_GROUP_ID_KEY: 7, "STATE": 95829})
+        self.assertEqual(
+            results[str(self.membership.id)],
+            {USER_KV_DAILY_TARGET_KEY: 10, USER_KV_DAILY_LIMIT_KEY: 50},
+        )
+        self.assertEqual(results[str(self.second.id)], {USER_KV_GROUP_ID_KEY: 7, "STATE": 95829})
 
-    def test_rows_match_the_per_member_endpoint(self):
+    def test_returns_only_the_requested_members(self):
+        results = self._get([self.second.id])
+
+        self.assertEqual(set(results), {str(self.second.id)})
+
+    def test_values_match_the_per_member_endpoint(self):
         self._set(self.second, "EMPLOYEE_CODE", "E-101")
-        results = self._get()
+        results = self._get([self.second.id])
 
         per_member = self.client.get(
             reverse("user-core-kv-settings", kwargs={"user_id": str(self.second.id)}),
             **self.auth_headers,
         )
         self.assertEqual(per_member.status_code, 200, per_member.data)
-        self.assertEqual(results[str(self.second.id)], per_member.data)
+        self.assertEqual(
+            results[str(self.second.id)],
+            {row["key"]: row["value"] for row in per_member.data},
+        )
 
     def test_excludes_reserved_non_core_keys(self):
         self._set(self.membership, USER_KV_LEAD_ASSIGNMENT_KEY, {"lead_types": ["BJP"]})
-        results = self._get()
+        results = self._get([self.membership.id])
 
-        keys = {row["key"] for row in results[str(self.membership.id)]}
-        self.assertNotIn(USER_KV_LEAD_ASSIGNMENT_KEY, keys)
+        self.assertNotIn(USER_KV_LEAD_ASSIGNMENT_KEY, results[str(self.membership.id)])
 
-    def test_excludes_other_tenants(self):
-        other_tenant = TenantFactory()
-        outsider = TenantMembershipFactory(tenant=other_tenant)
+    def test_never_returns_other_tenants_members(self):
+        outsider = TenantMembershipFactory(tenant=TenantFactory())
         self._set(outsider, USER_KV_DAILY_TARGET_KEY, 99)
 
-        results = self._get()
+        results = self._get([self.membership.id, outsider.id])
 
-        self.assertNotIn(str(outsider.id), results)
-        self.assertEqual(set(results), {str(self.membership.id), str(self.second.id)})
+        self.assertEqual(set(results), {str(self.membership.id)})
 
-    def test_query_count_does_not_grow_with_members(self):
-        self._get()  # first request also loads auth/tenant lookups that are cached afterwards
+    def test_rejects_missing_membership_ids(self):
+        response = self.client.get(self.url, **self.auth_headers)
+        self.assertEqual(response.status_code, 400, response.data)
+
+    def test_rejects_non_integer_membership_ids(self):
+        response = self._request(["67", "abc"])
+        self.assertEqual(response.status_code, 400, response.data)
+
+    def test_accepts_up_to_the_batch_limit_and_rejects_more(self):
+        from user_settings.views import CORE_KV_SETTINGS_BATCH_LIMIT
+
+        ids = list(range(1, CORE_KV_SETTINGS_BATCH_LIMIT + 1))
+        self.assertEqual(self._request(ids).status_code, 200)
+
+        response = self._request(ids + [CORE_KV_SETTINGS_BATCH_LIMIT + 1])
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn(str(CORE_KV_SETTINGS_BATCH_LIMIT), response.data["error"])
+
+    def test_query_count_does_not_grow_with_batch_size(self):
+        self._get([self.membership.id])  # first request also loads auth/tenant lookups that are cached afterwards
         with CaptureQueriesContext(connection) as few:
-            self._get()
+            self._get([self.membership.id, self.second.id])
 
-        for index in range(10):
-            member = TenantMembershipFactory(tenant=self.tenant)
+        members = [TenantMembershipFactory(tenant=self.tenant) for _ in range(10)]
+        for index, member in enumerate(members):
             self._set(member, USER_KV_DAILY_TARGET_KEY, index)
             self._set(member, USER_KV_DAILY_LIMIT_KEY, index)
 
         with CaptureQueriesContext(connection) as many:
-            results = self._get()
+            results = self._get([self.membership.id, self.second.id] + [m.id for m in members])
 
         self.assertEqual(len(results), 12)
         self.assertEqual(len(many.captured_queries), len(few.captured_queries))
 
     def test_requires_authentication(self):
         self.client.force_authenticate(user=None)
-        response = self.client.get(self.url)
+        response = self.client.get(self.url, {"membership_ids": str(self.membership.id)})
         self.assertIn(response.status_code, (401, 403))
 
 
