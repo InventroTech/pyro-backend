@@ -21,13 +21,13 @@ from rest_framework import exceptions
 
 from accounts.models import SupabaseAuthUser
 from authentication.models import User
-from config.supabase_auth import (
+from authentication.views import (
     SIGN_IN_MAX_CLOCK_SKEW_SECONDS,
-    SupabaseJWTAuthentication,
-    _get_or_create_profile,
     _record_sign_in,
     _signed_in_at,
+    record_sign_in_from_token,
 )
+from config.supabase_auth import SupabaseJWTAuthentication, _get_or_create_profile
 from tests.base.test_setup import BaseAPITestCase
 from tests.factories import TenantFactory, TenantMembershipFactory, UserFactory
 from user_settings.inactivity import (
@@ -77,7 +77,7 @@ def _last_login_updates(queries):
 
 
 # ---------------------------------------------------------------------------
-# config.supabase_auth._signed_in_at
+# authentication.views._signed_in_at
 # ---------------------------------------------------------------------------
 
 
@@ -213,7 +213,7 @@ class SignedInAtTests(SimpleTestCase):
 
 
 # ---------------------------------------------------------------------------
-# config.supabase_auth._record_sign_in
+# authentication.views._record_sign_in
 # ---------------------------------------------------------------------------
 
 
@@ -277,7 +277,7 @@ class RecordSignInTests(TestCase):
 
     def test_database_error_is_logged_not_raised(self):
         with patch.object(User.objects, "filter", side_effect=DatabaseError("db down")):
-            with self.assertLogs("config.supabase_auth", level="WARNING") as logs:
+            with self.assertLogs("authentication.views", level="WARNING") as logs:
                 _record_sign_in(self.user, _ago(minutes=1))
 
         self.assertIsNone(self.user.last_login)
@@ -285,10 +285,81 @@ class RecordSignInTests(TestCase):
 
     def test_database_error_leaves_the_db_unchanged(self):
         with patch.object(User.objects, "filter", side_effect=DatabaseError("db down")):
-            with self.assertLogs("config.supabase_auth", level="WARNING"):
+            with self.assertLogs("authentication.views", level="WARNING"):
                 _record_sign_in(self.user, _ago(minutes=1))
 
         self.assertIsNone(self._db_last_login())
+
+
+# ---------------------------------------------------------------------------
+# authentication.views.record_sign_in_from_token
+# ---------------------------------------------------------------------------
+
+
+class RecordSignInFromTokenTests(TestCase):
+    def setUp(self):
+        self.user = UserFactory(supabase_uid=str(uuid.uuid4()), email="from-token@example.com")
+
+    def _db_last_login(self):
+        return User.objects.get(pk=self.user.pk).last_login
+
+    def test_saves_the_sign_in_time_from_the_token(self):
+        signed_in = _ts(_ago(minutes=10))
+
+        record_sign_in_from_token(self.user, {"amr": _amr(signed_in)})
+
+        self.assertEqual(_ts(self.user.last_login), signed_in)
+        self.assertEqual(_ts(self._db_last_login()), signed_in)
+
+    def test_newer_token_moves_last_login_forward(self):
+        record_sign_in_from_token(self.user, {"amr": _amr(_ts(_ago(days=2)))})
+        newer = _ts(_ago(minutes=1))
+
+        record_sign_in_from_token(self.user, {"amr": _amr(newer)})
+
+        self.assertEqual(_ts(self._db_last_login()), newer)
+
+    def test_older_token_does_not_move_last_login_back(self):
+        newer = _ts(_ago(minutes=1))
+        record_sign_in_from_token(self.user, {"amr": _amr(newer)})
+
+        record_sign_in_from_token(self.user, {"amr": _amr(_ts(_ago(days=2)))})
+
+        self.assertEqual(_ts(self._db_last_login()), newer)
+
+    def test_token_without_a_sign_in_time_does_nothing(self):
+        with self.assertNumQueries(0):
+            record_sign_in_from_token(self.user, {"sub": self.user.supabase_uid})
+
+        self.assertIsNone(self._db_last_login())
+
+    def test_malformed_or_future_sign_in_time_does_nothing(self):
+        for claims in (
+            {"amr": "password"},
+            {"amr": 12345},
+            {"amr": [{"method": "otp"}]},
+            {"amr": _amr(int(time.time()) + 86400)},
+        ):
+            with self.subTest(claims=claims):
+                with self.assertNumQueries(0):
+                    record_sign_in_from_token(self.user, claims)
+
+        self.assertIsNone(self._db_last_login())
+
+    def test_database_error_is_logged_not_raised(self):
+        with patch.object(User.objects, "filter", side_effect=DatabaseError("db down")):
+            with self.assertLogs("authentication.views", level="WARNING"):
+                record_sign_in_from_token(self.user, {"amr": _amr(_ts(_ago(minutes=1)))})
+
+        self.assertIsNone(self._db_last_login())
+
+    def test_token_check_uses_this_function(self):
+        claims = {"sub": self.user.supabase_uid, "email": self.user.email, "amr": _amr(_ts(_ago(minutes=1)))}
+
+        with patch("authentication.views.record_sign_in_from_token") as recorder:
+            user = _get_or_create_profile(claims)
+
+        recorder.assert_called_once_with(user, claims)
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +513,7 @@ class GetOrCreateProfileTests(TestCase):
         UserFactory(supabase_uid=self.uid, email=self.email)
 
         with patch.object(User.objects, "filter", side_effect=DatabaseError("db down")):
-            with self.assertLogs("config.supabase_auth", level="WARNING"):
+            with self.assertLogs("authentication.views", level="WARNING"):
                 user = _get_or_create_profile(self._claims(_ts(_ago(minutes=1))))
 
         self.assertEqual(user.supabase_uid, self.uid)
