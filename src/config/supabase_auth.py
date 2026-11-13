@@ -39,6 +39,10 @@ def _get_or_create_profile(claims):
     if email and user.email != email:
         user.email = email
         user.save(update_fields=["email"])
+    # Imported here, not at the top: authentication.views must not load while this module loads.
+    from authentication.views import record_sign_in_from_token
+
+    record_sign_in_from_token(user, claims)
     return user
 
 class SupabaseJWTAuthentication(BaseAuthentication):
