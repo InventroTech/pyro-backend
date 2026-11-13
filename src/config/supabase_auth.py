@@ -60,11 +60,9 @@ def _get_or_create_profile(claims):
         user.email = email
         user.save(update_fields=["email"])
     # Imported here: authentication.views -> account_views imports this module.
-    from authentication.views import _record_sign_in, _signed_in_at
+    from authentication.views import record_sign_in_from_token
 
-    signed_in_at = _signed_in_at(claims)
-    if signed_in_at:
-        _record_sign_in(user, signed_in_at)
+    record_sign_in_from_token(user, claims)
     return user
 
 class SupabaseJWTAuthentication(BaseAuthentication):

@@ -371,3 +371,10 @@ def _record_sign_in(user, signed_in_at):
         return
     if updated:
         user.last_login = signed_in_at
+
+
+def record_sign_in_from_token(user, claims):
+    """Copy the token's Supabase sign-in time onto user.last_login when it is newer."""
+    signed_in_at = _signed_in_at(claims)
+    if signed_in_at:
+        _record_sign_in(user, signed_in_at)
