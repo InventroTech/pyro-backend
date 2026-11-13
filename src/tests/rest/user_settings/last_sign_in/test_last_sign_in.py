@@ -21,13 +21,12 @@ from rest_framework import exceptions
 
 from accounts.models import SupabaseAuthUser
 from authentication.models import User
-from config.supabase_auth import (
+from authentication.views import (
     SIGN_IN_MAX_CLOCK_SKEW_SECONDS,
-    SupabaseJWTAuthentication,
-    _get_or_create_profile,
     _record_sign_in,
     _signed_in_at,
 )
+from config.supabase_auth import SupabaseJWTAuthentication, _get_or_create_profile
 from tests.base.test_setup import BaseAPITestCase
 from tests.factories import TenantFactory, TenantMembershipFactory, UserFactory
 from user_settings.inactivity import (
@@ -69,7 +68,7 @@ def _last_login_updates(queries):
 
 
 # ---------------------------------------------------------------------------
-# config.supabase_auth._signed_in_at
+# authentication.views._signed_in_at
 # ---------------------------------------------------------------------------
 
 
@@ -205,7 +204,7 @@ class SignedInAtTests(SimpleTestCase):
 
 
 # ---------------------------------------------------------------------------
-# config.supabase_auth._record_sign_in
+# authentication.views._record_sign_in
 # ---------------------------------------------------------------------------
 
 
@@ -269,7 +268,7 @@ class RecordSignInTests(TestCase):
 
     def test_database_error_is_logged_not_raised(self):
         with patch.object(User.objects, "filter", side_effect=DatabaseError("db down")):
-            with self.assertLogs("config.supabase_auth", level="WARNING") as logs:
+            with self.assertLogs("authentication.views", level="WARNING") as logs:
                 _record_sign_in(self.user, _ago(minutes=1))
 
         self.assertIsNone(self.user.last_login)
@@ -277,7 +276,7 @@ class RecordSignInTests(TestCase):
 
     def test_database_error_leaves_the_db_unchanged(self):
         with patch.object(User.objects, "filter", side_effect=DatabaseError("db down")):
-            with self.assertLogs("config.supabase_auth", level="WARNING"):
+            with self.assertLogs("authentication.views", level="WARNING"):
                 _record_sign_in(self.user, _ago(minutes=1))
 
         self.assertIsNone(self._db_last_login())
@@ -436,7 +435,7 @@ class GetOrCreateProfileTests(TestCase):
         claims = {"sub": self.uid, "amr": _amr(_ts(_ago(minutes=1)))}
 
         with patch.object(User.objects, "filter", side_effect=DatabaseError("db down")):
-            with self.assertLogs("config.supabase_auth", level="WARNING"):
+            with self.assertLogs("authentication.views", level="WARNING"):
                 user = _get_or_create_profile(claims)
 
         self.assertEqual(user.supabase_uid, self.uid)
