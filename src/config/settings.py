@@ -90,6 +90,15 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     # First so process_request starts the timer early and process_response finishes last.
     'middleware.prometheus_metrics.PrometheusMetricsMiddleware',
+    # Near the top so it's one of the last things to touch the response body
+    # (middleware response-processing runs bottom-to-top) — compression
+    # should be the final step, after every other middleware has read/
+    # written the body. Was entirely absent from this stack; RM PRD's
+    # activity-log pages (repetitive JSON, up to 500 rows/page) are exactly
+    # the kind of payload gzip helps most — compresses ~5-10x, directly
+    # cutting network transfer time on every page fetch at effectively zero
+    # correctness risk (standard, broadly-used Django middleware).
+    'django.middleware.gzip.GZipMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.middleware.security.SecurityMiddleware',
