@@ -185,6 +185,8 @@ class TokenRefreshView(APIView):
         except TokenConfigurationError:
             logger.error("[Auth][refresh] AUTH_JWT_SECRET is not configured")
             return _error("auth_not_configured", "Login is not available", status.HTTP_503_SERVICE_UNAVAILABLE)
+        # App reopen often refreshes; keep settings last sign-in in sync without a full login.
+        User.objects.filter(pk=session.user.pk).update(last_login=timezone.now())
         return _session_response(session)
 
 

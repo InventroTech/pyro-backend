@@ -2,8 +2,9 @@
 Hour threshold and last sign-in time for the settings user list.
 
 Nothing here turns a membership off. The sign-in time is
-authentication.User.last_login, set from the newer of the token's amr
-sign-in time and iat on each authenticated request (config.supabase_auth).
+authentication.User.last_login, kept current on authenticated requests
+(config.supabase_auth): Supabase tokens use amr/iat plus a throttled now()
+bump; Django tokens use the throttled touch; token refresh also updates it.
 """
 from __future__ import annotations
 
