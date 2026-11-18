@@ -319,11 +319,14 @@ class PasswordResetConfirmView(APIView):
 
 # ---------------------------------------------------------------------------
 # Last sign-in: config.supabase_auth calls these on every authenticated request
-# to copy the token activity time into authentication_user.last_login.
+# to keep authentication_user.last_login current for the settings user list.
 # ---------------------------------------------------------------------------
 
 # Sign-in times further ahead than this are treated as bogus, not clock skew.
 SIGN_IN_MAX_CLOCK_SKEW_SECONDS = 300
+# Reused access tokens (tab close/reopen) keep the same iat; bump last_login at
+# most this often so activity is visible without a write on every API call.
+LAST_LOGIN_TOUCH_INTERVAL_SECONDS = 60
 
 
 def _valid_unix_timestamp(value, latest_allowed):
@@ -387,8 +390,27 @@ def _record_sign_in(user, signed_in_at):
         user.last_login = signed_in_at
 
 
+def touch_last_login(user):
+    """
+    Bump last_login to now when it is missing or older than the touch interval.
+
+    Django auth has no amr claim; tab close/reopen often reuses the same access
+    token. Calling this on authenticated requests keeps the settings time moving
+    without writing on every request.
+    """
+    now = timezone.now()
+    if user.last_login is not None:
+        age = (now - user.last_login).total_seconds()
+        if age < LAST_LOGIN_TOUCH_INTERVAL_SECONDS:
+            return
+    _record_sign_in(user, now)
+
+
 def record_sign_in_from_token(user, claims):
-    """Copy the token's activity time onto user.last_login when it is newer."""
+    """Copy token activity onto last_login, then touch now() if still stale."""
     signed_in_at = _signed_in_at(claims)
-    if signed_in_at:
-        _record_sign_in(user, signed_in_at)
+    if not signed_in_at:
+        return
+    _record_sign_in(user, signed_in_at)
+    # Same access token after tab reopen: amr/iat unchanged; bump when stale.
+    touch_last_login(user)

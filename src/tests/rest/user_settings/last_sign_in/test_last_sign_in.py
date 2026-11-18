@@ -1,9 +1,10 @@
 """
 Last sign-in on the settings user list comes from authentication.User.last_login.
 
-The token check (config.supabase_auth) copies the newer of the token's amr
-sign-in time and iat onto last_login; user_settings.inactivity reads it back for
-/membership/users/. auth.users.last_sign_in_at is no longer used.
+The token check (config.supabase_auth) keeps last_login current from amr/iat
+(Supabase) or a throttled now() touch (Django / same-token reopen);
+user_settings.inactivity reads it back for /membership/users/.
+auth.users.last_sign_in_at is no longer used.
 """
 import time
 import uuid
@@ -22,10 +23,12 @@ from rest_framework import exceptions
 from accounts.models import SupabaseAuthUser
 from authentication.models import User
 from authentication.views import (
+    LAST_LOGIN_TOUCH_INTERVAL_SECONDS,
     SIGN_IN_MAX_CLOCK_SKEW_SECONDS,
     _record_sign_in,
     _signed_in_at,
     record_sign_in_from_token,
+    touch_last_login,
 )
 from config.supabase_auth import SupabaseJWTAuthentication, _get_or_create_profile
 from tests.base.test_setup import BaseAPITestCase
@@ -319,7 +322,8 @@ class RecordSignInFromTokenTests(TestCase):
         return User.objects.get(pk=self.user.pk).last_login
 
     def test_saves_the_sign_in_time_from_the_token(self):
-        signed_in = _ts(_ago(minutes=10))
+        # Keep within the touch interval so now() does not overwrite the amr time.
+        signed_in = _ts(_ago(seconds=10))
 
         record_sign_in_from_token(self.user, {"amr": _amr(signed_in)})
 
@@ -327,20 +331,26 @@ class RecordSignInFromTokenTests(TestCase):
         self.assertEqual(_ts(self._db_last_login()), signed_in)
 
     def test_newer_token_moves_last_login_forward(self):
-        record_sign_in_from_token(self.user, {"amr": _amr(_ts(_ago(days=2)))})
-        newer = _ts(_ago(minutes=1))
+        record_sign_in_from_token(self.user, {"amr": _amr(_ts(_ago(seconds=40)))})
+        newer = _ts(_ago(seconds=5))
 
         record_sign_in_from_token(self.user, {"amr": _amr(newer)})
 
         self.assertEqual(_ts(self._db_last_login()), newer)
 
     def test_older_token_does_not_move_last_login_back(self):
-        newer = _ts(_ago(minutes=1))
+        newer = _ts(_ago(seconds=5))
         record_sign_in_from_token(self.user, {"amr": _amr(newer)})
 
         record_sign_in_from_token(self.user, {"amr": _amr(_ts(_ago(days=2)))})
 
         self.assertEqual(_ts(self._db_last_login()), newer)
+
+    def test_stale_token_time_is_bumped_to_now(self):
+        # Same access token after tab reopen: amr/iat unchanged and older than the interval.
+        record_sign_in_from_token(self.user, {"amr": _amr(_ts(_ago(hours=2))), "iat": _ts(_ago(hours=1))})
+
+        self.assertAlmostEqual(self._db_last_login().timestamp(), timezone.now().timestamp(), delta=5)
 
     def test_token_without_a_sign_in_time_does_nothing(self):
         with self.assertNumQueries(0):
@@ -364,17 +374,47 @@ class RecordSignInFromTokenTests(TestCase):
     def test_database_error_is_logged_not_raised(self):
         with patch.object(User.objects, "filter", side_effect=DatabaseError("db down")):
             with self.assertLogs("authentication.views", level="WARNING"):
-                record_sign_in_from_token(self.user, {"amr": _amr(_ts(_ago(minutes=1)))})
+                record_sign_in_from_token(self.user, {"amr": _amr(_ts(_ago(seconds=10)))})
 
         self.assertIsNone(self._db_last_login())
 
-    def test_token_check_uses_this_function(self):
-        claims = {"sub": self.user.supabase_uid, "email": self.user.email, "amr": _amr(_ts(_ago(minutes=1)))}
 
-        with patch("authentication.views.record_sign_in_from_token") as recorder:
-            user = _get_or_create_profile(claims)
+# ---------------------------------------------------------------------------
+# authentication.views.touch_last_login
+# ---------------------------------------------------------------------------
 
-        recorder.assert_called_once_with(user, claims)
+
+class TouchLastLoginTests(TestCase):
+    def setUp(self):
+        self.user = UserFactory(supabase_uid=str(uuid.uuid4()), email="touch@example.com")
+
+    def _db_last_login(self):
+        return User.objects.get(pk=self.user.pk).last_login
+
+    def test_sets_last_login_when_empty(self):
+        touch_last_login(self.user)
+
+        self.assertAlmostEqual(self._db_last_login().timestamp(), timezone.now().timestamp(), delta=5)
+
+    def test_skips_when_last_login_is_within_the_interval(self):
+        recent = _ago(seconds=10)
+        User.objects.filter(pk=self.user.pk).update(last_login=recent)
+        self.user.last_login = recent
+
+        with CaptureQueriesContext(connection) as ctx:
+            touch_last_login(self.user)
+
+        self.assertEqual(_last_login_updates(ctx.captured_queries), [])
+        self.assertAlmostEqual(self._db_last_login().timestamp(), recent.timestamp(), delta=1)
+
+    def test_bumps_when_last_login_is_older_than_the_interval(self):
+        stale = _ago(seconds=LAST_LOGIN_TOUCH_INTERVAL_SECONDS + 30)
+        User.objects.filter(pk=self.user.pk).update(last_login=stale)
+        self.user.last_login = stale
+
+        touch_last_login(self.user)
+
+        self.assertAlmostEqual(self._db_last_login().timestamp(), timezone.now().timestamp(), delta=5)
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +422,7 @@ class RecordSignInFromTokenTests(TestCase):
 # ---------------------------------------------------------------------------
 
 
+@override_settings(AUTH_PROVIDER="supabase")
 class GetOrCreateProfileTests(TestCase):
     def setUp(self):
         self.uid = str(uuid.uuid4())
@@ -396,8 +437,17 @@ class GetOrCreateProfileTests(TestCase):
     def _last_login(self):
         return User.objects.get(supabase_uid=self.uid).last_login
 
+    def test_token_check_uses_record_sign_in_from_token(self):
+        UserFactory(supabase_uid=self.uid, email=self.email)
+        claims = self._claims(_ts(_ago(seconds=10)))
+
+        with patch("authentication.views.record_sign_in_from_token") as recorder:
+            user = _get_or_create_profile(claims)
+
+        recorder.assert_called_once_with(user, claims)
+
     def test_new_user_gets_last_login_from_the_token(self):
-        signed_in = _ts(_ago(hours=1))
+        signed_in = _ts(_ago(seconds=10))
 
         user = _get_or_create_profile(self._claims(signed_in))
 
@@ -411,8 +461,8 @@ class GetOrCreateProfileTests(TestCase):
         self.assertIsNone(self._last_login())
 
     def test_newer_sign_in_moves_last_login_forward(self):
-        older = _ts(_ago(days=3))
-        newer = _ts(_ago(minutes=5))
+        older = _ts(_ago(seconds=40))
+        newer = _ts(_ago(seconds=5))
         _get_or_create_profile(self._claims(older))
 
         user = _get_or_create_profile(self._claims(newer))
@@ -421,7 +471,7 @@ class GetOrCreateProfileTests(TestCase):
         self.assertEqual(_ts(self._last_login()), newer)
 
     def test_older_token_does_not_move_last_login_back(self):
-        newer = _ts(_ago(minutes=5))
+        newer = _ts(_ago(seconds=5))
         older = _ts(_ago(days=3))
         _get_or_create_profile(self._claims(newer))
 
@@ -432,7 +482,7 @@ class GetOrCreateProfileTests(TestCase):
     def test_stored_last_login_read_from_the_db_compares_without_error(self):
         UserFactory(supabase_uid=self.uid, email=self.email)
         User.objects.filter(supabase_uid=self.uid).update(last_login=_ago(days=1))
-        newer = _ts(_ago(minutes=1))
+        newer = _ts(_ago(seconds=10))
 
         user = _get_or_create_profile(self._claims(newer))
 
@@ -440,7 +490,7 @@ class GetOrCreateProfileTests(TestCase):
         self.assertEqual(_ts(self._last_login()), newer)
 
     def test_many_requests_in_a_row_keep_working(self):
-        signed_in = _ts(_ago(minutes=2))
+        signed_in = _ts(_ago(seconds=20))
 
         for _ in range(3):
             _get_or_create_profile(self._claims(signed_in))
@@ -448,7 +498,7 @@ class GetOrCreateProfileTests(TestCase):
         self.assertEqual(_ts(self._last_login()), signed_in)
 
     def test_same_sign_in_does_not_write_again(self):
-        signed_in = _ts(_ago(minutes=5))
+        signed_in = _ts(_ago(seconds=15))
         _get_or_create_profile(self._claims(signed_in))
 
         with CaptureQueriesContext(connection) as ctx:
@@ -482,7 +532,7 @@ class GetOrCreateProfileTests(TestCase):
 
     def test_far_future_token_does_not_block_later_real_sign_ins(self):
         _get_or_create_profile(self._claims(int(time.time()) + 86400))
-        real = _ts(_ago(minutes=1))
+        real = _ts(_ago(seconds=10))
 
         _get_or_create_profile(self._claims(real))
 
@@ -490,7 +540,7 @@ class GetOrCreateProfileTests(TestCase):
 
     def test_email_change_and_sign_in_are_both_saved(self):
         UserFactory(supabase_uid=self.uid, email="old@example.com")
-        signed_in = _ts(_ago(minutes=1))
+        signed_in = _ts(_ago(seconds=10))
 
         _get_or_create_profile(self._claims(signed_in))
 
@@ -499,7 +549,7 @@ class GetOrCreateProfileTests(TestCase):
         self.assertEqual(_ts(row.last_login), signed_in)
 
     def test_uppercase_email_claim_is_lowercased_and_sign_in_saved(self):
-        signed_in = _ts(_ago(minutes=1))
+        signed_in = _ts(_ago(seconds=10))
 
         _get_or_create_profile({**self._claims(signed_in), "email": "SignIn@Example.COM"})
 
@@ -508,7 +558,7 @@ class GetOrCreateProfileTests(TestCase):
         self.assertEqual(_ts(row.last_login), signed_in)
 
     def test_user_id_claim_is_used_when_sub_is_missing(self):
-        signed_in = _ts(_ago(minutes=1))
+        signed_in = _ts(_ago(seconds=10))
         claims = {"user_id": self.uid, "email": self.email, "amr": _amr(signed_in)}
 
         user = _get_or_create_profile(claims)
@@ -527,7 +577,7 @@ class GetOrCreateProfileTests(TestCase):
     def test_database_error_while_recording_still_returns_the_user(self):
         UserFactory(supabase_uid=self.uid, email=self.email)
         # No email claim, so the only User.objects.filter call is the sign-in write.
-        claims = {"sub": self.uid, "amr": _amr(_ts(_ago(minutes=1)))}
+        claims = {"sub": self.uid, "amr": _amr(_ts(_ago(seconds=10)))}
 
         with patch.object(User.objects, "filter", side_effect=DatabaseError("db down")):
             with self.assertLogs("authentication.views", level="WARNING"):
@@ -538,7 +588,7 @@ class GetOrCreateProfileTests(TestCase):
 
     def test_email_owned_by_another_account_still_records_the_sign_in(self):
         UserFactory(supabase_uid=str(uuid.uuid4()), email=self.email)
-        signed_in = _ts(_ago(minutes=1))
+        signed_in = _ts(_ago(seconds=10))
 
         user = _get_or_create_profile(self._claims(signed_in))
 
@@ -546,27 +596,39 @@ class GetOrCreateProfileTests(TestCase):
         self.assertEqual(_ts(self._last_login()), signed_in)
 
     @override_settings(AUTH_PROVIDER="django")
-    def test_django_auth_mode_does_not_record_from_the_token(self):
+    def test_django_auth_mode_touches_last_login(self):
         UserFactory(supabase_uid=self.uid, email=self.email)
 
-        user = _get_or_create_profile(self._claims(_ts(_ago(minutes=1))))
+        user = _get_or_create_profile(self._claims(_ts(_ago(days=1))))
 
         self.assertEqual(user.supabase_uid, self.uid)
-        self.assertIsNone(self._last_login())
+        self.assertAlmostEqual(self._last_login().timestamp(), timezone.now().timestamp(), delta=5)
 
-    def test_our_own_issued_token_does_not_record_from_the_token(self):
+    @override_settings(AUTH_PROVIDER="django")
+    def test_django_auth_mode_does_not_touch_again_within_the_interval(self):
         UserFactory(supabase_uid=self.uid, email=self.email)
-        claims = self._claims(_ts(_ago(minutes=1)), iss=settings.AUTH_JWT_ISSUER)
+        _get_or_create_profile(self._claims())
+        first = self._last_login()
+
+        with CaptureQueriesContext(connection) as ctx:
+            _get_or_create_profile(self._claims())
+
+        self.assertEqual(_last_login_updates(ctx.captured_queries), [])
+        self.assertAlmostEqual(self._last_login().timestamp(), first.timestamp(), delta=1)
+
+    def test_our_own_issued_token_touches_last_login(self):
+        UserFactory(supabase_uid=self.uid, email=self.email)
+        claims = self._claims(_ts(_ago(days=1)), iss=settings.AUTH_JWT_ISSUER)
 
         user = _get_or_create_profile(claims)
 
         self.assertEqual(user.supabase_uid, self.uid)
-        self.assertIsNone(self._last_login())
+        self.assertAlmostEqual(self._last_login().timestamp(), timezone.now().timestamp(), delta=5)
 
     @override_settings(AUTH_PROVIDER="django")
     def test_django_auth_mode_rejects_an_unknown_user_and_records_nothing(self):
         with self.assertRaises(exceptions.AuthenticationFailed):
-            _get_or_create_profile(self._claims(_ts(_ago(minutes=1))))
+            _get_or_create_profile(self._claims(_ts(_ago(seconds=10))))
 
         self.assertFalse(User.objects.filter(supabase_uid=self.uid).exists())
 
@@ -582,7 +644,11 @@ class GetOrCreateProfileTests(TestCase):
 # ---------------------------------------------------------------------------
 
 
-@override_settings(SUPABASE_JWT_SECRET=TEST_SECRET, AUTH_ACCEPT_SUPABASE_TOKENS=True)
+@override_settings(
+    AUTH_PROVIDER="supabase",
+    SUPABASE_JWT_SECRET=TEST_SECRET,
+    AUTH_ACCEPT_SUPABASE_TOKENS=True,
+)
 class SupabaseJWTAuthenticationTests(TestCase):
     def setUp(self):
         self.uid = str(uuid.uuid4())
@@ -603,7 +669,7 @@ class SupabaseJWTAuthenticationTests(TestCase):
         return User.objects.get(supabase_uid=self.uid).last_login
 
     def test_real_token_records_the_sign_in(self):
-        signed_in = _ts(_ago(minutes=30))
+        signed_in = _ts(_ago(seconds=10))
 
         user, _ = self.auth.authenticate(self._request(_token(self._claims(signed_in))))
 
@@ -611,7 +677,7 @@ class SupabaseJWTAuthenticationTests(TestCase):
         self.assertEqual(_ts(self._last_login()), signed_in)
 
     def test_sets_claims_and_token_on_the_request(self):
-        token = _token(self._claims(_ts(_ago(minutes=1))))
+        token = _token(self._claims(_ts(_ago(seconds=10))))
         request = self._request(token)
 
         self.auth.authenticate(request)
@@ -620,25 +686,26 @@ class SupabaseJWTAuthenticationTests(TestCase):
         self.assertEqual(request.token, token)
 
     def test_lowercase_bearer_scheme_works(self):
-        signed_in = _ts(_ago(minutes=3))
+        signed_in = _ts(_ago(seconds=10))
 
         self.auth.authenticate(self._request(_token(self._claims(signed_in)), scheme="bearer"))
 
         self.assertEqual(_ts(self._last_login()), signed_in)
 
     def test_refreshed_token_updates_last_login_from_iat(self):
-        # Same amr (no logout), new iat (token refresh on next-day app open).
+        # Same amr (no logout), newer iat within the touch interval wins over a stale last_login.
+        UserFactory(supabase_uid=self.uid, email=self.email)
+        User.objects.filter(supabase_uid=self.uid).update(last_login=_ago(days=1))
         signed_in = _ts(_ago(days=1))
-        self.auth.authenticate(self._request(_token(self._claims(signed_in, iat=signed_in))))
-        resumed = _ts(_ago(minutes=1))
+        resumed = _ts(_ago(seconds=10))
 
         self.auth.authenticate(self._request(_token(self._claims(signed_in, iat=resumed))))
 
         self.assertEqual(_ts(self._last_login()), resumed)
 
     def test_same_access_token_does_not_write_last_login_again(self):
-        signed_in = _ts(_ago(hours=2))
-        iat = _ts(_ago(minutes=30))
+        signed_in = _ts(_ago(seconds=40))
+        iat = _ts(_ago(seconds=20))
         token = _token(self._claims(signed_in, iat=iat))
         self.auth.authenticate(self._request(token))
 
@@ -648,9 +715,19 @@ class SupabaseJWTAuthenticationTests(TestCase):
         self.assertEqual(_last_login_updates(ctx.captured_queries), [])
         self.assertEqual(_ts(self._last_login()), iat)
 
+    def test_stale_same_access_token_bumps_last_login_to_now(self):
+        # Tab close/reopen with the same JWT after the touch interval.
+        signed_in = _ts(_ago(hours=2))
+        iat = _ts(_ago(hours=1))
+        token = _token(self._claims(signed_in, iat=iat))
+
+        self.auth.authenticate(self._request(token))
+
+        self.assertAlmostEqual(self._last_login().timestamp(), timezone.now().timestamp(), delta=5)
+
     def test_new_sign_in_after_logout_updates_last_login(self):
-        self.auth.authenticate(self._request(_token(self._claims(_ts(_ago(days=2))))))
-        again = _ts(_ago(minutes=1))
+        self.auth.authenticate(self._request(_token(self._claims(_ts(_ago(seconds=40))))))
+        again = _ts(_ago(seconds=5))
 
         self.auth.authenticate(self._request(_token(self._claims(again))))
 
@@ -960,8 +1037,9 @@ class UserListLastSignInAPITests(BaseAPITestCase):
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed, signed_in)
 
+    @override_settings(AUTH_PROVIDER="supabase")
     def test_sign_in_recorded_by_the_token_check_shows_on_the_list(self):
-        signed_in = _ts(_ago(minutes=20))
+        signed_in = _ts(_ago(seconds=10))
         _get_or_create_profile(
             {"sub": self.supabase_uid, "email": self.email, "amr": _amr(signed_in)}
         )
