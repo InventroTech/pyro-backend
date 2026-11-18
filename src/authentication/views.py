@@ -345,34 +345,48 @@ class PasswordResetConfirmView(APIView):
 
 # ---------------------------------------------------------------------------
 # Last sign-in: config.supabase_auth calls these on every authenticated request
-# to copy the Supabase sign-in time into authentication_user.last_login.
+# to copy the token activity time into authentication_user.last_login.
 # ---------------------------------------------------------------------------
 
 # Sign-in times further ahead than this are treated as bogus, not clock skew.
 SIGN_IN_MAX_CLOCK_SKEW_SECONDS = 300
 
 
+def _valid_unix_timestamp(value, latest_allowed):
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 < value <= latest_allowed
+    )
+
+
 def _signed_in_at(claims):
     """
-    Sign-in time from Supabase's amr claim ([{"method": ..., "timestamp": ...}]).
-    Refreshed tokens keep the original timestamp; spoof tokens have no amr.
-    Malformed, non-positive or far-future timestamps are ignored.
+    Activity time for last_login: newer of Supabase amr and token iat.
+
+    amr ([{"method": ..., "timestamp": ...}]) is required so spoof tokens without
+    it do not record. Refreshed tokens keep the original amr timestamp but get a
+    new iat when the user reopens the app; using the newer of the two keeps the
+    settings "last sign in" current without requiring logout. Malformed,
+    non-positive or far-future timestamps are ignored.
     """
     amr = claims.get("amr")
     if not isinstance(amr, (list, tuple)):
         return None
     latest_allowed = time.time() + SIGN_IN_MAX_CLOCK_SKEW_SECONDS
-    stamps = [
+    amr_stamps = [
         entry.get("timestamp")
         for entry in amr
         if isinstance(entry, dict)
     ]
-    stamps = [
-        s for s in stamps
-        if isinstance(s, (int, float)) and not isinstance(s, bool) and 0 < s <= latest_allowed
-    ]
-    if not stamps:
+    amr_stamps = [s for s in amr_stamps if _valid_unix_timestamp(s, latest_allowed)]
+    # Require a real amr marker; iat alone must not record a sign-in.
+    if not amr_stamps:
         return None
+    stamps = list(amr_stamps)
+    iat = claims.get("iat")
+    if _valid_unix_timestamp(iat, latest_allowed):
+        stamps.append(iat)
     signed_in_at = datetime.fromtimestamp(max(stamps), tz=dt_timezone.utc)
     # With USE_TZ=False, DB datetimes are naive; an aware value could not be compared to them.
     return signed_in_at if settings.USE_TZ else timezone.make_naive(signed_in_at)
@@ -400,7 +414,7 @@ def _record_sign_in(user, signed_in_at):
 
 
 def record_sign_in_from_token(user, claims):
-    """Copy the token's Supabase sign-in time onto user.last_login when it is newer."""
+    """Copy the token's activity time onto user.last_login when it is newer."""
     signed_in_at = _signed_in_at(claims)
     if signed_in_at:
         _record_sign_in(user, signed_in_at)

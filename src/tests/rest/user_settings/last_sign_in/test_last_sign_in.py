@@ -1,8 +1,8 @@
 """
 Last sign-in on the settings user list comes from authentication.User.last_login.
 
-The token check (config.supabase_auth) copies the Supabase sign-in time from the
-token's amr claim onto last_login; user_settings.inactivity reads it back for
+The token check (config.supabase_auth) copies the newer of the token's amr
+sign-in time and iat onto last_login; user_settings.inactivity reads it back for
 /membership/users/. auth.users.last_sign_in_at is no longer used.
 """
 import time
@@ -117,6 +117,28 @@ class SignedInAtTests(SimpleTestCase):
 
         self.assertEqual(_ts(result), 3000)
 
+    def test_newer_iat_wins_over_older_amr(self):
+        # Refreshed access token after reopen: amr stays at original sign-in, iat moves.
+        result = _signed_in_at({"amr": _amr(1000), "iat": 5000})
+
+        self.assertEqual(_ts(result), 5000)
+
+    def test_newer_amr_wins_over_older_iat(self):
+        result = _signed_in_at({"amr": _amr(5000), "iat": 1000})
+
+        self.assertEqual(_ts(result), 5000)
+
+    def test_iat_alone_without_valid_amr_returns_none(self):
+        self.assertIsNone(_signed_in_at({"iat": int(time.time()) - 10}))
+        self.assertIsNone(_signed_in_at({"amr": [], "iat": int(time.time()) - 10}))
+        self.assertIsNone(_signed_in_at({"amr": [{"method": "password"}], "iat": int(time.time()) - 10}))
+
+    def test_far_future_iat_is_ignored_when_amr_is_valid(self):
+        amr_ts = int(time.time()) - 60
+        result = _signed_in_at({"amr": _amr(amr_ts), "iat": time.time() + 86400})
+
+        self.assertEqual(_ts(result), amr_ts)
+
     def test_accepts_a_float_timestamp(self):
         result = _signed_in_at({"amr": _amr(1762758701.9)})
 
@@ -128,16 +150,17 @@ class SignedInAtTests(SimpleTestCase):
         self.assertEqual(_ts(result), 1762758701)
 
     def test_does_not_change_the_claims(self):
-        claims = {"amr": _amr(2000, 1000)}
+        claims = {"amr": _amr(2000, 1000), "iat": 3000}
 
         _signed_in_at(claims)
 
-        self.assertEqual(claims, {"amr": _amr(2000, 1000)})
+        self.assertEqual(claims, {"amr": _amr(2000, 1000), "iat": 3000})
 
     # --- missing / empty --------------------------------------------------
 
     def test_no_amr_claim_returns_none(self):
         self.assertIsNone(_signed_in_at({"sub": "x"}))
+        self.assertIsNone(_signed_in_at({"sub": "x", "iat": 1762758701}))
 
     def test_null_or_empty_amr_returns_none(self):
         self.assertIsNone(_signed_in_at({"amr": None}))
@@ -577,16 +600,27 @@ class SupabaseJWTAuthenticationTests(TestCase):
 
         self.assertEqual(_ts(self._last_login()), signed_in)
 
-    def test_refreshed_token_with_same_sign_in_does_not_write_again(self):
-        signed_in = _ts(_ago(hours=2))
+    def test_refreshed_token_updates_last_login_from_iat(self):
+        # Same amr (no logout), new iat (token refresh on next-day app open).
+        signed_in = _ts(_ago(days=1))
         self.auth.authenticate(self._request(_token(self._claims(signed_in, iat=signed_in))))
-        refreshed = _token(self._claims(signed_in, iat=_ts(timezone.now())))
+        resumed = _ts(_ago(minutes=1))
+
+        self.auth.authenticate(self._request(_token(self._claims(signed_in, iat=resumed))))
+
+        self.assertEqual(_ts(self._last_login()), resumed)
+
+    def test_same_access_token_does_not_write_last_login_again(self):
+        signed_in = _ts(_ago(hours=2))
+        iat = _ts(_ago(minutes=30))
+        token = _token(self._claims(signed_in, iat=iat))
+        self.auth.authenticate(self._request(token))
 
         with CaptureQueriesContext(connection) as ctx:
-            self.auth.authenticate(self._request(refreshed))
+            self.auth.authenticate(self._request(token))
 
         self.assertEqual(_last_login_updates(ctx.captured_queries), [])
-        self.assertEqual(_ts(self._last_login()), signed_in)
+        self.assertEqual(_ts(self._last_login()), iat)
 
     def test_new_sign_in_after_logout_updates_last_login(self):
         self.auth.authenticate(self._request(_token(self._claims(_ts(_ago(days=2))))))
