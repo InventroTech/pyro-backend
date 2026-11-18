@@ -119,6 +119,16 @@ class LoginSessionTests(TestCase):
         self.assertEqual(verify_access_token(second["access_token"])["sub"], self.uid)
         self.assertEqual(self._refresh(second["refresh_token"]).status_code, 200)
 
+    def test_refresh_updates_last_login(self):
+        first = self._login().json()
+        User.objects.filter(pk=self.user.pk).update(last_login=timezone.now() - timedelta(days=1))
+
+        response = self._refresh(first["refresh_token"])
+
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertAlmostEqual(self.user.last_login.timestamp(), timezone.now().timestamp(), delta=5)
+
     def test_reusing_old_refresh_token_revokes_the_session(self):
         first = self._login().json()
         second = self._refresh(first["refresh_token"]).json()
