@@ -345,34 +345,51 @@ class PasswordResetConfirmView(APIView):
 
 # ---------------------------------------------------------------------------
 # Last sign-in: config.supabase_auth calls these on every authenticated request
-# to copy the Supabase sign-in time into authentication_user.last_login.
+# to keep authentication_user.last_login current for the settings user list.
 # ---------------------------------------------------------------------------
 
 # Sign-in times further ahead than this are treated as bogus, not clock skew.
 SIGN_IN_MAX_CLOCK_SKEW_SECONDS = 300
+# Reused access tokens (tab close/reopen) keep the same iat; bump last_login at
+# most this often so activity is visible without a write on every API call.
+LAST_LOGIN_TOUCH_INTERVAL_SECONDS = 60
+
+
+def _valid_unix_timestamp(value, latest_allowed):
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 < value <= latest_allowed
+    )
 
 
 def _signed_in_at(claims):
     """
-    Sign-in time from Supabase's amr claim ([{"method": ..., "timestamp": ...}]).
-    Refreshed tokens keep the original timestamp; spoof tokens have no amr.
-    Malformed, non-positive or far-future timestamps are ignored.
+    Activity time for last_login: newer of Supabase amr and token iat.
+
+    amr ([{"method": ..., "timestamp": ...}]) is required so spoof tokens without
+    it do not record. Refreshed tokens keep the original amr timestamp but get a
+    new iat when the user reopens the app; using the newer of the two keeps the
+    settings "last sign in" current without requiring logout. Malformed,
+    non-positive or far-future timestamps are ignored.
     """
     amr = claims.get("amr")
     if not isinstance(amr, (list, tuple)):
         return None
     latest_allowed = time.time() + SIGN_IN_MAX_CLOCK_SKEW_SECONDS
-    stamps = [
+    amr_stamps = [
         entry.get("timestamp")
         for entry in amr
         if isinstance(entry, dict)
     ]
-    stamps = [
-        s for s in stamps
-        if isinstance(s, (int, float)) and not isinstance(s, bool) and 0 < s <= latest_allowed
-    ]
-    if not stamps:
+    amr_stamps = [s for s in amr_stamps if _valid_unix_timestamp(s, latest_allowed)]
+    # Require a real amr marker; iat alone must not record a sign-in.
+    if not amr_stamps:
         return None
+    stamps = list(amr_stamps)
+    iat = claims.get("iat")
+    if _valid_unix_timestamp(iat, latest_allowed):
+        stamps.append(iat)
     signed_in_at = datetime.fromtimestamp(max(stamps), tz=dt_timezone.utc)
     # With USE_TZ=False, DB datetimes are naive; an aware value could not be compared to them.
     return signed_in_at if settings.USE_TZ else timezone.make_naive(signed_in_at)
@@ -399,8 +416,27 @@ def _record_sign_in(user, signed_in_at):
         user.last_login = signed_in_at
 
 
+def touch_last_login(user):
+    """
+    Bump last_login to now when it is missing or older than the touch interval.
+
+    Tab close/reopen often reuses the same access token (same amr/iat). Calling
+    this after a real amr sign-in keeps the settings time moving without writing
+    on every request.
+    """
+    now = timezone.now()
+    if user.last_login is not None:
+        age = (now - user.last_login).total_seconds()
+        if age < LAST_LOGIN_TOUCH_INTERVAL_SECONDS:
+            return
+    _record_sign_in(user, now)
+
+
 def record_sign_in_from_token(user, claims):
-    """Copy the token's Supabase sign-in time onto user.last_login when it is newer."""
+    """Copy token activity onto last_login, then touch now() if still stale."""
     signed_in_at = _signed_in_at(claims)
-    if signed_in_at:
-        _record_sign_in(user, signed_in_at)
+    if not signed_in_at:
+        return
+    _record_sign_in(user, signed_in_at)
+    # Same access token after tab reopen: amr/iat unchanged; bump when stale.
+    touch_last_login(user)

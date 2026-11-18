@@ -2,8 +2,9 @@
 Hour threshold and last sign-in time for the settings user list.
 
 Nothing here turns a membership off. The sign-in time is
-authentication.User.last_login, set from the token's sign-in time on each
-authenticated request (config.supabase_auth).
+authentication.User.last_login, kept current on authenticated requests
+(config.supabase_auth) from amr/iat plus a throttled now() bump when the
+same access token is reused after tab reopen.
 """
 from __future__ import annotations
 
