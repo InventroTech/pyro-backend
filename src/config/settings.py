@@ -411,8 +411,19 @@ REST_FRAMEWORK = {
         'auth_password_reset_confirm_email': env(
             "AUTH_PASSWORD_RESET_CONFIRM_EMAIL_THROTTLE_RATE", default="5/min"
         ),
+        'rm_leaderboard': env("RM_LEADERBOARD_THROTTLE_RATE", default="60/min"),
     },
 }
+
+# A snapshot row older than this is still served (never a 500), but flagged
+# `stale: true` so the frontend can show a "last updated" hint instead of
+# presenting it as live.
+RM_LEADERBOARD_STALE_THRESHOLD_SECONDS = env.int("RM_LEADERBOARD_STALE_THRESHOLD_SECONDS", default=900)
+# Django cache TTL for leaderboard read responses — within the approved
+# 30-60s window; short enough that a refresh job's new numbers show up
+# quickly, long enough to absorb a page's poll traffic without re-querying
+# Postgres on every request.
+RM_LEADERBOARD_CACHE_TTL_SECONDS = env.int("RM_LEADERBOARD_CACHE_TTL_SECONDS", default=45)
 
 if DEBUG:
     REST_FRAMEWORK["DEFAULT_RENDERER_CLASSES"] = [

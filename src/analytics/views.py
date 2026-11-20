@@ -55,8 +55,9 @@ from django.db import models
 from django.contrib.auth import get_user_model
 from authz.permissions import IsTenantAuthenticated
 from config.supabase_auth import SupabaseJWTAuthentication
+from authentication.session_views import AuthRateThrottle
 from crm_records.mixins import TenantScopedMixin
-from .services import TeamResolver, TeamMetricsService
+from .services import TeamResolver, TeamMetricsService, RmLeaderboardReadService, ist_today, ist_week_start, ist_month_start
 from .serializers import (
     TeamOverviewSerializer,
     MemberBreakdownSerializer,
@@ -2119,3 +2120,126 @@ class RmPrdFilterOptionsView(APIView):
             "states": states,
             "parties": lead_options.get("lead_types", []),
         })
+
+
+_RM_LEADERBOARD_PERIOD_TYPES = {"day", "week", "month"}
+_RM_LEADERBOARD_DEFAULT_LIMIT = 50
+_RM_LEADERBOARD_MAX_LIMIT = 100
+
+
+def _rm_leaderboard_period_start(period_type: str):
+    today = ist_today()
+    if period_type == "week":
+        return ist_week_start(today)
+    if period_type == "month":
+        return ist_month_start(today)
+    return today
+
+
+def _rm_leaderboard_enabled(tenant) -> bool:
+    from core.models import TenantSettings
+
+    return TenantSettings.objects.filter(tenant_id=tenant.id, rm_leaderboard_enabled=True).exists()
+
+
+def _rm_leaderboard_limit(request) -> int:
+    raw = request.query_params.get("limit", "").strip()
+    if not raw:
+        return _RM_LEADERBOARD_DEFAULT_LIMIT
+    try:
+        limit = int(raw)
+    except ValueError:
+        return _RM_LEADERBOARD_DEFAULT_LIMIT
+    return max(1, min(limit, _RM_LEADERBOARD_MAX_LIMIT))
+
+
+class RmLeaderboardView(APIView):
+    """
+    GET /rm-leaderboard/ — the current (day/week/month) RmLeaderboardSnapshot
+    board for this tenant, read-only (never aggregates live — see
+    RmLeaderboardReadService). 404s while TenantSettings.rm_leaderboard_enabled
+    is False for this tenant, same as a resource that doesn't exist yet,
+    not a 403 — the frontend hides the tab entirely in that case rather
+    than rendering an error state (fix #9).
+
+    Query params:
+      period_type: day (default) | week | month — IST-calendar-aligned,
+        matching refresh_rm_leaderboard_snapshot's own period boundaries.
+      scope: tenant (default) | team — "team" re-scopes to the requesting
+        user's own TenantMembership hierarchy (self + direct/indirect
+        reports) and re-ranks 1..N within it, for an ASM/manager page
+        (viewMode='asm'|'manager'). "tenant" is the plain top-N board, for
+        a manager's full-tenant page or an RM's own top-N page
+        (viewMode='rm' pairs this with /rm-leaderboard/me/ for their own
+        row — see fix #7).
+      limit: top N rows, default 50, clamped to [1, 100].
+    """
+
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated]
+    throttle_classes = [AuthRateThrottle]
+    throttle_scope = "rm_leaderboard"
+
+    def get(self, request):
+        tenant = request.tenant
+        if not _rm_leaderboard_enabled(tenant):
+            return Response({"error": "RM Leaderboard is not enabled for this tenant."}, status=status.HTTP_404_NOT_FOUND)
+
+        period_type = request.query_params.get("period_type", "day").strip().lower()
+        if period_type not in _RM_LEADERBOARD_PERIOD_TYPES:
+            return Response(
+                {"error": f"Invalid period_type. Use one of: {sorted(_RM_LEADERBOARD_PERIOD_TYPES)}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        scope = request.query_params.get("scope", "tenant").strip().lower()
+        if scope not in {"tenant", "team"}:
+            return Response({"error": "Invalid scope. Use 'tenant' or 'team'."}, status=status.HTTP_400_BAD_REQUEST)
+        limit = _rm_leaderboard_limit(request)
+
+        scope_user_ids = None
+        if scope == "team":
+            viewer_user_id = getattr(request.user, "supabase_uid", None)
+            if not viewer_user_id:
+                return Response({"error": "User ID not found"}, status=status.HTTP_400_BAD_REQUEST)
+            scope_user_ids = TeamResolver.get_team_user_ids(str(viewer_user_id), tenant)
+
+        period_start = _rm_leaderboard_period_start(period_type)
+        result = RmLeaderboardReadService.get_board(tenant, period_type, period_start, scope_user_ids, limit)
+        return Response({"period_type": period_type, "period_start": period_start.isoformat(), **result})
+
+
+class RmLeaderboardMeView(APIView):
+    """
+    GET /rm-leaderboard/me/ — the requesting RM's own current leaderboard
+    row (rank, score, achieved, target, touches, unique_leads), regardless
+    of whether they fall inside /rm-leaderboard/'s top-N cutoff. Pairs with
+    that endpoint for viewMode='rm' pages: show the top N, and always show
+    the viewer's own row too (fix #7 — never hide the board from an RM).
+
+    Query params: period_type: day (default) | week | month.
+    """
+
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated]
+    throttle_classes = [AuthRateThrottle]
+    throttle_scope = "rm_leaderboard"
+
+    def get(self, request):
+        tenant = request.tenant
+        if not _rm_leaderboard_enabled(tenant):
+            return Response({"error": "RM Leaderboard is not enabled for this tenant."}, status=status.HTTP_404_NOT_FOUND)
+
+        period_type = request.query_params.get("period_type", "day").strip().lower()
+        if period_type not in _RM_LEADERBOARD_PERIOD_TYPES:
+            return Response(
+                {"error": f"Invalid period_type. Use one of: {sorted(_RM_LEADERBOARD_PERIOD_TYPES)}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        rm_user_id = getattr(request.user, "supabase_uid", None)
+        if not rm_user_id:
+            return Response({"error": "User ID not found"}, status=status.HTTP_400_BAD_REQUEST)
+
+        period_start = _rm_leaderboard_period_start(period_type)
+        result = RmLeaderboardReadService.get_my_row(tenant, period_type, period_start, str(rm_user_id))
+        return Response({"period_type": period_type, "period_start": period_start.isoformat(), **result})
