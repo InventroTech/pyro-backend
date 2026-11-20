@@ -4,9 +4,10 @@ Gunicorn configuration file for background job worker startup.
 This ensures background job worker threads start in each Gunicorn worker process,
 not in the master process (important when using --preload flag).
 
-Optional Prometheus multiprocess support:
-  If PROMETHEUS_MULTIPROC_DIR is set in the environment, prepare the directory
-  and mark workers dead on exit so scrapes can aggregate across workers.
+Prometheus multiprocess:
+  Set PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc so /metrics aggregates
+  all workers on this instance. HTTP metrics are registered lazily in workers
+  (see middleware.prometheus_metrics) to stay correct with --preload.
 """
 
 import logging
@@ -21,9 +22,13 @@ timeout = int(os.environ.get("GUNICORN_TIMEOUT", "30"))
 keepalive = int(os.environ.get("GUNICORN_KEEPALIVE", "2"))
 
 
+def _prometheus_multiproc_dir() -> str:
+    return (os.environ.get("PROMETHEUS_MULTIPROC_DIR") or "").strip()
+
+
 def on_starting(server):
     """Prepare Prometheus multiprocess directory when explicitly enabled."""
-    multiproc_dir = (os.environ.get("PROMETHEUS_MULTIPROC_DIR") or "").strip()
+    multiproc_dir = _prometheus_multiproc_dir()
     if not multiproc_dir:
         return
 
@@ -35,11 +40,12 @@ def on_starting(server):
                 os.unlink(path)
         except OSError:
             pass
+    server.log.info("Prometheus multiproc dir ready: %s", multiproc_dir)
 
 
 def child_exit(server, worker):
     """Mark dead worker so Prometheus multiprocess registry drops its samples."""
-    if not (os.environ.get("PROMETHEUS_MULTIPROC_DIR") or "").strip():
+    if not _prometheus_multiproc_dir():
         return
     try:
         from prometheus_client import multiprocess
@@ -49,8 +55,17 @@ def child_exit(server, worker):
         pass
 
 
+def worker_exit(server, worker):
+    """Same cleanup as child_exit for graceful worker shutdowns."""
+    child_exit(server, worker)
+
+
 def post_fork(server, worker):
     """Start general background job threads (Mixpanel runs on Render Background Worker)."""
+    multiproc_dir = _prometheus_multiproc_dir()
+    if multiproc_dir:
+        os.makedirs(multiproc_dir, exist_ok=True)
+
     try:
         from background_jobs.worker_bootstrap import start_background_job_worker_threads
 
