@@ -1,10 +1,17 @@
 """
 Analytics services for team metrics and event aggregation.
 """
+import hashlib
+import json
 import logging
+from contextlib import contextmanager
 from typing import Set, Optional, Dict, List, Any
 from datetime import datetime, date, timedelta
+import psycopg2
+import pytz
+from django.conf import settings
 from django.core.cache import cache
+from django.db import connection, transaction
 from django.db.models import Q, Count, F, Avg, Min, Max
 from django.utils import timezone
 
@@ -13,6 +20,7 @@ from crm_records.models import EventLog, Record
 from user_settings.services import (
     USER_KV_DAILY_LIMIT_KEY,
     USER_KV_DAILY_TARGET_KEY,
+    get_rm_daily_targets_sum,
     kv_int_by_membership,
     sum_kv_int_for_memberships,
 )
@@ -758,6 +766,590 @@ class TeamMetricsService:
                 day_metrics[day]['calls_made'] += metric['count']
             if event == 'lead.trial_activated':
                 day_metrics[day]['trials_activated'] += metric['count']
-        
+
         return list(day_metrics.values())
+
+
+class RmPerformanceSummaryService:
+    """
+    Computes and stores one tenant's one local-day RmPerformanceDailySummary
+    rows from raw rm_activity_events — the actual aggregation work behind
+    the refresh_rm_performance_summary management command. Kept as a plain
+    function (not called from any live request) so it's cheap to unit-test
+    directly and to run from a scheduled job without any web-request
+    machinery in the way.
+
+    One call = one tenant, one local day. The day boundary comes from
+    get_utc_datetime_range_for_ist_date, not a UTC-calendar-day window —
+    a previous live endpoint used a UTC-widened window the frontend sent
+    and never trimmed back down, which silently queried up to ~2x the
+    intended range for IST users. This function is the one place that
+    boundary gets computed from now on, so every reader downstream just
+    sums whichever `date` rows fall in range instead of re-deriving it.
+
+    Uses a plain cursor (no Django QuerySet .iterator()/server-side cursor)
+    — Supabase's transaction-mode pooler can swap backends between
+    statements, which breaks named server-side cursors (see
+    DISABLE_SERVER_SIDE_CURSORS in settings).
+    """
+
+    @staticmethod
+    def compute_and_store_day(tenant, target_date: date, statement_timeout_ms: Optional[int] = None) -> int:
+        """
+        Replaces every RmPerformanceDailySummary row for (tenant,
+        target_date) with a fresh computation — a DELETE + INSERT in one
+        transaction, not an upsert, so a bucket that no longer has any
+        touches (e.g. the last touch for a given state/party/lead_group
+        combo got reassigned or soft-deleted) actually disappears instead
+        of lingering with stale counts forever.
+
+        statement_timeout_ms, if given, is applied with SET LOCAL inside
+        the same transaction as the read query — not a bare session-level
+        SET, which isn't safe here: Supabase's transaction-mode pooler can
+        swap the underlying backend connection between statements outside
+        an explicit transaction. SET LOCAL is scoped to — and
+        automatically cleared at the end of — this one transaction, so it
+        can't leak onto whatever connection the pool hands back for an
+        unrelated later request.
+
+        Returns the number of summary rows written for this tenant/day.
+        """
+        utc_start, utc_end = get_utc_datetime_range_for_ist_date(target_date)
+        params = {
+            "tenant_id": str(tenant.id),
+            "start": json.dumps(utc_start.isoformat()),
+            "end": json.dumps(utc_end.isoformat()),
+        }
+
+        sql = """
+            WITH closed AS (
+                SELECT
+                    id,
+                    event_data->>'rm_user_id' AS rm_user_id,
+                    NULLIF(event_data->>'rm_name', '') AS rm_name,
+                    NULLIF(event_data->>'manager_name', '') AS manager_name,
+                    COALESCE(NULLIF(event_data->>'state', ''), '') AS state,
+                    COALESCE(NULLIF(event_data->>'party', ''), '') AS party,
+                    COALESCE(NULLIF(event_data->>'lead_group', ''), '') AS lead_group,
+                    NULLIF(event_data->>'lead_record_id', '')::bigint AS lead_record_id,
+                    NULLIF(event_data->>'updated_status', '') AS updated_status,
+                    event_data->>'started_at' AS started_at
+                FROM rm_activity_events
+                WHERE tenant_id = %(tenant_id)s
+                    AND is_deleted = false AND deleted_at IS NULL
+                    AND event_type = 'CALL_TOUCH'
+                    AND event_data->>'ended_at' IS NOT NULL
+                    AND event_data->>'rm_user_id' IS NOT NULL
+                    AND (event_data -> 'started_at') >= %(start)s::jsonb
+                    AND (event_data -> 'started_at') <= %(end)s::jsonb
+            ),
+            first_row AS (
+                SELECT DISTINCT ON (rm_user_id, state, party, lead_group)
+                    rm_user_id, state, party, lead_group, rm_name, manager_name
+                FROM closed
+                ORDER BY rm_user_id, state, party, lead_group, id ASC
+            ),
+            touches_agg AS (
+                SELECT rm_user_id, state, party, lead_group,
+                    count(*) AS touches, count(DISTINCT lead_record_id) AS unique_leads
+                FROM closed
+                GROUP BY rm_user_id, state, party, lead_group
+            ),
+            latest AS (
+                SELECT DISTINCT ON (rm_user_id, state, party, lead_group, lead_record_id)
+                    rm_user_id, state, party, lead_group, updated_status
+                FROM closed
+                WHERE lead_record_id IS NOT NULL
+                ORDER BY rm_user_id, state, party, lead_group, lead_record_id, started_at DESC, id ASC
+            ),
+            disp AS (
+                SELECT rm_user_id, state, party, lead_group, updated_status, count(*) AS cnt
+                FROM latest
+                WHERE updated_status IS NOT NULL
+                GROUP BY rm_user_id, state, party, lead_group, updated_status
+            )
+            SELECT
+                t.rm_user_id, f.rm_name, f.manager_name, t.state, t.party, t.lead_group,
+                t.touches, t.unique_leads,
+                COALESCE(
+                    jsonb_object_agg(d.updated_status, d.cnt) FILTER (WHERE d.updated_status IS NOT NULL),
+                    '{}'::jsonb
+                ) AS disposition_counts
+            FROM touches_agg t
+            JOIN first_row f
+                ON f.rm_user_id = t.rm_user_id AND f.state = t.state
+                AND f.party = t.party AND f.lead_group = t.lead_group
+            LEFT JOIN disp d
+                ON d.rm_user_id = t.rm_user_id AND d.state = t.state
+                AND d.party = t.party AND d.lead_group = t.lead_group
+            GROUP BY t.rm_user_id, f.rm_name, f.manager_name, t.state, t.party, t.lead_group,
+                t.touches, t.unique_leads
+        """
+
+        # Same `closed` universe, but deduped globally per lead_record_id
+        # (no rm_user_id in the DISTINCT ON) instead of per-RM-bucket — see
+        # RmPerformanceDailyLeadLatest's docstring for why this has to be a
+        # separate query rather than derived from the rows above: a lead
+        # touched by two different RMs the same day must appear exactly
+        # once here, attributed to whichever touch was truly latest.
+        leads_sql = """
+            WITH closed AS (
+                SELECT
+                    id,
+                    event_data->>'rm_user_id' AS rm_user_id,
+                    COALESCE(NULLIF(event_data->>'state', ''), '') AS state,
+                    COALESCE(NULLIF(event_data->>'party', ''), '') AS party,
+                    COALESCE(NULLIF(event_data->>'lead_group', ''), '') AS lead_group,
+                    NULLIF(event_data->>'lead_record_id', '')::bigint AS lead_record_id,
+                    NULLIF(event_data->>'updated_status', '') AS updated_status,
+                    event_data->>'started_at' AS started_at
+                FROM rm_activity_events
+                WHERE tenant_id = %(tenant_id)s
+                    AND is_deleted = false AND deleted_at IS NULL
+                    AND event_type = 'CALL_TOUCH'
+                    AND event_data->>'ended_at' IS NOT NULL
+                    AND event_data->>'rm_user_id' IS NOT NULL
+                    AND (event_data -> 'started_at') >= %(start)s::jsonb
+                    AND (event_data -> 'started_at') <= %(end)s::jsonb
+            )
+            SELECT DISTINCT ON (lead_record_id)
+                lead_record_id, rm_user_id, state, party, lead_group, updated_status
+            FROM closed
+            WHERE lead_record_id IS NOT NULL
+            ORDER BY lead_record_id, started_at DESC, id ASC
+        """
+
+        from .models import RmPerformanceDailyLeadLatest, RmPerformanceDailySummary
+
+        with transaction.atomic():
+            with connection.cursor() as cursor:
+                if statement_timeout_ms is not None:
+                    cursor.execute("SET LOCAL statement_timeout = %s", [statement_timeout_ms])
+                cursor.execute(sql, params)
+                columns = [col[0] for col in cursor.description]
+                rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+                cursor.execute(leads_sql, params)
+                lead_columns = [col[0] for col in cursor.description]
+                lead_rows = [dict(zip(lead_columns, row)) for row in cursor.fetchall()]
+
+            RmPerformanceDailySummary.objects.filter(tenant=tenant, date=target_date).delete()
+            RmPerformanceDailySummary.objects.bulk_create(
+                [
+                    RmPerformanceDailySummary(
+                        tenant=tenant,
+                        rm_user_id=row["rm_user_id"],
+                        rm_name=row["rm_name"] or "",
+                        manager_name=row["manager_name"] or "",
+                        state=row["state"],
+                        party=row["party"],
+                        lead_group=row["lead_group"],
+                        date=target_date,
+                        touches=row["touches"],
+                        unique_leads=row["unique_leads"],
+                        # jsonb_object_agg comes back from the raw cursor as a
+                        # JSON string, not auto-decoded like Django's JSONField
+                        disposition_counts=json.loads(row["disposition_counts"]),
+                    )
+                    for row in rows
+                ]
+            )
+
+            RmPerformanceDailyLeadLatest.objects.filter(tenant=tenant, date=target_date).delete()
+            RmPerformanceDailyLeadLatest.objects.bulk_create(
+                [
+                    RmPerformanceDailyLeadLatest(
+                        tenant=tenant,
+                        lead_record_id=row["lead_record_id"],
+                        rm_user_id=row["rm_user_id"],
+                        state=row["state"],
+                        party=row["party"],
+                        lead_group=row["lead_group"],
+                        date=target_date,
+                        updated_status=row["updated_status"] or "",
+                    )
+                    for row in lead_rows
+                ]
+            )
+
+        return len(rows)
+
+
+def compute_score(achieved: int, target: int) -> Optional[float]:
+    """
+    achieved/target as a 0-100+ PERCENTAGE (not a 0-1 ratio) — matches
+    formatVsTarget's convention on the frontend. Returns None (not
+    float('-inf')) when target is 0/unset: -inf isn't valid JSON (the
+    stdlib `json` module happily emits it as the literal token `-Infinity`,
+    which most JSON parsers, including JS's JSON.parse, reject outright),
+    and None round-trips through DRF/JSON cleanly as `null`. Callers that
+    need "unset sorts last" semantics (the leaderboard's own ranking) must
+    handle the None case explicitly when ordering — see
+    RmLeaderboardService.compute_and_store_period.
+    """
+    return (achieved / target) * 100 if target else None
+
+
+def ist_today() -> date:
+    """Today's date in IST — `timezone.now()` is naive UTC in this project
+    (USE_TZ=False), so this isn't simply `timezone.now().date()`: that
+    would read as the wrong calendar day for part of the evening/night IST
+    (e.g. 11pm IST is already the next UTC day)."""
+    ist_now = timezone.now().replace(tzinfo=pytz.UTC).astimezone(pytz.timezone("Asia/Kolkata"))
+    return ist_now.date()
+
+
+def ist_week_start(d: date) -> date:
+    """Monday of the ISO week containing `d` (date.weekday(): Monday=0)."""
+    return d - timedelta(days=d.weekday())
+
+
+def ist_week_end(week_start: date) -> date:
+    return week_start + timedelta(days=6)
+
+
+def ist_month_start(d: date) -> date:
+    return d.replace(day=1)
+
+
+def ist_month_end(month_start: date) -> date:
+    if month_start.month == 12:
+        next_month_start = month_start.replace(year=month_start.year + 1, month=1)
+    else:
+        next_month_start = month_start.replace(month=month_start.month + 1)
+    return next_month_start - timedelta(days=1)
+
+
+# Arbitrary fixed bigint — pg_advisory_lock's key space is just "pick a
+# number unique to this one job across the whole system." Not derived
+# from anything; just needs to never collide with another job's lock key.
+_LEADERBOARD_REFRESH_LOCK_KEY = 887_001_001
+
+
+def _session_mode_connection_params() -> dict:
+    """
+    Same session-mode-port pattern as realtime.pg_listener's LISTEN
+    connection: Supabase's transaction-mode pooler (port 6543) can swap
+    the underlying Postgres backend between statements outside an
+    explicit transaction. A session-scoped advisory lock taken over that
+    pooled connection would be meaningless — the "session" it's scoped to
+    might not even be the same backend by the time later work runs. The
+    session-mode port (5432, same host) guarantees one real backend for
+    the lifetime of this one dedicated connection.
+    """
+    db = settings.DATABASES["default"]
+    port = int(db.get("PORT") or 5432)
+    if port == 6543:
+        port = 5432
+    params = {
+        "dbname": db["NAME"],
+        "user": db["USER"],
+        "password": db["PASSWORD"],
+        "host": db["HOST"],
+        "port": port,
+    }
+    sslmode = (db.get("OPTIONS") or {}).get("sslmode")
+    if sslmode:
+        params["sslmode"] = sslmode
+    return params
+
+
+@contextmanager
+def leaderboard_refresh_lock():
+    """
+    Session-scoped pg_try_advisory_lock so two overlapping
+    refresh_rm_leaderboard_snapshot runs (a slow run plus the next
+    scheduled cron tick firing before it finishes) exit immediately
+    instead of both doing the same work concurrently. Yields True if this
+    call acquired the lock (caller should proceed), False if another
+    instance already holds it (caller should log and exit without doing
+    any work — not wait, not retry).
+
+    Deliberately opens its OWN dedicated connection on the session-mode
+    port rather than using Django's pooled `connection` — see
+    _session_mode_connection_params. This connection is held open for the
+    whole duration of the `with` block and explicitly closed after
+    releasing the lock; it is never used for any other query.
+    """
+    conn = psycopg2.connect(**_session_mode_connection_params())
+    acquired = False
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", [_LEADERBOARD_REFRESH_LOCK_KEY])
+            acquired = cur.fetchone()[0]
+        yield acquired
+    finally:
+        if acquired:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(%s)", [_LEADERBOARD_REFRESH_LOCK_KEY])
+        conn.close()
+
+
+class RmLeaderboardService:
+    """
+    Computes and stores one tenant's one CURRENT period's
+    RmLeaderboardSnapshot rows from RmPerformanceDailySummary — the
+    aggregation behind refresh_rm_leaderboard_snapshot. Unlike
+    RmPerformanceSummaryService, this never touches raw rm_activity_events
+    — it only sums already-small daily-summary rows for one RM at a time
+    (no cross-RM dedup ambiguity: a single RM's own achieved/touches count
+    has none of the "reassigned lead" double-counting risk that
+    RmPerformanceDailyLeadLatest exists to solve for team-wide totals), so
+    there's no raw-cursor/JSONB-string-decoding concern here at all — this
+    is plain Django ORM aggregation over a small, already-indexed table.
+    """
+
+    @staticmethod
+    def compute_and_store_period(
+        tenant,
+        period_type: str,
+        period_start: date,
+        period_end: date,
+        statement_timeout_ms: Optional[int] = None,
+    ) -> int:
+        """
+        Replaces every RmLeaderboardSnapshot row for (tenant, period_type,
+        period_start) with a fresh ranked computation. The read (summing
+        RmPerformanceDailySummary), the DELETE, and the INSERT all happen
+        inside ONE transaction.atomic() — not just the delete+insert — so
+        a reader can never observe an empty/partial board mid-refresh, and
+        so statement_timeout_ms (applied via SET LOCAL, same pooler-safety
+        reasoning as RmPerformanceSummaryService.compute_and_store_day)
+        covers every statement this call makes, not just some of them.
+
+        Only RMs with a currently-active TenantMembership are ranked —
+        historical RmPerformanceDailySummary rows for a since-deactivated
+        or deleted RM are excluded entirely, not just hidden client-side.
+
+        Returns the number of leaderboard rows written.
+        """
+        from .models import RmLeaderboardSnapshot, RmPerformanceDailySummary
+
+        with transaction.atomic():
+            if statement_timeout_ms is not None:
+                with connection.cursor() as cursor:
+                    cursor.execute("SET LOCAL statement_timeout = %s", [statement_timeout_ms])
+
+            active_memberships = list(
+                TenantMembership.objects.filter(
+                    tenant=tenant, is_active=True, user_id__isnull=False
+                ).values("id", "user_id")
+            )
+            active_rm_user_ids = {str(m["user_id"]) for m in active_memberships}
+            membership_id_by_user_id = {str(m["user_id"]): m["id"] for m in active_memberships}
+
+            if not active_rm_user_ids:
+                RmLeaderboardSnapshot.objects.filter(
+                    tenant=tenant, period_type=period_type, period_start=period_start
+                ).delete()
+                return 0
+
+            # Sum each active RM's own daily-summary buckets across the
+            # period — no cross-RM dedup concern (see class docstring), so
+            # this is a plain per-RM sum, not the global-dedup query the
+            # old team-totals path needed.
+            per_rm: Dict[str, Dict[str, Any]] = {
+                rm_user_id: {"touches": 0, "unique_leads": 0, "achieved": 0}
+                for rm_user_id in active_rm_user_ids
+            }
+            rows = RmPerformanceDailySummary.objects.filter(
+                tenant=tenant,
+                rm_user_id__in=active_rm_user_ids,
+                date__gte=period_start,
+                date__lte=period_end,
+            ).values("rm_user_id", "touches", "unique_leads", "disposition_counts")
+            for row in rows:
+                bucket = per_rm[row["rm_user_id"]]
+                bucket["touches"] += row["touches"]
+                bucket["unique_leads"] += row["unique_leads"]
+                bucket["achieved"] += (row["disposition_counts"] or {}).get("TRIAL_ACTIVATED", 0)
+
+            membership_ids = list(membership_id_by_user_id.values())
+            target_by_membership = get_rm_daily_targets_sum(tenant, membership_ids, period_start, period_end)
+            target_by_rm_user_id = {
+                user_id: target_by_membership.get(membership_id_by_user_id[user_id], 0)
+                for user_id in active_rm_user_ids
+            }
+
+            entries = []
+            for rm_user_id, bucket in per_rm.items():
+                target = target_by_rm_user_id.get(rm_user_id, 0)
+                entries.append(
+                    {
+                        "rm_user_id": rm_user_id,
+                        "touches": bucket["touches"],
+                        "unique_leads": bucket["unique_leads"],
+                        "achieved": bucket["achieved"],
+                        "target": target,
+                        "score": compute_score(bucket["achieved"], target),
+                    }
+                )
+
+            # score DESC NULLS LAST, achieved DESC, rm_id ASC — split into
+            # "has a real score" and "no target configured" groups so
+            # Python's sort (which can't compare None to a float) never
+            # has to, while still applying the achieved/rm_id tie-break
+            # within each group.
+            scored = sorted(
+                (e for e in entries if e["score"] is not None),
+                key=lambda e: (-e["score"], -e["achieved"], e["rm_user_id"]),
+            )
+            unscored = sorted(
+                (e for e in entries if e["score"] is None),
+                key=lambda e: (-e["achieved"], e["rm_user_id"]),
+            )
+            ranked = scored + unscored
+
+            RmLeaderboardSnapshot.objects.filter(
+                tenant=tenant, period_type=period_type, period_start=period_start
+            ).delete()
+            RmLeaderboardSnapshot.objects.bulk_create(
+                [
+                    RmLeaderboardSnapshot(
+                        tenant=tenant,
+                        rm_user_id=entry["rm_user_id"],
+                        period_type=period_type,
+                        period_start=period_start,
+                        touches=entry["touches"],
+                        unique_leads=entry["unique_leads"],
+                        achieved=entry["achieved"],
+                        target=entry["target"],
+                        score=entry["score"],
+                        rank=index + 1,
+                    )
+                    for index, entry in enumerate(ranked)
+                ]
+            )
+
+        return len(ranked)
+
+
+def leaderboard_cache_key(
+    tenant_id, period_type: str, period_start: date, scope_user_ids: Optional[Set[str]], limit: int
+) -> str:
+    """
+    Cache key for one leaderboard read. tenant_id is always first and
+    always present, so a cache entry can never be returned across
+    tenants even on a shared backend — see
+    test_no_cross_tenant_cache_hit.
+
+    scope_user_ids=None means "the whole tenant's board" (what a manager
+    or an RM's top-N view requests) — every viewer of that same
+    tenant/period/limit shares one entry. A concrete set means "one
+    ASM's team" — hashed rather than joined raw so the key stays a
+    short, fixed length regardless of team size, and so two ASMs with
+    different teams (same tenant, same period, same limit) never read
+    each other's cached board.
+    """
+    if scope_user_ids is None:
+        scope_component = "tenant"
+    else:
+        ids_digest = hashlib.sha256(",".join(sorted(scope_user_ids)).encode()).hexdigest()[:16]
+        scope_component = f"team:{ids_digest}"
+    return f"rm_leaderboard:{tenant_id}:{period_type}:{period_start.isoformat()}:{scope_component}:{limit}"
+
+
+_LEADERBOARD_ROW_FIELDS = ("rm_user_id", "rank", "score", "achieved", "target", "touches", "unique_leads", "computed_at")
+
+
+def _leaderboard_is_stale(computed_at: Optional[datetime]) -> bool:
+    if computed_at is None:
+        return True
+    threshold = getattr(settings, "RM_LEADERBOARD_STALE_THRESHOLD_SECONDS", 900)
+    return (timezone.now() - computed_at).total_seconds() > threshold
+
+
+class RmLeaderboardReadService:
+    """
+    Read-side of the leaderboard: only ever SELECTs RmLeaderboardSnapshot
+    rows written by RmLeaderboardService.compute_and_store_period — never
+    aggregates anything live. Wrapped in a short Django-cache TTL (see
+    leaderboard_cache_key) so repeated polling doesn't re-hit Postgres on
+    every request.
+    """
+
+    @staticmethod
+    def get_board(tenant, period_type: str, period_start: date, scope_user_ids: Optional[Set[str]] = None, limit: int = 50) -> dict:
+        """
+        scope_user_ids=None: plain tenant-wide top-N, ordered by the
+        rank the refresh job already computed — a single indexed,
+        LIMIT-pushed-down SELECT (the read query Step 5's EXPLAIN
+        ANALYZE targets).
+
+        scope_user_ids={...}: an ASM/manager's team view. The stored
+        `rank` is tenant-wide, so it has gaps once filtered to one
+        team — re-numbered 1..N here (equivalent to ROW_NUMBER() OVER
+        ORDER BY rank, just applied in Python on an already-ordered,
+        already-small result set instead of a second raw SQL query).
+        """
+        from .models import RmLeaderboardSnapshot
+
+        cache_key = leaderboard_cache_key(tenant.id, period_type, period_start, scope_user_ids, limit)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        base_qs = RmLeaderboardSnapshot.objects.filter(
+            tenant=tenant, period_type=period_type, period_start=period_start,
+        )
+        if scope_user_ids is None:
+            rows = list(
+                base_qs.order_by("rank")[:limit].values(*_LEADERBOARD_ROW_FIELDS)
+            )
+        else:
+            rows = list(
+                base_qs.filter(rm_user_id__in=scope_user_ids).order_by("rank").values(*_LEADERBOARD_ROW_FIELDS)
+            )
+            for index, row in enumerate(rows):
+                row["rank"] = index + 1
+            rows = rows[:limit]
+
+        computed_at = max((row["computed_at"] for row in rows), default=None)
+        stale = _leaderboard_is_stale(computed_at)
+        for row in rows:
+            row.pop("computed_at", None)
+
+        result = {
+            "rows": rows,
+            "stale": stale,
+            "computed_at": computed_at.isoformat() if computed_at else None,
+        }
+        cache.set(cache_key, result, getattr(settings, "RM_LEADERBOARD_CACHE_TTL_SECONDS", 45))
+        return result
+
+    @staticmethod
+    def get_my_row(tenant, period_type: str, period_start: date, rm_user_id: str) -> dict:
+        """
+        The requesting RM's own row, independent of the top-N cutoff —
+        what /rm-leaderboard/me/ uses so an RM outside the visible top N
+        still sees their own rank (fix #7: never hide the board from an
+        RM, just show them less of everyone else's).
+        """
+        from .models import RmLeaderboardSnapshot
+
+        cache_key = leaderboard_cache_key(tenant.id, period_type, period_start, {rm_user_id}, limit=1)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        row = (
+            RmLeaderboardSnapshot.objects.filter(
+                tenant=tenant, period_type=period_type, period_start=period_start, rm_user_id=rm_user_id,
+            )
+            .values(*_LEADERBOARD_ROW_FIELDS)
+            .first()
+        )
+        computed_at = row["computed_at"] if row else None
+        stale = _leaderboard_is_stale(computed_at)
+        if row is not None:
+            row.pop("computed_at", None)
+
+        result = {
+            "row": row,
+            "stale": stale,
+            "computed_at": computed_at.isoformat() if computed_at else None,
+        }
+        cache.set(cache_key, result, getattr(settings, "RM_LEADERBOARD_CACHE_TTL_SECONDS", 45))
+        return result
 
