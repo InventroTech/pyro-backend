@@ -12,9 +12,9 @@ Auth: set METRICS_AUTH_TOKEN and scrape with Authorization: Bearer <token>
       or X-Metrics-Token: <token>. In non-dev, an empty token hides the endpoint (404).
 
 Multiprocess note:
-  PROMETHEUS_MULTIPROC_DIR is optional. When unset (default), metrics live in-process
-  and /metrics reads the default REGISTRY. That is the reliable mode on Render.
-  When set, scrapes use MultiProcessCollector, with a REGISTRY fallback if empty.
+  Set PROMETHEUS_MULTIPROC_DIR (e.g. /tmp/prometheus_multiproc) so Gunicorn workers
+  share metrics on disk and /metrics aggregates them. Metrics are created lazily on
+  first request so --preload does not register them in the master process.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ import logging
 import os
 import re
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 from django.conf import settings
 from django.http import HttpRequest, HttpResponse, HttpResponseNotFound, HttpResponseForbidden
@@ -55,23 +55,39 @@ _UUID_RE = re.compile(
 )
 _NUMERIC_RE = re.compile(r"^\d+$")
 
-# If multiproc is enabled, ensure the directory exists before metric objects are created.
-_MULTIPROC_DIR = (os.environ.get("PROMETHEUS_MULTIPROC_DIR") or "").strip()
-if _MULTIPROC_DIR:
-    os.makedirs(_MULTIPROC_DIR, exist_ok=True)
+_LATENCY_BUCKETS = (0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
 
-REQUEST_LATENCY = Histogram(
-    "http_request_duration_seconds",
-    "HTTP request latency in seconds",
-    labelnames=("method", "endpoint", "status"),
-    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
-)
+# Lazily created so Gunicorn --preload does not register metrics in the master.
+REQUEST_LATENCY: Optional[Histogram] = None
+REQUEST_COUNT: Optional[Counter] = None
 
-REQUEST_COUNT = Counter(
-    "http_requests_total",
-    "Total HTTP requests",
-    labelnames=("method", "endpoint", "status"),
-)
+
+def _ensure_multiproc_dir() -> str:
+    multiproc_dir = (os.environ.get("PROMETHEUS_MULTIPROC_DIR") or "").strip()
+    if multiproc_dir:
+        os.makedirs(multiproc_dir, exist_ok=True)
+    return multiproc_dir
+
+
+def _get_http_metrics() -> Tuple[Histogram, Counter]:
+    """Create HTTP metrics on first use (in the worker that handled the request)."""
+    global REQUEST_LATENCY, REQUEST_COUNT
+    if REQUEST_LATENCY is not None and REQUEST_COUNT is not None:
+        return REQUEST_LATENCY, REQUEST_COUNT
+
+    _ensure_multiproc_dir()
+    REQUEST_LATENCY = Histogram(
+        "http_request_duration_seconds",
+        "HTTP request latency in seconds",
+        labelnames=("method", "endpoint", "status"),
+        buckets=_LATENCY_BUCKETS,
+    )
+    REQUEST_COUNT = Counter(
+        "http_requests_total",
+        "Total HTTP requests",
+        labelnames=("method", "endpoint", "status"),
+    )
+    return REQUEST_LATENCY, REQUEST_COUNT
 
 
 def _should_skip(path: str) -> bool:
@@ -132,9 +148,9 @@ def _collect_metrics_payload() -> bytes:
     """
     Prefer multiprocess aggregation when configured and files exist; otherwise use
     the in-process REGISTRY. This avoids returning an empty 200 when multiproc
-    is enabled but no files were written.
+    is enabled but no files were written yet.
     """
-    multiproc_dir = (os.environ.get("PROMETHEUS_MULTIPROC_DIR") or "").strip()
+    multiproc_dir = _ensure_multiproc_dir()
     if multiproc_dir and os.path.isdir(multiproc_dir):
         try:
             has_files = any(
@@ -162,6 +178,13 @@ def metrics_view(request: HttpRequest) -> HttpResponse:
     if not _metrics_authorized(request):
         return HttpResponseForbidden("Forbidden")
 
+    # Register HTTP metrics in this worker so scrapes include HELP/TYPE even
+    # before traffic (safe with --preload; creation is deferred from import).
+    try:
+        _get_http_metrics()
+    except Exception:
+        logger.exception("Failed to initialize Prometheus HTTP metrics for scrape")
+
     payload = _collect_metrics_payload()
     return HttpResponse(payload, content_type=CONTENT_TYPE_LATEST)
 
@@ -186,8 +209,9 @@ class PrometheusMetricsMiddleware(MiddlewareMixin):
         status = str(getattr(response, "status_code", 0))
 
         try:
-            REQUEST_LATENCY.labels(method=method, endpoint=endpoint, status=status).observe(duration)
-            REQUEST_COUNT.labels(method=method, endpoint=endpoint, status=status).inc()
+            latency, count = _get_http_metrics()
+            latency.labels(method=method, endpoint=endpoint, status=status).observe(duration)
+            count.labels(method=method, endpoint=endpoint, status=status).inc()
         except Exception:
             logger.exception("Failed to record Prometheus HTTP metrics")
         return response

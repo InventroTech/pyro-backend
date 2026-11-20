@@ -582,7 +582,7 @@ EMAIL_SSL_VERIFY = env.bool('EMAIL_SSL_VERIFY', default=not IS_DEV)  # Disable i
 # Prometheus /metrics scrape endpoint.
 # Set METRICS_AUTH_TOKEN and scrape with Authorization: Bearer <token> (or X-Metrics-Token).
 # In non-dev, an empty token returns 404 for /metrics.
-# Gunicorn sets PROMETHEUS_MULTIPROC_DIR so worker metrics aggregate correctly.
+# Set PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc so Gunicorn workers aggregate.
 METRICS_AUTH_TOKEN = env('METRICS_AUTH_TOKEN', default='')
 
 # Render metrics polling — reads from Render REST API to trigger email alerts
