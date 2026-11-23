@@ -29,8 +29,6 @@ from .views import (
     RmActiveSessionsView,
     RmDailyTargetsView,
     RmPrdFilterOptionsView,
-    RmLeaderboardView,
-    RmLeaderboardMeView,
 )
 app_name = "analytics"
 
@@ -105,10 +103,6 @@ urlpatterns = [
     path("rm-active-sessions/", RmActiveSessionsView.as_view(), name="rm-active-sessions"),
     path("rm-daily-targets/", RmDailyTargetsView.as_view(), name="rm-daily-targets"),
     path("rm-filter-options/", RmPrdFilterOptionsView.as_view(), name="rm-filter-options"),
-
-    # RM Leaderboard — Postgres-snapshot read endpoints (see RmLeaderboardReadService)
-    path("rm-leaderboard/", RmLeaderboardView.as_view(), name="rm-leaderboard"),
-    path("rm-leaderboard/me/", RmLeaderboardMeView.as_view(), name="rm-leaderboard-me"),
 
     # Saved analytics boards (one row per board, generic across analytics types)
     path("board/", AnalyticsBoardView.as_view(), name="analytics-board"),

@@ -48,9 +48,6 @@ class TenantSettings(HistoryTrackedModel, models.Model):
     ``persistent_object_history``: when ``True``, :class:`object_history.models.ObjectHistory`
     rows for this tenant are stamped ``persistent_history=True`` and are skipped by
     :func:`core.log_retention.purge_old_log_rows`.
-
-    ``rm_leaderboard_enabled``: per-tenant feature flag for the RM Leaderboard —
-    see the field's own help_text.
     """
 
     tenant = models.OneToOneField(
@@ -85,16 +82,6 @@ class TenantSettings(HistoryTrackedModel, models.Model):
         default=72,
         validators=[MinValueValidator(1), MaxValueValidator(8760)],
         help_text="Consecutive hours without a login before the settings list counts an email as inactive.",
-    )
-    rm_leaderboard_enabled = models.BooleanField(
-        default=False,
-        db_index=True,
-        help_text=(
-            "Feature flag for the RM Leaderboard. Off by default, per tenant. "
-            "refresh_rm_leaderboard_snapshot only processes tenants where this "
-            "is True — until a tenant opts in, the leaderboard job does zero "
-            "extra work for them. See analytics.RmLeaderboardSnapshot."
-        ),
     )
 
     class Meta:
