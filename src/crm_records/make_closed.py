@@ -88,6 +88,9 @@ def make_leads_closed(*, tenant, praja_ids: list[str], actor: str | None = None)
     if updated:
         # Closing a fresh lead takes it out of the fresh pool count.
         cache.delete(f"fresh_leads_inventory:{tenant.id}")
+        from utils.cache_utils import invalidate_team_analytics_cache
+
+        invalidate_team_analytics_cache(tenant.id)
         logger.info(
             "[MakeClosed] tenant=%s actor=%s updated=%s skipped=%s not_found=%s",
             tenant.id,

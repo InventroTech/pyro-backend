@@ -363,6 +363,25 @@ def apply_record_data_updates(
             payload[key] = _serialize_extra_value(value)
     record.data = payload
     record.save(update_fields=["data", "updated_at"])
+    # CSE analytics + ticket filter dropdowns are short-TTL cached; bump versions
+    # so dashboards don't wait full TTL after a write.
+    try:
+        from utils.cache_utils import (
+            invalidate_cse_analytics_cache,
+            invalidate_ticket_filter_options_cache,
+        )
+
+        tenant_id = getattr(record, "tenant_id", None)
+        if tenant_id is not None:
+            invalidate_cse_analytics_cache(tenant_id)
+            invalidate_ticket_filter_options_cache(tenant_id)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "cache_utils invalidate after ticket update failed record_id=%s",
+            getattr(record, "id", None),
+        )
     return record
 
 

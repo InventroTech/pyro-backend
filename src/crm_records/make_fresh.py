@@ -91,6 +91,9 @@ def make_leads_fresh(*, tenant, praja_ids: list[str], actor: str | None = None) 
 
     if updated:
         cache.delete(f"fresh_leads_inventory:{tenant.id}")
+        from utils.cache_utils import invalidate_team_analytics_cache
+
+        invalidate_team_analytics_cache(tenant.id)
         logger.info(
             "[MakeFresh] tenant=%s actor=%s updated=%s skipped=%s not_found=%s",
             tenant.id,

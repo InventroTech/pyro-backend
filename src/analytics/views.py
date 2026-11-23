@@ -56,6 +56,13 @@ from django.contrib.auth import get_user_model
 from authz.permissions import IsTenantAuthenticated
 from config.supabase_auth import SupabaseJWTAuthentication
 from crm_records.mixins import TenantScopedMixin
+from utils.cache_utils import (
+    DEFAULT_TTL_SECONDS,
+    FILTER_OPTIONS_TTL_SECONDS,
+    cache_key_fingerprint,
+    cached_payload,
+    wants_refresh,
+)
 from .services import TeamResolver, TeamMetricsService
 from .serializers import (
     TeamOverviewSerializer,
@@ -862,13 +869,22 @@ class SupportTicketFilterOptionsView(APIView):
     permission_classes = [IsTenantAuthenticated]
     def get(self, request):
         tenant = request.tenant
-        qs = support_ticket_records_qs(tenant=tenant)
-        resolution_statuses = distinct_data_values(qs, "resolution_status")
-        poster_statuses = distinct_data_values(qs, "poster")
-        return Response({
-            "resolution_statuses": resolution_statuses,
-            "poster_statuses": poster_statuses,
-        }, status=status.HTTP_200_OK)
+
+        def _compute():
+            qs = support_ticket_records_qs(tenant=tenant)
+            return {
+                "resolution_statuses": distinct_data_values(qs, "resolution_status"),
+                "poster_statuses": distinct_data_values(qs, "poster"),
+            }
+
+        payload = cached_payload(
+            prefix="ticket:filter_options",
+            tenant_id=tenant.id,
+            compute=_compute,
+            ttl=FILTER_OPTIONS_TTL_SECONDS,
+            refresh=wants_refresh(request),
+        )
+        return Response(payload, status=status.HTTP_200_OK)
 
 _TICKET_STATUS_TTL_SECONDS = 30
 
@@ -1196,12 +1212,21 @@ class TeamOverviewView(TenantScopedMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
-        metrics_service = TeamMetricsService(team_user_ids, request.tenant)
-        overview = metrics_service.get_overview(target_date, manager_user_id=str(user_id))
+        def _compute():
+            team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
+            metrics_service = TeamMetricsService(team_user_ids, request.tenant)
+            overview = metrics_service.get_overview(target_date, manager_user_id=str(user_id))
+            return TeamOverviewSerializer(overview).data
 
-        serializer = TeamOverviewSerializer(overview)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        payload = cached_payload(
+            prefix="team:overview",
+            tenant_id=request.tenant.id,
+            parts={"manager": str(user_id), "date": target_date.isoformat()},
+            compute=_compute,
+            ttl=DEFAULT_TTL_SECONDS,
+            refresh=wants_refresh(request),
+        )
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class TeamMembersView(TenantScopedMixin, APIView):
@@ -1268,17 +1293,30 @@ class TeamMembersView(TenantScopedMixin, APIView):
             )
 
         logger.info(f"Resolving team for manager user_id: {user_id}, tenant: {request.tenant.id}")
-        team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
-        logger.info(f"Team resolved - found {len(team_user_ids)} user_ids: {team_user_ids}")
 
-        metrics_service = TeamMetricsService(team_user_ids, request.tenant)
-        member_breakdown = metrics_service.get_member_breakdown(
-            start_date, end_date, manager_user_id=str(user_id)
+        def _compute():
+            team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
+            logger.info(f"Team resolved - found {len(team_user_ids)} user_ids: {team_user_ids}")
+            metrics_service = TeamMetricsService(team_user_ids, request.tenant)
+            member_breakdown = metrics_service.get_member_breakdown(
+                start_date, end_date, manager_user_id=str(user_id)
+            )
+            return MemberBreakdownSerializer(member_breakdown, many=True).data
+
+        payload = cached_payload(
+            prefix="team:members",
+            tenant_id=request.tenant.id,
+            parts={
+                "manager": str(user_id),
+                "from": start_date.isoformat(),
+                "to": end_date.isoformat(),
+            },
+            compute=_compute,
+            ttl=DEFAULT_TTL_SECONDS,
+            refresh=wants_refresh(request),
         )
-
-        serializer = MemberBreakdownSerializer(member_breakdown, many=True)
         logger.info("=" * 80)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class TeamEventsView(TenantScopedMixin, APIView):
@@ -1328,13 +1366,26 @@ class TeamEventsView(TenantScopedMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
-        metrics_service = TeamMetricsService(team_user_ids, request.tenant)
-        event_breakdown = metrics_service.get_event_breakdown(start_date, end_date)
+        def _compute():
+            team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
+            metrics_service = TeamMetricsService(team_user_ids, request.tenant)
+            event_breakdown = metrics_service.get_event_breakdown(start_date, end_date)
+            result = [{"event_type": k, "count": v} for k, v in event_breakdown.items()]
+            return EventBreakdownSerializer(result, many=True).data
 
-        result = [{"event_type": k, "count": v} for k, v in event_breakdown.items()]
-        serializer = EventBreakdownSerializer(result, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        payload = cached_payload(
+            prefix="team:events",
+            tenant_id=request.tenant.id,
+            parts={
+                "manager": str(user_id),
+                "from": start_date.isoformat(),
+                "to": end_date.isoformat(),
+            },
+            compute=_compute,
+            ttl=DEFAULT_TTL_SECONDS,
+            refresh=wants_refresh(request),
+        )
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class TeamTimeSeriesView(TenantScopedMixin, APIView):
@@ -1376,12 +1427,25 @@ class TeamTimeSeriesView(TenantScopedMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
-        metrics_service = TeamMetricsService(team_user_ids, request.tenant)
-        time_series = metrics_service.get_time_series(start_date, end_date)
+        def _compute():
+            team_user_ids = TeamResolver.get_team_user_ids(str(user_id), request.tenant)
+            metrics_service = TeamMetricsService(team_user_ids, request.tenant)
+            time_series = metrics_service.get_time_series(start_date, end_date)
+            return TimeSeriesSerializer(time_series, many=True).data
 
-        serializer = TimeSeriesSerializer(time_series, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        payload = cached_payload(
+            prefix="team:time_series",
+            tenant_id=request.tenant.id,
+            parts={
+                "manager": str(user_id),
+                "from": start_date.isoformat(),
+                "to": end_date.isoformat(),
+            },
+            compute=_compute,
+            ttl=DEFAULT_TTL_SECONDS,
+            refresh=wants_refresh(request),
+        )
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class UnassignedLeadsBreakdownView(TenantScopedMixin, APIView):
@@ -1404,13 +1468,25 @@ class UnassignedLeadsBreakdownView(TenantScopedMixin, APIView):
         lead_source_list = [s.strip() for s in lead_source_raw.split(',') if s.strip()] or None
         lead_stage = request.query_params.get('lead_stage', '').strip() or None
 
-        metrics_service = TeamMetricsService(set(), request.tenant)
-        breakdown = metrics_service.get_unassigned_leads_breakdown(
-            lead_source_filter=lead_source_list,
-            lead_stage_filter=lead_stage,
-        )
+        def _compute():
+            metrics_service = TeamMetricsService(set(), request.tenant)
+            return metrics_service.get_unassigned_leads_breakdown(
+                lead_source_filter=lead_source_list,
+                lead_stage_filter=lead_stage,
+            )
 
-        return Response(breakdown, status=status.HTTP_200_OK)
+        payload = cached_payload(
+            prefix="team:unassigned",
+            tenant_id=request.tenant.id,
+            parts={
+                "sources": lead_source_list or [],
+                "stage": lead_stage or "",
+            },
+            compute=_compute,
+            ttl=DEFAULT_TTL_SECONDS,
+            refresh=wants_refresh(request),
+        )
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 def _parse_cse_date_range(request):
@@ -1503,6 +1579,14 @@ def _resolve_cse_analytics_context(request):
     }, None
 
 
+def _cse_cache_scope_parts(context) -> dict:
+    emails = context.get("allowed_cse_emails")
+    return {
+        "scope": context.get("visibility_scope") or "-",
+        "emails": cache_key_fingerprint(sorted(emails) if emails is not None else "all"),
+    }
+
+
 class CseFilterOptionsView(APIView):
     permission_classes = [IsTenantAuthenticated]
 
@@ -1513,14 +1597,24 @@ class CseFilterOptionsView(APIView):
         if error_response:
             return error_response
 
-        service = CseMetricsService(
-            request.tenant,
-            allowed_cse_emails=context["allowed_cse_emails"],
+        def _compute():
+            service = CseMetricsService(
+                request.tenant,
+                allowed_cse_emails=context["allowed_cse_emails"],
+            )
+            return CseFilterOptionsSerializer(
+                service.get_filter_options(visibility_scope=context["visibility_scope"])
+            ).data
+
+        payload = cached_payload(
+            prefix="cse:filter_options",
+            tenant_id=request.tenant.id,
+            parts=_cse_cache_scope_parts(context),
+            compute=_compute,
+            ttl=FILTER_OPTIONS_TTL_SECONDS,
+            refresh=wants_refresh(request),
         )
-        serializer = CseFilterOptionsSerializer(
-            service.get_filter_options(visibility_scope=context["visibility_scope"])
-        )
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class CseOverviewView(APIView):
@@ -1545,20 +1639,39 @@ class CseOverviewView(APIView):
             )
             attribute_filters = _parse_attribute_filters(request)
 
-            service = CseMetricsService(
-                request.tenant,
-                allowed_cse_emails=context["allowed_cse_emails"],
+            def _compute():
+                service = CseMetricsService(
+                    request.tenant,
+                    allowed_cse_emails=context["allowed_cse_emails"],
+                )
+                overview = service.get_overview(
+                    start_date,
+                    end_date,
+                    ticket_types=ticket_types,
+                    handling_status=handling_status,
+                    cse_name=cse_name,
+                    attribute_filters=attribute_filters,
+                )
+                return CseOverviewSerializer(overview).data
+
+            parts = {
+                **_cse_cache_scope_parts(context),
+                "from": start_date.isoformat(),
+                "to": end_date.isoformat(),
+                "types": ticket_types or [],
+                "handling": handling_status or "",
+                "cse": cse_name or "",
+                "af": cache_key_fingerprint(attribute_filters or {}),
+            }
+            payload = cached_payload(
+                prefix="cse:overview",
+                tenant_id=request.tenant.id,
+                parts=parts,
+                compute=_compute,
+                ttl=DEFAULT_TTL_SECONDS,
+                refresh=wants_refresh(request),
             )
-            overview = service.get_overview(
-                start_date,
-                end_date,
-                ticket_types=ticket_types,
-                handling_status=handling_status,
-                cse_name=cse_name,
-                attribute_filters=attribute_filters,
-            )
-            serializer = CseOverviewSerializer(overview)
-            return Response(serializer.data, status=status.HTTP_200_OK)
+            return Response(payload, status=status.HTTP_200_OK)
         except Exception as exc:
             logger.exception("CseOverviewView failed: %s", exc)
             return Response(
@@ -1589,20 +1702,39 @@ class CseMembersView(APIView):
             )
             attribute_filters = _parse_attribute_filters(request)
 
-            service = CseMetricsService(
-                request.tenant,
-                allowed_cse_emails=context["allowed_cse_emails"],
+            def _compute():
+                service = CseMetricsService(
+                    request.tenant,
+                    allowed_cse_emails=context["allowed_cse_emails"],
+                )
+                members = service.get_member_breakdown(
+                    start_date,
+                    end_date,
+                    ticket_types=ticket_types,
+                    handling_status=handling_status,
+                    cse_name=cse_name,
+                    attribute_filters=attribute_filters,
+                )
+                return CseMemberBreakdownSerializer(members, many=True).data
+
+            parts = {
+                **_cse_cache_scope_parts(context),
+                "from": start_date.isoformat(),
+                "to": end_date.isoformat(),
+                "types": ticket_types or [],
+                "handling": handling_status or "",
+                "cse": cse_name or "",
+                "af": cache_key_fingerprint(attribute_filters or {}),
+            }
+            payload = cached_payload(
+                prefix="cse:members",
+                tenant_id=request.tenant.id,
+                parts=parts,
+                compute=_compute,
+                ttl=DEFAULT_TTL_SECONDS,
+                refresh=wants_refresh(request),
             )
-            members = service.get_member_breakdown(
-                start_date,
-                end_date,
-                ticket_types=ticket_types,
-                handling_status=handling_status,
-                cse_name=cse_name,
-                attribute_filters=attribute_filters,
-            )
-            serializer = CseMemberBreakdownSerializer(members, many=True)
-            return Response(serializer.data, status=status.HTTP_200_OK)
+            return Response(payload, status=status.HTTP_200_OK)
         except Exception as exc:
             logger.exception("CseMembersView failed: %s", exc)
             return Response(
@@ -1633,19 +1765,37 @@ class CseTimeSeriesView(APIView):
             )
             attribute_filters = _parse_attribute_filters(request)
 
-            service = CseMetricsService(
-                request.tenant,
-                allowed_cse_emails=context["allowed_cse_emails"],
+            def _compute():
+                service = CseMetricsService(
+                    request.tenant,
+                    allowed_cse_emails=context["allowed_cse_emails"],
+                )
+                series = service.get_time_series(
+                    start_date,
+                    end_date,
+                    ticket_types=ticket_types,
+                    cse_name=cse_name,
+                    attribute_filters=attribute_filters,
+                )
+                return CseTimeSeriesSerializer(series, many=True).data
+
+            parts = {
+                **_cse_cache_scope_parts(context),
+                "from": start_date.isoformat(),
+                "to": end_date.isoformat(),
+                "types": ticket_types or [],
+                "cse": cse_name or "",
+                "af": cache_key_fingerprint(attribute_filters or {}),
+            }
+            payload = cached_payload(
+                prefix="cse:time_series",
+                tenant_id=request.tenant.id,
+                parts=parts,
+                compute=_compute,
+                ttl=DEFAULT_TTL_SECONDS,
+                refresh=wants_refresh(request),
             )
-            series = service.get_time_series(
-                start_date,
-                end_date,
-                ticket_types=ticket_types,
-                cse_name=cse_name,
-                attribute_filters=attribute_filters,
-            )
-            serializer = CseTimeSeriesSerializer(series, many=True)
-            return Response(serializer.data, status=status.HTTP_200_OK)
+            return Response(payload, status=status.HTTP_200_OK)
         except Exception as exc:
             logger.exception("CseTimeSeriesView failed: %s", exc)
             return Response(
@@ -2007,25 +2157,42 @@ class RmDailyTargetsView(APIView):
             today = timezone.now().date()
             date_from = date_to = today
 
-        memberships = TenantMembership.objects.filter(
-            tenant=tenant, is_active=True, user_id__isnull=False,
-        ).values("id", "user_id")
-
         rm_user_ids_param = request.query_params.get("rm_user_ids", "").strip()
-        if rm_user_ids_param:
-            rm_user_ids = {v.strip() for v in rm_user_ids_param.split(",") if v.strip()}
-            memberships = memberships.filter(user_id__in=rm_user_ids)
-
-        membership_id_to_user_id = {m["id"]: str(m["user_id"]) for m in memberships}
-        target_by_membership = get_rm_daily_targets_sum(
-            tenant, list(membership_id_to_user_id.keys()), date_from, date_to
+        rm_user_ids = (
+            sorted({v.strip() for v in rm_user_ids_param.split(",") if v.strip()})
+            if rm_user_ids_param
+            else []
         )
 
-        targets = {
-            membership_id_to_user_id[membership_id]: target
-            for membership_id, target in target_by_membership.items()
-        }
-        return Response(targets)
+        def _compute():
+            memberships = TenantMembership.objects.filter(
+                tenant=tenant, is_active=True, user_id__isnull=False,
+            ).values("id", "user_id")
+            if rm_user_ids:
+                memberships = memberships.filter(user_id__in=rm_user_ids)
+
+            membership_id_to_user_id = {m["id"]: str(m["user_id"]) for m in memberships}
+            target_by_membership = get_rm_daily_targets_sum(
+                tenant, list(membership_id_to_user_id.keys()), date_from, date_to
+            )
+            return {
+                membership_id_to_user_id[membership_id]: target
+                for membership_id, target in target_by_membership.items()
+            }
+
+        payload = cached_payload(
+            prefix="rm:daily_targets",
+            tenant_id=tenant.id,
+            parts={
+                "from": date_from.isoformat(),
+                "to": date_to.isoformat(),
+                "rms": rm_user_ids,
+            },
+            compute=_compute,
+            ttl=DEFAULT_TTL_SECONDS,
+            refresh=wants_refresh(request),
+        )
+        return Response(payload)
 
 
 class RmPrdFilterOptionsView(APIView):
@@ -2073,49 +2240,63 @@ class RmPrdFilterOptionsView(APIView):
 
         tenant = request.tenant
 
-        manager_role_keys = [
-            key.strip() for key in request.query_params.get("manager_role_keys", "").split(",") if key.strip()
-        ]
-        manager_qs = TenantMembership.objects.filter(tenant=tenant, is_active=True)
-        if manager_role_keys:
-            manager_qs = manager_qs.filter(role__key__in=manager_role_keys)
-        else:
-            # no roles configured yet — old heuristic, kept only so a page
-            # saved before managerRoles existed doesn't show an empty filter
-            manager_qs = manager_qs.filter(direct_reports__isnull=False)
-
-        managers = list(
-            manager_qs
-            .exclude(name__isnull=True)
-            .exclude(name="")
-            .values_list("name", flat=True)
-            .distinct()
-            .order_by("name")
+        manager_role_keys = sorted(
+            key.strip()
+            for key in request.query_params.get("manager_role_keys", "").split(",")
+            if key.strip()
         )
 
-        active_membership_ids = list(
-            TenantMembership.objects.filter(tenant=tenant, is_active=True).values_list("id", flat=True)
+        def _compute():
+            manager_qs = TenantMembership.objects.filter(tenant=tenant, is_active=True)
+            if manager_role_keys:
+                manager_qs = manager_qs.filter(role__key__in=manager_role_keys)
+            else:
+                # no roles configured yet — old heuristic, kept only so a page
+                # saved before managerRoles existed doesn't show an empty filter
+                manager_qs = manager_qs.filter(direct_reports__isnull=False)
+
+            managers = list(
+                manager_qs
+                .exclude(name__isnull=True)
+                .exclude(name="")
+                .values_list("name", flat=True)
+                .distinct()
+                .order_by("name")
+            )
+
+            active_membership_ids = list(
+                TenantMembership.objects.filter(tenant=tenant, is_active=True).values_list("id", flat=True)
+            )
+            state_by_membership = kv_int_by_membership(tenant, active_membership_ids, USER_KV_STATE_KEY)
+            state_ids = sorted({v for v in state_by_membership.values()})
+            states = [
+                {"value": str(state_id), "label": resolve_catalog_name("states", state_id) or str(state_id)}
+                for state_id in state_ids
+            ]
+
+            lead_options = get_lead_filter_options(tenant)
+
+            lead_groups = sorted(
+                Group.objects.filter(tenant=tenant)
+                .exclude(name__isnull=True)
+                .exclude(name="")
+                .values_list("name", flat=True)
+                .distinct()
+            )
+
+            return {
+                "managers": managers,
+                "lead_groups": lead_groups,
+                "states": states,
+                "parties": lead_options.get("lead_types", []),
+            }
+
+        payload = cached_payload(
+            prefix="rm:filter_options",
+            tenant_id=tenant.id,
+            parts={"roles": manager_role_keys},
+            compute=_compute,
+            ttl=FILTER_OPTIONS_TTL_SECONDS,
+            refresh=wants_refresh(request),
         )
-        state_by_membership = kv_int_by_membership(tenant, active_membership_ids, USER_KV_STATE_KEY)
-        state_ids = sorted({v for v in state_by_membership.values()})
-        states = [
-            {"value": str(state_id), "label": resolve_catalog_name("states", state_id) or str(state_id)}
-            for state_id in state_ids
-        ]
-
-        lead_options = get_lead_filter_options(tenant)
-
-        lead_groups = sorted(
-            Group.objects.filter(tenant=tenant)
-            .exclude(name__isnull=True)
-            .exclude(name="")
-            .values_list("name", flat=True)
-            .distinct()
-        )
-
-        return Response({
-            "managers": managers,
-            "lead_groups": lead_groups,
-            "states": states,
-            "parties": lead_options.get("lead_types", []),
-        })
+        return Response(payload)
