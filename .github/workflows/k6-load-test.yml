@@ -1,6 +1,9 @@
-name: K6 Load Test (Manual)
+name: K6 Load Test
 
 on:
+  pull_request:
+    branches: [preprod]
+    types: [opened, reopened]
   workflow_dispatch:
     inputs:
       api_base_url:
@@ -27,6 +30,11 @@ on:
 permissions:
   contents: read
 
+# One load test at a time. A second PR waits instead of stacking traffic on preprod.
+concurrency:
+  group: k6-preprod-load-test
+  cancel-in-progress: false
+
 jobs:
   k6:
     runs-on: ubuntu-latest
@@ -35,11 +43,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Pull requests hit the script already on preprod. The run calls the
+          # live preprod service, not a preview of the pull request.
+          ref: ${{ github.event_name == 'pull_request' && 'preprod' || github.sha }}
 
       - name: Install k6
         run: |
-          sudo gpg -k
-          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
           sudo apt-get update
           sudo apt-get install -y k6
@@ -54,11 +65,11 @@ jobs:
 
       - name: Run GET-only k6 script
         env:
-          API_BASE_URL: ${{ inputs.api_base_url }}
-          TENANT_SLUG: ${{ inputs.tenant_slug }}
-          RATE: ${{ inputs.rate }}
-          DURATION_SECONDS: ${{ inputs.duration_seconds }}
-          PREALLOCATED_VUS: ${{ inputs.preallocated_vus }}
+          API_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && inputs.api_base_url || 'https://pyro-backend-ea2j.onrender.com' }}
+          TENANT_SLUG: ${{ github.event_name == 'workflow_dispatch' && inputs.tenant_slug || 'praja' }}
+          RATE: ${{ github.event_name == 'workflow_dispatch' && inputs.rate || '20' }}
+          DURATION_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.duration_seconds || '60' }}
+          PREALLOCATED_VUS: ${{ github.event_name == 'workflow_dispatch' && inputs.preallocated_vus || '20' }}
           ACCESS_TOKEN: ${{ secrets.LOADTEST_ACCESS_TOKEN }}
         run: |
           echo "API: $API_BASE_URL | GET-only | rate=$RATE/s duration=${DURATION_SECONDS}s"
