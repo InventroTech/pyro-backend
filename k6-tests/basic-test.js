@@ -2,7 +2,10 @@ import http from 'k6/http';
 import { check } from 'k6';
 
 /**
- * Multi-API GET load test (JWT only).
+ * Multi-API GET load test.
+ *
+ * The workflow logs in first and passes a fresh ACCESS_TOKEN.
+ * Do not print that token.
  *
  * Env:
  *   API_BASE_URL, ACCESS_TOKEN, TENANT_SLUG
@@ -37,6 +40,12 @@ export const options = {
       preAllocatedVUs: PREALLOCATED_VUS,
     },
   },
+  thresholds: {
+    checks: ['rate>0.99'],
+    http_req_failed: ['rate<0.01'],
+    http_req_duration: ['p(95)<5000'],
+    dropped_iterations: ['rate<1'],
+  },
 };
 
 function authHeaders() {
@@ -52,10 +61,9 @@ function authHeaders() {
 
 export function setup() {
   if (!ACCESS_TOKEN) {
-    console.warn('WARNING: ACCESS_TOKEN is empty — expect 401/403.');
-  } else {
-    console.log(`ACCESS_TOKEN length: ${ACCESS_TOKEN.length} | TENANT_SLUG: ${TENANT_SLUG || '(none)'}`);
+    throw new Error('ACCESS_TOKEN is empty. Log in before starting k6.');
   }
+  console.log(`ACCESS_TOKEN length: ${ACCESS_TOKEN.length} | TENANT_SLUG: ${TENANT_SLUG || '(none)'}`);
   console.log(
     `GET-only load: ${ENDPOINTS.length} endpoints @ ${RATE}/s for ${DURATION_SECONDS}s → ${API_BASE_URL}`,
   );

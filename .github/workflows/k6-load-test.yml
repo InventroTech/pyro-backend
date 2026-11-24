@@ -1,9 +1,11 @@
 name: K6 Load Test
 
+# Load-tests the deployed preprod service. It does not call production.
+# Regression of the pull request's own code is the pytest job in backend-lint.yml.
 on:
   pull_request:
-    branches: [preprod]
-    types: [opened, reopened]
+    branches: [preprod, PROD]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       api_base_url:
@@ -30,10 +32,10 @@ on:
 permissions:
   contents: read
 
-# One load test at a time. A second PR waits instead of stacking traffic on preprod.
+# A new commit on the same pull request cancels the in-flight load test and starts again.
 concurrency:
-  group: k6-preprod-load-test
-  cancel-in-progress: false
+  group: k6-load-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   k6:
@@ -43,10 +45,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          # Pull requests hit the script already on preprod. The run calls the
-          # live preprod service, not a preview of the pull request.
-          ref: ${{ github.event_name == 'pull_request' && 'preprod' || github.sha }}
 
       - name: Install k6
         run: |
@@ -55,22 +53,58 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y k6
 
-      - name: Require access token
-        shell: bash
+      - name: Log in to preprod
+        env:
+          API_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && inputs.api_base_url || 'https://pyro-backend-ea2j.onrender.com' }}
+          LOADTEST_USER_EMAIL: ${{ secrets.LOADTEST_USER_EMAIL }}
+          LOADTEST_USER_PASSWORD: ${{ secrets.LOADTEST_USER_PASSWORD }}
         run: |
-          if [ -z "${{ secrets.LOADTEST_ACCESS_TOKEN }}" ]; then
-            echo "::error::Add secret LOADTEST_ACCESS_TOKEN for JWT GETs."
-            exit 1
-          fi
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          email = (os.environ.get("LOADTEST_USER_EMAIL") or "").strip()
+          password = os.environ.get("LOADTEST_USER_PASSWORD") or ""
+          if not email or not password:
+              print("::error::Add repository secrets LOADTEST_USER_EMAIL and LOADTEST_USER_PASSWORD. Use a preprod user with a confirmed email and an active membership in the tenant under test. Do not store an access token; login tokens expire after one hour.")
+              raise SystemExit(1)
+
+          base = os.environ["API_BASE_URL"].rstrip("/")
+          request = urllib.request.Request(
+              base + "/auth/login/",
+              data=json.dumps({"email": email, "password": password}).encode(),
+              headers={"Content-Type": "application/json", "Accept": "application/json"},
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  payload = json.load(response)
+          except urllib.error.HTTPError as exc:
+              detail = exc.read().decode("utf-8", "replace")[:300]
+              print(f"::error::Login failed ({exc.code}): {detail}")
+              raise SystemExit(1)
+
+          token = payload.get("access_token") or ""
+          if not token:
+              print("::error::Login response did not include an access token.")
+              raise SystemExit(1)
+
+          print(f"::add-mask::{token}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              handle.write(f"API_BASE_URL={base}\n")
+              handle.write("ACCESS_TOKEN<<TOKEN_EOF\n")
+              handle.write(token + "\n")
+              handle.write("TOKEN_EOF\n")
+          print(f"Logged in as {email}. Token expires in {payload.get('expires_in')}s.")
+          PY
 
       - name: Run GET-only k6 script
         env:
-          API_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && inputs.api_base_url || 'https://pyro-backend-ea2j.onrender.com' }}
           TENANT_SLUG: ${{ github.event_name == 'workflow_dispatch' && inputs.tenant_slug || 'praja' }}
           RATE: ${{ github.event_name == 'workflow_dispatch' && inputs.rate || '20' }}
           DURATION_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.duration_seconds || '60' }}
           PREALLOCATED_VUS: ${{ github.event_name == 'workflow_dispatch' && inputs.preallocated_vus || '20' }}
-          ACCESS_TOKEN: ${{ secrets.LOADTEST_ACCESS_TOKEN }}
         run: |
           echo "API: $API_BASE_URL | GET-only | rate=$RATE/s duration=${DURATION_SECONDS}s"
           k6 run k6-tests/basic-test.js
