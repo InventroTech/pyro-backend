@@ -28,18 +28,47 @@ def _tenant_id_from_claims(claims: dict) -> str | None:
     return str(membership) if membership else None
 
 
+def _role_key_for_user(sub: str | None, tenant_id: str | None, claims: dict) -> str | None:
+    user_data = claims.get("user_data") or {}
+    from_claims = user_data.get("role_key") or user_data.get("role")
+    if from_claims:
+        return str(from_claims)
+
+    if not sub or not tenant_id:
+        return None
+
+    from authz.models import TenantMembership
+
+    role_key = (
+        TenantMembership.objects.filter(
+            user_id=sub,
+            tenant_id=tenant_id,
+            is_active=True,
+        )
+        .values_list("role__key", flat=True)
+        .first()
+    )
+    return str(role_key) if role_key else None
+
+
 @database_sync_to_async
 def resolve_websocket_user_and_tenant(token: str | None):
     if not token:
-        return AnonymousUser(), None
+        return AnonymousUser(), None, None
 
     try:
         claims = _verify_jwt(token)
         user = _get_or_create_profile(claims)
         tenant_id = _tenant_id_from_claims(claims)
-        return user, str(tenant_id) if tenant_id else None
+        sub = claims.get("sub") or claims.get("user_id")
+        role_key = _role_key_for_user(
+            str(sub) if sub else None,
+            str(tenant_id) if tenant_id else None,
+            claims,
+        )
+        return user, str(tenant_id) if tenant_id else None, role_key
     except Exception:
-        return AnonymousUser(), None
+        return AnonymousUser(), None, None
 
 
 def extract_bearer_token(scope) -> str | None:
@@ -69,7 +98,8 @@ class JWTAuthMiddleware:
             return await self.inner(scope, receive, send)
 
         token = extract_bearer_token(scope)
-        user, tenant_id = await resolve_websocket_user_and_tenant(token)
+        user, tenant_id, role_key = await resolve_websocket_user_and_tenant(token)
         scope["user"] = user
         scope["tenant_id"] = tenant_id
+        scope["role_key"] = role_key
         return await self.inner(scope, receive, send)
