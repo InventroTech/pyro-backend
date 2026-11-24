@@ -180,6 +180,24 @@ else:
 # Supabase transaction pooler (port 6543) cannot receive cross-connection NOTIFY;
 # session mode (5432 on the same pooler host) is required.
 REALTIME_PG_NOTIFY_PORT = env.int("REALTIME_PG_NOTIFY_PORT", default=None)
+# Role keys that join tenant_*_oversight and receive all record_updated fan-out
+# (managers/admins). Comma-separated; matching is case-insensitive / substring-aware
+# via realtime.broadcast.is_realtime_oversight_role.
+REALTIME_OVERSIGHT_ROLE_KEYS = env.list(
+    "REALTIME_OVERSIGHT_ROLE_KEYS",
+    default=[
+        "admin",
+        "administrator",
+        "owner",
+        "manager",
+        "tl",
+        "team_lead",
+        "teamlead",
+        "supervisor",
+        "head",
+        "gm",
+    ],
+)
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 # Logging might add color later for better debugging
