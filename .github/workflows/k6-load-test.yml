@@ -1,9 +1,10 @@
 name: K6 Load Test
 
-# A pull request into preprod first copies every production row the AWS preprod
-# database is missing, then runs the read-only load test. It does not call the
-# production API. Regression of the pull request's own code is the pytest job
-# in backend-lint.yml.
+# A pull request into preprod first copies every record. Leads are stored as FRESH and unassigned.
+# plus groups, rule sets, and the schema tables, then runs the read-only
+# load test.
+# It does not call the production API. Regression of the pull request's own
+# code is the pytest job in backend-lint.yml.
 on:
   pull_request:
     branches: [preprod]
@@ -54,7 +55,7 @@ jobs:
       - name: Install psql
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
-      - name: Copy production rows preprod is missing
+      - name: Copy every record and reset leads
         env:
           SOURCE_DB_HOST: ${{ secrets.SOURCE_DB_HOST }}
           SOURCE_DB_PORT: ${{ secrets.SOURCE_DB_PORT }}

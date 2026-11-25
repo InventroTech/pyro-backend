@@ -11,9 +11,8 @@ RDS. Preprod is already the AWS database. Run this on a machine in that VPC
   python3 scripts/sync_prod_to_preprod.py sync --confirm-overwrite-preprod
 
 incremental runs when a pull request opens against preprod, before the load
-test. It copies every production row that preprod is missing, then later runs
-copy only rows that changed after that. It does not copy object_history,
-background jobs, or Zoho tokens, so preprod does not email customers.
+test. It copies every record, sets leads to FRESH with no assignee, and copies groups, rule sets, entity type schemas,
+and scoring rules. It does not copy tenants, users, history, or job queues.
 
 Source env (first name wins): SOURCE_DB_* or PROD_SYNC_DB_*
 Target env (first name wins): TARGET_DB_* or PREPROD_DB_*
@@ -422,23 +421,13 @@ def cmd_sync(source: Database, target: Database) -> int:
     return 0
 
 
-# Changed rows only. These are the tables the load test reads.
-INCREMENTAL_TABLES = (
-    ("records", "updated_at"),
-    ("event_logs", "timestamp"),
-    ("rm_activity_events", "updated_at"),
-    ("rm_call_sessions", "updated_at"),
-)
-# Small catalogs, copied whole each run. Still not the 158 GB.
+# Tenants and users stay on the ids already in preprod.
+# Every record is copied. Only leads are set to FRESH with assigned_to cleared.
 FULL_TABLES = (
-    "tenants",
-    "authentication_user",
-    "authz_role",
-    "authz_tenantmembership",
     "groups",
-    "user_kv_settings",
-    "analytics_boards",
-    "rm_daily_targets",
+    "rule_sets",
+    "entity_type_schemas",
+    "scoring_rules",
 )
 PARENT_FIXES = (
     ("event_logs", "record_id", "records"),
@@ -578,7 +567,63 @@ def shared_columns(target: Database, table: str, csv_path: str, pk: str) -> list
     return columns
 
 
-def upsert_csv(target: Database, table: str, csv_path: str, pk: str) -> str:
+def tenant_id_pairs(source: Database, target: Database) -> list[tuple[str, str]]:
+    cached = getattr(tenant_id_pairs, "cache", None)
+    if cached is not None:
+        return cached
+    target_by_slug = {}
+    for line in target.psql("SELECT slug || '|' || id::text FROM tenants").splitlines():
+        slug, _, tenant_id = line.partition("|")
+        if slug and tenant_id:
+            target_by_slug[slug] = tenant_id
+    pairs = []
+    for line in source.psql("SELECT id::text || '|' || slug FROM tenants").splitlines():
+        prod_id, _, slug = line.partition("|")
+        preprod_id = target_by_slug.get(slug, "")
+        if prod_id and preprod_id and prod_id != preprod_id:
+            pairs.append((prod_id, preprod_id))
+    tenant_id_pairs.cache = pairs
+    return pairs
+
+
+def prepare_staging_sql(source: Database, target: Database, table: str, staging: str) -> list[str]:
+    """Point copied rows at the preprod tenant with the same slug. Do not change tenant or user ids."""
+    statements = []
+    if table == "records":
+        statements.append(
+            f"UPDATE {staging} SET data = jsonb_set("
+            f"jsonb_set(COALESCE(data, '{{}}'::jsonb), '{{lead_stage}}', '\"FRESH\"'::jsonb, true), "
+            f"'{{assigned_to}}', 'null'::jsonb, true) "
+            f"WHERE entity_type = 'lead';"
+        )
+    if "tenant_id" in set(table_columns(target, table)):
+        pairs = tenant_id_pairs(source, target)
+        if pairs:
+            values = ", ".join(
+                f"({quote_literal(prod_id)}::uuid, {quote_literal(preprod_id)}::uuid)"
+                for prod_id, preprod_id in pairs
+            )
+            statements.append(
+                f"UPDATE {staging} AS s SET tenant_id = v.preprod_id "
+                f"FROM (VALUES {values}) AS v(prod_id, preprod_id) "
+                f"WHERE s.tenant_id = v.prod_id;"
+            )
+        statements.append(
+            f"DELETE FROM {staging} AS s WHERE s.tenant_id IS NOT NULL "
+            f"AND NOT EXISTS (SELECT 1 FROM tenants t WHERE t.id = s.tenant_id);"
+        )
+    for column, parent in (("role_id", "authz_role"),):
+        if column not in set(table_columns(target, table)):
+            continue
+        statements.append(
+            f"UPDATE {staging} AS s SET {column} = NULL "
+            f"WHERE s.{column} IS NOT NULL "
+            f"AND NOT EXISTS (SELECT 1 FROM {parent} p WHERE p.id = s.{column});"
+        )
+    return statements
+
+
+def upsert_csv(source: Database, target: Database, table: str, csv_path: str, pk: str) -> str:
     columns = shared_columns(target, table, csv_path, pk)
     assigned = ", ".join(f"{name} = EXCLUDED.{name}" for name in columns if name != pk)
     column_list = ", ".join(columns)
@@ -588,6 +633,7 @@ def upsert_csv(target: Database, table: str, csv_path: str, pk: str) -> str:
         "DROP TABLE IF EXISTS preprod_sync_catalog;",
         f"CREATE UNLOGGED TABLE preprod_sync_catalog (LIKE {table} INCLUDING DEFAULTS);",
         f"\\copy preprod_sync_catalog ({column_list}) FROM '{csv_path}' WITH (FORMAT csv, HEADER true, NULL '\\N')",
+        *prepare_staging_sql(source, target, table, "preprod_sync_catalog"),
         f"INSERT INTO {table} ({column_list}) SELECT {column_list} FROM preprod_sync_catalog",
         f"ON CONFLICT ({pk}) DO UPDATE SET {assigned};",
         "DROP TABLE preprod_sync_catalog;",
@@ -658,8 +704,9 @@ def sync_batch(source: Database, target: Database, table: str, sql: str, pk: str
                         f"SELECT {parent_columns} FROM {parent} WHERE id IN ({id_list})",
                         parent_csv,
                     )
-                    upsert_csv(target, parent, parent_csv, parent_pk or "id")
+                    upsert_csv(source, target, parent, parent_csv, parent_pk or "id")
         insert_script = "\n".join([
+            *prepare_staging_sql(source, target, table, "preprod_sync_batch"),
             f"INSERT INTO {table} ({column_list})",
             f"SELECT {column_list} FROM preprod_sync_batch",
             f"ON CONFLICT ({pk}) DO UPDATE SET {assigned};",
@@ -817,9 +864,34 @@ def sync_whole_table(source: Database, target: Database, table: str) -> int:
         if count == 0:
             print(f"{table}: 0 rows")
             return 0
-        upsert_csv(target, table, csv_path, pk)
+        upsert_csv(source, target, table, csv_path, pk)
     print(f"{table}: {count} rows")
     return count
+
+
+def sync_records(source: Database, target: Database) -> int:
+    table = "records"
+    if not table_ready(source, table) or not table_ready(target, table):
+        print("skip records, not on both databases")
+        return 0
+    pk = primary_key(source, table) or "id"
+    columns = ", ".join(common_columns(source, target, table, pk))
+    cursor = "-1"
+    copied = 0
+    while True:
+        text = source.psql(
+            "SELECT id::text FROM records WHERE id > "
+            + quote_literal(cursor) + "::bigint ORDER BY id LIMIT " + str(BATCH)
+        )
+        ids = [line for line in text.splitlines() if line]
+        if not ids:
+            break
+        copied += copy_ids(source, target, table, columns, pk, "updated_at", "::bigint", ids)
+        cursor = ids[-1]
+        if len(ids) < BATCH:
+            break
+    print(f"records: {copied} rows")
+    return copied
 
 
 def cmd_incremental(source: Database, target: Database) -> int:
@@ -827,9 +899,8 @@ def cmd_incremental(source: Database, target: Database) -> int:
     print("catalogs")
     for table in FULL_TABLES:
         sync_whole_table(source, target, table)
-    print("rows preprod is missing")
-    for table, cursor_col in INCREMENTAL_TABLES:
-        sync_changed_table(source, target, table, cursor_col)
+    print("records")
+    sync_records(source, target)
     ensure_loadtest_user(target)
     print("incremental sync finished")
     return 0
