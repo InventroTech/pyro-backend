@@ -89,18 +89,24 @@ class Database:
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         }
 
-    def psql(self, sql: str) -> str:
+    def psql(self, sql: str, **params: str) -> str:
+        command = [
+            PSQL,
+            "-h", self.host,
+            "-p", self.port,
+            "-U", self.user,
+            "-d", self.name,
+            "-v", "ON_ERROR_STOP=1",
+            "-At",
+        ]
+        for name, value in params.items():
+            if not name.isidentifier():
+                raise SystemExit(f"Bad SQL parameter name {name}.")
+            # psql splits -v on the first "=" and quotes :'name' as a literal.
+            command.extend(["-v", f"{name}={value}"])
+        command.extend(["-c", sql])
         result = subprocess.run(
-            [
-                PSQL,
-                "-h", self.host,
-                "-p", self.port,
-                "-U", self.user,
-                "-d", self.name,
-                "-v", "ON_ERROR_STOP=1",
-                "-At",
-                "-c", sql,
-            ],
+            command,
             env=self.env(),
             capture_output=True,
             text=True,
@@ -264,17 +270,16 @@ def ensure_loadtest_user(target: Database) -> None:
         )
         return
     tenant_id = target.psql(
-        "SELECT id FROM tenants WHERE slug = "
-        + quote_literal(slug)
-        + " LIMIT 1"
+        "SELECT id FROM tenants WHERE slug = :'slug' LIMIT 1",
+        slug=slug,
     )
     if not tenant_id:
         raise SystemExit(f"No tenant with slug {slug} on the target.")
     role_id = target.psql(
         "SELECT role_id FROM authz_tenantmembership "
-        "WHERE tenant_id = "
-        + quote_literal(tenant_id)
-        + " AND is_active = true AND is_deleted = false LIMIT 1"
+        "WHERE tenant_id = CAST(:'tenant_id' AS uuid) "
+        "AND is_active = true AND is_deleted = false LIMIT 1",
+        tenant_id=tenant_id,
     )
     if not role_id:
         raise SystemExit(f"Tenant {slug} has no active membership to copy a role from.")
@@ -285,66 +290,71 @@ def ensure_loadtest_user(target: Database) -> None:
     ) == "t"
     password_hash = django_password_hash(password)
     uid = str(uuid.uuid4())
-    verified_sql = ", email_verified_at = now()" if has_verified else ""
-    target.psql(
-        "INSERT INTO authentication_user "
-        "(password, is_superuser, supabase_uid, email, is_active, is_staff, email_verified_at) "
-        "SELECT "
-        + quote_literal(password_hash) + ", false, "
-        + quote_literal(uid) + ", "
-        + quote_literal(email) + ", true, false, now() "
-        "WHERE NOT EXISTS (SELECT 1 FROM authentication_user WHERE lower(email) = "
-        + quote_literal(email) + ")"
-        if has_verified
-        else
-        "INSERT INTO authentication_user "
-        "(password, is_superuser, supabase_uid, email, is_active, is_staff) "
-        "SELECT "
-        + quote_literal(password_hash) + ", false, "
-        + quote_literal(uid) + ", "
-        + quote_literal(email) + ", true, false "
-        "WHERE NOT EXISTS (SELECT 1 FROM authentication_user WHERE lower(email) = "
-        + quote_literal(email) + ")"
-    )
+    # Values go through psql :'name' placeholders, not into the SQL text.
+    # INSERT does nothing when the email already exists. UPDATE always runs
+    # so the load-test password replaces a production password the sync copied.
     if has_verified:
         target.psql(
-            "UPDATE authentication_user SET password = "
-            + quote_literal(password_hash)
-            + verified_sql
-            + ", is_active = true WHERE lower(email) = "
-            + quote_literal(email)
+            "INSERT INTO authentication_user "
+            "(password, is_superuser, supabase_uid, email, is_active, is_staff, email_verified_at) "
+            "SELECT :'password_hash', false, :'uid', :'email', true, false, now() "
+            "WHERE NOT EXISTS ("
+            "SELECT 1 FROM authentication_user WHERE lower(email) = :'email')",
+            password_hash=password_hash,
+            uid=uid,
+            email=email,
+        )
+        target.psql(
+            "UPDATE authentication_user SET password = :'password_hash', "
+            "email_verified_at = now(), is_active = true "
+            "WHERE lower(email) = :'email'",
+            password_hash=password_hash,
+            email=email,
         )
     else:
         target.psql(
-            "UPDATE authentication_user SET password = "
-            + quote_literal(password_hash)
-            + ", is_active = true WHERE lower(email) = "
-            + quote_literal(email)
+            "INSERT INTO authentication_user "
+            "(password, is_superuser, supabase_uid, email, is_active, is_staff) "
+            "SELECT :'password_hash', false, :'uid', :'email', true, false "
+            "WHERE NOT EXISTS ("
+            "SELECT 1 FROM authentication_user WHERE lower(email) = :'email')",
+            password_hash=password_hash,
+            uid=uid,
+            email=email,
+        )
+        target.psql(
+            "UPDATE authentication_user SET password = :'password_hash', "
+            "is_active = true WHERE lower(email) = :'email'",
+            password_hash=password_hash,
+            email=email,
         )
     user_uid = target.psql(
-        "SELECT supabase_uid FROM authentication_user WHERE lower(email) = "
-        + quote_literal(email)
-        + " LIMIT 1"
+        "SELECT supabase_uid FROM authentication_user "
+        "WHERE lower(email) = :'email' LIMIT 1",
+        email=email,
     )
     target.psql(
         "INSERT INTO authz_tenantmembership "
         "(user_id, is_active, created_at, role_id, tenant_id, email, is_deleted, name) "
-        "SELECT "
-        + quote_literal(user_uid) + "::uuid, true, now(), "
-        + quote_literal(role_id) + "::uuid, "
-        + quote_literal(tenant_id) + "::uuid, "
-        + quote_literal(email) + ", false, 'Load test' "
+        "SELECT CAST(:'user_uid' AS uuid), true, now(), CAST(:'role_id' AS uuid), "
+        "CAST(:'tenant_id' AS uuid), :'email', false, 'Load test' "
         "WHERE NOT EXISTS ("
         "SELECT 1 FROM authz_tenantmembership "
-        "WHERE tenant_id = " + quote_literal(tenant_id) + "::uuid "
-        "AND user_id = " + quote_literal(user_uid) + "::uuid "
-        "AND is_deleted = false)"
+        "WHERE tenant_id = CAST(:'tenant_id' AS uuid) "
+        "AND user_id = CAST(:'user_uid' AS uuid) "
+        "AND is_deleted = false)",
+        user_uid=user_uid,
+        role_id=role_id,
+        tenant_id=tenant_id,
+        email=email,
     )
     target.psql(
         "UPDATE authz_tenantmembership SET is_active = true, is_deleted = false, "
-        "role_id = " + quote_literal(role_id) + "::uuid "
-        "WHERE tenant_id = " + quote_literal(tenant_id) + "::uuid "
-        "AND lower(email) = " + quote_literal(email)
+        "role_id = CAST(:'role_id' AS uuid) "
+        "WHERE tenant_id = CAST(:'tenant_id' AS uuid) AND lower(email) = :'email'",
+        role_id=role_id,
+        tenant_id=tenant_id,
+        email=email,
     )
     print(f"load-test login {email} is active on tenant {slug}")
 

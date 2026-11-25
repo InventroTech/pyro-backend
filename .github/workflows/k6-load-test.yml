@@ -86,15 +86,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y k6
 
-      - name: Log in to preprod
+      - name: Log in and run the load test
         env:
           API_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && inputs.api_base_url || 'https://pyro-backend-ea2j.onrender.com' }}
           LOADTEST_USER_EMAIL: ${{ secrets.LOADTEST_USER_EMAIL }}
           LOADTEST_USER_PASSWORD: ${{ secrets.LOADTEST_USER_PASSWORD }}
+          TENANT_SLUG: ${{ github.event_name == 'workflow_dispatch' && inputs.tenant_slug || 'praja' }}
+          RATE: ${{ github.event_name == 'workflow_dispatch' && inputs.rate || '30' }}
+          DURATION_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.duration_seconds || '60' }}
+          PREALLOCATED_VUS: ${{ github.event_name == 'workflow_dispatch' && inputs.preallocated_vus || '40' }}
         run: |
           python3 - <<'PY'
           import json
           import os
+          import subprocess
           import urllib.error
           import urllib.request
 
@@ -123,21 +128,16 @@ jobs:
               print("::error::Login response did not include an access token.")
               raise SystemExit(1)
 
-          print(f"::add-mask::{token}")
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
-              handle.write(f"API_BASE_URL={base}\n")
-              handle.write("ACCESS_TOKEN<<TOKEN_EOF\n")
-              handle.write(token + "\n")
-              handle.write("TOKEN_EOF\n")
+          # The token stays in the k6 process environment. It is not printed
+          # and it is not written to GITHUB_ENV.
+          child_env = os.environ.copy()
+          child_env["ACCESS_TOKEN"] = token
+          child_env["API_BASE_URL"] = base
+          child_env.pop("LOADTEST_USER_PASSWORD", None)
           print(f"Logged in as {email}. Token expires in {payload.get('expires_in')}s.")
+          print(
+              f"API: {base} | GET-only | rate={os.environ.get('RATE')}/s "
+              f"duration={os.environ.get('DURATION_SECONDS')}s"
+          )
+          raise SystemExit(subprocess.run(["k6", "run", "k6-tests/basic-test.js"], env=child_env).returncode)
           PY
-
-      - name: Run GET-only k6 script
-        env:
-          TENANT_SLUG: ${{ github.event_name == 'workflow_dispatch' && inputs.tenant_slug || 'praja' }}
-          RATE: ${{ github.event_name == 'workflow_dispatch' && inputs.rate || '30' }}
-          DURATION_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.duration_seconds || '60' }}
-          PREALLOCATED_VUS: ${{ github.event_name == 'workflow_dispatch' && inputs.preallocated_vus || '40' }}
-        run: |
-          echo "API: $API_BASE_URL | GET-only | rate=$RATE/s duration=${DURATION_SECONDS}s"
-          k6 run k6-tests/basic-test.js
