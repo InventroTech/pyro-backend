@@ -32,6 +32,7 @@ import argparse
 import base64
 import hashlib
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -603,11 +604,19 @@ def prepare_staging_sql(source: Database, target: Database, table: str, staging:
                 f"({quote_literal(prod_id)}::uuid, {quote_literal(preprod_id)}::uuid)"
                 for prod_id, preprod_id in pairs
             )
+            # Leads keep the preprod tenant id for that slug. The production id is not stored.
+            lead_only = " AND s.entity_type = 'lead'" if table == "records" else ""
             statements.append(
                 f"UPDATE {staging} AS s SET tenant_id = v.preprod_id "
                 f"FROM (VALUES {values}) AS v(prod_id, preprod_id) "
-                f"WHERE s.tenant_id = v.prod_id;"
+                f"WHERE s.tenant_id = v.prod_id{lead_only};"
             )
+            if table == "records":
+                statements.append(
+                    f"UPDATE {staging} AS s SET tenant_id = v.preprod_id "
+                    f"FROM (VALUES {values}) AS v(prod_id, preprod_id) "
+                    f"WHERE s.tenant_id = v.prod_id AND s.entity_type IS DISTINCT FROM 'lead';"
+                )
         statements.append(
             f"DELETE FROM {staging} AS s WHERE s.tenant_id IS NOT NULL "
             f"AND NOT EXISTS (SELECT 1 FROM tenants t WHERE t.id = s.tenant_id);"
@@ -623,6 +632,50 @@ def prepare_staging_sql(source: Database, target: Database, table: str, staging:
     return statements
 
 
+def qualify_predicate(predicate: str, alias: str, column_names: list[str]) -> str:
+    if not predicate:
+        return "true"
+    text = predicate
+    for column in sorted(column_names, key=len, reverse=True):
+        text = re.sub(rf"\b{re.escape(column)}\b", f"{alias}.{column}", text)
+    return text
+
+
+def keep_existing_ids_sql(target: Database, table: str, pk: str, staging: str, columns: list[str]) -> list[str]:
+    """Drop a staged row when preprod already has that unique name. Leave the existing row alone."""
+    indexes = target.psql(
+        "SELECT i.indexrelid::text || '|' || COALESCE(pg_get_expr(i.indpred, i.indrelid), '') "
+        "FROM pg_index i "
+        "WHERE i.indrelid = " + quote_literal("public." + table) + "::regclass "
+        "AND i.indisunique AND NOT i.indisprimary AND i.indexprs IS NULL"
+    )
+    statements = []
+    for line in indexes.splitlines():
+        if "|" not in line:
+            continue
+        index_id, predicate = line.split("|", 1)
+        key_columns = [
+            name for name in target.psql(
+                "SELECT a.attname FROM pg_index i "
+                "JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true "
+                "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum "
+                "WHERE i.indexrelid = " + quote_literal(index_id) + "::oid "
+                "AND k.attnum > 0 ORDER BY k.ord"
+            ).splitlines() if name
+        ]
+        if not key_columns:
+            continue
+        match = " AND ".join(
+            f"t.{name} IS NOT DISTINCT FROM s.{name}" for name in key_columns
+        )
+        alive = qualify_predicate(predicate, "t", columns)
+        statements.append(
+            f"DELETE FROM {staging} AS s USING {table} AS t "
+            f"WHERE {match} AND t.{pk} IS DISTINCT FROM s.{pk} AND ({alive});"
+        )
+    return statements
+
+
 def upsert_csv(source: Database, target: Database, table: str, csv_path: str, pk: str) -> str:
     columns = shared_columns(target, table, csv_path, pk)
     assigned = ", ".join(f"{name} = EXCLUDED.{name}" for name in columns if name != pk)
@@ -634,6 +687,7 @@ def upsert_csv(source: Database, target: Database, table: str, csv_path: str, pk
         f"CREATE UNLOGGED TABLE preprod_sync_catalog (LIKE {table} INCLUDING DEFAULTS);",
         f"\\copy preprod_sync_catalog ({column_list}) FROM '{csv_path}' WITH (FORMAT csv, HEADER true, NULL '\\N')",
         *prepare_staging_sql(source, target, table, "preprod_sync_catalog"),
+        *keep_existing_ids_sql(target, table, pk, "preprod_sync_catalog", columns),
         f"INSERT INTO {table} ({column_list}) SELECT {column_list} FROM preprod_sync_catalog",
         f"ON CONFLICT ({pk}) DO UPDATE SET {assigned};",
         "DROP TABLE preprod_sync_catalog;",
@@ -707,6 +761,7 @@ def sync_batch(source: Database, target: Database, table: str, sql: str, pk: str
                     upsert_csv(source, target, parent, parent_csv, parent_pk or "id")
         insert_script = "\n".join([
             *prepare_staging_sql(source, target, table, "preprod_sync_batch"),
+            *keep_existing_ids_sql(target, table, pk, "preprod_sync_batch", columns),
             f"INSERT INTO {table} ({column_list})",
             f"SELECT {column_list} FROM preprod_sync_batch",
             f"ON CONFLICT ({pk}) DO UPDATE SET {assigned};",
