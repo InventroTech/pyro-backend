@@ -3,6 +3,7 @@ from .views import (
     LeadTypeAssignmentView,
     UserLeadTypesView,
     UserCoreKVSettingsView,
+    TenantCoreKVSettingsView,
     UserLeadsCountView,
     LeadTypesListView,
     LeadSourcesListView,
@@ -14,6 +15,7 @@ from .views import (
     GroupListCreateView,
     GroupDetailView,
     MyLeadGroupSummaryView,
+    InactiveEmailPolicyView,
 )
 
 urlpatterns = [
@@ -31,6 +33,11 @@ urlpatterns = [
         "users/<str:user_id>/core-kv-settings/",
         UserCoreKVSettingsView.as_view(),
         name="user-core-kv-settings",
+    ),
+    path(
+        "core-kv-settings/",
+        TenantCoreKVSettingsView.as_view(),
+        name="tenant-core-kv-settings",
     ),
     path(
         "users/<uuid:user_id>/leads-count/",
@@ -53,6 +60,11 @@ urlpatterns = [
     ),
     path("lead-filter-options/", LeadFilterOptionsView.as_view(), name="lead-filter-options"),
     path("queue-types/", QueueTypesListView.as_view(), name="queue-types-list"),
+    path(
+        "inactive-email-policy/",
+        InactiveEmailPolicyView.as_view(),
+        name="inactive-email-policy",
+    ),
     path("groups/", GroupListCreateView.as_view(), name="groups-list-create"),
     path("groups/<int:pk>/", GroupDetailView.as_view(), name="groups-detail"),
 ]

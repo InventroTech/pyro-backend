@@ -9,13 +9,22 @@ must never stop an RM's call outcome from being saved.
 """
 
 import logging
+from datetime import timedelta
 
 from django.utils import timezone
 
-from analytics.models import RmActivityEvent
+from analytics.models import RmActivityEvent, RmCallSession
 from authz.models import TenantMembership
 
 logger = logging.getLogger(__name__)
+
+# How long an unconsumed RmCallSession stays authoritative. Mirrors the
+# frontend's own staleness cutoff (LEAD_START_TIME_MAX_AGE_MS in
+# bob/.../lead-card-carousel/utils.ts) — long enough that no single lead
+# legitimately stays open this long, short enough that a lead abandoned
+# mid-shift and genuinely reopened later starts a fresh, accurate session
+# instead of eventually computing a multi-day duration_seconds.
+LEAD_OPEN_SESSION_MAX_AGE = timedelta(hours=12)
 
 # the four status-updating events the lead card carousel already sends today —
 # see bob/src/components/page-builder/lead-card-carousel/useLeadCardCarousel.ts
@@ -61,6 +70,83 @@ def _resolve_lead_group_name(tenant, membership):
         return None
 
 
+def record_lead_opened(event_name, record, payload, tenant, request_user):
+    """
+    Called for every event the lead card carousel sends; only acts on
+    "lead.opened", fired the instant a lead becomes the RM's current lead
+    card (see bob/.../utils.ts markLeadOpened) — covers the whole time the
+    RM has the lead open, not just the phone call itself.
+
+    Stamps that moment here, server-side, synchronously, so it survives the
+    tab being backgrounded/reclaimed (e.g. while the native Phone app has
+    focus during the call). record_lead_touch_event reads this row back when
+    the RM later logs a disposition, instead of trusting a client-side clock
+    that resets if that happens. Deliberately fails silently like
+    record_lead_touch_event below — a bug here must never block the RM's
+    actual call or disposition.
+
+    Each lead gets its OWN independent session, keyed by (tenant,
+    rm_user_id, lead_record) — opening any lead always succeeds immediately
+    and never touches any OTHER lead's session. An RM CAN end up with
+    several leads' sessions open at once (two tabs, All Leads + Pending
+    Leads, etc.) — that's allowed, not prevented or silently discarded.
+    Any real overlap between two leads' open-to-disposition spans is
+    resolved honestly at the aggregation layer instead: Handling Time is
+    computed by merging overlapping [started_at, ended_at] intervals before
+    summing (see mergedIntervalMinutes in bob's rm-prd-analytics/
+    aggregate.ts), so simultaneous real engagement with two leads is
+    counted once, not twice — without ever needing to block opening a lead,
+    guess a duration, or discard a touch's real data. (An earlier version
+    of this function deleted the other lead's session the moment a new one
+    opened, to force at most one session per RM — that meant the deleted
+    lead's eventual disposition had no session to read back, so its
+    duration had to be recorded as unknown (or, in a later iteration,
+    skipped as a touch entirely) rather than its own real measured span.
+    Merging overlapping intervals at the aggregation layer gets the same
+    "no inflated Handling Time" result without ever losing a real,
+    server-measured duration — or the touch itself — for any individual lead.)
+
+    Re-opening the SAME lead is idempotent (keeps the original started_at,
+    so a parent re-render / same-lead realtime re-fetch / discarded-and-
+    reloaded tab doesn't reset the clock) unless that session has gone
+    stale (LEAD_OPEN_SESSION_MAX_AGE) — a lead abandoned mid-shift and
+    genuinely reopened later starts fresh too.
+
+    `payload.opened_from` is the page/carousel title the lead was opened
+    from (e.g. "All Leads", "Pending Leads") — stashed here and carried onto
+    the eventual CALL_TOUCH row by record_lead_touch_event, the same way
+    started_at is. Not updated when an existing fresh session is reused, so
+    it stays whichever page genuinely opened the lead first, not wherever a
+    later re-render happened to fire from.
+    """
+    if event_name != "lead.opened" or tenant is None or record is None:
+        return
+
+    try:
+        rm_user_id = getattr(request_user, "supabase_uid", None)
+        if not rm_user_id:
+            return
+
+        existing = RmCallSession.objects.filter(
+            tenant=tenant, rm_user_id=rm_user_id, lead_record=record
+        ).first()
+        if existing is not None and timezone.now() - existing.started_at <= LEAD_OPEN_SESSION_MAX_AGE:
+            return
+
+        opened_from = (payload or {}).get("opened_from") or ""
+        RmCallSession.objects.update_or_create(
+            tenant=tenant,
+            rm_user_id=rm_user_id,
+            lead_record=record,
+            defaults={"started_at": timezone.now(), "opened_from": opened_from},
+        )
+    except Exception:
+        logger.exception(
+            "[RmActivity] Failed to record call start for record_id=%s",
+            getattr(record, "id", None),
+        )
+
+
 def record_lead_touch_event(event_name, record, payload, tenant, request_user):
     """
     Writes one CALL_TOUCH row for a lead-status-update event. Does nothing if
@@ -81,14 +167,42 @@ def record_lead_touch_event(event_name, record, payload, tenant, request_user):
             logger.warning("[RmActivity] No authenticated RM user id for event=%s record_id=%s", event_name, getattr(record, "id", None))
             return
 
-        duration_seconds = payload.get("duration_seconds")
-        try:
-            duration_seconds = int(duration_seconds) if duration_seconds is not None else None
-        except (TypeError, ValueError):
-            duration_seconds = None
-
         ended_at = timezone.now()
-        started_at = ended_at - timezone.timedelta(seconds=duration_seconds) if duration_seconds else ended_at
+
+        # The server-recorded session (stamped the instant the lead became
+        # the RM's current lead — see record_lead_opened, which keeps every
+        # lead's session independent) is the ONLY trusted source for
+        # duration_seconds. We deliberately do NOT fall back to a client-
+        # supplied duration: that number comes straight from the RM's own
+        # browser (payload.duration_seconds) and is trivially editable via
+        # devtools before a disposition is submitted. Since every lead now
+        # keeps its own session until it's actually dispositioned (nothing
+        # deletes a sibling lead's session anymore), this "no session found"
+        # branch is a genuinely rare edge case — a disposition logged
+        # without the lead ever going through record_lead_opened at all —
+        # not the common path. duration_seconds comes out None ("unknown")
+        # there rather than a guessed number. The disposition itself (touch
+        # count, trial activations, etc.) is completely unaffected either
+        # way; only duration-derived stats (Handling Time, ACHT, breach
+        # flags) skip a None row rather than silently average in a
+        # fabricated value — see the null-aware changes in bob's
+        # rm-prd-analytics/aggregate.ts.
+        call_session = (
+            RmCallSession.objects.filter(tenant=tenant, rm_user_id=rm_user_id, lead_record=record)
+            .order_by("-started_at")
+            .first()
+            if record is not None
+            else None
+        )
+        if call_session is not None:
+            started_at = call_session.started_at
+            opened_from = call_session.opened_from
+            duration_seconds = max(0, int((ended_at - started_at).total_seconds()))
+            call_session.delete()
+        else:
+            started_at = ended_at
+            duration_seconds = None
+            opened_from = payload.get("opened_from") or ""
 
         # names are copied onto the row at write time so a dashboard query
         # never has to join back to the membership table (see RmActivityEvent docstring)
@@ -144,6 +258,7 @@ def record_lead_touch_event(event_name, record, payload, tenant, request_user):
                 "started_at": started_at.isoformat(),
                 "ended_at": ended_at.isoformat(),
                 "duration_seconds": duration_seconds,
+                "opened_from": opened_from,
             },
         )
     except Exception:

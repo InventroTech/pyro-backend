@@ -33,3 +33,4 @@ DEBUG = True
 SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET", "test-jwt-secret")
 AUTH_JWT_SECRET = "test-auth-jwt-secret"
 LOCAL_TEST_MODE = True  # Single source for test flags; tests use config.settings_test only.
+STICKY_ASSIGNMENT_GROUP_NAME = "Election Contestants"

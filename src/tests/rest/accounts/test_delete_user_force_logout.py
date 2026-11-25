@@ -50,6 +50,35 @@ class DeleteUserEverywhereForceLogoutTest(TestCase):
         self.assertIsNone(archived.user_id)
 
     @patch("accounts.services.delete_user_everywhere.revoke_supabase_sessions_globally")
+    def test_delete_by_uid_alone_soft_deletes_the_membership(self, mock_revoke):
+        mock_revoke.return_value = {"user_id": str(self.uid), "revoked": True}
+
+        report = delete_user_everywhere(tenant=self.tenant, uid=self.uid)
+
+        self.assertEqual(report["matched_by"], "uid")
+        self.assertEqual(report["memberships_deactivated"], 1)
+        self.assertEqual(report["deleted"]["tenant_memberships"], 1)
+        self.assertFalse(TenantMembership.objects.filter(id=self.membership.id).exists())
+        archived = TenantMembership.all_objects.get(id=self.membership.id)
+        self.assertTrue(archived.is_deleted)
+        self.assertFalse(archived.is_active)
+        self.assertIsNone(archived.user_id)
+
+    @patch("accounts.services.delete_user_everywhere.revoke_supabase_sessions_globally")
+    def test_delete_by_uid_leaves_other_members_alone(self, mock_revoke):
+        mock_revoke.return_value = {"user_id": str(self.uid), "revoked": True}
+        other = TenantMembershipFactory(
+            tenant=self.tenant, role=self.role, email="stays@example.com", user_id=uuid.uuid4(), is_active=True
+        )
+
+        delete_user_everywhere(tenant=self.tenant, uid=self.uid)
+
+        other.refresh_from_db()
+        self.assertFalse(other.is_deleted)
+        self.assertTrue(other.is_active)
+        self.assertIsNotNone(other.user_id)
+
+    @patch("accounts.services.delete_user_everywhere.revoke_supabase_sessions_globally")
     def test_delete_manager_reparents_reports_instead_of_deleting(self, mock_revoke):
         """Deleting a manager keeps their reports and promotes them to the grandparent."""
         mock_revoke.return_value = {"user_id": str(self.uid), "revoked": True}

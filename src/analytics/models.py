@@ -144,6 +144,12 @@ class RmActivityEvent(BaseModel):
 
     class Meta(BaseModel.Meta):
         db_table = "rm_activity_events"
+        # RmActivityEventListView's date-range/rm_user_id filters are served by
+        # two expression indexes on event_data, added via raw SQL (CONCURRENTLY)
+        # in migration 0019 — not declared here, same as this codebase's other
+        # JSONB query indexes (see crm_records' records_support_ticket_*_idx /
+        # event_logs_tenant_*_idx), since Django can't build them without
+        # locking the table and a declared Index always does a plain CREATE INDEX.
         indexes = [
             *BaseModel.Meta.indexes,
             models.Index(fields=["tenant", "event_type"], name="rm_events_tenant_type_idx"),
@@ -153,3 +159,43 @@ class RmActivityEvent(BaseModel):
     def __str__(self):
         data = self.event_data or {}
         return f"RmActivityEvent({data.get('rm_name')}:{self.event_type}:{data.get('started_at')})"
+
+
+class RmCallSession(BaseModel):
+    """
+    Marks the real instant a lead became an RM's current lead card —
+    written synchronously at that moment (see rm_activity.record_lead_opened),
+    so it survives the browser tab being backgrounded or reclaimed for the
+    length of the actual phone call (dialing hands off to the native Phone
+    app; the RM PRD dashboard previously measured "time on lead" with a
+    client-side JS clock that silently reset whenever that happened,
+    truncating real call durations down to a few seconds).
+
+    record_lead_touch_event reads the matching row back (by tenant +
+    rm_user_id + lead_record) when the RM logs a disposition, uses it as the
+    authoritative start time instead of the client-supplied duration, and
+    deletes it — so a row only exists between "RM opened the lead" and "RM
+    logged the outcome" for that lead.
+    """
+
+    rm_user_id = models.UUIDField(db_index=True, help_text="Supabase user id of the RM who opened this lead.")
+    lead_record = models.ForeignKey(
+        "crm_records.Record", on_delete=models.CASCADE, related_name="rm_call_sessions"
+    )
+    started_at = models.DateTimeField()
+    opened_from = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Page/carousel title the RM opened this lead from (e.g. 'All Leads', 'Pending Leads') — copied onto the CALL_TOUCH row's event_data when the disposition is logged.",
+    )
+
+    class Meta(BaseModel.Meta):
+        db_table = "rm_call_sessions"
+        indexes = [
+            *BaseModel.Meta.indexes,
+            models.Index(fields=["tenant", "rm_user_id", "lead_record"], name="rm_call_sessions_lookup_idx"),
+        ]
+
+    def __str__(self):
+        return f"RmCallSession(rm={self.rm_user_id}:lead={self.lead_record_id}:started={self.started_at})"

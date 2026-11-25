@@ -68,7 +68,7 @@ from .serializers import (
     CseTimeSeriesSerializer,
     RmActivityEventSerializer,
 )
-from .models import RmActivityEvent
+from .models import RmActivityEvent, RmCallSession
 
 
 # "How many support tickets did each executive resolve last week?"
@@ -1832,6 +1832,20 @@ class RmActivityEventPagination(MetaPageNumberPagination):
     page_size = 500
     max_page_size = 2000
 
+    # The frontend only ever reads page_meta.next_page_link to decide
+    # whether to keep paging (see rmActivityApi's fetchEventWindow) — it
+    # never reads total_count/number_of_pages. The base class's default
+    # (_include_count=True) was running a full COUNT(*) over the matched
+    # date range on EVERY page request though — for a ~19k-row day split
+    # into ~38 pages of 500, that's 38 wasted COUNT queries per day per
+    # load. Same fix RecordListPagination already applies for lead lists;
+    # still honors an explicit ?include_count=true if anything ever needs it.
+    def _include_count(self, request, view=None):
+        raw = request.query_params.get("include_count")
+        if raw is not None:
+            return raw.strip().lower() not in ("0", "false", "no")
+        return False
+
 
 class RmActivityEventListView(TenantScopedMixin, generics.ListAPIView):
     """
@@ -1839,7 +1853,9 @@ class RmActivityEventListView(TenantScopedMixin, generics.ListAPIView):
     tenant, windowed to a `from`/`to` date range (YYYY-MM-DD, defaults to
     today if omitted so this never silently dumps the whole table), an
     optional `rm_user_id` to scope to one RM (e.g. the lead-card "Your
-    Shift" panel, which has no business seeing every other RM's rows), and
+    Shift" panel, which has no business seeing every other RM's rows), an
+    optional `manager_user_id` to scope to one manager's own hierarchy (RM
+    PRD's ASM view — "my team" rather than the whole tenant), and
     paginated. The dashboard does its own grouping/summing client-side, so
     this stays a plain list per page: no aggregation logic lives on the
     backend (yet).
@@ -1874,11 +1890,81 @@ class RmActivityEventListView(TenantScopedMixin, generics.ListAPIView):
         if rm_user_id:
             qs = qs.filter(event_data__rm_user_id=rm_user_id)
 
+        # ASM view: narrow to the signed-in manager's own hierarchy (direct +
+        # indirect reports), resolved the same way Team Analytics resolves
+        # "my team" — not a manager_name text match, which could collide
+        # across two managers who happen to share a display name.
+        manager_user_id = self.request.query_params.get("manager_user_id", "").strip()
+        if manager_user_id:
+            team_user_ids = TeamResolver.get_team_user_ids(manager_user_id, self.request.tenant)
+            qs = qs.filter(event_data__rm_user_id__in=team_user_ids)
+
         # `id` is a real indexed column (insertion order, effectively
         # chronological); ordering by event_data__started_at is a JSON
         # extraction that can't use rm_events_data_gin_idx and forces a sort
         # over the whole matched set
         return qs.order_by("id")
+
+
+class RmActiveSessionsView(APIView):
+    """
+    RM PRD analytics — which RMs have a lead open *right now*: an
+    RmCallSession that hasn't been consumed by a disposition yet (see
+    record_lead_opened/record_lead_touch_event in rm_activity.py).
+
+    This is the only place "currently on a lead" can come from.
+    rm_activity_events never contains an in-progress row — a CALL_TOUCH row
+    is written complete, with both started_at and ended_at already set, only
+    once a disposition is logged — so the dashboard's historical event feed
+    has no way to answer "right now" on its own; RmCallSession is the live
+    half of the story that record_lead_touch_event consumes and deletes the
+    instant a disposition lands.
+
+    No date range: this is a live, present-moment fact. Meant to be re-fetched
+    on the same cadence as the rest of the dashboard (mount, manual Refresh,
+    tab-visibility-return) rather than polled on an interval. Sessions older
+    than LEAD_OPEN_SESSION_MAX_AGE are excluded, same cutoff
+    record_lead_opened itself uses — a session that old is an abandoned tab,
+    not someone still genuinely on that lead.
+
+    Same scoping precedent as RmActivityEventListView: optional
+    `rm_user_id` (one RM), `manager_user_id` (one manager's own hierarchy),
+    or `rm_user_ids` (a known set). Omit all three for the whole tenant.
+    """
+
+    authentication_classes = [SupabaseJWTAuthentication]
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        from analytics.rm_activity import LEAD_OPEN_SESSION_MAX_AGE
+
+        tenant = request.tenant
+        cutoff = timezone.now() - LEAD_OPEN_SESSION_MAX_AGE
+        qs = RmCallSession.objects.filter(tenant=tenant, started_at__gte=cutoff)
+
+        rm_user_id = request.query_params.get("rm_user_id", "").strip()
+        if rm_user_id:
+            qs = qs.filter(rm_user_id=rm_user_id)
+
+        manager_user_id = request.query_params.get("manager_user_id", "").strip()
+        if manager_user_id:
+            team_user_ids = TeamResolver.get_team_user_ids(manager_user_id, tenant)
+            qs = qs.filter(rm_user_id__in=team_user_ids)
+
+        rm_user_ids_param = request.query_params.get("rm_user_ids", "").strip()
+        if rm_user_ids_param:
+            rm_user_ids = {v.strip() for v in rm_user_ids_param.split(",") if v.strip()}
+            qs = qs.filter(rm_user_id__in=rm_user_ids)
+
+        sessions = [
+            {
+                "rm_user_id": str(s.rm_user_id),
+                "lead_record_id": s.lead_record_id,
+                "started_at": s.started_at.isoformat(),
+            }
+            for s in qs
+        ]
+        return Response(sessions)
 
 
 class RmDailyTargetsView(APIView):

@@ -1,10 +1,15 @@
 import logging
 import re
 import secrets
-from datetime import timedelta
+import time
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+import requests
+from django.conf import settings
+from django.db import DatabaseError, transaction
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny
@@ -15,6 +20,8 @@ from authentication.client_email_templates import apply_otp_to_client_email, ens
 from authentication.account_views import validate_user_password
 from authentication.session_views import AuthEmailRateThrottle, AuthRateThrottle
 from authentication.models import PasswordResetOTP, User
+from authentication.models import PasswordResetOTP, User
+from authentication.supabase_env import supabase_anon_key, supabase_api_base_url
 from authentication.password_reset import (
     OTP_TTL_SECONDS,
     admin_update_user_password,
@@ -295,6 +302,7 @@ class PasswordResetConfirmView(APIView):
         PasswordResetOTP.objects.filter(email__iexact=email).delete()
 
         if not success:
+            # err_msg can come from the auth service's reply to the password change; not logged.
             logger.error(
                 "[PasswordReset][confirm-password] admin_set_password_failed rid=%s %s",
                 rid,
@@ -311,3 +319,102 @@ class PasswordResetConfirmView(APIView):
             _email_log_tag(email),
         )
         return Response({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Last sign-in: config.supabase_auth calls these on every authenticated request
+# to keep authentication_user.last_login current for the settings user list.
+# ---------------------------------------------------------------------------
+
+# Sign-in times further ahead than this are treated as bogus, not clock skew.
+SIGN_IN_MAX_CLOCK_SKEW_SECONDS = 300
+# Reused access tokens (tab close/reopen) keep the same iat; bump last_login at
+# most this often so activity is visible without a write on every API call.
+LAST_LOGIN_TOUCH_INTERVAL_SECONDS = 60
+
+
+def _valid_unix_timestamp(value, latest_allowed):
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 < value <= latest_allowed
+    )
+
+
+def _signed_in_at(claims):
+    """
+    Activity time for last_login: newer of Supabase amr and token iat.
+
+    amr ([{"method": ..., "timestamp": ...}]) is required so spoof tokens without
+    it do not record. Refreshed tokens keep the original amr timestamp but get a
+    new iat when the user reopens the app; using the newer of the two keeps the
+    settings "last sign in" current without requiring logout. Malformed,
+    non-positive or far-future timestamps are ignored.
+    """
+    amr = claims.get("amr")
+    if not isinstance(amr, (list, tuple)):
+        return None
+    latest_allowed = time.time() + SIGN_IN_MAX_CLOCK_SKEW_SECONDS
+    amr_stamps = [
+        entry.get("timestamp")
+        for entry in amr
+        if isinstance(entry, dict)
+    ]
+    amr_stamps = [s for s in amr_stamps if _valid_unix_timestamp(s, latest_allowed)]
+    # Require a real amr marker; iat alone must not record a sign-in.
+    if not amr_stamps:
+        return None
+    stamps = list(amr_stamps)
+    iat = claims.get("iat")
+    if _valid_unix_timestamp(iat, latest_allowed):
+        stamps.append(iat)
+    signed_in_at = datetime.fromtimestamp(max(stamps), tz=dt_timezone.utc)
+    # With USE_TZ=False, DB datetimes are naive; an aware value could not be compared to them.
+    return signed_in_at if settings.USE_TZ else timezone.make_naive(signed_in_at)
+
+
+def _record_sign_in(user, signed_in_at):
+    """
+    Move last_login forward to signed_in_at. The newer-than check is in SQL so
+    concurrent requests can't move it backwards. A failed write never blocks auth.
+    """
+    if user.last_login is not None and signed_in_at <= user.last_login:
+        return
+    try:
+        with transaction.atomic():
+            updated = (
+                User.objects.filter(pk=user.pk)
+                .filter(Q(last_login__isnull=True) | Q(last_login__lt=signed_in_at))
+                .update(last_login=signed_in_at)
+            )
+    except DatabaseError:
+        logger.warning("Could not record sign-in for user %s", user.pk, exc_info=True)
+        return
+    if updated:
+        user.last_login = signed_in_at
+
+
+def touch_last_login(user):
+    """
+    Bump last_login to now when it is missing or older than the touch interval.
+
+    Tab close/reopen often reuses the same access token (same amr/iat). Calling
+    this after a real amr sign-in keeps the settings time moving without writing
+    on every request.
+    """
+    now = timezone.now()
+    if user.last_login is not None:
+        age = (now - user.last_login).total_seconds()
+        if age < LAST_LOGIN_TOUCH_INTERVAL_SECONDS:
+            return
+    _record_sign_in(user, now)
+
+
+def record_sign_in_from_token(user, claims):
+    """Copy token activity onto last_login, then touch now() if still stale."""
+    signed_in_at = _signed_in_at(claims)
+    if not signed_in_at:
+        return
+    _record_sign_in(user, signed_in_at)
+    # Same access token after tab reopen: amr/iat unchanged; bump when stale.
+    touch_last_login(user)

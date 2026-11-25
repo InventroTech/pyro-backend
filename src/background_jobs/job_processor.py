@@ -26,6 +26,7 @@ from .scheduler_locks import (
     SCHEDULER_LOCK_SHIPMENT_TRACKING,
     SCHEDULER_LOCK_ZOHO_SHIPMENT_EMAILS,
     SCHEDULER_LOCK_RM_DAILY_TARGET_SNAPSHOT,
+    SCHEDULER_LOCK_RM_CALL_SESSION_CLEANUP,
     scheduler_lock,
 )
 from .tenant_jobs import enqueue_for_all_tenants
@@ -40,6 +41,12 @@ SHIPMENT_TRACKING_ENQUEUE_INTERVAL = 900  # 15 minutes
 
 # Zoho Mail ops-inbox → auto-fill tracking fields
 ZOHO_SHIPMENT_EMAIL_ENQUEUE_INTERVAL = 900  # 15 minutes
+
+# RM call session cleanup: 1am IST, expressed in UTC since Django/the DB run
+# in UTC (see config.settings.TIME_ZONE) — IST is UTC+5:30, so 1:00 IST is
+# 19:30 UTC the same calendar day it fires in UTC terms.
+RM_CALL_SESSION_CLEANUP_UTC_HOUR = 19
+RM_CALL_SESSION_CLEANUP_UTC_MINUTE = 30
 
 
 class JobProcessor:
@@ -74,6 +81,10 @@ class JobProcessor:
         # tracked by date, not elapsed seconds, so it fires once per real day
         # regardless of how often the worker loop ticks
         self._last_rm_daily_target_snapshot_date = None
+        # Calendar date (UTC) we last enqueued the RM call session cleanup
+        # on — paired with a time-of-day gate (1am IST) since this doesn't
+        # fire on the UTC day boundary the way the snapshot job above does
+        self._last_rm_call_session_cleanup_date = None
         self._run_schedulers = True
         # Circuit breaker state for connection errors
         self._connection_error_count = 0
@@ -587,6 +598,49 @@ class JobProcessor:
                 exc_info=True,
             )
 
+    def _maybe_enqueue_rm_call_session_cleanup(self):
+        """
+        Once per real day, after the clock crosses 1am IST (19:30 UTC),
+        enqueue a job per tenant that discards any RmCallSession left open
+        from earlier that day — an RM who opened a lead and never logged a
+        disposition before logging off. See RmCallSessionCleanupJobHandler.
+
+        Gated on both date AND time-of-day, unlike
+        _maybe_enqueue_rm_daily_target_snapshot's plain date-change check —
+        1am IST isn't the UTC day boundary, so a bare "has the date changed"
+        check would fire at the wrong wall-clock time (right after UTC
+        midnight, i.e. 5:30am IST).
+        """
+        now = timezone.now()
+        trigger_today = now.replace(
+            hour=RM_CALL_SESSION_CLEANUP_UTC_HOUR,
+            minute=RM_CALL_SESSION_CLEANUP_UTC_MINUTE,
+            second=0,
+            microsecond=0,
+        )
+        if now < trigger_today:
+            return
+        if self._last_rm_call_session_cleanup_date == now.date():
+            return
+        self._last_rm_call_session_cleanup_date = now.date()
+        try:
+            with scheduler_lock(SCHEDULER_LOCK_RM_CALL_SESSION_CLEANUP) as acquired:
+                if not acquired:
+                    return
+                queue = get_queue_service()
+                jobs = enqueue_for_all_tenants(
+                    queue, job_type=JobType.DISCARD_STALE_RM_CALL_SESSIONS, payload={}, priority=0
+                )
+            logger.info(
+                f"[Worker {self.worker_id}] Enqueued discard_stale_rm_call_sessions for %s tenant(s)",
+                len(jobs),
+            )
+        except Exception as e:
+            logger.warning(
+                f"[Worker {self.worker_id}] Failed to enqueue RM call session cleanup: {e}",
+                exc_info=True,
+            )
+
     def process_next_job(self, tenant_id: Optional[str] = None) -> bool:
         """
         Process the next available job.
@@ -694,6 +748,9 @@ class JobProcessor:
                     self._maybe_enqueue_zoho_shipment_email_sync()
                     # Once a day: freeze each RM's DAILY_TARGET for the day that just ended
                     self._maybe_enqueue_rm_daily_target_snapshot()
+                    # Once a day, right after 1am IST: discard any lead left
+                    # open overnight so the next day starts fresh
+                    self._maybe_enqueue_rm_call_session_cleanup()
 
                 if jobs_processed > 0:
                     logger.debug(

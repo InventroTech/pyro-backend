@@ -4,6 +4,9 @@ Snoozed → NOT_CONNECTED Midnight Job
 For SALES LEAD leads in SNOOZED stage belonging to tenant d6db1158-2212-4d94-bb01-2c28b971d9a9:
 sets lead_stage to NOT_CONNECTED, clears assigned_to, removes snooze_unassign_at.
 
+Leads matching the group named by ``STICKY_ASSIGNMENT_GROUP_NAME`` also move to
+NOT_CONNECTED and lose snooze_unassign_at, but assigned_to is left as-is.
+
 Only processes leads whose next_call_at falls on today's calendar date (UTC).
 Runs once per UTC calendar day at 17:30 UTC (11 PM IST) via Brahma.
 """
@@ -15,6 +18,10 @@ from django.conf import settings
 from django.utils import timezone
 
 from crm_records.models import Record
+from crm_records.sticky_assignment import (
+    lead_keeps_assignment,
+    sticky_group_data_for_tenant,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,23 +51,39 @@ def run_snoozed_to_not_connected_midnight(payload: dict) -> dict:
     # Fetch all matching IDs upfront with a plain query (no server-side cursor)
     # to avoid "cursor does not exist" errors on connection resets during iteration.
     record_ids = list(qs.values_list("id", flat=True))
+    group_data = sticky_group_data_for_tenant(TENANT_ID)
     updated = 0
+    assignment_kept = 0
     for offset in range(0, len(record_ids), CHUNK_SIZE):
         chunk = Record.objects.filter(id__in=record_ids[offset:offset + CHUNK_SIZE])
         for record in chunk:
             data = (record.data or {}).copy() if isinstance(record.data, dict) else {}
             if data.get("lead_stage") != "SNOOZED" or data.get("lead_status") != "SALES LEAD":
                 continue
+            keep_assignment = lead_keeps_assignment(data, group_data)
             data["lead_stage"] = "NOT_CONNECTED"
-            data["assigned_to"] = None
+            if keep_assignment:
+                assignment_kept += 1
+            else:
+                data["assigned_to"] = None
             data.pop("snooze_unassign_at", None)
             record.data = data
             record.save(update_fields=["data", "updated_at"])
             updated += 1
             logger.debug(
-                "[SnoozedToNotConnectedMidnight] record_id=%s: NOT_CONNECTED + unassigned",
+                "[SnoozedToNotConnectedMidnight] record_id=%s: NOT_CONNECTED%s",
                 record.id,
+                ", assignment kept" if keep_assignment else " + unassigned",
             )
 
-    logger.info("[SnoozedToNotConnectedMidnight] completed updated=%s rows", updated)
-    return {"success": True, "updated": updated, "timestamp": timezone.now().isoformat()}
+    logger.info(
+        "[SnoozedToNotConnectedMidnight] completed updated=%s assignment_kept=%s",
+        updated,
+        assignment_kept,
+    )
+    return {
+        "success": True,
+        "updated": updated,
+        "assignment_kept": assignment_kept,
+        "timestamp": timezone.now().isoformat(),
+    }

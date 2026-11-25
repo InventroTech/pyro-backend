@@ -4,6 +4,7 @@ Analytics services for team metrics and event aggregation.
 import logging
 from typing import Set, Optional, Dict, List, Any
 from datetime import datetime, date, timedelta
+from django.core.cache import cache
 from django.db.models import Q, Count, F, Avg, Min, Max
 from django.utils import timezone
 
@@ -18,6 +19,15 @@ from user_settings.services import (
 from django.db.models.expressions import RawSQL
 from .constants import TRACKED_EVENTS, TERMINAL_EVENTS
 from .utils import get_utc_datetime_range_for_ist_date
+
+# Team hierarchy changes rarely (a manager reassignment, not a per-minute
+# event) but get_team_user_ids is called on nearly every manager-scoped
+# request across this file AND analytics/views.py's RM PRD endpoints — each
+# call re-fetches and re-traverses every active TenantMembership in the
+# tenant from scratch. A short TTL turns N redundant full-tenant scans per
+# page load (one per manager-scoped endpoint) into one, without meaningfully
+# delaying a real reassignment showing up.
+_TEAM_USER_IDS_TTL_SECONDS = 60
 
 
 class TeamResolver:
@@ -49,17 +59,30 @@ class TeamResolver:
         """
         Get all user_ids in the team (manager + all direct and indirect reports).
         Uses a single bulk query to avoid N+1 when traversing the hierarchy.
-        
+
+        Cached per (tenant, manager_user_id) for _TEAM_USER_IDS_TTL_SECONDS —
+        see the module-level comment on that constant.
+
         Args:
             manager_user_id: UUID of the manager user
             tenant: Tenant instance
-            
+
         Returns:
             Set of user_id strings (UUIDs) including manager and all team members
         """
+        cache_key = f"team_user_ids:{tenant.id}:{manager_user_id}"
+        cached_ids = cache.get(cache_key)
+        if cached_ids is not None:
+            return cached_ids
+        team_ids = TeamResolver._resolve_team_user_ids(manager_user_id, tenant)
+        cache.set(cache_key, team_ids, timeout=_TEAM_USER_IDS_TTL_SECONDS)
+        return team_ids
+
+    @staticmethod
+    def _resolve_team_user_ids(manager_user_id: str, tenant) -> Set[str]:
         logger = logging.getLogger(__name__)
         logger.info(f"[TeamResolver] Starting team resolution for manager_user_id: {manager_user_id}, tenant: {tenant.id}")
-        
+
         team_ids = {str(manager_user_id)}
         
         # Single bulk query: fetch ALL active TenantMemberships for this tenant

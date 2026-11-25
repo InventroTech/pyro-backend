@@ -217,6 +217,8 @@ def delete_user_everywhere(*, tenant, uid=None, email=None, role_id=None):
     # manager's own parent (nearest surviving ancestor), or becomes top-level.
     report["reports_reassigned"] = _reassign_reports_before_delete(tenant=tenant, tm_q=tm_q)
 
+    # Pin the rows by id first: tm_q may match on user_id, which the update below clears.
+    tm_q = TenantMembership.objects.filter(id__in=list(tm_q.values_list("id", flat=True)))
     report["memberships_deactivated"] = tm_q.update(is_active=False, user_id=None)
     tm_deleted, _ = tm_q.delete()
     report["deleted"]["tenant_memberships"] = tm_deleted

@@ -1,7 +1,8 @@
 import re
 import uuid
 from typing import Optional
-from django.db import transaction, connection
+from django.db import DatabaseError, transaction, connection, close_old_connections
+from django.db.utils import InterfaceError, OperationalError
 from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -16,10 +17,12 @@ from user_settings.services import upsert_user_kv_settings
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from core.models import Tenant
 
-from django.db.models import Subquery
+from django.db.models import Q, Subquery
+from .models import DeletedUserLog
 from .serializers import LinkUserUidSerializer, DeleteUserEverywhereSerializer
 from authz.service import link_user_uid_and_activate, drop_permissions_cache
 from accounts.services.delete_user_everywhere import delete_user_everywhere
+from realtime.broadcast import broadcast_to_tenant
 import logging
 
 logger = logging.getLogger(__name__)
@@ -80,6 +83,22 @@ def _apply_group_and_assignment(
     )
 
     return group
+
+
+def _run_atomic_with_connection_retry(fn, *, label: str):
+    """
+    Run ``fn`` in a transaction; if the DB connection drops (e.g. the Supabase pooler
+    closes it mid-request), open a fresh connection and run it once more. ``fn`` must be
+    safe to repeat: the failed attempt is rolled back by Postgres.
+    """
+    try:
+        with transaction.atomic():
+            return fn()
+    except (InterfaceError, OperationalError) as e:
+        logger.warning(f"DB connection lost during {label}; retrying once: {e}")
+        close_old_connections()
+        with transaction.atomic():
+            return fn()
 
 
 def _resolve_manager_membership(tenant, manager_email: Optional[str], *, self_membership_id=None):
@@ -287,81 +306,86 @@ class TenantMembershipUpdateView(APIView):
         update_manager = "manager_email" in ser.validated_data
         manager_email = ser.validated_data.get("manager_email") if update_manager else None
 
-        with transaction.atomic():
+        def save_membership():
             try:
+                authz_role = Role.objects.get(id=role_id, tenant=tenant)
+            except Role.DoesNotExist:
                 try:
-                    authz_role = Role.objects.get(id=role_id, tenant=tenant)
-                except Role.DoesNotExist:
-                    try:
-                        authz_role = get_authz_role_from_legacy_role(role_id, tenant)
-                    except Exception as e:
-                        logger.error(f"Failed to find role {role_id} for tenant {tenant.id}: {e}")
-                        return Response({
-                            "error": f"Role with ID {role_id} not found for this tenant"
-                        }, status=status.HTTP_400_BAD_REQUEST)
+                    authz_role = get_authz_role_from_legacy_role(role_id, tenant)
+                except Exception as e:
+                    logger.error(f"Failed to find role {role_id} for tenant {tenant.id}: {e}")
+                    return Response({
+                        "error": f"Role with ID {role_id} not found for this tenant"
+                    }, status=status.HTTP_400_BAD_REQUEST)
 
-                parent_membership = None
-                if update_manager:
-                    try:
-                        parent_membership = _resolve_manager_membership(
-                            tenant,
-                            manager_email,
-                            self_membership_id=membership.id,
-                        )
-                    except serializers.ValidationError as ve:
-                        return Response(ve.detail, status=status.HTTP_400_BAD_REQUEST)
+            parent_membership = None
+            if update_manager:
+                try:
+                    parent_membership = _resolve_manager_membership(
+                        tenant,
+                        manager_email,
+                        self_membership_id=membership.id,
+                    )
+                except serializers.ValidationError as ve:
+                    return Response(ve.detail, status=status.HTTP_400_BAD_REQUEST)
 
-                membership.name = name
-                membership.email = email
-                membership.department = department
-                membership.role = authz_role
-                if update_manager:
-                    membership.user_parent_id = parent_membership
-                membership.save()
+            membership.name = name
+            membership.email = email
+            membership.department = department
+            membership.role = authz_role
+            if update_manager:
+                membership.user_parent_id = parent_membership
+            membership.save()
 
-                group = _apply_group_and_assignment(
-                    tenant=tenant,
-                    membership=membership,
-                    lead_group_name=lead_group_name,
-                    daily_target=daily_target,
-                    daily_limit=daily_limit,
-                    state=state,
-                    district=district,
-                    party=party,
-                    update_group=update_group,
-                    update_daily_target=update_daily_target,
-                    update_daily_limit=update_daily_limit,
-                    update_state=update_state,
-                    update_district=update_district,
-                    update_party=update_party,
-                )
+            group = _apply_group_and_assignment(
+                tenant=tenant,
+                membership=membership,
+                lead_group_name=lead_group_name,
+                daily_target=daily_target,
+                daily_limit=daily_limit,
+                state=state,
+                district=district,
+                party=party,
+                update_group=update_group,
+                update_daily_target=update_daily_target,
+                update_daily_limit=update_daily_limit,
+                update_state=update_state,
+                update_district=update_district,
+                update_party=update_party,
+            )
 
-                if membership.user_id:
-                    drop_permissions_cache(str(membership.user_id), membership.tenant)
+            if membership.user_id:
+                drop_permissions_cache(str(membership.user_id), membership.tenant)
 
-                geo = _read_geo_kv(tenant, membership)
-                return Response({
-                    "id": str(membership.id),
-                    "name": membership.name,
-                    "email": membership.email,
-                    "tenant_id": str(tenant.id),
-                    "department": membership.department,
-                    "role_id": str(membership.role.id),
-                    "uid": str(membership.user_id) if membership.user_id else None,
-                    "is_active": membership.is_active,
-                    "lead_group_id": group.id if group else None,
-                    "lead_group_name": group.name if group else None,
-                    "state": geo["state"],
-                    "district": geo["district"],
-                    "party": geo["party"],
-                    "manager_email": membership.user_parent_id.email if membership.user_parent_id else None,
-                    "updated": True
-                }, status=status.HTTP_200_OK)
-            except Exception as e:
-                logger.error(f"Failed to update TenantMembership {membership.id}: {str(e)}", exc_info=True)
-                return Response({
-                    "error": f"Failed to update user: {str(e)}"
-                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            geo = _read_geo_kv(tenant, membership)
+            return Response({
+                "id": str(membership.id),
+                "name": membership.name,
+                "email": membership.email,
+                "tenant_id": str(tenant.id),
+                "department": membership.department,
+                "role_id": str(membership.role.id),
+                "uid": str(membership.user_id) if membership.user_id else None,
+                "is_active": membership.is_active,
+                "lead_group_id": group.id if group else None,
+                "lead_group_name": group.name if group else None,
+                "state": geo["state"],
+                "district": geo["district"],
+                "party": geo["party"],
+                "manager_email": membership.user_parent_id.email if membership.user_parent_id else None,
+                "updated": True
+            }, status=status.HTTP_200_OK)
+
+        try:
+            return _run_atomic_with_connection_retry(
+                save_membership,
+                label=f"update TenantMembership {membership.id}",
+            )
+        except Exception as e:
+            logger.error(f"Failed to update TenantMembership {membership.id}: {str(e)}", exc_info=True)
+            return Response({
+                "error": f"Failed to update user: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
 
 
@@ -637,3 +661,183 @@ class DeleteUserEverywhereView(APIView):
                 {"success": False, "error": "Internal server error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+# ---------------------------------------------------------------------------
+# Deleted-users log: DELETE /accounts/delete-user-with-log/ snapshots the user,
+# calls the unchanged delete_user_everywhere, then stores a DeletedUserLog row for
+# each membership it soft-deleted. GET /accounts/deleted-users/ lists those rows.
+# ---------------------------------------------------------------------------
+
+# Realtime clients already relay "record_updated"; existing listeners filter on
+# lead / support_ticket, so this entity type only reaches the deleted-users list.
+DELETED_USER_REALTIME_ENTITY_TYPE = "tenant_membership"
+
+
+def _broadcast_user_deleted(tenant_id, membership_ids: list[int]) -> None:
+    for membership_id in membership_ids:
+        broadcast_to_tenant(
+            tenant_id,
+            {
+                "event": "record_updated",
+                "entity_type": DELETED_USER_REALTIME_ENTITY_TYPE,
+                "record_id": f"{DELETED_USER_REALTIME_ENTITY_TYPE}:{membership_id}",
+                "created": False,
+                "data": {"deleted": True},
+            },
+        )
+
+
+def _actor(request) -> str:
+    user = getattr(request, "user", None)
+    return str(getattr(user, "email", None) or getattr(user, "supabase_uid", None) or "")
+
+
+def _candidate_memberships(*, tenant, uid, email):
+    """The live memberships delete_user_everywhere can remove for this request."""
+    match = Q()
+    if email:
+        match |= Q(email=email)
+    if uid:
+        match |= Q(user_id=uid)
+    if not match:
+        return []
+    return list(
+        TenantMembership.objects.select_related("role", "user_parent_id").filter(tenant=tenant).filter(match)
+    )
+
+
+def _snapshot(membership) -> dict:
+    manager = membership.user_parent_id
+    return {
+        "membership_id": membership.id,
+        "name": membership.name or "",
+        "email": membership.email,
+        "role_id": membership.role_id,
+        "role_name": membership.role.name if membership.role_id else "",
+        "manager_name": (manager.name or "") if manager else "",
+        "manager_email": manager.email if manager else "",
+        "account_created_at": membership.created_at,
+    }
+
+
+def _save_delete_logs(rows: list[DeletedUserLog]) -> list[DeletedUserLog]:
+    """
+    Save the log rows in their own savepoint. If the log table is missing or the
+    write fails, the delete still goes through and only the log is skipped.
+    """
+    if not rows:
+        return []
+    try:
+        with transaction.atomic():
+            return DeletedUserLog.objects.bulk_create(rows)
+    except DatabaseError:
+        logger.exception(
+            "[DeleteUserWithLog] Could not save deleted-user log for %s; the user was still deleted",
+            [row.email for row in rows],
+        )
+        return []
+
+
+def _logged_deletions(tenant) -> list[DeletedUserLog]:
+    """Log rows for the tenant, newest first, or none if the log table can't be read yet."""
+    try:
+        with transaction.atomic():
+            return list(DeletedUserLog.objects.filter(tenant=tenant).order_by("-deleted_at", "-id"))
+    except DatabaseError:
+        logger.exception("[DeletedUsersList] Could not read deleted-user log; returning an empty list")
+        return []
+
+
+class DeleteUserWithLogView(APIView):
+    """
+    DELETE /accounts/delete-user-with-log/
+    Body: same as /accounts/delete-user/.
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def delete(self, request):
+        try:
+            ser = DeleteUserEverywhereSerializer(data=request.data, context={"request": request})
+            ser.is_valid(raise_exception=True)
+
+            tenant = ser.validated_data["_tenant"]
+            uid = ser.validated_data.get("uid")
+            email = ser.validated_data.get("email")
+            role_id = ser.validated_data.get("role_id")
+            deleted_by = _actor(request)
+
+            with transaction.atomic():
+                snapshots = {m.id: _snapshot(m) for m in _candidate_memberships(tenant=tenant, uid=uid, email=email)}
+                report = delete_user_everywhere(tenant=tenant, uid=uid, email=email, role_id=role_id)
+                removed = TenantMembership.all_objects.filter(id__in=list(snapshots), is_deleted=True)
+                now = timezone.now()
+                logs = _save_delete_logs(
+                    [
+                        DeletedUserLog(
+                            tenant=tenant,
+                            deleted_at=membership.deleted_at or now,
+                            deleted_by=deleted_by,
+                            **snapshots[membership.id],
+                        )
+                        for membership in removed
+                    ]
+                )
+                if logs:
+                    deleted_ids = [log.membership_id for log in logs]
+                    transaction.on_commit(lambda: _broadcast_user_deleted(tenant.id, deleted_ids))
+
+            return Response(
+                {
+                    "success": True,
+                    "matched_by": report.get("matched_by"),
+                    "tenant_id": report.get("tenant_id"),
+                    "resolved_uid": report.get("resolved_uid"),
+                    "deleted": report.get("deleted"),
+                    "memberships_deactivated": report.get("memberships_deactivated", 0),
+                    "reports_reassigned": report.get("reports_reassigned", 0),
+                    "sessions_revoked": report.get("sessions_revoked", []),
+                    "notes": report.get("notes", []),
+                    "logged": len(logs),
+                },
+                status=status.HTTP_200_OK,
+            )
+        except serializers.ValidationError as exc:
+            return Response({"success": False, "error": exc.detail}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.error("DeleteUserWithLogView error: %s", exc, exc_info=True)
+            return Response(
+                {"success": False, "error": "Internal server error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+def _log_row(log: DeletedUserLog) -> dict:
+    return {
+        "id": f"log-{log.id}",
+        "name": log.name,
+        "email": log.email,
+        "role_id": str(log.role_id) if log.role_id else None,
+        "role_name": log.role_name or None,
+        "manager_name": log.manager_name or None,
+        "manager_email": log.manager_email or None,
+        "created_at": log.account_created_at,
+        "deleted_at": log.deleted_at,
+        "deleted_by": log.deleted_by or None,
+    }
+
+
+class DeletedUsersListView(APIView):
+    """
+    GET /accounts/deleted-users/ — users removed through delete-user-with-log, newest first.
+
+    Memberships soft-deleted before the log existed are not listed: many tenants have
+    repeat deletes and re-added users there, which made the list look like everyone.
+    """
+
+    permission_classes = [IsTenantAuthenticated]
+
+    def get(self, request):
+        rows = [_log_row(log) for log in _logged_deletions(request.tenant)]
+        return Response({"count": len(rows), "results": rows}, status=status.HTTP_200_OK)

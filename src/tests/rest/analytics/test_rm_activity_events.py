@@ -4,6 +4,8 @@ Tests for the RM PRD analytics activity log:
   disposition events, never for anything else, and attributes it to whoever
   is actually authenticated (not a user id read out of the payload).
 - RmActivityEventListView never leaks another tenant's rows.
+- RmActivityEventListView's manager_user_id param (RM PRD's ASM "my team"
+  view) scopes to the signed-in manager's own hierarchy, not the whole tenant.
 """
 from datetime import timedelta
 
@@ -11,10 +13,11 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 
-from analytics.models import RmActivityEvent
-from analytics.rm_activity import record_lead_touch_event
+from analytics.models import RmActivityEvent, RmCallSession
+from analytics.rm_activity import record_lead_opened, record_lead_touch_event
 from crm_records.models import Record
 from tests.base.test_setup import BaseAPITestCase, MultiTenantAPITestCase
+from tests.factories import TenantMembershipFactory
 from user_settings.models import Group, TenantMemberSetting
 from user_settings.services import USER_KV_GROUP_ID_KEY
 
@@ -89,6 +92,176 @@ class RecordLeadTouchEventTests(BaseAPITestCase):
             self.user,
         )
         self.assertEqual(RmActivityEvent.objects.count(), before)
+
+
+class RecordLeadOpenedTests(BaseAPITestCase):
+    """
+    record_lead_opened() stamps the real lead-open time server-side the
+    instant a lead becomes the RM's current lead card; record_lead_touch_event()
+    must then prefer it over the client-supplied duration_seconds when
+    computing a disposition's duration — the whole point being that the
+    server-side timestamp survives the browser tab backgrounding for the
+    length of the real call, unlike the client-side clock it replaces.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.record = Record.objects.create(
+            tenant=self.tenant,
+            entity_type="lead",
+            data={"praja_id": "1793876"},
+        )
+
+    def test_only_acts_on_lead_opened_event(self):
+        before = RmCallSession.objects.count()
+        record_lead_opened("lead.trial_activated", self.record, {}, self.tenant, self.user)
+        self.assertEqual(RmCallSession.objects.count(), before)
+
+    def test_stamps_a_session_for_lead_opened(self):
+        record_lead_opened("lead.opened", self.record, {}, self.tenant, self.user)
+        session = RmCallSession.objects.get(
+            tenant=self.tenant, rm_user_id=self.supabase_uid, lead_record=self.record
+        )
+        self.assertAlmostEqual(session.started_at, timezone.now(), delta=timedelta(seconds=5))
+
+    def test_stamps_opened_from_the_payload(self):
+        record_lead_opened("lead.opened", self.record, {"opened_from": "Pending Leads"}, self.tenant, self.user)
+        session = RmCallSession.objects.get(tenant=self.tenant, lead_record=self.record)
+        self.assertEqual(session.opened_from, "Pending Leads")
+
+    def test_reopening_a_fresh_session_does_not_push_started_at_forward(self):
+        # the exact bug seen in production: a spurious duplicate "lead.opened"
+        # (e.g. the frontend's own duplicate-open guard losing track of an
+        # already-open lead after a discarded/reloaded tab) must not reset
+        # the clock — the eventual duration_seconds has to measure from the
+        # real first open, not from whenever the duplicate event arrived.
+        record_lead_opened("lead.opened", self.record, {"opened_from": "All Leads"}, self.tenant, self.user)
+        first = RmCallSession.objects.get(tenant=self.tenant, lead_record=self.record)
+        first.started_at = timezone.now() - timedelta(minutes=10)
+        first.save(update_fields=["started_at"])
+
+        # a duplicate open arriving from a DIFFERENT page must not steal
+        # attribution from the page that genuinely opened it first either
+        record_lead_opened("lead.opened", self.record, {"opened_from": "Pending Leads"}, self.tenant, self.user)
+
+        self.assertEqual(RmCallSession.objects.filter(tenant=self.tenant, lead_record=self.record).count(), 1)
+        unchanged = RmCallSession.objects.get(tenant=self.tenant, lead_record=self.record)
+        self.assertEqual(unchanged.started_at, first.started_at)
+        self.assertEqual(unchanged.opened_from, "All Leads")
+
+    def test_reopening_a_stale_session_overwrites_it_with_a_fresh_start(self):
+        # an abandoned lead (RM opened it, never dispositioned it, walked
+        # away) genuinely reopened later must start its own fresh timer —
+        # otherwise it'd eventually compute an absurd multi-day duration_seconds
+        stale_started_at = timezone.now() - timedelta(hours=13)
+        RmCallSession.objects.create(
+            tenant=self.tenant, rm_user_id=self.supabase_uid, lead_record=self.record, started_at=stale_started_at,
+            opened_from="All Leads",
+        )
+
+        record_lead_opened("lead.opened", self.record, {"opened_from": "Pending Leads"}, self.tenant, self.user)
+
+        self.assertEqual(RmCallSession.objects.filter(tenant=self.tenant, lead_record=self.record).count(), 1)
+        refreshed = RmCallSession.objects.get(tenant=self.tenant, lead_record=self.record)
+        self.assertGreater(refreshed.started_at, stale_started_at)
+        self.assertAlmostEqual(refreshed.started_at, timezone.now(), delta=timedelta(seconds=5))
+        self.assertEqual(refreshed.opened_from, "Pending Leads")
+
+    def test_opening_a_different_lead_always_succeeds_and_does_not_disturb_the_other_ones_session(self):
+        # opening a lead must NEVER be blocked by another lead still being
+        # open, AND must not delete that other lead's session either — an
+        # RM can legitimately have two leads' sessions open at once (two
+        # tabs); any real overlap between them is resolved honestly later,
+        # at the aggregation layer (merged-interval Handling Time), not by
+        # discarding one of their sessions here.
+        other_record = Record.objects.create(
+            tenant=self.tenant, entity_type="lead", data={"praja_id": "2222222"},
+        )
+        record_lead_opened("lead.opened", self.record, {"opened_from": "All Leads"}, self.tenant, self.user)
+
+        record_lead_opened("lead.opened", other_record, {"opened_from": "Pending Leads"}, self.tenant, self.user)
+
+        sessions = RmCallSession.objects.filter(tenant=self.tenant, rm_user_id=self.supabase_uid)
+        self.assertEqual(sessions.count(), 2)
+        self.assertEqual(
+            {s.lead_record_id for s in sessions},
+            {self.record.id, other_record.id},
+        )
+
+    def test_a_lead_left_open_while_another_opens_still_gets_its_own_real_measured_duration(self):
+        # lead A opened, RM moves to lead B without dispositioning A — A's
+        # session must still be there, untouched, when A is eventually
+        # dispositioned, so its duration is a real server-measured span
+        # (however long that genuinely was), not silently discarded to
+        # "unknown". Whether that real span overlapped with B's is a
+        # Handling-Time aggregation concern (merged intervals), not
+        # something record_lead_touch_event itself needs to hide.
+        other_record = Record.objects.create(
+            tenant=self.tenant, entity_type="lead", data={"praja_id": "3333333"},
+        )
+        record_lead_opened("lead.opened", self.record, {"opened_from": "All Leads"}, self.tenant, self.user)
+        record_lead_opened("lead.opened", other_record, {"opened_from": "Pending Leads"}, self.tenant, self.user)
+
+        # the RM dispositions the still-open lead, self-reporting a
+        # suspiciously tiny duration — must be ignored either way, but the
+        # real point here is the session survives and gets used
+        record_lead_touch_event(
+            "lead.call_back_later", self.record, {"duration_seconds": 15}, self.tenant, self.user,
+        )
+
+        row = RmActivityEvent.objects.latest("id")
+        self.assertIsNotNone(row.event_data["duration_seconds"])
+        self.assertGreaterEqual(row.event_data["duration_seconds"], 0)
+        self.assertNotEqual(row.event_data["duration_seconds"], 15)
+        self.assertFalse(
+            RmCallSession.objects.filter(tenant=self.tenant, lead_record=self.record).exists(),
+            "the session must be consumed (deleted) once its disposition is logged",
+        )
+        # lead B's own session is untouched by A's disposition
+        self.assertTrue(
+            RmCallSession.objects.filter(tenant=self.tenant, lead_record=other_record).exists(),
+        )
+
+    def test_disposition_uses_the_server_recorded_open_time_not_the_client_clock(self):
+        # the exact bug this fixes: the client reports a tiny duration
+        # because its own tab was backgrounded for the real call, but the
+        # server-recorded open time says the lead was actually open for ~37.5 minutes
+        started_at = timezone.now() - timedelta(minutes=37, seconds=28)
+        RmCallSession.objects.create(
+            tenant=self.tenant, rm_user_id=self.supabase_uid, lead_record=self.record, started_at=started_at,
+            opened_from="All Leads",
+        )
+        record_lead_touch_event(
+            "lead.trial_activated", self.record, {"duration_seconds": 2}, self.tenant, self.user,
+        )
+        row = RmActivityEvent.objects.latest("id")
+        self.assertGreaterEqual(row.event_data["duration_seconds"], 37 * 60)
+        self.assertEqual(row.event_data["opened_from"], "All Leads")
+        self.assertFalse(
+            RmCallSession.objects.filter(tenant=self.tenant, lead_record=self.record).exists(),
+            "the session must be consumed (deleted) once its disposition is logged",
+        )
+
+    def test_disposition_falls_back_to_payload_opened_from_when_no_session_exists(self):
+        # a disposition logged without the lead ever going through
+        # record_lead_opened — the touch row should still carry whatever the
+        # disposition-time payload itself says, rather than crash/omit it
+        record_lead_touch_event(
+            "lead.trial_activated", self.record, {"duration_seconds": 42, "opened_from": "Pending Leads"},
+            self.tenant, self.user,
+        )
+        row = RmActivityEvent.objects.latest("id")
+        self.assertEqual(row.event_data["opened_from"], "Pending Leads")
+
+    def test_does_not_trust_client_duration_when_no_session_was_recorded(self):
+        # a disposition logged without the lead ever being opened in-app (no
+        # lead.opened was ever sent), or after its session was evicted — the
+        # client-supplied duration is never used; must not crash either
+        record_lead_touch_event(
+            "lead.trial_activated", self.record, {"duration_seconds": 42}, self.tenant, self.user,
+        )
+        row = RmActivityEvent.objects.latest("id")
+        self.assertIsNone(row.event_data["duration_seconds"])
 
 
 class LeadGroupResolutionTests(BaseAPITestCase):
@@ -182,3 +355,121 @@ class RmActivityEventListViewTenantIsolationTest(MultiTenantAPITestCase):
         rm_names = {row["event_data"]["rm_name"] for row in rows}
         self.assertIn("Other", rm_names)
         self.assertNotIn("Mine", rm_names)
+
+
+class RmActivityEventListViewManagerScopingTest(BaseAPITestCase):
+    """manager_user_id (RM PRD's ASM 'my team' view) scopes to the signed-in
+    manager's own hierarchy via TenantMembership, not a manager_name text
+    match — two managers sharing a display name must not leak into each
+    other's view."""
+
+    def setUp(self):
+        super().setUp()
+        self.url = reverse("analytics:rm-activity-events")
+        now = timezone.now()
+
+        # self.membership (BaseAPITestCase) is the signed-in "ASM" for this test.
+        self.direct_report = TenantMembershipFactory(
+            tenant=self.tenant, user_parent_id=self.membership,
+        )
+        self.outside_rm = TenantMembershipFactory(tenant=self.tenant)
+
+        def make_event(rm_user_id, rm_name):
+            RmActivityEvent.objects.create(
+                tenant=self.tenant,
+                event_type="CALL_TOUCH",
+                event_data={
+                    "rm_user_id": rm_user_id,
+                    "rm_name": rm_name,
+                    "manager_name": "",
+                    "team": "",
+                    "state": "",
+                    "lead_record_id": 1,
+                    "updated_status": "TRIAL_ACTIVATED",
+                    "lead_group": None,
+                    "party": None,
+                    "started_at": now.isoformat(),
+                    "ended_at": now.isoformat(),
+                    "duration_seconds": 60,
+                },
+            )
+
+        make_event(self.direct_report.user_id, "In Team")
+        make_event(self.outside_rm.user_id, "Outside Team")
+
+        self.wide_window = {
+            "from": (now - timedelta(days=1)).strftime("%Y-%m-%d"),
+            "to": (now + timedelta(days=1)).strftime("%Y-%m-%d"),
+        }
+
+    def test_manager_user_id_scopes_to_own_hierarchy_only(self):
+        response = self.client.get(
+            self.url,
+            data={**self.wide_window, "manager_user_id": self.supabase_uid},
+            **self.auth_headers,
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        rm_names = {row["event_data"]["rm_name"] for row in response.data["data"]}
+        self.assertIn("In Team", rm_names)
+        self.assertNotIn("Outside Team", rm_names)
+
+    def test_without_manager_user_id_returns_whole_tenant(self):
+        response = self.client.get(self.url, data=self.wide_window, **self.auth_headers)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        rm_names = {row["event_data"]["rm_name"] for row in response.data["data"]}
+        self.assertIn("In Team", rm_names)
+        self.assertIn("Outside Team", rm_names)
+
+
+class RmActivityEventListViewPaginationCountTest(BaseAPITestCase):
+    """
+    The frontend only ever reads page_meta.next_page_link to decide whether
+    to keep paging (see bob's rmActivityApi.fetchEventWindow) — never
+    total_count/number_of_pages. Skipping the COUNT(*) by default removes a
+    second full query (over the whole matched date range) that used to run
+    on every single page request, same optimization RecordListPagination
+    already applies for lead lists.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.url = reverse("analytics:rm-activity-events")
+        now = timezone.now()
+        RmActivityEvent.objects.create(
+            tenant=self.tenant,
+            event_type="CALL_TOUCH",
+            event_data={
+                "rm_user_id": "rm-1", "rm_name": "Asha", "manager_name": "", "team": "",
+                "state": "", "lead_record_id": 1, "updated_status": "TRIAL_ACTIVATED",
+                "lead_group": None, "party": None, "started_at": now.isoformat(),
+                "ended_at": now.isoformat(), "duration_seconds": 60,
+            },
+        )
+        self.wide_window = {
+            "from": (now - timedelta(days=1)).strftime("%Y-%m-%d"),
+            "to": (now + timedelta(days=1)).strftime("%Y-%m-%d"),
+        }
+
+    def test_total_count_is_none_by_default(self):
+        response = self.client.get(self.url, data=self.wide_window, **self.auth_headers)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["page_meta"]["total_count"])
+        self.assertIsNone(response.data["page_meta"]["number_of_pages"])
+
+    def test_next_page_link_still_works_without_the_count(self):
+        response = self.client.get(
+            self.url, data={**self.wide_window, "page_size": 1}, **self.auth_headers
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["data"]), 1)
+        # only one row exists in this test's fixture — no next page
+        self.assertIsNone(response.data["page_meta"]["next_page_link"])
+
+    def test_explicit_include_count_true_still_runs_the_count(self):
+        response = self.client.get(
+            self.url, data={**self.wide_window, "include_count": "true"}, **self.auth_headers
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["page_meta"]["total_count"], 1)
