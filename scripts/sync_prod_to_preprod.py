@@ -112,8 +112,7 @@ class Database:
             text=True,
         )
         if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "query failed").strip().splitlines()
-            raise SystemExit(f"{self.describe}: {detail[-1] if detail else 'query failed'}")
+            raise command_failure(self, result, "query failed")
         return result.stdout.strip()
 
 
@@ -363,6 +362,19 @@ def quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def quote_ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def command_failure(db: Database, result: subprocess.CompletedProcess, fallback: str) -> SystemExit:
+    """Keep the Postgres ERROR line. The last line of a syntax error is only a caret."""
+    text = (result.stderr or result.stdout or fallback).strip()
+    lines = [line.strip() for line in text.splitlines() if line.strip() and line.strip() != "^"]
+    picked = [line for line in lines if line.startswith(("ERROR", "DETAIL", "HINT"))]
+    message = " | ".join((picked or lines)[:3]) if (picked or lines) else fallback
+    return SystemExit(f"{db.label}: {message}")
+
+
 def cmd_sync(source: Database, target: Database) -> int:
     source_bytes = public_bytes(source)
     needed = int(source_bytes * 1.2)
@@ -448,8 +460,7 @@ def psql_file(db: Database, path: str) -> str:
         text=True,
     )
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "script failed").strip().splitlines()
-        raise SystemExit(f"{db.describe}: {detail[-1] if detail else 'script failed'}")
+        raise command_failure(db, result, "script failed")
     return result.stdout.strip()
 
 
@@ -467,8 +478,7 @@ def export_query(source: Database, sql: str, path: str) -> int:
             text=True,
         )
     if result.returncode != 0:
-        detail = (result.stderr or "export failed").strip().splitlines()
-        raise SystemExit(f"{source.describe}: {detail[-1] if detail else 'export failed'}")
+        raise command_failure(source, result, "export failed")
     with open(path, encoding="utf-8") as handle:
         lines = sum(1 for _ in handle)
     return max(0, lines - 1)
@@ -624,10 +634,11 @@ def prepare_staging_sql(source: Database, target: Database, table: str, staging:
     for column, parent in (("role_id", "authz_role"),):
         if column not in set(table_columns(target, table)):
             continue
+        quoted = quote_ident(column)
         statements.append(
-            f"UPDATE {staging} AS s SET {column} = NULL "
-            f"WHERE s.{column} IS NOT NULL "
-            f"AND NOT EXISTS (SELECT 1 FROM {parent} p WHERE p.id = s.{column});"
+            f"UPDATE {staging} AS s SET {quoted} = NULL "
+            f"WHERE s.{quoted} IS NOT NULL "
+            f"AND NOT EXISTS (SELECT 1 FROM {quote_ident(parent)} p WHERE p.id = s.{quoted});"
         )
     return statements
 
@@ -666,30 +677,33 @@ def keep_existing_ids_sql(target: Database, table: str, pk: str, staging: str, c
         if not key_columns:
             continue
         match = " AND ".join(
-            f"t.{name} IS NOT DISTINCT FROM s.{name}" for name in key_columns
+            f"t.{quote_ident(name)} IS NOT DISTINCT FROM s.{quote_ident(name)}" for name in key_columns
         )
         alive = qualify_predicate(predicate, "t", columns)
         statements.append(
-            f"DELETE FROM {staging} AS s USING {table} AS t "
-            f"WHERE {match} AND t.{pk} IS DISTINCT FROM s.{pk} AND ({alive});"
+            f"DELETE FROM {staging} AS s USING {quote_ident(table)} AS t "
+            f"WHERE {match} AND t.{quote_ident(pk)} IS DISTINCT FROM s.{quote_ident(pk)} AND ({alive});"
         )
     return statements
 
 
 def upsert_csv(source: Database, target: Database, table: str, csv_path: str, pk: str) -> str:
     columns = shared_columns(target, table, csv_path, pk)
-    assigned = ", ".join(f"{name} = EXCLUDED.{name}" for name in columns if name != pk)
-    column_list = ", ".join(columns)
+    assigned = ", ".join(
+        f"{quote_ident(name)} = EXCLUDED.{quote_ident(name)}" for name in columns if name != pk
+    )
+    column_list = ", ".join(quote_ident(name) for name in columns)
+    quoted_table = quote_ident(table)
     # preprod_sync_catalog, not preprod_sync_batch: a parent upsert must not
     # wipe the child batch that is still waiting to be inserted.
     script = "\n".join([
         "DROP TABLE IF EXISTS preprod_sync_catalog;",
-        f"CREATE UNLOGGED TABLE preprod_sync_catalog (LIKE {table} INCLUDING DEFAULTS);",
+        f"CREATE UNLOGGED TABLE preprod_sync_catalog (LIKE {quoted_table} INCLUDING DEFAULTS);",
         f"\\copy preprod_sync_catalog ({column_list}) FROM '{csv_path}' WITH (FORMAT csv, HEADER true, NULL '\\N')",
         *prepare_staging_sql(source, target, table, "preprod_sync_catalog"),
         *keep_existing_ids_sql(target, table, pk, "preprod_sync_catalog", columns),
-        f"INSERT INTO {table} ({column_list}) SELECT {column_list} FROM preprod_sync_catalog",
-        f"ON CONFLICT ({pk}) DO UPDATE SET {assigned};",
+        f"INSERT INTO {quoted_table} ({column_list}) SELECT {column_list} FROM preprod_sync_catalog",
+        f"ON CONFLICT ({quote_ident(pk)}) DO UPDATE SET {assigned};",
         "DROP TABLE preprod_sync_catalog;",
     ])
     with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as handle:
@@ -709,8 +723,10 @@ def sync_batch(source: Database, target: Database, table: str, sql: str, pk: str
         if count == 0:
             return 0, "", ""
         columns = shared_columns(target, table, csv_path, pk)
-        assigned = ", ".join(f"{name} = EXCLUDED.{name}" for name in columns if name != pk)
-        column_list = ", ".join(columns)
+        assigned = ", ".join(
+            f"{quote_ident(name)} = EXCLUDED.{quote_ident(name)}" for name in columns if name != pk
+        )
+        column_list = ", ".join(quote_ident(name) for name in columns)
         parent_sql = ""
         for child, fk, parent in PARENT_FIXES:
             if child != table:
@@ -722,12 +738,12 @@ def sync_batch(source: Database, target: Database, table: str, sql: str, pk: str
             )
         script = "\n".join([
             "DROP TABLE IF EXISTS preprod_sync_batch;",
-            f"CREATE UNLOGGED TABLE preprod_sync_batch (LIKE {table} INCLUDING DEFAULTS);",
+            f"CREATE UNLOGGED TABLE preprod_sync_batch (LIKE {quote_ident(table)} INCLUDING DEFAULTS);",
             f"\\copy preprod_sync_batch ({column_list}) FROM '{csv_path}' WITH (FORMAT csv, HEADER true, NULL '\\N')",
             "\\echo PARENTS",
             parent_sql or "SELECT '';",
-            f"SELECT {cursor_col}::text || '|' || {pk}::text FROM preprod_sync_batch "
-            f"ORDER BY {cursor_col} DESC, {pk} DESC LIMIT 1;",
+            f"SELECT {quote_ident(cursor_col)}::text || '|' || {quote_ident(pk)}::text FROM preprod_sync_batch "
+            f"ORDER BY {quote_ident(cursor_col)} DESC, {quote_ident(pk)} DESC LIMIT 1;",
         ])
         with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as handle:
             handle.write(script)
@@ -750,21 +766,23 @@ def sync_batch(source: Database, target: Database, table: str, sql: str, pk: str
                 if not id_list:
                     continue
                 parent_pk = primary_key(source, parent)
-                parent_columns = ", ".join(common_columns(source, target, parent, parent_pk or "id"))
+                parent_columns = ", ".join(
+                    quote_ident(name) for name in common_columns(source, target, parent, parent_pk or "id")
+                )
                 with tempfile.TemporaryDirectory(prefix="pyro-sync-parent-") as parent_dir:
                     parent_csv = str(Path(parent_dir) / "parents.csv")
                     export_query(
                         source,
-                        f"SELECT {parent_columns} FROM {parent} WHERE id IN ({id_list})",
+                        f"SELECT {parent_columns} FROM {quote_ident(parent)} WHERE id IN ({id_list})",
                         parent_csv,
                     )
                     upsert_csv(source, target, parent, parent_csv, parent_pk or "id")
         insert_script = "\n".join([
             *prepare_staging_sql(source, target, table, "preprod_sync_batch"),
             *keep_existing_ids_sql(target, table, pk, "preprod_sync_batch", columns),
-            f"INSERT INTO {table} ({column_list})",
+            f"INSERT INTO {quote_ident(table)} ({column_list})",
             f"SELECT {column_list} FROM preprod_sync_batch",
-            f"ON CONFLICT ({pk}) DO UPDATE SET {assigned};",
+            f"ON CONFLICT ({quote_ident(pk)}) DO UPDATE SET {assigned};",
             "DROP TABLE preprod_sync_batch;",
         ])
         with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as handle:
@@ -823,7 +841,7 @@ def copy_ids(
     id_list = ", ".join(quote_literal(row_id) + cast for row_id in ids)
     count, _, _ = sync_batch(
         source, target, table,
-        f"SELECT {columns} FROM {table} WHERE {pk} IN ({id_list})",
+        f"SELECT {columns} FROM {quote_ident(table)} WHERE {quote_ident(pk)} IN ({id_list})",
         pk, cursor_col,
     )
     return count
@@ -842,7 +860,7 @@ def sync_changed_table(source: Database, target: Database, table: str, cursor_co
         return 0
     pk_type = column_type(source, table, pk)
     cast = "::uuid" if "uuid" in pk_type else "::bigint"
-    columns = ", ".join(common_columns(source, target, table, pk))
+    columns = ", ".join(quote_ident(name) for name in common_columns(source, target, table, pk))
     caught_up, cursor_at, cursor_id = read_scan(target, table)
     run_started = target.psql("SELECT now()::text")
     copied = 0
@@ -908,14 +926,14 @@ def sync_whole_table(source: Database, target: Database, table: str) -> int:
     if not pk:
         print(f"skip {table}, no single primary key")
         return 0
-    count_raw = source.psql(f"SELECT count(*) FROM {table}")
+    count_raw = source.psql(f"SELECT count(*) FROM {quote_ident(table)}")
     if int(count_raw or "0") > 100000:
-        print(f"skip {table}, {count_raw} rows is too many for a full pass")
+        print(f"skip {table}, {count_raw} rows is too many for a full pass", flush=True)
         return 0
-    columns = ", ".join(common_columns(source, target, table, pk))
+    columns = ", ".join(quote_ident(name) for name in common_columns(source, target, table, pk))
     with tempfile.TemporaryDirectory(prefix="pyro-sync-full-") as directory:
         csv_path = str(Path(directory) / "full.csv")
-        count = export_query(source, f"SELECT {columns} FROM {table}", csv_path)
+        count = export_query(source, f"SELECT {columns} FROM {quote_ident(table)}", csv_path)
         if count == 0:
             print(f"{table}: 0 rows")
             return 0
@@ -930,7 +948,7 @@ def sync_records(source: Database, target: Database) -> int:
         print("skip records, not on both databases")
         return 0
     pk = primary_key(source, table) or "id"
-    columns = ", ".join(common_columns(source, target, table, pk))
+    columns = ", ".join(quote_ident(name) for name in common_columns(source, target, table, pk))
     cursor = "-1"
     copied = 0
     while True:
@@ -962,6 +980,8 @@ def cmd_incremental(source: Database, target: Database) -> int:
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     load_dotenv()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("check", "incremental", "sync", "sanitize"))
