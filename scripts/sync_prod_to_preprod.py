@@ -104,13 +104,22 @@ class Database:
                 raise SystemExit(f"Bad SQL parameter name {name}.")
             # psql splits -v on the first "=" and quotes :'name' as a literal.
             command.extend(["-v", f"{name}={value}"])
-        command.extend(["-c", sql])
-        result = subprocess.run(
-            command,
-            env=self.env(),
-            capture_output=True,
-            text=True,
-        )
+        # A 5,000-id query is larger than one command-line argument is allowed to be.
+        with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as handle:
+            handle.write(sql)
+            if not sql.endswith("\n"):
+                handle.write("\n")
+            script_path = handle.name
+        command.extend(["-f", script_path])
+        try:
+            result = subprocess.run(
+                command,
+                env=self.env(),
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
         if result.returncode != 0:
             raise command_failure(self, result, "query failed")
         return result.stdout.strip()
@@ -466,18 +475,25 @@ def psql_file(db: Database, path: str) -> str:
 
 
 def export_query(source: Database, sql: str, path: str) -> int:
-    with open(path, "w", encoding="utf-8") as handle:
-        result = subprocess.run(
-            [
-                PSQL, "-h", source.host, "-p", source.port, "-U", source.user,
-                "-d", source.name, "-v", "ON_ERROR_STOP=1",
-                "-c", "COPY (" + sql + ") TO STDOUT WITH (FORMAT csv, HEADER true, NULL '\\N')",
-            ],
-            env=source.env(),
-            stdout=handle,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+    copy_sql = "COPY (" + sql + ") TO STDOUT WITH (FORMAT csv, HEADER true, NULL '\\N')\n"
+    with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as script:
+        script.write(copy_sql)
+        script_path = script.name
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            result = subprocess.run(
+                [
+                    PSQL, "-h", source.host, "-p", source.port, "-U", source.user,
+                    "-d", source.name, "-v", "ON_ERROR_STOP=1",
+                    "-f", script_path,
+                ],
+                env=source.env(),
+                stdout=handle,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+    finally:
+        Path(script_path).unlink(missing_ok=True)
     if result.returncode != 0:
         raise command_failure(source, result, "export failed")
     with open(path, encoding="utf-8") as handle:
