@@ -644,45 +644,87 @@ def prepare_staging_sql(source: Database, target: Database, table: str, staging:
 
 
 def qualify_predicate(predicate: str, alias: str, column_names: list[str]) -> str:
-    if not predicate:
+    """Point column names in an index expression at one table alias. Leave string literals alone."""
+    if not predicate or not predicate.strip():
         return "true"
-    text = predicate
+    protected: list[str] = []
+
+    def hide(match: re.Match) -> str:
+        protected.append(match.group(0))
+        return f"__Q{len(protected) - 1}__"
+
+    text = re.sub(r"'(?:''|[^'])*'", hide, predicate)
     for column in sorted(column_names, key=len, reverse=True):
-        text = re.sub(rf"\b{re.escape(column)}\b", f"{alias}.{column}", text)
+        text = text.replace(quote_ident(column), f"{alias}.{quote_ident(column)}")
+    for column in sorted(column_names, key=len, reverse=True):
+        text = re.sub(
+            rf"(?<![\"\w.]){re.escape(column)}\b",
+            f"{alias}.{quote_ident(column)}",
+            text,
+        )
+    for index, original in enumerate(protected):
+        text = text.replace(f"__Q{index}__", original)
     return text
 
 
+def index_match(pieces: list[str], left: str, right: str, columns: list[str]) -> str:
+    return " AND ".join(
+        f"({qualify_predicate(piece, left, columns)}) IS NOT DISTINCT FROM "
+        f"({qualify_predicate(piece, right, columns)})"
+        for piece in pieces
+    )
+
+
 def keep_existing_ids_sql(target: Database, table: str, pk: str, staging: str, columns: list[str]) -> list[str]:
-    """Drop a staged row when preprod already has that unique name. Leave the existing row alone."""
+    """Update the preprod row that already owns this unique key. Insert only when it is new."""
     indexes = target.psql(
-        "SELECT i.indexrelid::text || '|' || COALESCE(pg_get_expr(i.indpred, i.indrelid), '') "
+        "SELECT i.indexrelid::text || '|' || i.indnkeyatts::text || '|' || "
+        "COALESCE(pg_get_expr(i.indpred, i.indrelid), '') "
         "FROM pg_index i "
         "WHERE i.indrelid = " + quote_literal("public." + table) + "::regclass "
-        "AND i.indisunique AND NOT i.indisprimary AND i.indexprs IS NULL"
+        "AND i.indisunique AND NOT i.indisprimary"
+    )
+    quoted_pk = quote_ident(pk)
+    quoted_table = quote_ident(table)
+    assigned = ", ".join(
+        f"{quote_ident(name)} = s.{quote_ident(name)}" for name in columns if name != pk
     )
     statements = []
     for line in indexes.splitlines():
-        if "|" not in line:
+        if line.count("|") < 2:
             continue
-        index_id, predicate = line.split("|", 1)
-        key_columns = [
-            name for name in target.psql(
-                "SELECT a.attname FROM pg_index i "
-                "JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true "
-                "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum "
-                "WHERE i.indexrelid = " + quote_literal(index_id) + "::oid "
-                "AND k.attnum > 0 ORDER BY k.ord"
-            ).splitlines() if name
+        index_id, nkeys, predicate = line.split("|", 2)
+        if not nkeys.isdigit():
+            continue
+        pieces = [
+            piece for piece in target.psql(
+                "SELECT pg_get_indexdef(" + quote_literal(index_id) + "::oid, pos, true) "
+                "FROM generate_series(1, " + nkeys + ") AS pos"
+            ).splitlines() if piece
         ]
-        if not key_columns:
+        if not pieces:
             continue
-        match = " AND ".join(
-            f"t.{quote_ident(name)} IS NOT DISTINCT FROM s.{quote_ident(name)}" for name in key_columns
+        pred_s = qualify_predicate(predicate, "s", columns)
+        pred_t = qualify_predicate(predicate, "t", columns)
+        matched = (
+            f"{index_match(pieces, 't', 's', columns)} "
+            f"AND t.{quoted_pk} IS DISTINCT FROM s.{quoted_pk} "
+            f"AND ({pred_t}) AND ({pred_s})"
         )
-        alive = qualify_predicate(predicate, "t", columns)
+        if assigned:
+            statements.append(
+                f"UPDATE {quoted_table} AS t SET {assigned} "
+                f"FROM {staging} AS s WHERE {matched};"
+            )
         statements.append(
-            f"DELETE FROM {staging} AS s USING {quote_ident(table)} AS t "
-            f"WHERE {match} AND t.{quote_ident(pk)} IS DISTINCT FROM s.{quote_ident(pk)} AND ({alive});"
+            f"DELETE FROM {staging} AS s USING {quoted_table} AS t WHERE {matched};"
+        )
+        pred_o = qualify_predicate(predicate, "o", columns)
+        statements.append(
+            f"DELETE FROM {staging} AS s USING {staging} AS o "
+            f"WHERE s.{quoted_pk} > o.{quoted_pk} "
+            f"AND {index_match(pieces, 's', 'o', columns)} "
+            f"AND ({pred_s}) AND ({pred_o});"
         )
     return statements
 
