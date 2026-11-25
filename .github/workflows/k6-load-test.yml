@@ -43,7 +43,7 @@ concurrency:
 jobs:
   sync-data:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 360
     # One preprod database. A second pull request waits until this copy finishes.
     concurrency:
       group: preprod-data-sync

@@ -447,6 +447,7 @@ PARENT_FIXES = (
     ("rm_call_sessions", "lead_record_id", "records"),
 )
 BATCH = 1000
+RECORD_BATCH = 5000
 
 
 def psql_file(db: Database, path: str) -> str:
@@ -553,13 +554,22 @@ def header_columns(path: str) -> list[str]:
 
 
 def table_columns(db: Database, table: str) -> list[str]:
-    return [
+    cache = getattr(table_columns, "cache", None)
+    if cache is None:
+        cache = {}
+        table_columns.cache = cache
+    key = (db.host, db.port, db.name, table)
+    if key in cache:
+        return cache[key]
+    columns = [
         line for line in db.psql(
             "SELECT column_name FROM information_schema.columns "
             "WHERE table_schema = 'public' AND table_name = " + quote_literal(table)
             + " ORDER BY ordinal_position"
         ).splitlines() if line
     ]
+    cache[key] = columns
+    return columns
 
 
 def common_columns(source: Database, target: Database, table: str, pk: str) -> list[str]:
@@ -668,15 +678,23 @@ def qualify_predicate(predicate: str, alias: str, column_names: list[str]) -> st
 
 
 def index_match(pieces: list[str], left: str, right: str, columns: list[str]) -> str:
+    # Equality can use the unique index. IS NOT DISTINCT FROM scans the whole table
+    # and the first batch never commits before the job is canceled.
     return " AND ".join(
-        f"({qualify_predicate(piece, left, columns)}) IS NOT DISTINCT FROM "
-        f"({qualify_predicate(piece, right, columns)})"
+        f"({qualify_predicate(piece, left, columns)}) = ({qualify_predicate(piece, right, columns)})"
         for piece in pieces
     )
 
 
 def keep_existing_ids_sql(target: Database, table: str, pk: str, staging: str, columns: list[str]) -> list[str]:
     """Update the preprod row that already owns this unique key. Insert only when it is new."""
+    cache = getattr(keep_existing_ids_sql, "cache", None)
+    if cache is None:
+        cache = {}
+        keep_existing_ids_sql.cache = cache
+    key = (table, pk, staging, tuple(columns))
+    if key in cache:
+        return cache[key]
     indexes = target.psql(
         "SELECT i.indexrelid::text || '|' || i.indnkeyatts::text || '|' || "
         "COALESCE(pg_get_expr(i.indpred, i.indrelid), '') "
@@ -726,6 +744,7 @@ def keep_existing_ids_sql(target: Database, table: str, pk: str, staging: str, c
             f"AND {index_match(pieces, 's', 'o', columns)} "
             f"AND ({pred_s}) AND ({pred_o});"
         )
+    cache[key] = statements
     return statements
 
 
@@ -984,37 +1003,122 @@ def sync_whole_table(source: Database, target: Database, table: str) -> int:
     return count
 
 
+def record_id(value: str) -> str:
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return "-1"
+
+
+def record_page(source: Database, after_id: str) -> list[tuple[str, str]]:
+    text = source.psql(
+        "SELECT id::text || '|' || COALESCE(updated_at::text, '') FROM records "
+        "WHERE id > " + quote_literal(after_id) + "::bigint "
+        "ORDER BY id LIMIT " + str(RECORD_BATCH)
+    )
+    page = []
+    for line in text.splitlines():
+        if not line:
+            continue
+        row_id, _, stamp = line.partition("|")
+        if row_id:
+            page.append((row_id, stamp))
+    return page
+
+
+def report_records(done: int, total: int, written: int) -> None:
+    left = max(total - done, 0)
+    percent = (100.0 * done / total) if total else 100.0
+    print(
+        f"records: {done:,}/{total:,} ({percent:.1f}%), {left:,} left, {written:,} written this run",
+        flush=True,
+    )
+
+
 def sync_records(source: Database, target: Database) -> int:
     table = "records"
     if not table_ready(source, table) or not table_ready(target, table):
-        print("skip records, not on both databases")
+        print("skip records, not on both databases", flush=True)
         return 0
     pk = primary_key(source, table) or "id"
     columns = ", ".join(quote_ident(name) for name in common_columns(source, target, table, pk))
-    cursor = "-1"
-    copied = 0
+    caught_up, cursor_at, cursor_id = read_scan(target, table)
+    cursor_id = record_id(cursor_id)
+    run_started = target.psql("SELECT now()::text")
+    if caught_up:
+        return sync_changed_records(source, target, columns, pk, cursor_at, cursor_id, run_started)
+    print("records: counting rows", flush=True)
+    raw = source.psql(
+        "SELECT count(*)::text || '|' || count(*) FILTER (WHERE id <= "
+        + quote_literal(cursor_id) + "::bigint)::text FROM records"
+    )
+    total_text, _, done_text = raw.partition("|")
+    total = int(total_text or "0")
+    done = int(done_text or "0")
+    written = 0
+    report_records(done, total, written)
+    while True:
+        page = record_page(source, cursor_id)
+        if not page:
+            write_scan(target, table, run_started, cursor_id, True)
+            report_records(total, total, written)
+            print("records: full copy finished", flush=True)
+            return written
+        missing = ids_missing_on_target(target, table, pk, "updated_at", "::bigint", page)
+        written += copy_ids(source, target, table, columns, pk, "updated_at", "::bigint", missing)
+        cursor_id = page[-1][0]
+        done += len(page)
+        # Save the id before the job can be canceled, so the next run continues here.
+        write_scan(target, table, cursor_at, cursor_id, False)
+        report_records(min(done, total), total, written)
+        if len(page) < RECORD_BATCH:
+            write_scan(target, table, run_started, cursor_id, True)
+            print("records: full copy finished", flush=True)
+            return written
+
+
+def sync_changed_records(
+    source: Database, target: Database, columns: str, pk: str, cursor_at: str, cursor_id: str, run_started: str
+) -> int:
+    print("records: full copy already finished, checking rows changed since then", flush=True)
+    written = 0
+    edit_after = "-1"
     while True:
         text = source.psql(
-            "SELECT id::text FROM records WHERE id > "
-            + quote_literal(cursor) + "::bigint ORDER BY id LIMIT " + str(BATCH)
+            "SELECT id::text FROM records WHERE id > " + quote_literal(edit_after) + "::bigint "
+            "AND id <= " + quote_literal(cursor_id) + "::bigint "
+            "AND updated_at > " + quote_literal(cursor_at) + "::timestamptz "
+            "ORDER BY id LIMIT " + str(RECORD_BATCH)
         )
         ids = [line for line in text.splitlines() if line]
         if not ids:
             break
-        copied += copy_ids(source, target, table, columns, pk, "updated_at", "::bigint", ids)
-        cursor = ids[-1]
-        if len(ids) < BATCH:
+        written += copy_ids(source, target, "records", columns, pk, "updated_at", "::bigint", ids)
+        edit_after = ids[-1]
+        print(f"records: {written:,} changed rows written", flush=True)
+    while True:
+        text = source.psql(
+            "SELECT id::text FROM records WHERE id > " + quote_literal(cursor_id) + "::bigint "
+            "ORDER BY id LIMIT " + str(RECORD_BATCH)
+        )
+        ids = [line for line in text.splitlines() if line]
+        if not ids:
             break
-    print(f"records: {copied} rows")
-    return copied
+        written += copy_ids(source, target, "records", columns, pk, "updated_at", "::bigint", ids)
+        cursor_id = ids[-1]
+        write_scan(target, "records", cursor_at, cursor_id, True)
+        print(f"records: {written:,} changed rows written", flush=True)
+    write_scan(target, "records", run_started, cursor_id, True)
+    print(f"records: {written:,} changed rows written", flush=True)
+    return written
 
 
 def cmd_incremental(source: Database, target: Database) -> int:
     ensure_state(target)
-    print("catalogs")
-    for table in FULL_TABLES:
+    print(f"catalogs: 0/{len(FULL_TABLES)}", flush=True)
+    for index, table in enumerate(FULL_TABLES, start=1):
+        print(f"catalogs: {index}/{len(FULL_TABLES)} {table}", flush=True)
         sync_whole_table(source, target, table)
-    print("records")
     sync_records(source, target)
     ensure_loadtest_user(target)
     print("incremental sync finished")
