@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import jwt
 from django.conf import settings
-from django.db import DatabaseError, connection
+from django.db import DatabaseError, IntegrityError, connection
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -438,6 +438,7 @@ class TouchLastLoginTests(TestCase):
 # ---------------------------------------------------------------------------
 
 
+@override_settings(AUTH_PROVIDER="supabase")
 class GetOrCreateProfileTests(TestCase):
     def setUp(self):
         self.uid = str(uuid.uuid4())
@@ -580,9 +581,18 @@ class GetOrCreateProfileTests(TestCase):
         self.assertIsNone(other.last_login)
 
     def test_database_error_while_recording_still_returns_the_user(self):
-        UserFactory(supabase_uid=self.uid, email=self.email)
+        # Profile lookup also uses User.objects.filter (email uniqueness). Fail only
+        # inside last-login recording so auth still returns the user.
+        from authentication import views as auth_views
 
-        with patch.object(User.objects, "filter", side_effect=DatabaseError("db down")):
+        UserFactory(supabase_uid=self.uid, email=self.email)
+        real_record = auth_views._record_sign_in
+
+        def record_with_db_error(user, signed_in_at):
+            with patch.object(auth_views.User.objects, "filter", side_effect=DatabaseError("db down")):
+                real_record(user, signed_in_at)
+
+        with patch.object(auth_views, "_record_sign_in", side_effect=record_with_db_error):
             with self.assertLogs("authentication.views", level="WARNING"):
                 user = _get_or_create_profile(self._claims(_ts(_ago(seconds=10))))
 
@@ -601,11 +611,11 @@ class GetOrCreateProfileTests(TestCase):
 # ---------------------------------------------------------------------------
 
 
+@override_settings(SUPABASE_JWT_SECRET=TEST_SECRET, AUTH_PROVIDER="supabase")
 class SupabaseJWTAuthenticationTests(TestCase):
     def setUp(self):
-        patcher = patch("config.supabase_auth.SUPABASE_JWT_SECRET", TEST_SECRET)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # JWT verification reads settings.SUPABASE_JWT_SECRET via authentication.tokens
+        # (config.supabase_auth no longer defines that module attribute).
         self.uid = str(uuid.uuid4())
         self.email = "jwt-signin@example.com"
         self.auth = SupabaseJWTAuthentication()
@@ -793,25 +803,20 @@ class DjangoUsersForMembershipsTests(TestCase):
 
         self.assertEqual(matched[membership.id].pk, by_uid.pk)
 
-    def test_duplicate_email_accounts_pick_the_most_recent_sign_in(self):
-        _separate_user("dupe@example.com", last_login=_ago(days=10))
-        recent = _separate_user("DUPE@example.com", last_login=_ago(minutes=5))
-        _separate_user("Dupe@Example.com", last_login=_ago(days=1))
-        membership = self._membership(user_id=None, email="dupe@example.com")
+    def test_email_match_is_case_insensitive_when_emails_are_unique(self):
+        # auth_user_email_ci_unique forbids duplicate emails; matching is case-insensitive.
+        user = _separate_user("dupe@example.com", last_login=_ago(minutes=5))
+        membership = self._membership(user_id=None, email="DUPE@example.com")
 
         matched = _django_users_for_memberships([membership])
 
-        self.assertEqual(matched[membership.id].pk, recent.pk)
+        self.assertEqual(matched[membership.id].pk, user.pk)
 
-    def test_duplicate_email_prefers_an_account_that_has_signed_in(self):
-        _separate_user("half@example.com")
-        signed_in = _separate_user("half@example.com", last_login=_ago(days=30))
-        _separate_user("half@example.com")
-        membership = self._membership(user_id=None, email="half@example.com")
+    def test_second_user_with_same_email_is_rejected(self):
+        _separate_user("half@example.com", last_login=_ago(days=30))
 
-        matched = _django_users_for_memberships([membership])
-
-        self.assertEqual(matched[membership.id].pk, signed_in.pk)
+        with self.assertRaises(IntegrityError):
+            _separate_user("half@example.com")
 
     def test_user_with_no_email_still_matches_by_uid(self):
         uid = str(uuid.uuid4())
@@ -930,10 +935,9 @@ class LastSignInAtByMembershipIdTests(TestCase):
         self.assertEqual(result[first.id], result[second.id])
         self.assertAlmostEqual(result[first.id].timestamp(), signed_in.timestamp(), delta=1)
 
-    def test_duplicate_email_accounts_show_the_most_recent_sign_in(self):
+    def test_unique_email_account_shows_its_sign_in(self):
+        # Duplicate emails are blocked by auth_user_email_ci_unique.
         recent = _ago(minutes=10)
-        _separate_user("twice@example.com")
-        _separate_user("twice@example.com", last_login=_ago(days=20))
         _separate_user("twice@example.com", last_login=recent)
         membership = TenantMembershipFactory(tenant=self.tenant, user_id=None, email="twice@example.com")
 
