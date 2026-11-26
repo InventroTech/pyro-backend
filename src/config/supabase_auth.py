@@ -35,12 +35,17 @@ def _get_or_create_profile(claims):
         raise exceptions.AuthenticationFailed("Token missing 'sub'")
     email = (claims.get("email") or "").lower() or None
 
+    # Imported here: authentication.views -> account_views imports this module.
+    from authentication.views import record_sign_in_from_token, touch_last_login
+
     if claims.get("iss") == settings.AUTH_JWT_ISSUER or settings.AUTH_PROVIDER == "django":
         # Django owns the accounts: a token (ours, or a leftover Supabase one) only works for
         # an existing active user, so a deleted or disabled account is never recreated.
         user = User.objects.filter(supabase_uid=sub, is_active=True).first()
         if user is None:
             raise exceptions.AuthenticationFailed("User not found")
+        # No amr on Django tokens; throttle-touch so tab reopen updates last_login.
+        touch_last_login(user)
         return user
 
     # Mirror user locally (no password; identity of record is Supabase)
@@ -59,8 +64,6 @@ def _get_or_create_profile(claims):
     if email and user.email != email:
         user.email = email
         user.save(update_fields=["email"])
-    # Imported here, not at the top: authentication.views must not load while this module loads.
-    from authentication.views import record_sign_in_from_token
 
     record_sign_in_from_token(user, claims)
     return user

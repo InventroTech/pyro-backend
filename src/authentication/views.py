@@ -4,10 +4,8 @@ import secrets
 import time
 from datetime import datetime, timedelta, timezone as dt_timezone
 
-from django.core.exceptions import ValidationError
-from django.db import transaction
-import requests
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import DatabaseError, transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -20,8 +18,6 @@ from authentication.client_email_templates import apply_otp_to_client_email, ens
 from authentication.account_views import validate_user_password
 from authentication.session_views import AuthEmailRateThrottle, AuthRateThrottle
 from authentication.models import PasswordResetOTP, User
-from authentication.models import PasswordResetOTP, User
-from authentication.supabase_env import supabase_anon_key, supabase_api_base_url
 from authentication.password_reset import (
     OTP_TTL_SECONDS,
     admin_update_user_password,
@@ -298,7 +294,7 @@ class PasswordResetConfirmView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        success, _ = _set_reset_password(uid, password)
+        success, err_msg = _set_reset_password(uid, password)
         PasswordResetOTP.objects.filter(email__iexact=email).delete()
 
         if not success:
@@ -309,7 +305,7 @@ class PasswordResetConfirmView(APIView):
                 _email_log_tag(email),
             )
             return Response(
-                {"error": "Could not update password."},
+                {"error": err_msg or "Could not update password."},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
@@ -398,9 +394,9 @@ def touch_last_login(user):
     """
     Bump last_login to now when it is missing or older than the touch interval.
 
-    Tab close/reopen often reuses the same access token (same amr/iat). Calling
-    this after a real amr sign-in keeps the settings time moving without writing
-    on every request.
+    Django auth has no amr claim; tab close/reopen often reuses the same access
+    token. Calling this on authenticated requests keeps the settings time moving
+    without writing on every request.
     """
     now = timezone.now()
     if user.last_login is not None:
