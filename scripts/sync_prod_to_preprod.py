@@ -11,8 +11,10 @@ RDS. Preprod is already the AWS database. Run this on a machine in that VPC
   python3 scripts/sync_prod_to_preprod.py sync --confirm-overwrite-preprod
 
 incremental runs when a pull request opens against preprod, before the load
-test. It copies every record, sets leads to FRESH with no assignee, and copies groups, rule sets, entity type schemas,
-and scoring rules. It does not copy tenants, users, history, or job queues.
+test. The first run copies every record. Later runs copy only records changed
+since the last one. Leads are stored as FRESH with no assignee. It also copies
+groups, rule sets, entity type schemas, and scoring rules. It does not copy
+tenants, users, history, or job queues.
 
 Source env (first name wins): SOURCE_DB_* or PROD_SYNC_DB_*
 Target env (first name wins): TARGET_DB_* or PREPROD_DB_*
@@ -1096,35 +1098,33 @@ def sync_records(source: Database, target: Database) -> int:
 def sync_changed_records(
     source: Database, target: Database, columns: str, pk: str, cursor_at: str, cursor_id: str, run_started: str
 ) -> int:
-    print("records: full copy already finished, checking rows changed since then", flush=True)
+    """Copy records touched since the last run. Do not walk the whole table."""
+    print("records: copying rows changed since the last run", flush=True)
     written = 0
-    edit_after = "-1"
     while True:
         text = source.psql(
-            "SELECT id::text FROM records WHERE id > " + quote_literal(edit_after) + "::bigint "
-            "AND id <= " + quote_literal(cursor_id) + "::bigint "
-            "AND updated_at > " + quote_literal(cursor_at) + "::timestamptz "
-            "ORDER BY id LIMIT " + str(RECORD_BATCH)
+            "SELECT id::text || '|' || updated_at::text FROM records "
+            "WHERE updated_at > " + quote_literal(cursor_at) + "::timestamptz "
+            "OR (updated_at = " + quote_literal(cursor_at) + "::timestamptz "
+            "AND id > " + quote_literal(cursor_id) + "::bigint) "
+            "ORDER BY updated_at, id LIMIT " + str(RECORD_BATCH)
         )
-        ids = [line for line in text.splitlines() if line]
-        if not ids:
+        page = []
+        for line in text.splitlines():
+            if not line:
+                continue
+            row_id, _, stamp = line.partition("|")
+            if row_id and stamp:
+                page.append((row_id, stamp))
+        if not page:
             break
-        written += copy_ids(source, target, "records", columns, pk, "updated_at", "::bigint", ids)
-        edit_after = ids[-1]
-        print(f"records: {written:,} changed rows written", flush=True)
-    while True:
-        text = source.psql(
-            "SELECT id::text FROM records WHERE id > " + quote_literal(cursor_id) + "::bigint "
-            "ORDER BY id LIMIT " + str(RECORD_BATCH)
+        written += copy_ids(
+            source, target, "records", columns, pk, "updated_at", "::bigint",
+            [row_id for row_id, _ in page],
         )
-        ids = [line for line in text.splitlines() if line]
-        if not ids:
-            break
-        written += copy_ids(source, target, "records", columns, pk, "updated_at", "::bigint", ids)
-        cursor_id = ids[-1]
+        cursor_id, cursor_at = page[-1]
         write_scan(target, "records", cursor_at, cursor_id, True)
         print(f"records: {written:,} changed rows written", flush=True)
-    write_scan(target, "records", run_started, cursor_id, True)
     print(f"records: {written:,} changed rows written", flush=True)
     return written
 
