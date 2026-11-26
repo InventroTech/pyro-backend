@@ -547,7 +547,7 @@ class CallAttemptMatrixSerializer(serializers.ModelSerializer):
 def _actor_display_name(user) -> Optional[str]:
     if not user:
         return None
-    meta = user.raw_user_meta_data
+    meta = user.user_metadata
     if isinstance(meta, dict):
         return meta.get("full_name") or meta.get("name")
     return None
@@ -570,7 +570,7 @@ class RecordHistoryEntrySerializer(serializers.ModelSerializer):
         label = obj.actor_label
         if user:
             return {
-                "id": str(user.id),
+                "id": str(user.supabase_uid),
                 "email": user.email,
                 "name": _actor_display_name(user),
                 "label": label,

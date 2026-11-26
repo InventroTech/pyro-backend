@@ -5,6 +5,7 @@ from rest_framework.test import APIRequestFactory
 
 from core.models import Tenant
 from authz.models import Role, TenantMembership
+from authentication.tokens import verify_access_token
 from authz.views_management import SpoofTenantUserTokenView
 
 
@@ -134,6 +135,37 @@ class SpoofTenantUserTokenApiTestCase(TestCase):
 
         self.assertEqual(response2.status_code, 404)
         self.assertEqual(response2.data.get("error"), "User membership not found for this tenant")
+
+    def _spoof_agent(self):
+        req = self._attach_ctx(self.factory.post("/api/authz/users/agent/spoof-token/"))
+        with patch(
+            "authz.permissions._get_membership_info",
+            return_value={"role_key": "GM", "perm_keys": ["users:spoof"]},
+        ):
+            return SpoofTenantUserTokenView.as_view()(req, membership_id=self.agent_membership.id)
+
+    @override_settings(
+        AUTH_PROVIDER="django",
+        AUTH_JWT_SECRET="test-auth-jwt-secret",
+        SUPABASE_JWT_SECRET=None,
+        AUTH_ACCEPT_SUPABASE_TOKENS=False,
+        AUTH_ACCESS_TOKEN_TTL_SECONDS=3600,
+    )
+    def test_django_provider_signs_expiring_token_with_own_secret(self):
+        response = self._spoof_agent()
+
+        self.assertEqual(response.status_code, 200)
+        claims = verify_access_token(response.data["token"])
+        self.assertEqual(claims["sub"], str(self.agent_membership.user_id))
+        self.assertEqual(claims["user_data"]["role_key"], self.role_agent.key)
+        self.assertEqual(claims["exp"] - claims["iat"], 3600)
+
+    @override_settings(AUTH_PROVIDER="django", AUTH_JWT_SECRET="")
+    def test_django_provider_without_secret_returns_500(self):
+        response = self._spoof_agent()
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.data.get("error"), "AUTH_JWT_SECRET is not configured")
 
     @override_settings(SUPABASE_JWT_SECRET=None)
     def test_missing_supabase_jwt_secret_returns_500(self):
