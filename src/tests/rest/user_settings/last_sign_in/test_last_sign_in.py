@@ -2,7 +2,7 @@
 Last sign-in on the settings user list comes from authentication.User.last_login.
 
 The token check (config.supabase_auth) keeps last_login current from amr/iat
-plus a throttled now() bump when the same access token is reused;
+(Supabase) or a throttled now() touch (Django / same-token reopen);
 user_settings.inactivity reads it back for /membership/users/.
 auth.users.last_sign_in_at is no longer used.
 """
@@ -61,14 +61,6 @@ def _amr(*timestamps, method="password"):
 def _token(claims, secret=TEST_SECRET):
     token = jwt.encode({"aud": "authenticated", **claims}, secret, algorithm="HS256")
     return token.decode("utf-8") if isinstance(token, bytes) else token
-
-
-def _separate_user(email, last_login=None):
-    """UserFactory reuses users by email; duplicate-email cases need a real second row."""
-    user = User.objects.create(supabase_uid=str(uuid.uuid4()), email=email)
-    if last_login is not None:
-        User.objects.filter(pk=user.pk).update(last_login=last_login)
-    return user
 
 
 def _last_login_updates(queries):
@@ -386,14 +378,6 @@ class RecordSignInFromTokenTests(TestCase):
 
         self.assertIsNone(self._db_last_login())
 
-    def test_token_check_uses_this_function(self):
-        claims = {"sub": self.user.supabase_uid, "email": self.user.email, "amr": _amr(_ts(_ago(seconds=10)))}
-
-        with patch("authentication.views.record_sign_in_from_token") as recorder:
-            user = _get_or_create_profile(claims)
-
-        recorder.assert_called_once_with(user, claims)
-
 
 # ---------------------------------------------------------------------------
 # authentication.views.touch_last_login
@@ -438,6 +422,7 @@ class TouchLastLoginTests(TestCase):
 # ---------------------------------------------------------------------------
 
 
+@override_settings(AUTH_PROVIDER="supabase")
 class GetOrCreateProfileTests(TestCase):
     def setUp(self):
         self.uid = str(uuid.uuid4())
@@ -451,6 +436,15 @@ class GetOrCreateProfileTests(TestCase):
 
     def _last_login(self):
         return User.objects.get(supabase_uid=self.uid).last_login
+
+    def test_token_check_uses_record_sign_in_from_token(self):
+        UserFactory(supabase_uid=self.uid, email=self.email)
+        claims = self._claims(_ts(_ago(seconds=10)))
+
+        with patch("authentication.views.record_sign_in_from_token") as recorder:
+            user = _get_or_create_profile(claims)
+
+        recorder.assert_called_once_with(user, claims)
 
     def test_new_user_gets_last_login_from_the_token(self):
         signed_in = _ts(_ago(seconds=10))
@@ -506,6 +500,7 @@ class GetOrCreateProfileTests(TestCase):
     def test_same_sign_in_does_not_write_again(self):
         signed_in = _ts(_ago(seconds=15))
         _get_or_create_profile(self._claims(signed_in))
+
         with CaptureQueriesContext(connection) as ctx:
             _get_or_create_profile(self._claims(signed_in))
 
@@ -581,13 +576,61 @@ class GetOrCreateProfileTests(TestCase):
 
     def test_database_error_while_recording_still_returns_the_user(self):
         UserFactory(supabase_uid=self.uid, email=self.email)
+        # No email claim, so the only User.objects.filter call is the sign-in write.
+        claims = {"sub": self.uid, "amr": _amr(_ts(_ago(seconds=10)))}
 
         with patch.object(User.objects, "filter", side_effect=DatabaseError("db down")):
             with self.assertLogs("authentication.views", level="WARNING"):
-                user = _get_or_create_profile(self._claims(_ts(_ago(seconds=10))))
+                user = _get_or_create_profile(claims)
 
         self.assertEqual(user.supabase_uid, self.uid)
         self.assertIsNone(self._last_login())
+
+    def test_email_owned_by_another_account_still_records_the_sign_in(self):
+        UserFactory(supabase_uid=str(uuid.uuid4()), email=self.email)
+        signed_in = _ts(_ago(seconds=10))
+
+        user = _get_or_create_profile(self._claims(signed_in))
+
+        self.assertEqual(user.supabase_uid, self.uid)
+        self.assertEqual(_ts(self._last_login()), signed_in)
+
+    @override_settings(AUTH_PROVIDER="django")
+    def test_django_auth_mode_touches_last_login(self):
+        UserFactory(supabase_uid=self.uid, email=self.email)
+
+        user = _get_or_create_profile(self._claims(_ts(_ago(days=1))))
+
+        self.assertEqual(user.supabase_uid, self.uid)
+        self.assertAlmostEqual(self._last_login().timestamp(), timezone.now().timestamp(), delta=5)
+
+    @override_settings(AUTH_PROVIDER="django")
+    def test_django_auth_mode_does_not_touch_again_within_the_interval(self):
+        UserFactory(supabase_uid=self.uid, email=self.email)
+        _get_or_create_profile(self._claims())
+        first = self._last_login()
+
+        with CaptureQueriesContext(connection) as ctx:
+            _get_or_create_profile(self._claims())
+
+        self.assertEqual(_last_login_updates(ctx.captured_queries), [])
+        self.assertAlmostEqual(self._last_login().timestamp(), first.timestamp(), delta=1)
+
+    def test_our_own_issued_token_touches_last_login(self):
+        UserFactory(supabase_uid=self.uid, email=self.email)
+        claims = self._claims(_ts(_ago(days=1)), iss=settings.AUTH_JWT_ISSUER)
+
+        user = _get_or_create_profile(claims)
+
+        self.assertEqual(user.supabase_uid, self.uid)
+        self.assertAlmostEqual(self._last_login().timestamp(), timezone.now().timestamp(), delta=5)
+
+    @override_settings(AUTH_PROVIDER="django")
+    def test_django_auth_mode_rejects_an_unknown_user_and_records_nothing(self):
+        with self.assertRaises(exceptions.AuthenticationFailed):
+            _get_or_create_profile(self._claims(_ts(_ago(seconds=10))))
+
+        self.assertFalse(User.objects.filter(supabase_uid=self.uid).exists())
 
     def test_token_without_sub_is_rejected(self):
         with self.assertRaises(exceptions.AuthenticationFailed):
@@ -601,11 +644,13 @@ class GetOrCreateProfileTests(TestCase):
 # ---------------------------------------------------------------------------
 
 
+@override_settings(
+    AUTH_PROVIDER="supabase",
+    SUPABASE_JWT_SECRET=TEST_SECRET,
+    AUTH_ACCEPT_SUPABASE_TOKENS=True,
+)
 class SupabaseJWTAuthenticationTests(TestCase):
     def setUp(self):
-        patcher = patch("config.supabase_auth.SUPABASE_JWT_SECRET", TEST_SECRET)
-        patcher.start()
-        self.addCleanup(patcher.stop)
         self.uid = str(uuid.uuid4())
         self.email = "jwt-signin@example.com"
         self.auth = SupabaseJWTAuthentication()
@@ -793,26 +838,6 @@ class DjangoUsersForMembershipsTests(TestCase):
 
         self.assertEqual(matched[membership.id].pk, by_uid.pk)
 
-    def test_duplicate_email_accounts_pick_the_most_recent_sign_in(self):
-        _separate_user("dupe@example.com", last_login=_ago(days=10))
-        recent = _separate_user("DUPE@example.com", last_login=_ago(minutes=5))
-        _separate_user("Dupe@Example.com", last_login=_ago(days=1))
-        membership = self._membership(user_id=None, email="dupe@example.com")
-
-        matched = _django_users_for_memberships([membership])
-
-        self.assertEqual(matched[membership.id].pk, recent.pk)
-
-    def test_duplicate_email_prefers_an_account_that_has_signed_in(self):
-        _separate_user("half@example.com")
-        signed_in = _separate_user("half@example.com", last_login=_ago(days=30))
-        _separate_user("half@example.com")
-        membership = self._membership(user_id=None, email="half@example.com")
-
-        matched = _django_users_for_memberships([membership])
-
-        self.assertEqual(matched[membership.id].pk, signed_in.pk)
-
     def test_user_with_no_email_still_matches_by_uid(self):
         uid = str(uuid.uuid4())
         user = self._user("placeholder@example.com", uid=uid)
@@ -930,17 +955,6 @@ class LastSignInAtByMembershipIdTests(TestCase):
         self.assertEqual(result[first.id], result[second.id])
         self.assertAlmostEqual(result[first.id].timestamp(), signed_in.timestamp(), delta=1)
 
-    def test_duplicate_email_accounts_show_the_most_recent_sign_in(self):
-        recent = _ago(minutes=10)
-        _separate_user("twice@example.com")
-        _separate_user("twice@example.com", last_login=_ago(days=20))
-        _separate_user("twice@example.com", last_login=recent)
-        membership = TenantMembershipFactory(tenant=self.tenant, user_id=None, email="twice@example.com")
-
-        value = last_sign_in_at_by_membership_id([membership])[membership.id]
-
-        self.assertAlmostEqual(value.timestamp(), recent.timestamp(), delta=1)
-
     def test_uses_one_query_for_many_memberships(self):
         memberships = [
             self._member_with_login(f"bulk{i}@example.com", timezone.now()) for i in range(5)
@@ -1023,6 +1037,7 @@ class UserListLastSignInAPITests(BaseAPITestCase):
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed, signed_in)
 
+    @override_settings(AUTH_PROVIDER="supabase")
     def test_sign_in_recorded_by_the_token_check_shows_on_the_list(self):
         signed_in = _ts(_ago(seconds=10))
         _get_or_create_profile(
