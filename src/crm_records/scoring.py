@@ -254,9 +254,17 @@ def calculate_and_update_lead_score(lead: Record, tenant_id: Optional[str] = Non
     lead.data['lead_score'] = score
     logger.info(f"calculate_and_update_lead_score: Lead {lead.id} score: {score}")
     
-    # Save if requested
+    # Save if requested. Score-only writes must not fan out on the websocket
+    # (payload is slimmed and never includes lead_score anyway).
     if save:
-        lead.save(update_fields=['data', 'updated_at'])
+        from realtime.broadcast import skip_realtime_broadcast
+
+        with skip_realtime_broadcast():
+            with transaction.atomic():
+                with connection.cursor() as cursor:
+                    # Suppress Postgres NOTIFY for this transaction.
+                    cursor.execute("SELECT set_config('pyro.skip_record_notify', '1', true)")
+                lead.save(update_fields=['data', 'updated_at'])
         logger.debug(f"calculate_and_update_lead_score: Updated and saved lead {lead.id} with score {score}")
     else:
         logger.debug(f"calculate_and_update_lead_score: Updated lead {lead.id} with score {score} (not saved)")
@@ -424,9 +432,12 @@ def score_chunk_sql(
     # - then tenant/entity/range placeholders in the WHERE clause
     params = rule_params + [str(tenant_id), entity_type, int(id_gte), int(id_lt)]
 
-    with connection.cursor() as cursor:
-        cursor.execute(sql, params)
-        row = cursor.fetchone()
+    # Bulk score UPDATEs must not emit pyro_record_changed for every row.
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT set_config('pyro.skip_record_notify', '1', true)")
+            cursor.execute(sql, params)
+            row = cursor.fetchone()
 
     processed, updated, total_score = row
     elapsed = _time.monotonic() - start
