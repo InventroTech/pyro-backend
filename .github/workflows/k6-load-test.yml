@@ -1,6 +1,14 @@
-name: K6 Load Test (Manual)
+name: K6 Load Test
 
+# A pull request into preprod first copies every record. Leads are stored as FRESH and unassigned.
+# plus groups, rule sets, and the schema tables, then runs the read-only
+# load test.
+# It does not call the production API. Regression of the pull request's own
+# code is the pytest job in backend-lint.yml.
 on:
+  pull_request:
+    branches: [preprod]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       api_base_url:
@@ -12,9 +20,9 @@ on:
         required: true
         default: 'praja'
       rate:
-        description: Requests per second
+        description: Requests per second. Default is one production instance at peak.
         required: true
-        default: '20'
+        default: '30'
       duration_seconds:
         description: Test duration in seconds
         required: true
@@ -22,13 +30,49 @@ on:
       preallocated_vus:
         description: Pre-allocated virtual users
         required: true
-        default: '20'
+        default: '40'
 
 permissions:
   contents: read
 
+# A new commit on the same pull request cancels the in-flight load test and starts again.
+concurrency:
+  group: k6-load-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
+  sync-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    # One preprod database. A second pull request waits until this copy finishes.
+    concurrency:
+      group: preprod-data-sync
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Copy every record and reset leads
+        env:
+          SOURCE_DB_HOST: ${{ secrets.SOURCE_DB_HOST }}
+          SOURCE_DB_PORT: ${{ secrets.SOURCE_DB_PORT }}
+          SOURCE_DB_NAME: ${{ secrets.SOURCE_DB_NAME }}
+          SOURCE_DB_USER: ${{ secrets.SOURCE_DB_USER }}
+          SOURCE_DB_PASSWORD: ${{ secrets.SOURCE_DB_PASSWORD }}
+          TARGET_DB_HOST: ${{ secrets.TARGET_DB_HOST }}
+          TARGET_DB_PORT: ${{ secrets.TARGET_DB_PORT }}
+          TARGET_DB_NAME: ${{ secrets.TARGET_DB_NAME }}
+          TARGET_DB_USER: ${{ secrets.TARGET_DB_USER }}
+          TARGET_DB_PASSWORD: ${{ secrets.TARGET_DB_PASSWORD }}
+          LOADTEST_USER_EMAIL: ${{ secrets.LOADTEST_USER_EMAIL }}
+          LOADTEST_USER_PASSWORD: ${{ secrets.LOADTEST_USER_PASSWORD }}
+        run: python3 scripts/sync_prod_to_preprod.py incremental
+
   k6:
+    needs: sync-data
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -38,28 +82,63 @@ jobs:
 
       - name: Install k6
         run: |
-          sudo gpg -k
-          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
           sudo apt-get update
           sudo apt-get install -y k6
 
-      - name: Require access token
-        shell: bash
-        run: |
-          if [ -z "${{ secrets.LOADTEST_ACCESS_TOKEN }}" ]; then
-            echo "::error::Add secret LOADTEST_ACCESS_TOKEN for JWT GETs."
-            exit 1
-          fi
-
-      - name: Run GET-only k6 script
+      - name: Log in and run the load test
         env:
-          API_BASE_URL: ${{ inputs.api_base_url }}
-          TENANT_SLUG: ${{ inputs.tenant_slug }}
-          RATE: ${{ inputs.rate }}
-          DURATION_SECONDS: ${{ inputs.duration_seconds }}
-          PREALLOCATED_VUS: ${{ inputs.preallocated_vus }}
-          ACCESS_TOKEN: ${{ secrets.LOADTEST_ACCESS_TOKEN }}
+          API_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && inputs.api_base_url || 'https://pyro-backend-ea2j.onrender.com' }}
+          LOADTEST_USER_EMAIL: ${{ secrets.LOADTEST_USER_EMAIL }}
+          LOADTEST_USER_PASSWORD: ${{ secrets.LOADTEST_USER_PASSWORD }}
+          TENANT_SLUG: ${{ github.event_name == 'workflow_dispatch' && inputs.tenant_slug || 'praja' }}
+          RATE: ${{ github.event_name == 'workflow_dispatch' && inputs.rate || '30' }}
+          DURATION_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.duration_seconds || '60' }}
+          PREALLOCATED_VUS: ${{ github.event_name == 'workflow_dispatch' && inputs.preallocated_vus || '40' }}
         run: |
-          echo "API: $API_BASE_URL | GET-only | rate=$RATE/s duration=${DURATION_SECONDS}s"
-          k6 run k6-tests/basic-test.js
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import urllib.error
+          import urllib.request
+
+          email = (os.environ.get("LOADTEST_USER_EMAIL") or "").strip()
+          password = os.environ.get("LOADTEST_USER_PASSWORD") or ""
+          if not email or not password:
+              print("::error::Add repository secrets LOADTEST_USER_EMAIL and LOADTEST_USER_PASSWORD. Use a preprod user with a confirmed email and an active membership in the tenant under test. Do not store an access token; login tokens expire after one hour.")
+              raise SystemExit(1)
+
+          base = os.environ["API_BASE_URL"].rstrip("/")
+          request = urllib.request.Request(
+              base + "/auth/login/",
+              data=json.dumps({"email": email, "password": password}).encode(),
+              headers={"Content-Type": "application/json", "Accept": "application/json"},
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  payload = json.load(response)
+          except urllib.error.HTTPError as exc:
+              detail = exc.read().decode("utf-8", "replace")[:300]
+              print(f"::error::Login failed ({exc.code}): {detail}")
+              raise SystemExit(1)
+
+          token = payload.get("access_token") or ""
+          if not token:
+              print("::error::Login response did not include an access token.")
+              raise SystemExit(1)
+
+          # The token stays in the k6 process environment. It is not printed
+          # and it is not written to GITHUB_ENV.
+          child_env = os.environ.copy()
+          child_env["ACCESS_TOKEN"] = token
+          child_env["API_BASE_URL"] = base
+          child_env.pop("LOADTEST_USER_PASSWORD", None)
+          print(f"Logged in as {email}. Token expires in {payload.get('expires_in')}s.")
+          print(
+              f"API: {base} | GET-only | rate={os.environ.get('RATE')}/s "
+              f"duration={os.environ.get('DURATION_SECONDS')}s"
+          )
+          raise SystemExit(subprocess.run(["k6", "run", "k6-tests/basic-test.js"], env=child_env).returncode)
+          PY

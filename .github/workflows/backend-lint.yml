@@ -2,7 +2,10 @@ name: Backend Code Quality & SQL Warning
 
 on:
   pull_request:
-    branches: [ "main", "TESTING", "PROD" ]
+    # Every push to a pull request re-runs this. preprod and PROD are the gates
+    # before a change is deployed.
+    branches: [ "main", "TESTING", "preprod", "PROD" ]
+    types: [opened, synchronize, reopened]
 
 jobs:
   lint-and-check-sql:
