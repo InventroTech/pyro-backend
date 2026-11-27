@@ -294,7 +294,7 @@ class PasswordResetConfirmView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        success, _ = _set_reset_password(uid, password)
+        success, err_msg = _set_reset_password(uid, password)
         PasswordResetOTP.objects.filter(email__iexact=email).delete()
 
         if not success:
