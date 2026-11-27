@@ -305,7 +305,7 @@ class PasswordResetConfirmView(APIView):
                 _email_log_tag(email),
             )
             return Response(
-                {"error": err_msg or "Could not update password."},
+                {"error": "Could not update password."},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
